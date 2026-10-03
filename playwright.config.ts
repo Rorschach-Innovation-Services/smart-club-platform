@@ -34,5 +34,13 @@ export default defineConfig({
     url: 'http://localhost:3201',
     reuseExistingServer: true,
     timeout: 120_000,
+    // The captain's-report spec stands up a stub medicoach on this port; the API's puller
+    // ("Sync now") calls it. Inert for every other spec (no tenant has the sync feature on
+    // unless a spec turns it on). A reused stack started without these skips that spec.
+    env: {
+      ...(process.env as Record<string, string>),
+      MEDICOACH_SYNC_URL: 'http://127.0.0.1:4799',
+      MEDICOACH_SYNC_SECRET: 'e2e-medicoach-sync-secret',
+    },
   },
 });

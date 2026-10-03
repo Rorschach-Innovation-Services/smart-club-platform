@@ -55,6 +55,12 @@ export type WhatsAppTemplateDefinition = {
   /** The registered body text (or, for pending/unverified, a reconstruction). */
   bodyText: string;
   status: 'registered' | 'unverified' | 'pending';
+  /**
+   * A URL button with a dynamic suffix (Meta "Visit website" button, URL ending in `{{1}}`).
+   * `urlTemplate` is the URL as registered in Meta; the sender supplies the ONE suffix value
+   * (button index 0). Absent ⇒ a body-only template.
+   */
+  urlButton?: { urlTemplate: string; suffix: string };
 };
 
 export const WHATSAPP_TEMPLATES = {
@@ -145,6 +151,41 @@ export const WHATSAPP_TEMPLATES = {
       'Check your email for the full schedule.\n\n' +
       'If you have any questions, please contact your club.',
     status: 'unverified',
+  },
+
+  /**
+   * Captain's report due (ADR 0016, Slice 2): the submit-once report link to the match
+   * captain, or to the club chair when the captain can't be reached. The link is a URL
+   * BUTTON with a dynamic suffix (the signed report token), NOT a URL in the body — Meta
+   * scrutinises body URLs, and the token must not sit in the message text.
+   *
+   * The button URL is fixed per template in Meta, so it points at the PLATFORM host (the
+   * `/r/<token>` page is tenant-independent, like `/verify`): every tenant shares one
+   * template. Non-prod stages send the same button — they normally dry-run anyway.
+   *
+   * Created in Meta 3 Oct 2026; EDITED IN PLACE to the v2 copy on 4 Oct 2026 (Utility,
+   * English, 3 body params, dynamic URL button `https://platform.club.medicoach.co.za/r/{{1}}`).
+   * The v2 copy names the UNION instead of the club (no awkward "Crusaders's") and drops
+   * "works once" (a link can be opened and drafted many times; it is SUBMITTED once).
+   * Meta keeps serving the previously approved body until the edit clears review, so during
+   * that window {{2}} (now the union) renders inside the old club-possessive sentence —
+   * cosmetic only, same arity. `bodyText` is the exact copy submitted; confirm against
+   * Business Manager after the edit is approved.
+   */
+  captainsReportDue: {
+    name: 'captains_report_due',
+    lang: 'en',
+    paramCount: 3,
+    params: ['recipient name', 'org name', 'match line + date'],
+    bodyText:
+      'Hello {{1}},\n\n' +
+      "The {{2}} captain's report for {{3}} is open. Please rate the umpires.\n\n" +
+      'Tap the button below to open it. You can submit it once; the link expires on the date shown in the report.',
+    status: 'registered',
+    urlButton: {
+      urlTemplate: 'https://platform.club.medicoach.co.za/r/{{1}}',
+      suffix: 'signed report token',
+    },
   },
 } as const satisfies Record<string, WhatsAppTemplateDefinition>;
 

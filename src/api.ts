@@ -30,6 +30,11 @@ import type {
   Clash,
   SeasonRun,
   Venue,
+  Umpire,
+  FixtureOfficials,
+  CaptainsReport,
+  CaptainsReportFields,
+  LinkedCaptainsReport,
   SendResult,
   LogoUploadPost,
   TutorialUploadGrant,
@@ -542,12 +547,21 @@ export const getSeasonRun = (id: string) => request<SeasonRun>(`/season-runs/${i
 // `derivedFrom.fromStage` that no longer resolves).
 export const rebaseSeasonRun = (
   id: string,
-  body: { structureId: string; structureVersion: number; version: number },
+  body: {
+    structureId: string;
+    structureVersion: number;
+    version: number;
+    /** Medicoach sync: consent to orphan the synced fixtures of released series. */
+    allowResync?: true;
+  },
 ) =>
-  request<SeasonRun & { warnings?: string[] }>(`/season-runs/${id}/rebase`, {
-    method: 'POST',
-    body,
-  });
+  request<SeasonRun & { warnings?: string[]; orphanedRefs?: string[] }>(
+    `/season-runs/${id}/rebase`,
+    {
+      method: 'POST',
+      body,
+    },
+  );
 /**
  * Generate one stage of a season run ON THE SERVER (ADR 0014): it materialises the stage
  * with the shared engine and writes one series per group through the same gates as
@@ -560,12 +574,16 @@ export const rebaseSeasonRun = (
 export interface GenerateStageRequest {
   version: number;
   confirmReleasedOverwrite?: true;
+  /** Medicoach sync: consent to orphan the synced refs of released series (operator call). */
+  allowResync?: true;
 }
 export interface GenerateStageResponse {
   run: SeasonRun;
   series: Series[];
   /** Caveats on a generate that still succeeded, e.g. a pool pairing drawn as a seeded bracket. */
   warnings?: string[];
+  /** With `allowResync`: the medicoach fixture refs this regenerate orphaned. */
+  orphanedRefs?: string[];
 }
 /** The generate would replace released series and the caller did not confirm it. */
 export class ReleasedOverwriteError extends ApiError {
@@ -587,6 +605,297 @@ export const generateStage = (runId: string, specId: string, body: GenerateStage
     if (err instanceof ApiError && err.status === 409 && err.code === 'released_overwrite')
       throw new ReleasedOverwriteError(err);
     throw err;
+  });
+
+// ── Umpires ──
+// Admins get the full registry (contacts included); club members get id + name only.
+export const getUmpires = () => request<Umpire[]>('/umpires');
+export const createUmpire = (body: Partial<Umpire>) =>
+  request<Umpire>('/umpires', { method: 'POST', body });
+export const patchUmpire = (id: string, body: Partial<Umpire>) =>
+  request<Umpire>(`/umpires/${encodeURIComponent(id)}`, { method: 'PATCH', body });
+export const mergeUmpire = (id: string, targetId: string) =>
+  request<{ target: Umpire; source: Umpire; repointed: number }>(
+    `/umpires/${encodeURIComponent(id)}/merge`,
+    { method: 'POST', body: { targetId } },
+  );
+// ── Upload appointments (admin) ── the CLI's parser/matcher behind a preview → confirm pair.
+export interface AppointmentPreviewRow {
+  sheetRow: number;
+  section: string;
+  date: string;
+  time?: string;
+  home: string;
+  away: string;
+  venue: string;
+  umpires: string[];
+  referee?: string;
+}
+export interface AppointmentPreview {
+  sheet: string;
+  problems: string[];
+  summary: {
+    rows: number;
+    matched: number;
+    notMatched: number;
+    new: number;
+    changed: number;
+    unchanged: number;
+    skipped: number;
+    toCreate: number;
+    doubleBookings: number;
+  };
+  rows: Array<
+    AppointmentPreviewRow & {
+      seriesId: string;
+      seriesName: string;
+      fixtureId: string;
+      fixture: { date: string; time?: string };
+      action: 'new' | 'changed' | 'unchanged' | 'skipped';
+      appointed?: string[];
+      previous?: string[];
+      skipReason?: string;
+      differences: Array<{ field: 'time' | 'venue'; sheet: string; fixture: string }>;
+      tieBroken: boolean;
+    }
+  >;
+  unmatched: Array<
+    AppointmentPreviewRow & {
+      kind: 'unknown-team' | 'no-fixture' | 'ambiguous' | 'duplicate';
+      reason: string;
+    }
+  >;
+  unknownUmpires: string[];
+  toCreate: Array<{ id: string; displayName: string }>;
+  doubleBookings: Array<{
+    umpireId: string;
+    date: string;
+    a: { venue: string; time?: string };
+    b: { venue: string; time?: string };
+  }>;
+  planHash: string;
+}
+export const previewUmpireAppointments = async (file: File, createUmpires: boolean) =>
+  request<AppointmentPreview>('/umpires/appointments/preview', {
+    method: 'POST',
+    body: { filename: file.name, dataBase64: await fileToBase64(file), createUmpires },
+  });
+/** 409 `plan_changed` carries the fresh preview on `details.preview`. */
+export const confirmUmpireAppointments = async (
+  file: File,
+  createUmpires: boolean,
+  planHash: string,
+) =>
+  request<{ written: number; created: number }>('/umpires/appointments/confirm', {
+    method: 'POST',
+    body: { filename: file.name, dataBase64: await fileToBase64(file), createUmpires, planHash },
+  });
+
+// A fixture's umpires (max two). Stored apart from the series, so it never bumps the
+// series version, withdraws approval or runs the clash gate. `[]` clears the fixture.
+export const putFixtureOfficials = (seriesId: string, fixtureId: string, umpireIds: string[]) =>
+  request<FixtureOfficials & { seriesId: string; fixtureId: string }>(
+    `/series/${encodeURIComponent(seriesId)}/fixtures/${encodeURIComponent(fixtureId)}/officials`,
+    { method: 'PUT', body: { umpires: umpireIds.map((umpireId) => ({ umpireId })) } },
+  );
+
+// ── Medicoach sync (ADR 0016) ── admin only; visible when `features.medicoachSync` is on.
+export interface MedicoachSyncSchedule {
+  scheduledTime: string | null;
+  timeTbc: boolean;
+  dateTbc: boolean;
+  venue: string | null;
+  postponed: boolean;
+  cancelled: boolean;
+  changedAt: string;
+}
+export interface MedicoachSyncConflict {
+  ref: string;
+  seriesId: string;
+  fixtureId: string;
+  seriesName?: string;
+  matchLine?: string;
+  current: { date?: string; time?: string; venue?: string; status?: string; dateTbc?: boolean };
+  proposed: MedicoachSyncSchedule;
+  proposedText: string;
+  /** `proposed` in the same parts as `current`, for the side-by-side view. */
+  proposedParts?: MedicoachSchedulePartsView;
+  fields: string[];
+  reason: 'venue-unresolved' | 'clash';
+  detail: string[];
+  detectedAt: string;
+  notifiedAt?: string;
+}
+export interface MedicoachSyncLog {
+  id: string;
+  at: string;
+  trigger: 'cron' | 'manual' | 'write' | 'cli';
+  kind?: 'pull' | 'push' | 'new-fixtures';
+  /** Refs of fixtures added in smart club that medicoach does not have (`new-fixtures`). */
+  newFixtureRefs?: string[];
+  outcome: 'ok' | 'error';
+  pages: number;
+  fixtures: number;
+  counts: Record<string, number | undefined>;
+  push?: Record<string, number>;
+  /** Technical failure text (shown under "Details"). */
+  error?: string;
+  /** The failure in plain language. */
+  message?: string;
+}
+/** The schedule parts the conflict inbox compares (same shape on both sides). */
+export interface MedicoachSchedulePartsView {
+  date?: string;
+  time?: string;
+  venue?: string;
+  status?: string;
+  dateTbc?: boolean;
+}
+export interface MedicoachSyncStatus {
+  enabled: boolean;
+  dryRun?: boolean;
+  cursor?: { cursor: string; updatedAt?: string } | null;
+  /** When the sync last worked / last failed (a quiet run leaves no log row). */
+  health?: {
+    lastAttemptAt?: string;
+    lastSuccessAt?: string;
+    lastErrorAt?: string;
+    lastError?: string;
+    lastErrorText?: string;
+  } | null;
+  logs?: MedicoachSyncLog[];
+  outbox?: {
+    count: number;
+    /** Kept back while the series withholds venue/time from clubs; sent once revealed. */
+    held?: Array<{
+      ref: string;
+      seriesId: string;
+      fixtureId: string;
+      enqueuedAt: string;
+      proposed: string;
+    }>;
+    failures: Array<{
+      ref: string;
+      seriesId: string;
+      fixtureId: string;
+      attempts: number;
+      /** Failed 5+ pushes: still retried, but the page offers Retry and Drop. */
+      stuck?: boolean;
+      lastError: string | null;
+      lastErrorText?: string;
+      lastAttemptAt: string | null;
+      enqueuedAt: string;
+      proposed: string;
+    }>;
+  };
+  conflicts?: MedicoachSyncConflict[];
+  pendingReports?: number;
+  /** Captain's-report notices that failed on every channel and are waiting on a retry. */
+  noticesFailed?: number;
+}
+export const getMedicoachSyncStatus = () =>
+  request<MedicoachSyncStatus>('/integrations/medicoach/status');
+export const medicoachSyncNow = () =>
+  request<{ status: string; counts?: Record<string, number> }>('/integrations/medicoach/sync-now', {
+    method: 'POST',
+  });
+export const applyMedicoachConflict = (ref: string) =>
+  request<{ status: string }>('/integrations/medicoach/conflicts/apply', {
+    method: 'POST',
+    body: { ref },
+  });
+export const discardMedicoachConflict = (ref: string) =>
+  request<{ status: string }>('/integrations/medicoach/conflicts/discard', {
+    method: 'POST',
+    body: { ref },
+  });
+/** Retry a stuck outbox row now: `sent`, `failed` (with why), `held`, `queued` or `dry-run`. */
+export const retryMedicoachOutbox = (ref: string) =>
+  request<{ status: string; lastErrorText?: string }>('/integrations/medicoach/outbox/retry', {
+    method: 'POST',
+    body: { ref },
+  });
+/** Stop sending one smart-club change; medicoach keeps its version. */
+export const dropMedicoachOutbox = (ref: string) =>
+  request<{ status: string }>('/integrations/medicoach/outbox/drop', {
+    method: 'POST',
+    body: { ref },
+  });
+
+// ── Captain's reports (ADR 0016) ──
+// Club routes are own-club only. `submit: true` files the report (first submit wins → 409);
+// without it the body is saved as a draft.
+const reportPath = (id: string) => `/club/captains-reports/${encodeURIComponent(id)}`;
+export const getClubCaptainsReports = (clubId: string) =>
+  request<CaptainsReport[]>('/club/captains-reports', { query: { clubId } });
+export const putClubCaptainsReport = (
+  id: string,
+  body: CaptainsReportFields & { submit?: boolean },
+) => request<CaptainsReport>(reportPath(id), { method: 'PUT', body });
+export const createClubCaptainsReport = (
+  body: CaptainsReportFields & { seriesId: string; fixtureId: string; clubId: string },
+) => request<CaptainsReport>('/club/captains-reports', { method: 'POST', body });
+export const getCaptainsReports = (query: { status?: string; from?: string; to?: string } = {}) =>
+  request<CaptainsReport[]>('/captains-reports', { query });
+/** Clubs a report notice cannot reach (no chair email or cell) — sync tenants only. */
+export const getCaptainsReportContactGaps = () =>
+  request<{ enabled: boolean; clubs: Array<{ id: string; name: string }> }>(
+    '/captains-reports/contact-gaps',
+  );
+/** Attribute a free-text umpire on a filed report to a registry umpire. */
+export const attributeCaptainsReportUmpire = (
+  id: string,
+  index: number,
+  body: { umpireId: string; action: 'registered' | 'linked' },
+) =>
+  request<CaptainsReport>(
+    `/captains-reports/${encodeURIComponent(id)}/umpires/${index}/attribute`,
+    { method: 'POST', body },
+  );
+/** "Send to captain": who the report can go to (names + opaque ids), and how many sends remain. */
+export interface ForwardCandidates {
+  candidates: Array<{ id: string; name: string }>;
+  remaining: number;
+}
+export const getClubReportForwardCandidates = (id: string) =>
+  request<ForwardCandidates>(`${reportPath(id)}/forward-candidates`);
+export const forwardClubCaptainsReport = (id: string, candidateId: string) =>
+  request<CaptainsReport>(`${reportPath(id)}/forward`, { method: 'POST', body: { candidateId } });
+/** File a report for a match that is not in the fixture list (created submitted). */
+export const createUnlistedCaptainsReport = (
+  body: CaptainsReportFields & {
+    clubId: string;
+    opponentName: string;
+    matchDate: string;
+    competition: string;
+    venue: string;
+  },
+) => request<CaptainsReport>('/club/captains-reports/unlisted', { method: 'POST', body });
+// The public submit-once link: no auth, the token is the capability.
+export const getLinkedCaptainsReport = (token: string) =>
+  request<LinkedCaptainsReport>(`/captains-report-link/${encodeURIComponent(token)}`, {
+    auth: false,
+  });
+export const putLinkedCaptainsReport = (
+  token: string,
+  body: CaptainsReportFields & { submit?: boolean },
+) =>
+  request<LinkedCaptainsReport>(`/captains-report-link/${encodeURIComponent(token)}`, {
+    method: 'PUT',
+    body,
+    auth: false,
+  });
+/** The chair's link only: who the report can be sent on to. */
+export const getLinkedForwardCandidates = (token: string) =>
+  request<ForwardCandidates>(
+    `/captains-report-link/${encodeURIComponent(token)}/forward-candidates`,
+    { auth: false },
+  );
+export const forwardLinkedCaptainsReport = (token: string, candidateId: string) =>
+  request<LinkedCaptainsReport>(`/captains-report-link/${encodeURIComponent(token)}/forward`, {
+    method: 'POST',
+    body: { candidateId },
+    auth: false,
   });
 
 // ── Venues (ADR 0008 phase 2) ──

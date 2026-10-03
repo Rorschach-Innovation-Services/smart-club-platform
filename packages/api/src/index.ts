@@ -53,8 +53,34 @@ import {
   resolveTenant,
   HttpError,
   type HonoEnv,
+  type RequestAuth,
 } from './auth.js';
 import * as repo from './repo.js';
+import {
+  joinFixtureResults,
+  seriesIsSyncMapped,
+  stripResponseOnlyFixtureFields,
+} from './medicoach-sync/series-results.js';
+import { MedicoachSyncError } from './medicoach-sync/puller.js';
+import { runTenantSync } from './medicoach-sync/run.js';
+import { explainSyncError } from './medicoach-sync/explain.js';
+import { carrySyncOwnedFields, fixtureSyncRef } from './fixture-identity.js';
+import {
+  buildInboundFixture,
+  describeSchedule,
+  fixtureSchedule,
+  flushScheduleOutbox,
+  scheduleParts,
+  STUCK_ATTEMPTS,
+  fixturesEditRecallsApproval,
+  recordScheduleDiff,
+  requeueRevealedSeries,
+  sameMatch,
+  seriesMappedForSync,
+  seriesHoldsSchedule,
+  type ScheduleFixture,
+} from './medicoach-sync/schedule.js';
+import { captainsReportLinkSecret, medicoachSyncSecret, medicoachSyncUrl } from './env.js';
 import { VersionConflictError, LastAdminError } from './repo.js';
 import { clubIdFromName } from './club-id.js';
 import {
@@ -69,6 +95,7 @@ import {
   clashKey,
   formatClash,
   formatClashForHumans,
+  introducedClashes,
   venueAliasesFor,
 } from './venue-clash.js';
 import {
@@ -77,6 +104,17 @@ import {
   withLegacyParticipants,
   isWithheld,
 } from './series-projection.js';
+import {
+  applyUmpireInput,
+  findAliasConflict,
+  fixtureClubIds,
+  indexOfficials,
+  joinOfficials,
+  parseOfficialsInput,
+  parseUmpireInput,
+  stripJoinedOfficials,
+  umpireIdFor,
+} from './umpires.js';
 import {
   validateCalendars,
   validateStructures,
@@ -140,6 +178,7 @@ import {
   isVeteransLeagueKey,
 } from './veterans.js';
 import type {
+  CaptainsReport,
   Club,
   ClubCommEvent,
   ClubSpec,
@@ -167,9 +206,35 @@ import type {
   AdminClearanceView,
   CertificateMeta,
   WithheldField,
+  ScheduleChangeOrigin,
+  SyncConflict,
 } from './types.js';
 import { teamIdsForClub, resolveTeam } from './teams.js';
 import { orgCopy } from './branding.js';
+import { chairContactOf } from './club-contacts.js';
+import {
+  captainsReportId,
+  checkUmpireIds,
+  forwardCandidates,
+  forwardReport,
+  hasContact,
+  loadLinkedReport,
+  MAX_FORWARDS,
+  NOTICE_FAILED_ERROR,
+  parseCaptainsReportId,
+  parseReportFields,
+  ReportFlowError,
+  ReportInputError,
+  reportView,
+  UNLISTED_SERIES_ID,
+} from './captains-reports.js';
+import { applyWhatsAppStatuses, parseStatuses } from './notify/whatsapp-status.js';
+import {
+  SYNC_SIGNATURE_HEADER,
+  SYNC_TIMESTAMP_HEADER,
+  verifySignature as verifySyncSignature,
+} from './medicoach-sync-contract.js';
+import { submissionProblems } from '../../engine/src/captainsReport.js';
 import { hasFeature, hasModule } from './features.js';
 import {
   resolveVertical,
@@ -1347,18 +1412,6 @@ async function findPlayerByIdNumber(
   return roster.find((p) => normalizeId(p.idNumber) === wanted) ?? null;
 }
 
-/**
- * The chair contact for a club's notices: the `exco.chair` sub-record (name/email/cell), falling
- * back to the flat `club.chair` name when exco has no chair name. `exco` is loosely typed here
- * (it also carries governance fields we never notify on) so we read only the three contact fields.
- */
-function chairContactOf(club: Club): { name: string; email?: string; cell?: string } {
-  const chair = (
-    club.exco as Record<string, { email?: string; cell?: string; name?: string }> | undefined
-  )?.chair;
-  return { name: chair?.name || club.chair || '', email: chair?.email, cell: chair?.cell };
-}
-
 const CLEARANCE_NOTICES_PER_DAY = 3;
 /**
  * Best-effort heads-up to the FROM-club chairman that a clearance now awaits the club's
@@ -1776,6 +1829,39 @@ async function registerWithoutClearance(
   return {};
 }
 
+/* ─── WhatsApp delivery statuses (public, sync-signed) ───
+   Smart club sends through medicoach's Meta app, whose ONE webhook callback is medicoach's,
+   so medicoach FORWARDS the raw Meta `statuses[]` for smart club's sending number here,
+   signed with the medicoach sync scheme (X-Sync-Timestamp / X-Sync-Signature, the
+   MedicoachSyncSecret — see medicoach-sync-contract.ts). Registered before the
+   authenticated `/integrations/*` middleware. Fails closed with the secret empty. See
+   notify/whatsapp-status.ts. */
+app.post('/integrations/whatsapp/status', async (c) => {
+  const raw = await c.req.text();
+  const url = new URL(c.req.url);
+  const check = verifySyncSignature({
+    secret: medicoachSyncSecret(),
+    method: 'POST',
+    pathAndQuery: `${url.pathname}${url.search}`,
+    body: raw,
+    timestampHeader: c.req.header(SYNC_TIMESTAMP_HEADER),
+    signatureHeader: c.req.header(SYNC_SIGNATURE_HEADER),
+  });
+  if (!check.ok) return c.json({ error: 'invalid signature' }, 401);
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    return c.json({ error: 'invalid JSON' }, 400);
+  }
+  // Unknown message ids are acknowledged and ignored (no retry storm); a repo failure
+  // answers 500 so the forwarder may retry — applying a status is idempotent.
+  const summary = await applyWhatsAppStatuses(repo, parseStatuses(payload));
+  if (summary.matched)
+    console.log(`[whatsapp-status] matched ${summary.matched}, unknown ${summary.unknown}`);
+  return c.json(summary);
+});
+
 // ───────────────────── Authenticated routes ─────────────────────
 
 app.use('/me', authenticate);
@@ -1814,9 +1900,15 @@ app.use('/season-runs/*', authenticate, requireTenantMembership);
 app.use('/season-runs', authenticate, requireTenantMembership);
 app.use('/venues/*', authenticate, requireTenantMembership);
 app.use('/venues', authenticate, requireTenantMembership);
+app.use('/umpires/*', authenticate, requireTenantMembership);
+app.use('/umpires', authenticate, requireTenantMembership);
+app.use('/club/*', authenticate, requireTenantMembership);
+app.use('/captains-reports', authenticate, requireTenantMembership);
+app.use('/captains-reports/*', authenticate, requireTenantMembership);
 app.use('/tenant/config', authenticate, requireTenantMembership);
 app.use('/tenant/support', authenticate, requireTenantMembership);
 app.use('/admin/*', authenticate, requireTenantMembership, requireAdmin);
+app.use('/integrations/*', authenticate, requireTenantMembership, requireAdmin);
 // Platform operator portal — tenant-INDEPENDENT (no requireTenantMembership /
 // host resolution): the '*'/operator membership itself is the authorization.
 app.use('/platform/*', authenticate, requirePlatformOperator);
@@ -3768,13 +3860,59 @@ async function seriesScheduleCalendars(
 
 app.get('/series', async (c) => {
   const ra = c.get('requestAuth')!;
-  const all = await repo.listSeries(ra.tenant);
+  // Medicoach-owned results (ADR 0016) live in their own FIXRESULT# items and are joined
+  // onto each fixture as a response-only `result` (scores + medicoach link, never captain
+  // data); a fixture with a result reads as completed.
+  // Officials live in their own per-fixture items; join them on the way out. One Query for
+  // the registry (so a renamed/merged umpire shows its new name) and — only when the tenant
+  // has umpires at all (they are never deleted, so none ⇒ no appointments) — one for the
+  // appointments. The FIXRESULT# query runs only with the medicoach sync on: a tenant
+  // without it has no results to join.
+  const [all, config, umpires] = await Promise.all([
+    repo.listSeries(ra.tenant),
+    repo.getTenantConfig(ra.tenant),
+    repo.listUmpires(ra.tenant),
+  ]);
+  const [results, officialRows] = await Promise.all([
+    hasFeature(config, 'medicoachSync') ? repo.listFixtureResults(ra.tenant) : [],
+    umpires.length ? repo.listFixtureOfficials(ra.tenant) : [],
+  ]);
   // Admins get the raw list (drafts, unreleased venues/times, approval state). Everyone
   // else sees the club-facing projection: released + activated series only, with any
   // withheld fields stripped (ADR 0011). Release filtering used to be client-only, which
   // leaked every draft and all fields to reps.
-  if (ra.membership.role === 'admin') return c.json(all);
+  const officials = indexOfficials(officialRows);
+  const namesById = new Map(umpires.map((u) => [u.id, u.displayName]));
+  if (ra.membership.role === 'admin') {
+    // `syncMapped` marks the fixtures whose result medicoach owns, so the console locks
+    // the manual "completed" status there (and only there). Resolved exactly as the outbox
+    // and the generate gate resolve it (`seriesMappedForSync`): a season-run series carries
+    // no `leagueKey`, so its run's league decides. Each run is read at most once.
+    const runs = new Map<string, ReturnType<typeof repo.getSeasonRun>>();
+    const runRepo = {
+      getSeasonRun: (t: string, runId: string) => {
+        if (!runs.has(runId)) runs.set(runId, repo.getSeasonRun(t, runId));
+        return runs.get(runId)!;
+      },
+    };
+    const mapped = new Set<string>();
+    await Promise.all(
+      all.map(async (s) => {
+        if (await seriesMappedForSync(runRepo, ra.tenant, s, config)) mapped.add(s.id);
+      }),
+    );
+    return c.json(
+      joinFixtureResults(
+        all.map((s) =>
+          joinOfficials(s, officials, namesById, { include: () => true, audit: true }),
+        ),
+        results,
+        (s) => mapped.has(s.id),
+      ),
+    );
+  }
   const today = tenantToday();
+  const ownClubs = new Set(ra.membership.clubIds ?? []);
   // Legacy series (created before the `participants` snapshot existed) carry no team
   // identity, so a rep's client — which can't call the admin-only GET /clubs — renders
   // opponents as "Removed club". Synthesise participants from the tenant's clubs on the
@@ -3782,10 +3920,23 @@ app.get('/series', async (c) => {
   // has the snapshot and is left untouched. Clubs are loaded once per request.
   const clubsById = new Map((await repo.listClubs(ra.tenant)).map((cl) => [cl.id, cl]));
   return c.json(
-    all
-      .map((s) => projectSeriesForClub(s, today))
-      .filter((s): s is Series => s !== null)
-      .map((s) => withLegacyParticipants(s, clubsById)),
+    joinFixtureResults(
+      all
+        .map((s) => projectSeriesForClub(s, today))
+        .filter((s): s is Series => s !== null)
+        .map((s) => withLegacyParticipants(s, clubsById))
+        // A club sees the umpires for ITS OWN fixtures only, and only once the venue is
+        // visible to it — appointments follow the same reveal rule as the ground (ADR 0011).
+        .map((s) =>
+          isWithheld(s, 'venue')
+            ? s
+            : joinOfficials(s, officials, namesById, {
+                include: (f) => fixtureClubIds(s, f).some((id) => ownClubs.has(id)),
+                audit: false,
+              }),
+        ),
+      results,
+    ),
   );
 });
 
@@ -3816,6 +3967,9 @@ async function createSeries(
   // already written the earlier series.
   if (typeof series?.startDate !== 'string' || !series.startDate.trim())
     throw new HttpError(400, 'a series needs a start date');
+  // GET /series' response-only fixture keys (a joined result, `syncMapped`) never persist.
+  if (series.fixtures !== undefined)
+    series.fixtures = stripResponseOnlyFixtureFields(series.fixtures) as unknown[];
   // A POST must never overwrite an existing series. `putSeries` is an unconditional Put
   // and this body is built fresh with `released: false`, `releasedAt: null`, `version: 1`
   // — so a POST landing on a live id would recall a schedule clubs and players have
@@ -3838,7 +3992,9 @@ async function createSeries(
       series.schedule,
       await seriesScheduleCalendars(tenant, series.seasonRunId, runCalendar),
     );
-  // Fixtures are generated client-side and POSTed whole.
+  // Fixtures are generated client-side and POSTed whole. `officials` is a read-only join
+  // (FIXOFFICIALS# items), never stored on the series.
+  series.fixtures = stripJoinedOfficials(series.fixtures);
   series.version = 1;
   // A brand-new series is a DRAFT (ADR 0011): release and approval are earned via PATCH,
   // never asserted at create. Force the server-owned state regardless of what the client
@@ -3880,9 +4036,18 @@ async function applySeriesPatch(
   patch: SeriesPatch,
   _actor: string,
   runCalendar?: RunCalendarOverride,
+  /** Who is changing the schedule — stamped + queued for medicoach unless `medicoach`. */
+  origin: ScheduleChangeOrigin = 'admin',
 ): Promise<Series> {
   const current = await repo.getSeries(tenant, id);
   if (!current) throw new HttpError(404, 'series not found');
+  // A whole-series PATCH echoes GET /series' response-only fixture keys (the joined
+  // medicoach result, `syncMapped`, the FIXOFFICIALS# `officials` join); they never belong
+  // in the series item (ADR 0016).
+  if (patch.fixtures !== undefined)
+    patch.fixtures = stripJoinedOfficials(
+      stripResponseOnlyFixtureFields(patch.fixtures) as unknown[],
+    );
   // Same gsi1-sort-key guard as POST. `updateSeries` rewrites `gsi1sk` from the patched
   // `startDate` on every write, so a blank one here is the identical DynamoDB failure,
   // with the identical property that dynalite won't catch it.
@@ -3939,8 +4104,17 @@ async function applySeriesPatch(
     // keys riding along on the patch (fixtures, approved, name…) are a client bug, not part
     // of the reveal intent, so they are ignored rather than persisted through this action.
     const revealWithheld = Object.keys(withheld).length ? withheld : undefined;
+    // Medicoach sync (ADR 0016): fixtures of a withheld series were held back from medicoach's
+    // public match centre. Once nothing is withheld any more, every fixture is re-queued with
+    // its real schedule and its EXISTING changedAt (never re-stamped: a medicoach edit made
+    // while it was withheld must still win) once the reveal landed.
+    const requeue = await requeueRevealedSeries(repo, tenant, {
+      ...current,
+      withheld: revealWithheld,
+    });
+    let revealed: Series;
     try {
-      return await repo.updateSeries(tenant, id, {
+      revealed = await repo.updateSeries(tenant, id, {
         withheld: revealWithheld,
         revealedAt,
         version: patch.version,
@@ -3949,6 +4123,8 @@ async function applySeriesPatch(
       if (err instanceof VersionConflictError) throw new HttpError(409, 'series changed; refetch');
       throw err;
     }
+    await requeue.enqueue();
+    return revealed;
   }
 
   // ── Version pre-check before ANY clash gate ──
@@ -3996,7 +4172,7 @@ async function applySeriesPatch(
   // release); a live series keeps its state so in-season edits still reach clubs.
   if (typeof patch.approved === 'boolean') {
     patch.approvedAt = patch.approved ? now() : null;
-  } else if (patch.fixtures !== undefined && !current.released) {
+  } else if (patch.fixtures !== undefined && fixturesEditRecallsApproval(current)) {
     patch.approved = false;
     patch.approvedAt = null;
   }
@@ -4070,12 +4246,41 @@ async function applySeriesPatch(
   if (patch.released === true && !current.released) patch.releasedAt = now();
   else if (patch.released === false) patch.releasedAt = null;
   else delete patch.releasedAt;
+  // Medicoach sync (ADR 0016, Slice 4): a fixture whose schedule this write changes gets
+  // `schedule.changedAt = now` in the same write, and its outbox row once the write landed.
+  let scheduleSync: Awaited<ReturnType<typeof recordScheduleDiff>> | undefined;
+  if (patch.fixtures !== undefined) {
+    const after = { ...current, ...patch, id } as Series;
+    scheduleSync = await recordScheduleDiff(repo, tenant, current, after, origin);
+    patch.fixtures = after.fixtures;
+  }
+  // A draft's schedule was held back from medicoach (ADR 0016); the release of a series that
+  // withholds nothing makes it public, so once this write landed every fixture is queued with
+  // its real schedule and its EXISTING changedAt — never re-stamped, so a medicoach edit made
+  // while it was a draft still wins. A release WITH withholding stays held until the reveal
+  // of the last field (the reveal branch above).
+  if (patch.released === true && !current.released) {
+    const requeue = await requeueRevealedSeries(repo, tenant, {
+      ...current,
+      ...patch,
+      id,
+    } as Series);
+    const edits = scheduleSync;
+    scheduleSync = {
+      refs: edits?.refs ?? [],
+      newRefs: edits?.newRefs ?? [],
+      enqueue: async () => (await edits?.enqueue(), requeue.enqueue()),
+    };
+  }
+  let written: Series;
   try {
-    return await repo.updateSeries(tenant, id, patch);
+    written = await repo.updateSeries(tenant, id, patch);
   } catch (err) {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'series changed; refetch');
     throw err;
   }
+  await scheduleSync?.enqueue();
+  return written;
 }
 
 /**
@@ -4093,11 +4298,7 @@ function inSeasonClashRefusal(
   venues: Venue[],
   aliases: Record<string, string>,
 ): HttpError | undefined {
-  const before = new Set(
-    findClashes(current, allSeries, clubs, venues, aliases).map((c) => clashKey(c, aliases)),
-  );
-  const after = findClashes(subject, allSeries, clubs, venues, aliases);
-  const introduced = after.filter((c) => !before.has(clashKey(c, aliases)));
+  const introduced = introducedClashes(current, subject, allSeries, clubs, venues, aliases);
   if (!introduced.length) return undefined;
   const shown = introduced.slice(0, 3).map(formatClashForHumans).join('; ');
   return new HttpError(
@@ -4124,6 +4325,292 @@ function inSeasonClashRefusal(
  * subject changes each time. That is fine at today's tenant sizes; revisit if a tenant's
  * fixture count makes 20 rebuilds per pre-check felt.
  */
+/**
+ * Admin "Sync now" (ADR 0016): run the medicoach puller for the caller's tenant right away,
+ * instead of waiting for the 15-minute cron. Same code path as the cron; returns the run
+ * summary (counts only — never a pulled payload). 409 when the tenant has no sync; 502 when
+ * medicoach can't be reached or answers outside the contract (`error` in plain language,
+ * `technical` the puller's own text). With the sync secrets unset
+ * the run is a dry run (`status: 'dry-run'`, nothing requested).
+ */
+app.post('/integrations/medicoach/sync-now', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  try {
+    // Outbox first, then the pull, then pending captain's reports — the cron's sequence.
+    const summary = await runTenantSync(tenant, 'manual', {
+      repo,
+      url: medicoachSyncUrl(),
+      secret: medicoachSyncSecret(),
+    });
+    if (summary.status === 'disabled')
+      throw new HttpError(409, 'the medicoach sync is not enabled for this tenant');
+    return c.json(summary);
+  } catch (err) {
+    // The admin reads the plain-language reason; the technical text rides along.
+    if (err instanceof MedicoachSyncError)
+      throw new HttpError(502, explainSyncError(err.message), {
+        code: 'sync_failed',
+        technical: err.message,
+      });
+    throw err;
+  }
+});
+
+/**
+ * Admin "Medicoach sync" page data (ADR 0016): whether the sync is on (and a dry run), the
+ * pull cursor, recent SYNCLOG# rows (pull and push), the PENDINGSYNC# outbox (count + rows
+ * that failed, with their last error) and the SYNCCONFLICT# inbox. Counts, fixture refs and
+ * schedules only — no player data lives in any of these rows.
+ */
+app.get('/integrations/medicoach/status', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const config = await repo.getTenantConfig(tenant);
+  const enabled = hasFeature(config, 'medicoachSync');
+  if (!enabled) return c.json({ enabled: false });
+  const [cursor, logs, pending, conflicts, markers, health] = await Promise.all([
+    repo.getSyncCursorRow(tenant),
+    repo.listSyncLogs(tenant, 20),
+    repo.listPendingSync(tenant),
+    repo.listSyncConflicts(tenant),
+    repo.listReportOpenMarkers(tenant),
+    repo.getSyncHealth(tenant),
+  ]);
+  return c.json({
+    enabled: true,
+    dryRun: !medicoachSyncUrl() || !medicoachSyncSecret(),
+    cursor,
+    // When the sync last worked / last failed; `lastErrorText` is the failure in plain
+    // language (the technical `lastError` stays for the page's "Details").
+    health: health
+      ? {
+          ...health,
+          ...(health.lastError ? { lastErrorText: explainSyncError(health.lastError) } : {}),
+        }
+      : null,
+    // Rows written before SYNCLOG carried `message` are explained here.
+    logs: logs.map((l) =>
+      l.error && !l.message ? { ...l, message: explainSyncError(l.error) } : l,
+    ),
+    outbox: {
+      count: pending.length,
+      // Rows kept back because their series is a draft or still withholds venue/time
+      // (ADR 0011): they go out when the series is released/revealed, never before.
+      held: pending
+        .filter((p) => p.heldUntilReveal)
+        .sort((a, b) => a.enqueuedAt.localeCompare(b.enqueuedAt))
+        .map((p) => ({
+          ref: p.ref,
+          seriesId: p.seriesId,
+          fixtureId: p.fixtureId,
+          enqueuedAt: p.enqueuedAt,
+          proposed: describeSchedule(p.schedule),
+        })),
+      failures: pending
+        .filter((p) => p.attempts > 0 && !p.heldUntilReveal)
+        .sort((a, b) => a.enqueuedAt.localeCompare(b.enqueuedAt))
+        .map((p) => ({
+          ref: p.ref,
+          seriesId: p.seriesId,
+          fixtureId: p.fixtureId,
+          attempts: p.attempts,
+          // Still retried every run; flagged so the page offers Retry and Drop.
+          stuck: p.attempts >= STUCK_ATTEMPTS,
+          lastError: p.lastError ?? null,
+          lastErrorText: explainSyncError(p.lastError),
+          lastAttemptAt: p.lastAttemptAt ?? null,
+          enqueuedAt: p.enqueuedAt,
+          proposed: describeSchedule(p.schedule),
+        })),
+    },
+    conflicts: conflicts
+      .sort((a, b) => b.detectedAt.localeCompare(a.detectedAt))
+      .map((x) => conflictView(x)),
+    pendingReports: markers.length,
+    // Report notices that reached nobody (every channel failed) and are waiting on a retry.
+    noticesFailed: markers.filter((m) => m.lastError?.startsWith(NOTICE_FAILED_ERROR)).length,
+  });
+});
+
+/** A conflict as the inbox shows it: the stored row plus readable proposed text, and the
+ * proposal in the same parts as `current` so the two read side by side. */
+function conflictView(x: SyncConflict) {
+  return {
+    ...x,
+    proposedText: describeSchedule(x.proposed),
+    proposedParts: scheduleParts(x.proposed),
+  };
+}
+
+app.get('/integrations/medicoach/conflicts', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const conflicts = await repo.listSyncConflicts(tenant);
+  return c.json(
+    conflicts.sort((a, b) => b.detectedAt.localeCompare(a.detectedAt)).map(conflictView),
+  );
+});
+
+/** The `ref` of a conflict action body (refs carry `:`, so they ride in the body). */
+async function conflictRefOf(c: Context<HonoEnv>): Promise<string> {
+  const body = await c.req.json<{ ref?: unknown }>().catch(() => ({}) as { ref?: unknown });
+  if (typeof body?.ref !== 'string' || !body.ref) throw new HttpError(400, 'ref is required');
+  return body.ref;
+}
+
+/**
+ * Apply a held medicoach schedule change as an ADMIN EDIT: the proposal is written through
+ * `applySeriesPatch`, so the clash gate runs again (409 `venue_clash` when it still clashes),
+ * a draft's approval is recalled, and the change is stamped + queued back to medicoach like
+ * any admin edit (medicoach answers `unchanged`). A venue that still doesn't resolve is 409
+ * `venue_unresolved`. The conflict row is deleted once applied.
+ */
+app.post('/integrations/medicoach/conflicts/apply', async (c) => {
+  const { tenant, email } = c.get('requestAuth')!;
+  const ref = await conflictRefOf(c);
+  const conflict = await repo.getSyncConflict(tenant, ref);
+  if (!conflict) throw new HttpError(404, 'conflict not found');
+  const [config, venues] = await Promise.all([
+    repo.getTenantConfig(tenant),
+    repo.listVenues(tenant),
+  ]);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const series = await repo.getSeries(tenant, conflict.seriesId);
+    const fixtures = (series?.fixtures as ScheduleFixture[] | undefined) ?? [];
+    const i = fixtures.findIndex((f) => f?.id === conflict.fixtureId);
+    if (!series || i < 0)
+      throw new HttpError(404, 'that fixture no longer exists; discard the conflict');
+    const built = buildInboundFixture(
+      series,
+      fixtures[i],
+      conflict.proposed,
+      venues,
+      venueAliasesFor(config),
+    );
+    if (!built.ok)
+      throw new HttpError(409, built.detail.join('; '), {
+        code: 'venue_unresolved',
+        detail: built.detail,
+      });
+    if (!built.changed.length) {
+      await repo.deleteSyncConflict(tenant, ref);
+      return c.json({ status: 'unchanged' });
+    }
+    const next = fixtures.map((f, j) => (j === i ? built.fixture : f));
+    try {
+      const written = await applySeriesPatch(
+        tenant,
+        series.id,
+        { fixtures: next, version: series.version },
+        email ?? 'unknown',
+      );
+      await repo.deleteSyncConflict(tenant, ref);
+      return c.json({ status: 'applied', series: written });
+    } catch (err) {
+      // A concurrent edit: re-read and rebuild. Anything structured (a clash) is the answer.
+      if (err instanceof HttpError && err.status === 409 && !err.details) continue;
+      throw err;
+    }
+  }
+  throw new HttpError(409, 'series changed; refetch');
+});
+
+/**
+ * Discard a held change: smart club's schedule stands. The fixture's `schedule.changedAt` is
+ * re-stamped and its current schedule queued for medicoach, so medicoach takes smart club's
+ * version on the next push and the discarded proposal (now older) can never be re-applied.
+ */
+app.post('/integrations/medicoach/conflicts/discard', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const ref = await conflictRefOf(c);
+  const conflict = await repo.getSyncConflict(tenant, ref);
+  if (!conflict) throw new HttpError(404, 'conflict not found');
+  const config = await repo.getTenantConfig(tenant);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const series = await repo.getSeries(tenant, conflict.seriesId);
+    const fixtures = (series?.fixtures as ScheduleFixture[] | undefined) ?? [];
+    const i = fixtures.findIndex((f) => f?.id === conflict.fixtureId);
+    if (!series || i < 0) break;
+    const at = now();
+    const stamped: ScheduleFixture = {
+      ...fixtures[i],
+      schedule: { ...(fixtures[i].schedule ?? {}), changedAt: at },
+    };
+    try {
+      await repo.updateSeries(tenant, series.id, {
+        fixtures: fixtures.map((f, j) => (j === i ? stamped : f)),
+        version: series.version,
+      });
+    } catch (err) {
+      if (err instanceof VersionConflictError) continue;
+      throw err;
+    }
+    if (await seriesMappedForSync(repo, tenant, series, config))
+      await repo.putPendingSync(tenant, {
+        ref,
+        seriesId: series.id,
+        fixtureId: conflict.fixtureId,
+        schedule: fixtureSchedule(series, stamped, at),
+        origin: 'admin',
+        enqueuedAt: at,
+        attempts: 0,
+        ...(seriesHoldsSchedule(series) ? { heldUntilReveal: true } : {}),
+      });
+    break;
+  }
+  await repo.deleteSyncConflict(tenant, ref);
+  return c.json({ status: 'discarded' });
+});
+
+/** The `ref` and live row of an outbox action body (404 when nothing is queued for it). */
+async function outboxRowOf(c: Context<HonoEnv>, tenant: string) {
+  const ref = await conflictRefOf(c);
+  const row = (await repo.listPendingSync(tenant)).find((p) => p.ref === ref);
+  if (!row) throw new HttpError(404, 'nothing is waiting to be sent for that fixture');
+  return row;
+}
+
+/**
+ * Retry an outbox row now (the admin page offers it on a stuck row, STUCK_ATTEMPTS+ failed
+ * pushes): its attempt count restarts and the tenant's outbox is flushed right away — the
+ * same flush the cron runs. Answers what became of THIS row: `sent` (medicoach answered a
+ * success status), `failed` (with the new error, technical + plain), `held` (its series is a
+ * draft or withholds venue/time) or `dry-run` (the sync secrets are unset).
+ */
+app.post('/integrations/medicoach/outbox/retry', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const row = await outboxRowOf(c, tenant);
+  await repo.resetPendingSyncAttempts(tenant, row.ref, row.schedule.changedAt);
+  const flushed = await flushScheduleOutbox(tenant, 'manual', {
+    repo,
+    url: medicoachSyncUrl(),
+    secret: medicoachSyncSecret(),
+  });
+  const after = (await repo.listPendingSync(tenant)).find((p) => p.ref === row.ref);
+  if (!after) return c.json({ status: 'sent' });
+  if (after.heldUntilReveal) return c.json({ status: 'held' });
+  if (flushed.status === 'dry-run') return c.json({ status: 'dry-run' });
+  if (after.schedule.changedAt !== row.schedule.changedAt || !after.attempts)
+    return c.json({ status: 'queued' });
+  return c.json({
+    status: 'failed',
+    attempts: after.attempts,
+    lastError: after.lastError ?? null,
+    lastErrorText: explainSyncError(after.lastError),
+  });
+});
+
+/**
+ * Drop an outbox row: this smart-club schedule change is never sent, and medicoach keeps its
+ * own version until the fixture is next edited here. Only the snapshot the admin was shown is
+ * dropped — an edit queued meanwhile replaced the row and still goes out (409).
+ */
+app.post('/integrations/medicoach/outbox/drop', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const row = await outboxRowOf(c, tenant);
+  if (!(await repo.deletePendingSyncIfUnchanged(tenant, row.ref, row.schedule.changedAt)))
+    throw new HttpError(409, 'a newer change for that fixture was queued meanwhile; refresh');
+  return c.json({ status: 'dropped' });
+});
+
 app.post('/series/:id/clash-check', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
   const id = c.req.param('id');
@@ -4188,7 +4675,700 @@ app.post('/series/:id/clash-check', requireAdmin, async (c) => {
 app.delete('/series/:id', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
   await repo.deleteSeries(tenant, c.req.param('id'));
+  // Its fixtures' umpire appointments go with it, and so does its medicoach-sync state
+  // (results, outbox rows, held conflicts, report markers); pending captain's reports are
+  // voided (ADR 0016).
+  await repo.deleteFixtureOfficialsForSeries(tenant, c.req.param('id'));
+  await repo.deleteSeriesSyncState(tenant, c.req.param('id'));
   return c.json({ ok: true });
+});
+
+/* ─── Umpire allocation ───
+   A tenant umpire registry plus per-fixture appointments. Appointments are their own
+   FIXOFFICIALS# items, so writing them never touches the Series item: no version bump, no
+   approval reset, no clash gate. Contacts (phone/email) are admin-only. */
+
+/**
+ * Appoint a fixture's officials: up to two umpires and an optional referee, by registry
+ * id. An empty body (`{ umpires: [] }`) clears the appointment.
+ */
+app.put('/series/:id/fixtures/:fixtureId/officials', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const seriesId = c.req.param('id');
+  const fixtureId = c.req.param('fixtureId');
+  const input = parseOfficialsInput(await c.req.json().catch(() => null));
+  const series = await repo.getSeries(ra.tenant, seriesId);
+  if (!series) throw new HttpError(404, 'series not found');
+  const fixtures = (series.fixtures ?? []) as Array<{ id?: unknown }>;
+  if (!fixtures.some((f) => f.id === fixtureId)) throw new HttpError(404, 'fixture not found');
+  const registry = new Map((await repo.listUmpires(ra.tenant)).map((u) => [u.id, u]));
+  const ref = (umpireId: string) => {
+    const u = registry.get(umpireId);
+    if (!u) throw new HttpError(400, `unknown umpire ${umpireId}`);
+    if (!u.active) throw new HttpError(400, `${u.displayName} is no longer active`);
+    return { umpireId, name: u.displayName };
+  };
+  const officials = {
+    umpires: input.umpireIds.map(ref),
+    ...(input.refereeId ? { referee: ref(input.refereeId) } : {}),
+    updatedAt: now(),
+    updatedBy: ra.email ?? 'unknown',
+  };
+  await repo.putFixtureOfficials(ra.tenant, seriesId, fixtureId, officials);
+  return c.json({ seriesId, fixtureId, ...officials });
+});
+
+/** The registry. Admins get every entry with contacts; club members get active names only. */
+app.get('/umpires', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const all = (await repo.listUmpires(ra.tenant)).sort((a, b) =>
+    a.displayName.localeCompare(b.displayName),
+  );
+  if (ra.membership.role === 'admin') return c.json(all);
+  return c.json(all.filter((u) => u.active).map((u) => ({ id: u.id, displayName: u.displayName })));
+});
+
+app.post('/umpires', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const input = parseUmpireInput(await c.req.json().catch(() => null), 'create');
+  const existing = await repo.listUmpires(tenant);
+  const at = now();
+  const stem = umpireIdFor(input.displayName!);
+  const taken = new Set(existing.map((u) => u.id));
+  const id = taken.has(stem) ? `${stem}-${randomUUID().slice(0, 6)}` : stem;
+  const umpire = applyUmpireInput(undefined, input, id, at);
+  const clash = findAliasConflict(umpire.aliases, existing);
+  if (clash)
+    throw new HttpError(409, `${clash.displayName} already answers to that name`, {
+      code: 'umpire_alias_taken',
+      umpireId: clash.id,
+    });
+  try {
+    await repo.createUmpire(tenant, umpire);
+  } catch (err) {
+    if (err instanceof repo.UmpireExistsError)
+      throw new HttpError(409, 'an umpire with that id already exists');
+    throw err;
+  }
+  return c.json(umpire, 201);
+});
+
+app.patch('/umpires/:id', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const input = parseUmpireInput(await c.req.json().catch(() => null), 'patch');
+  const current = await repo.getUmpire(tenant, id);
+  if (!current) throw new HttpError(404, 'umpire not found');
+  if (current.mergedInto && input.active === true)
+    throw new HttpError(409, 'a merged umpire cannot be reactivated');
+  const next = applyUmpireInput(current, input, id, now());
+  if (next.active) {
+    const clash = findAliasConflict(next.aliases, await repo.listUmpires(tenant), id);
+    if (clash)
+      throw new HttpError(409, `${clash.displayName} already answers to that name`, {
+        code: 'umpire_alias_taken',
+        umpireId: clash.id,
+      });
+  }
+  await repo.putUmpire(tenant, next);
+  return c.json(next);
+});
+
+/**
+ * Merge a duplicate (`:id`, the source) into `targetId`: every appointment naming the source
+ * now names the target, the target takes over the source's aliases, and the source is
+ * deactivated with `mergedInto` set. A source that is already merged (a stale page, a
+ * double-click) is 409 `umpire_already_merged`, naming the umpire it went into. The source is
+ * retired LAST, so a merge that failed part-way can simply be run again.
+ */
+app.post('/umpires/:id/merge', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const sourceId = c.req.param('id');
+  const body = (await c.req.json().catch(() => null)) as { targetId?: unknown } | null;
+  const targetId = typeof body?.targetId === 'string' ? body.targetId.trim() : '';
+  if (!targetId) throw new HttpError(400, 'targetId is required');
+  if (targetId === sourceId) throw new HttpError(400, 'cannot merge an umpire into itself');
+  const [source, target] = await Promise.all([
+    repo.getUmpire(ra.tenant, sourceId),
+    repo.getUmpire(ra.tenant, targetId),
+  ]);
+  if (!source) throw new HttpError(404, 'umpire not found');
+  if (source.mergedInto) {
+    const into = await repo.getUmpire(ra.tenant, source.mergedInto);
+    const name = into?.displayName ?? source.mergedInto;
+    throw new HttpError(409, `${source.displayName} is already merged into ${name}`, {
+      code: 'umpire_already_merged',
+      mergedInto: source.mergedInto,
+      mergedIntoName: name,
+    });
+  }
+  if (!target) throw new HttpError(404, 'target umpire not found');
+  if (!target.active) throw new HttpError(409, 'cannot merge into an inactive umpire');
+  const at = now();
+  const targetRef = { umpireId: target.id, name: target.displayName };
+  let repointed = 0;
+  for (const row of await repo.listFixtureOfficials(ra.tenant)) {
+    const hasSource =
+      row.umpires.some((u) => u.umpireId === sourceId) || row.referee?.umpireId === sourceId;
+    if (!hasSource) continue;
+    const umpires: typeof row.umpires = [];
+    for (const u of row.umpires) {
+      const next = u.umpireId === sourceId ? targetRef : u;
+      if (!umpires.some((x) => x.umpireId === next.umpireId)) umpires.push(next);
+    }
+    let referee = row.referee?.umpireId === sourceId ? targetRef : row.referee;
+    // A merge can't leave one person as both umpire and referee on a fixture.
+    if (referee && umpires.some((u) => u.umpireId === referee!.umpireId)) referee = undefined;
+    await repo.putFixtureOfficials(ra.tenant, row.seriesId, row.fixtureId, {
+      umpires,
+      ...(referee ? { referee } : {}),
+      updatedAt: at,
+      updatedBy: ra.email ?? 'unknown',
+    });
+    repointed++;
+  }
+  const mergedTarget = {
+    ...target,
+    aliases: [...new Set([...target.aliases, ...(source.aliases ?? [])])],
+    updatedAt: at,
+  };
+  const retiredSource = {
+    ...source,
+    active: false,
+    mergedInto: target.id,
+    // Its aliases now belong to the target; keeping them here would make the source a
+    // second answer to the same name if it were ever looked up.
+    aliases: [],
+    updatedAt: at,
+  };
+  await repo.putUmpire(ra.tenant, mergedTarget);
+  await repo.putUmpire(ra.tenant, retiredSource);
+  return c.json({ target: mergedTarget, source: retiredSource, repointed });
+});
+
+/* ─── Upload appointments (admin) ───
+   The weekly appointments workbook, uploaded from the Umpires page: the CLI's own parser,
+   matcher and write plan (import-umpire-appointments.ts) — no second parser. `preview` writes
+   nothing; `confirm` re-plans from the same file and writes exactly what the CLI's --confirm
+   would, refusing (409 `plan_changed`, with the fresh preview) if the plan moved since the
+   preview the admin saw. Direct JSON/base64 transport like structure intake: xlsx only, 2 MB. */
+
+const APPOINTMENTS_MAX_BYTES = 2 * 1024 * 1024; // 2 MB
+const APPOINTMENTS_MAX_BASE64_LENGTH = Math.ceil((APPOINTMENTS_MAX_BYTES * 4) / 3) + 4;
+
+/** Parse and plan an uploaded appointments workbook for the caller's tenant. */
+async function planAppointmentsUpload(c: Context<HonoEnv>, tenant: string) {
+  const body = (await c.req.json().catch(() => null)) as {
+    filename?: unknown;
+    dataBase64?: unknown;
+    createUmpires?: unknown;
+    planHash?: unknown;
+  } | null;
+  const filename = typeof body?.filename === 'string' ? body.filename : '';
+  const dataBase64 = typeof body?.dataBase64 === 'string' ? body.dataBase64 : '';
+  if (!dataBase64) throw new HttpError(400, 'dataBase64 is required');
+  if (dataBase64.length > APPOINTMENTS_MAX_BASE64_LENGTH)
+    throw new HttpError(413, 'the workbook is larger than 2 MB');
+  if (filename && !/\.xlsx$/i.test(filename))
+    throw new HttpError(400, 'upload the appointments sheet as an Excel .xlsx file');
+  const buffer = Buffer.from(dataBase64, 'base64');
+  // Every .xlsx is a zip: anything else (an old .xls, a CSV renamed) is refused unread.
+  if (buffer.length < 4 || buffer.readUInt32LE(0) !== 0x04034b50)
+    throw new HttpError(400, 'that file is not an Excel .xlsx workbook');
+  const imp = await import('./import-umpire-appointments.js');
+  const wb = new ExcelJS.Workbook();
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await wb.xlsx.load(buffer as any);
+  } catch {
+    throw new HttpError(400, 'unable to read the workbook — check the file is a valid .xlsx');
+  }
+  let parsed: ReturnType<typeof imp.parseAppointmentsWorkbook>;
+  try {
+    parsed = imp.parseAppointmentsWorkbook(wb);
+  } catch (err) {
+    throw new HttpError(400, err instanceof Error ? err.message : 'unreadable appointments sheet');
+  }
+  const sections = imp.unknownSections(parsed.rows);
+  if (sections.length)
+    throw new HttpError(
+      400,
+      `The sheet has section(s) this union isn't set up for: ${sections.map((x) => `"${x}"`).join(', ')}. Ask your operator to add them, or remove those rows.`,
+      { code: 'unknown_sections', sections },
+    );
+  const [series, clubs, registry, officials] = await Promise.all([
+    repo.listSeries(tenant),
+    repo.listClubs(tenant),
+    repo.listUmpires(tenant),
+    repo.listFixtureOfficials(tenant),
+  ]);
+  const existing = new Map(officials.map((o) => [`${o.seriesId}#${o.fixtureId}`, o]));
+  const plan = imp.planAppointmentImport(parsed.rows, {
+    series,
+    clubs,
+    registry,
+    existing,
+    createUmpires: body?.createUmpires === true,
+    at: now(),
+  });
+  return { imp, parsed, plan, planHash: body?.planHash };
+}
+
+app.post('/umpires/appointments/preview', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const { imp, parsed, plan } = await planAppointmentsUpload(c, tenant);
+  return c.json(imp.appointmentPreview(parsed, plan));
+});
+
+app.post('/umpires/appointments/confirm', requireAdmin, async (c) => {
+  const { tenant, email } = c.get('requestAuth')!;
+  const { imp, parsed, plan, planHash } = await planAppointmentsUpload(c, tenant);
+  if (typeof planHash !== 'string' || planHash !== imp.appointmentPlanHash(plan))
+    throw new HttpError(
+      409,
+      'Appointments or umpires changed since your preview. Check the updated preview, then confirm again.',
+      { code: 'plan_changed', preview: imp.appointmentPreview(parsed, plan) },
+    );
+  const out = await imp.writeAppointmentImport(repo, tenant, plan, email ?? 'unknown', now());
+  return c.json(out);
+});
+
+/* ─── Captain's reports (ADR 0016, Slice 2) ───
+   Reports open automatically when medicoach reports a result (medicoach-sync/puller.ts →
+   captains-reports.ts). Clubs read and file their OWN reports here; the recipient may instead
+   use the submit-once link (`/captains-report-link/:token`, public). First submit wins. The
+   union office reads every report through `GET /captains-reports` (admin). */
+
+/** A report's editable fields from a request body, with the umpire ids checked. */
+async function reportFieldsFrom(
+  tenant: string,
+  report: CaptainsReport,
+  raw: unknown,
+): Promise<{ fields: repo.CaptainsReportFields; submit: boolean }> {
+  try {
+    const parsed = parseReportFields(raw);
+    const umpires = await checkUmpireIds(repo, tenant, report, parsed.umpires);
+    const submit = (raw as { submit?: unknown }).submit === true;
+    if (submit) {
+      const problems = submissionProblems({ ...parsed, umpires });
+      if (problems.length) throw new HttpError(400, problems[0], { problems });
+    }
+    return { fields: { ...parsed, umpires }, submit };
+  } catch (err) {
+    if (err instanceof ReportInputError) throw new HttpError(400, err.message);
+    throw err;
+  }
+}
+
+/** Save a draft or submit (first submit wins → 409 for the loser). */
+async function writeReport(
+  tenant: string,
+  report: CaptainsReport,
+  fields: repo.CaptainsReportFields,
+  submit: boolean,
+  meta: { submittedBy: string; via: 'portal' | 'link'; memberId?: string },
+): Promise<CaptainsReport> {
+  try {
+    if (!submit) return await repo.saveCaptainsReportDraft(tenant, report, fields, meta);
+    if (report.status !== 'pending')
+      throw new repo.CaptainsReportStateError("captain's report already submitted");
+    // The CR number is allocated only once the first-submit-wins write landed (repo).
+    return await repo.submitCaptainsReport(tenant, report, fields, meta);
+  } catch (err) {
+    if (err instanceof repo.CaptainsReportStateError)
+      throw new HttpError(409, err.message, { code: 'report_closed' });
+    throw err;
+  }
+}
+
+/** A club-route report by id, after the caller's club access is checked. */
+async function clubReport(ra: RequestAuth, id: string): Promise<CaptainsReport> {
+  const key = parseCaptainsReportId(id);
+  if (!key) throw new HttpError(404, 'report not found');
+  assertClubAccess(ra, key.clubId);
+  const report = await repo.getCaptainsReport(ra.tenant, key.seriesId, key.fixtureId, key.clubId);
+  if (!report) throw new HttpError(404, 'report not found');
+  return report;
+}
+
+/**
+ * Report views with the venue re-read from the LIVE series (ADR 0011): club members and link
+ * holders never see a venue the series withholds, and see it once revealed. Admins see it.
+ */
+async function reportViews(
+  tenant: string,
+  reports: CaptainsReport[],
+  forClub: boolean,
+): Promise<ReturnType<typeof reportView>[]> {
+  const series = new Map<string, Promise<Series | null>>();
+  const seriesOf = (id: string) => {
+    if (!series.has(id)) series.set(id, repo.getSeries(tenant, id));
+    return series.get(id)!;
+  };
+  return Promise.all(
+    reports.map(async (r) =>
+      reportView(r, {
+        series: r.seriesId === UNLISTED_SERIES_ID ? null : await seriesOf(r.seriesId),
+        forClub,
+      }),
+    ),
+  );
+}
+
+const clubView = async (ra: RequestAuth, r: CaptainsReport) =>
+  (await reportViews(ra.tenant, [r], ra.membership.role !== 'admin'))[0];
+
+/** A refused forward / attribution as the HTTP error the client reads. */
+function flowError(err: unknown): never {
+  if (err instanceof ReportFlowError)
+    throw new HttpError(err.status, err.message, err.code ? { code: err.code } : undefined);
+  throw err;
+}
+
+app.get('/club/captains-reports', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const clubId = c.req.query('clubId') ?? ra.membership.clubIds[0];
+  if (!clubId) throw new HttpError(400, 'clubId is required');
+  assertClubAccess(ra, clubId);
+  const reports = (await repo.listCaptainsReports(ra.tenant))
+    .filter((r) => r.clubId === clubId)
+    .sort((a, b) => b.matchDate.localeCompare(a.matchDate));
+  return c.json(await reportViews(ra.tenant, reports, ra.membership.role !== 'admin'));
+});
+
+app.get('/club/captains-reports/:id', async (c) => {
+  const ra = c.get('requestAuth')!;
+  return c.json(await clubView(ra, await clubReport(ra, c.req.param('id'))));
+});
+
+/** "Send to captain" from the portal: the club's eligible players (names + opaque ids). */
+app.get('/club/captains-reports/:id/forward-candidates', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const report = await clubReport(ra, c.req.param('id'));
+  const candidates = await forwardCandidates(repo, ra.tenant, report, captainsReportLinkSecret());
+  return c.json({
+    candidates: candidates.map(({ id, name }) => ({ id, name })),
+    remaining: Math.max(0, MAX_FORWARDS - (report.forwardCount ?? 0)),
+  });
+});
+
+app.post('/club/captains-reports/:id/forward', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const report = await clubReport(ra, c.req.param('id'));
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as { candidateId?: unknown };
+  if (typeof body.candidateId !== 'string' || !body.candidateId)
+    throw new HttpError(400, 'candidateId is required');
+  const updated = await forwardReport(
+    { repo },
+    { tenant: ra.tenant, report, candidateId: body.candidateId, via: 'portal' },
+  ).catch(flowError);
+  return c.json(await clubView(ra, updated));
+});
+
+/**
+ * File a report for a match that is NOT in the fixture list (a friendly, a re-arranged game):
+ * free-text opponent, a date that is not in the future, competition and venue; umpires from
+ * the registry or free text. Created and submitted in one go (`source: 'manual-unlisted'`).
+ */
+app.post('/club/captains-reports/unlisted', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as Record<string, unknown>;
+  const clubId = typeof body.clubId === 'string' ? body.clubId : '';
+  if (!clubId) throw new HttpError(400, 'clubId is required');
+  assertClubAccess(ra, clubId);
+  const text = (v: unknown, max: number, field: string, required = false) => {
+    const t = typeof v === 'string' ? v.trim() : '';
+    if (required && !t) throw new HttpError(400, `${field} is required`);
+    if (t.length > max) throw new HttpError(400, `${field} is too long (max ${max})`);
+    return t;
+  };
+  const opponentName = text(body.opponentName, 120, 'the opponent', true);
+  const competition = text(body.competition, 120, 'the competition');
+  const venue = text(body.venue, 120, 'the venue');
+  const matchDate = typeof body.matchDate === 'string' ? body.matchDate : '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(matchDate) || !dayjs(matchDate).isValid())
+    throw new HttpError(400, 'the match date must be a date (YYYY-MM-DD)');
+  if (matchDate > tenantToday())
+    throw new HttpError(400, 'this match has not been played yet', { code: 'match_in_future' });
+  const club = await repo.getClub(ra.tenant, clubId);
+  if (!club) throw new HttpError(404, 'club not found');
+  const at = now();
+  const fixtureId = randomUUID();
+  const report: CaptainsReport = {
+    id: captainsReportId(UNLISTED_SERIES_ID, fixtureId, clubId),
+    seriesId: UNLISTED_SERIES_ID,
+    fixtureId,
+    clubId,
+    status: 'pending',
+    source: 'manual-unlisted',
+    matchDate,
+    side: 'home',
+    clubName: club.name,
+    opponentName,
+    competition,
+    ...(venue ? { venue } : {}),
+    umpiresSnapshot: [],
+    recipient: { kind: 'portal', memberId: randomUUID(), name: ra.email ?? '' },
+    captainName: '',
+    umpires: [],
+    general: '',
+    createdAt: at,
+    updatedAt: at,
+  };
+  const { fields } = await reportFieldsFrom(ra.tenant, report, { ...body, submit: true });
+  if (!(await repo.createCaptainsReport(ra.tenant, report)))
+    throw new HttpError(409, 'a report already exists for this match', { code: 'report_exists' });
+  const saved = await writeReport(ra.tenant, report, fields, true, {
+    submittedBy: ra.email ?? 'portal',
+    via: 'portal',
+  });
+  return c.json(reportView(saved), 201);
+});
+
+app.put('/club/captains-reports/:id', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const report = await clubReport(ra, c.req.param('id'));
+  const { fields, submit } = await reportFieldsFrom(
+    ra.tenant,
+    report,
+    await c.req.json().catch(() => null),
+  );
+  const saved = await writeReport(ra.tenant, report, fields, submit, {
+    submittedBy: ra.email ?? 'portal',
+    via: 'portal',
+  });
+  return c.json(await clubView(ra, saved));
+});
+
+/**
+ * File a report by hand for one of the club's fixtures that has no report yet (e.g. a match
+ * medicoach didn't score). Creates and submits in one go; 409 when a report already exists
+ * (the portal then opens that one).
+ */
+app.post('/club/captains-reports', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as Record<string, unknown>;
+  const seriesId = typeof body.seriesId === 'string' ? body.seriesId : '';
+  const fixtureId = typeof body.fixtureId === 'string' ? body.fixtureId : '';
+  const clubId = typeof body.clubId === 'string' ? body.clubId : '';
+  if (!seriesId || !fixtureId || !clubId)
+    throw new HttpError(400, 'seriesId, fixtureId and clubId are required');
+  assertClubAccess(ra, clubId);
+  const stored = await repo.getSeries(ra.tenant, seriesId);
+  // Reps see only released series (and released fields); file against what they can see.
+  const series =
+    stored &&
+    (ra.membership.role === 'admin' ? stored : projectSeriesForClub(stored, tenantToday()));
+  const fixture = (series?.fixtures as Array<Record<string, unknown>> | undefined)?.find(
+    (f) => f?.id === fixtureId,
+  );
+  if (!series || !fixture) throw new HttpError(404, 'fixture not found');
+  const clubIds = fixtureClubIds(series, fixture);
+  const sideIndex = clubIds.indexOf(clubId);
+  if (sideIndex < 0) throw new HttpError(403, 'not your fixture');
+  const matchDate = typeof fixture.date === 'string' ? fixture.date : '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(matchDate))
+    throw new HttpError(400, 'the fixture has no date yet');
+  if (matchDate > tenantToday())
+    throw new HttpError(400, 'this match has not been played yet', { code: 'match_in_future' });
+  const existing = await repo.getCaptainsReport(ra.tenant, seriesId, fixtureId, clubId);
+  if (existing)
+    throw new HttpError(409, 'a report already exists for this match', {
+      code: 'report_exists',
+      id: existing.id,
+    });
+  const officials = await repo.getFixtureOfficials(ra.tenant, seriesId, fixtureId);
+  const side = sideIndex === 0 ? 'home' : 'away';
+  const byTeam = new Map((series.participants ?? []).map((p) => [p.teamId, p]));
+  const own = byTeam.get(String(fixture[side]));
+  const opp = byTeam.get(String(fixture[side === 'home' ? 'away' : 'home']));
+  const club = await repo.getClub(ra.tenant, clubId);
+  const at = now();
+  const report: CaptainsReport = {
+    id: captainsReportId(seriesId, fixtureId, clubId),
+    seriesId,
+    fixtureId,
+    clubId,
+    status: 'pending',
+    source: 'manual',
+    matchDate,
+    side,
+    clubName: own?.name ?? club?.name ?? clubId,
+    opponentName: opp?.name ?? clubIds[1 - sideIndex] ?? 'TBC',
+    competition: series.name ?? '',
+    umpiresSnapshot: (officials?.umpires ?? []).map((u) => ({
+      umpireId: u.umpireId,
+      name: u.name,
+    })),
+    recipient: { kind: 'portal', memberId: randomUUID(), name: ra.email ?? '' },
+    captainName: '',
+    umpires: [],
+    general: '',
+    createdAt: at,
+    updatedAt: at,
+  };
+  const { fields } = await reportFieldsFrom(ra.tenant, report, { ...body, submit: true });
+  if (!(await repo.createCaptainsReport(ra.tenant, report)))
+    throw new HttpError(409, 'a report already exists for this match', {
+      code: 'report_exists',
+      id: report.id,
+    });
+  const saved = await writeReport(ra.tenant, report, fields, true, {
+    submittedBy: ra.email ?? 'portal',
+    via: 'portal',
+  });
+  return c.json(await clubView(ra, saved), 201);
+});
+
+/** Admin: every report, filtered by status and match-date range. */
+app.get('/captains-reports', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const status = c.req.query('status');
+  const from = c.req.query('from');
+  const to = c.req.query('to');
+  const reports = (await repo.listCaptainsReports(ra.tenant))
+    .filter((r) => (!from || r.matchDate >= from) && (!to || r.matchDate <= to))
+    .filter((r) => !status || r.status === status)
+    .sort((a, b) => b.matchDate.localeCompare(a.matchDate) || a.id.localeCompare(b.id));
+  return c.json(await reportViews(ra.tenant, reports, false));
+});
+
+/**
+ * Admin: clubs a captain's-report notice cannot reach — no chair email and no usable cell
+ * (sync tenants only; other tenants get an empty list).
+ */
+app.get('/captains-reports/contact-gaps', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  if (!cfg || !hasFeature(cfg, 'medicoachSync')) return c.json({ enabled: false, clubs: [] });
+  const clubs = (await repo.listClubs(ra.tenant))
+    .filter((club) => !hasContact(chairContactOf(club)))
+    .map((club) => ({ id: club.id, name: club.name }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return c.json({ enabled: true, clubs });
+});
+
+/**
+ * Admin: attribute a FREE-TEXT umpire on a submitted report to a registry umpire (one the
+ * admin just added to the registry, `action: 'registered'`, or an existing one, 'linked'), so
+ * its ratings count for that umpire. The entry keeps an `attributed` audit stamp.
+ */
+app.post('/captains-reports/:id/umpires/:index/attribute', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const key = parseCaptainsReportId(c.req.param('id'));
+  const index = Number(c.req.param('index'));
+  if (!key || !Number.isInteger(index) || index < 0 || index > 1)
+    throw new HttpError(404, 'umpire entry not found');
+  const report = await repo.getCaptainsReport(ra.tenant, key.seriesId, key.fixtureId, key.clubId);
+  const entry = report?.umpires[index];
+  if (!report || !entry) throw new HttpError(404, 'umpire entry not found');
+  if (report.status !== 'submitted')
+    throw new HttpError(409, 'only a submitted report can be attributed');
+  if (entry.umpireId) throw new HttpError(409, 'this umpire is already in the registry');
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as Record<string, unknown>;
+  const umpireId = typeof body.umpireId === 'string' ? body.umpireId : '';
+  const action = body.action === 'registered' ? 'registered' : 'linked';
+  const reg = umpireId ? await repo.getUmpire(ra.tenant, umpireId) : null;
+  if (!reg || reg.mergedInto) throw new HttpError(400, 'unknown umpire');
+  try {
+    const saved = await repo.attributeCaptainsReportUmpire(ra.tenant, report, index, entry.name, {
+      ...entry,
+      umpireId: reg.id,
+      name: reg.displayName,
+      attributed: { action, by: ra.email ?? 'admin', at: now(), freeTextName: entry.name },
+    });
+    return c.json(reportView(saved));
+  } catch (err) {
+    if (err instanceof repo.CaptainsReportStateError) throw new HttpError(409, err.message);
+    throw err;
+  }
+});
+
+/**
+ * Public submit-once link. The token is the capability (HMAC over tenant + report + recipient +
+ * expiry); it serves THAT report only and no roster data — the registry umpire names are the
+ * only list it carries (for "a different umpire stood"). Invalid → 404; expired, submitted,
+ * void or re-addressed → 410. The response is never cached and never leaks the URL onward.
+ */
+async function linkedReportOr410(c: Context<HonoEnv>) {
+  c.header('Cache-Control', 'no-store');
+  c.header('Referrer-Policy', 'no-referrer');
+  const found = await loadLinkedReport(
+    repo,
+    c.req.param('token') ?? '',
+    Date.now(),
+    captainsReportLinkSecret(),
+  );
+  if (!found.ok) throw new HttpError(found.status, found.error);
+  return found;
+}
+
+async function linkPayload(tenant: string, report: CaptainsReport, isChairLink: boolean) {
+  const [cfg, umpires, views] = await Promise.all([
+    repo.getTenantConfig(tenant),
+    repo.listUmpires(tenant),
+    reportViews(tenant, [report], true),
+  ]);
+  return {
+    report: views[0],
+    // "Send to captain" is offered to the CHAIR's link only; a captain's link never gets a
+    // roster (the picker route answers 403 for it).
+    canForward: isChairLink,
+    forwardsRemaining: Math.max(0, MAX_FORWARDS - (report.forwardCount ?? 0)),
+    registry: umpires
+      .filter((u) => u.active)
+      .map((u) => ({ id: u.id, displayName: u.displayName }))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName)),
+    tenantBranding: {
+      name: cfg ? orgCopy(cfg).name : tenant,
+      logoUrl: cfg?.branding?.logoUrl ?? '',
+      colors: cfg?.branding?.colors ?? {},
+    },
+  };
+}
+
+app.get('/captains-report-link/:token', async (c) => {
+  const { tenant, report, isChairLink } = await linkedReportOr410(c);
+  return c.json(await linkPayload(tenant, report, isChairLink));
+});
+
+/** The chair's link only: the club's eligible players for "Send to captain" (names only). */
+app.get('/captains-report-link/:token/forward-candidates', async (c) => {
+  const { tenant, report, isChairLink } = await linkedReportOr410(c);
+  if (!isChairLink) throw new HttpError(403, 'only the club chair can send this report on');
+  const candidates = await forwardCandidates(repo, tenant, report, captainsReportLinkSecret());
+  return c.json({
+    candidates: candidates.map(({ id, name }) => ({ id, name })),
+    remaining: Math.max(0, MAX_FORWARDS - (report.forwardCount ?? 0)),
+  });
+});
+
+app.post('/captains-report-link/:token/forward', async (c) => {
+  const { tenant, report, isChairLink } = await linkedReportOr410(c);
+  if (!isChairLink) throw new HttpError(403, 'only the club chair can send this report on');
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as { candidateId?: unknown };
+  if (typeof body.candidateId !== 'string' || !body.candidateId)
+    throw new HttpError(400, 'candidateId is required');
+  const updated = await forwardReport(
+    { repo },
+    { tenant, report, candidateId: body.candidateId, via: 'link' },
+  ).catch(flowError);
+  return c.json(await linkPayload(tenant, updated, true));
+});
+
+app.put('/captains-report-link/:token', async (c) => {
+  const { tenant, report, memberId, isChairLink } = await linkedReportOr410(c);
+  const { fields, submit } = await reportFieldsFrom(
+    tenant,
+    report,
+    await c.req.json().catch(() => null),
+  );
+  const saved = await writeReport(tenant, report, fields, submit, {
+    submittedBy: `link:${report.recipient.kind}`,
+    via: 'link',
+    memberId,
+  });
+  return c.json(await linkPayload(tenant, saved, isChairLink));
 });
 
 /* ─── Season runs (ADR 0008) ───
@@ -4534,6 +5714,77 @@ async function applySeasonRunPatch(
 interface GenerateStageBody {
   version?: unknown;
   confirmReleasedOverwrite?: unknown;
+  /** Medicoach sync: consent to orphan synced refs of released series (see syncResyncGate). */
+  allowResync?: unknown;
+}
+
+/**
+ * Medicoach sync guard for stage generate/rebase (ADR 0016, Slice 4): a fixture's id is half
+ * of its sync ref, and regenerating a RELEASED series that medicoach mirrors re-mints ids and
+ * re-pairs fixtures — every ref whose fixture disappears or now names a different match is
+ * orphaned in medicoach. So on a sync tenant such a write is refused (409
+ * `sync_resync_required`, naming the series and the refs) unless the caller passes
+ * `allowResync: true`; the 200 then lists the orphaned refs. `next` (generate) is what each
+ * series would become; absent (rebase), every ref of the affected series is at stake.
+ */
+function syncResyncGate(
+  tenant: string,
+  config: TenantConfig | null,
+  /** The run's league: season-run series carry no `leagueKey` of their own. */
+  leagueKey: string,
+  stored: Series[],
+  next: Map<string, Series> | null,
+  allowResync: unknown,
+  action: 'regenerate' | 'rebase',
+): string[] | null {
+  const synced = stored.filter(
+    (s) =>
+      s.released &&
+      seriesIsSyncMapped(tenant, { ...s, leagueKey: s.leagueKey ?? leagueKey }, config) &&
+      Array.isArray(s.fixtures) &&
+      s.fixtures.length > 0,
+  );
+  if (!synced.length) return null;
+  const teamName = (s: Series, side: unknown) =>
+    s.participants?.find((p) => p.teamId === side)?.name ?? String(side ?? '?');
+  // Each orphaned fixture as clubs know it (teams + date) — the console's confirmation lists
+  // these, so the admin sees which matches lose their medicoach link.
+  const orphaned = synced.flatMap((s) => {
+    const after = next?.get(s.id);
+    const nextById = new Map(
+      ((after?.fixtures as ScheduleFixture[] | undefined) ?? []).map((f) => [f?.id, f]),
+    );
+    return (s.fixtures as ScheduleFixture[])
+      .filter((f) => f?.id)
+      .filter((f) => {
+        if (!next) return true;
+        const g = nextById.get(f.id);
+        return !g || !sameMatch(f, g);
+      })
+      .map((f) => ({
+        ref: fixtureSyncRef(tenant, s.id, f),
+        seriesId: s.id,
+        seriesName: s.name,
+        fixtureId: String(f.id),
+        home: teamName(s, f.home),
+        away: teamName(s, f.away),
+        ...(f.date ? { date: f.date } : {}),
+        ...(f.time ? { time: f.time } : {}),
+      }));
+  });
+  const orphanedRefs = orphaned.map((o) => o.ref);
+  if (allowResync !== true)
+    throw new HttpError(
+      409,
+      `${synced.length} released series in this stage ${synced.length === 1 ? 'is' : 'are'} synced with medicoach — a ${action} would orphan ${orphanedRefs.length} fixture ref(s) there. Ask your operator; it needs allowResync.`,
+      {
+        code: 'sync_resync_required',
+        seriesIds: synced.map((s) => s.id),
+        orphanedRefs,
+        orphaned,
+      },
+    );
+  return orphanedRefs;
 }
 
 /**
@@ -4592,6 +5843,8 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
     throw new HttpError(400, 'generate needs the season run version you read');
   if (body.confirmReleasedOverwrite !== undefined && body.confirmReleasedOverwrite !== true)
     throw new HttpError(400, 'confirmReleasedOverwrite must be true when present');
+  if (body.allowResync !== undefined && body.allowResync !== true)
+    throw new HttpError(400, 'allowResync must be true when present');
 
   const run = await repo.getSeasonRun(tenant, id);
   if (!run) throw new HttpError(404, 'season run not found');
@@ -4654,12 +5907,38 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
       `${released.length} of this stage's series ${released.length === 1 ? 'has' : 'have'} been released — confirm to replace the published fixtures`,
       { code: 'released_overwrite', seriesIds: released },
     );
+  const orphanedRefs = syncResyncGate(
+    tenant,
+    config,
+    run.leagueKey,
+    existing.filter((s): s is Series => !!s),
+    new Map(result.series.map((s) => [s.id, s])),
+    body.allowResync,
+    'regenerate',
+  );
 
   // What an existing series is PATCHed with: regenerating changes the fixtures, never
   // whether they are published, never a name the admin chose, and never the stored format
   // (seriesType/maxOvers) — except when a rebase marked the stage `formatChanged`, which is
   // the rebase's version-review consent to adopt the new structure's name/overs.
-  const overwriteOf = (series: Series): Partial<Series> => {
+  // A regenerated fixture with the same id AND the same match keeps its sync-owned fields
+  // (`syncRef`, `schedule.changedAt`) from the stored one, exactly as the importers carry them
+  // (ADR 0016) — dropping them would re-point a recipe ref or let an older medicoach change win.
+  const withSyncFields = (series: Series, stored: Series | null | undefined): Series => {
+    if (!stored || !Array.isArray(series.fixtures)) return series;
+    const prior = new Map<string, ScheduleFixture>();
+    for (const f of (stored.fixtures as ScheduleFixture[] | undefined) ?? [])
+      if (f?.id) prior.set(f.id, f);
+    return {
+      ...series,
+      fixtures: (series.fixtures as ScheduleFixture[]).map((f) => {
+        const old = f?.id ? prior.get(f.id) : undefined;
+        return old && sameMatch(old, f) ? carrySyncOwnedFields(old, { ...f }) : f;
+      }),
+    };
+  };
+  const overwriteOf = (generated: Series, stored: Series): Partial<Series> => {
+    const series = withSyncFields(generated, stored);
     const {
       released: _r,
       releasedAt: _ra,
@@ -4687,7 +5966,7 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
     for (const [i, series] of result.series.entries()) {
       const stored = existing[i];
       const subject = stored
-        ? ({ ...stored, ...overwriteOf(series), id: series.id } as Series)
+        ? ({ ...stored, ...overwriteOf(series, stored), id: series.id } as Series)
         : series;
       if (stored?.released) {
         const refusal = inSeasonClashRefusal(stored, subject, ledger, allClubs, venues, aliases);
@@ -4712,9 +5991,10 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
         await applySeriesPatch(
           tenant,
           series.id,
-          { ...overwriteOf(series), version: stored.version },
+          { ...overwriteOf(series, stored), version: stored.version },
           actor,
           runCalendar,
+          'generate',
         ),
       );
       writtenIds.push(series.id);
@@ -4747,6 +6027,7 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
     run: nextRun,
     series: written,
     ...(result.warnings?.length ? { warnings: result.warnings } : {}),
+    ...(orphanedRefs ? { orphanedRefs } : {}),
   });
 });
 
@@ -4809,6 +6090,7 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
     structureId?: unknown;
     structureVersion?: unknown;
     version?: unknown;
+    allowResync?: unknown;
   }>();
   if (typeof body?.structureId !== 'string' || !body.structureId)
     throw new HttpError(400, 'rebase needs the id of the structure you reviewed');
@@ -4816,6 +6098,8 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
     throw new HttpError(400, 'rebase needs the structure version you reviewed');
   if (!Number.isInteger(body?.version))
     throw new HttpError(400, 'rebase needs the season run version you read');
+  if (body.allowResync !== undefined && body.allowResync !== true)
+    throw new HttpError(400, 'allowResync must be true when present');
   const current = await repo.getSeasonRun(tenant, id);
   if (!current) throw new HttpError(404, 'season run not found');
   // Checked up front, not only by the conditional write below: the no-op return further
@@ -4886,6 +6170,46 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
     ? kept.map((run) => ({ ...run, formatChanged: true }))
     : kept;
 
+  // Medicoach sync guard: the stages this rebase resets (spec removed or changed, or the
+  // root format changed) lose their groups/format, so their released synced series will be
+  // regenerated — refused without allowResync (syncResyncGate).
+  let orphanedRefs: string[] | null = null;
+  if (hasFeature(config, 'medicoachSync')) {
+    const affected = new Set(
+      (current.stages ?? [])
+        .filter((run) => {
+          if (!run) return false;
+          const next = live.stages.find((s) => s.id === run.specId);
+          const prev = oldSpecs.get(run.specId);
+          return (
+            !next || rootFormatChanged || !prev || stableStringify(prev) !== stableStringify(next)
+          );
+        })
+        .map((run) => run.specId),
+    );
+    if (affected.size) {
+      const seriesIds = new Set(
+        (current.stages ?? [])
+          .filter((run) => run && affected.has(run.specId))
+          .flatMap((run) => (run.groups ?? []).map((g) => g.seriesId).filter(Boolean)),
+      );
+      const stageSeries = (await repo.listSeries(tenant)).filter(
+        (s) =>
+          seriesIds.has(s.id) ||
+          (s.seasonRunId === current.id && !!s.stageSpecId && affected.has(s.stageSpecId)),
+      );
+      orphanedRefs = syncResyncGate(
+        tenant,
+        config,
+        current.leagueKey,
+        stageSeries,
+        null,
+        body.allowResync,
+        'rebase',
+      );
+    }
+  }
+
   const hasRun = new Set(kept.map((run) => run.specId));
   const added: StageRun[] = live.stages
     .filter((s) => !oldSpecs.has(s.id) && !hasRun.has(s.id))
@@ -4915,7 +6239,11 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
       ...freeze,
     });
     // Same additive shape as PUT /platform/tenants: `warnings` only when non-empty.
-    return c.json(warnings.length > 0 ? { ...next, warnings } : next);
+    return c.json({
+      ...next,
+      ...(warnings.length > 0 ? { warnings } : {}),
+      ...(orphanedRefs ? { orphanedRefs } : {}),
+    });
   } catch (err) {
     if (err instanceof VersionConflictError)
       throw new HttpError(409, 'season run changed; refetch');
@@ -5016,6 +6344,13 @@ app.post('/series/:id/duplicate', requireAdmin, async (c) => {
   // original, not the clone. Reset the sign-off state so the copy can't start approved.
   delete copy.withheld;
   delete copy.revealedAt;
+  // The copy's fixtures are new matches: an explicit sync ref (a recipe knockout) and the
+  // sync's slot bookkeeping belong to the original, or two fixtures would claim one ref.
+  copy.fixtures = ((orig.fixtures as Array<Record<string, unknown>>) ?? []).map((f) => {
+    if (!f || typeof f !== 'object') return f;
+    const { syncRef: _ref, slots: _slots, schedule: _schedule, ...rest } = f;
+    return rest;
+  });
   await repo.putSeries(tenant, copy);
   return c.json(copy, 201);
 });
@@ -5629,6 +6964,7 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   delete (patch as { orgContact?: unknown }).orgContact;
   delete (patch as { sport?: unknown }).sport;
   delete (patch as { seasonLabel?: unknown }).seasonLabel;
+  delete (patch as { integrations?: unknown }).integrations;
   const next = await applyTenantConfigPatch(tenant, patch, { preserveOperatorBindings: true });
   return c.json(next);
 });
@@ -6045,6 +7381,28 @@ function keepStoredCompetitions(incoming: League[], stored: League[]): League[] 
  * below are best-effort, not atomic: a concurrent tenant-admin league write can
  * land between the reads and the final Put (same accepted window as branding).
  */
+/**
+ * `integrations` on PUT /platform/tenants/:slug (operator-only). Only
+ * `medicoach.goLiveDate` exists: YYYY-MM-DD, or ''/null to clear it.
+ */
+function validateIntegrations(value: unknown): TenantConfig['integrations'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new HttpError(400, 'integrations must be an object');
+  const medicoach = (value as { medicoach?: unknown }).medicoach;
+  if (medicoach === undefined || medicoach === null) return {};
+  if (typeof medicoach !== 'object' || Array.isArray(medicoach))
+    throw new HttpError(400, 'integrations.medicoach must be an object');
+  const goLive = (medicoach as { goLiveDate?: unknown }).goLiveDate;
+  if (goLive === undefined || goLive === null || goLive === '') return { medicoach: {} };
+  if (
+    typeof goLive !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(goLive) ||
+    Number.isNaN(Date.parse(`${goLive}T00:00:00Z`))
+  )
+    throw new HttpError(400, 'integrations.medicoach.goLiveDate must be a date (YYYY-MM-DD)');
+  return { medicoach: { goLiveDate: goLive } };
+}
+
 app.put('/platform/tenants/:slug', async (c) => {
   const slug = c.req.param('slug');
   const body = await c.req.json<Partial<TenantConfig>>();
@@ -6191,6 +7549,7 @@ app.put('/platform/tenants/:slug', async (c) => {
     patch.clearanceCertTemplate = validateCertTemplate(body.clearanceCertTemplate);
   }
   if (body.orgContact !== undefined) patch.orgContact = validateOrgContact(body.orgContact);
+  if (body.integrations !== undefined) patch.integrations = validateIntegrations(body.integrations);
   // Calendars, structures and the league setups binding them go through the shared
   // operator write (validation, version minting, referrer guards, calendar-edit warnings).
   if (body.calendars !== undefined) patch.calendars = body.calendars;

@@ -282,11 +282,13 @@ function allClashKeys(all: Series[], clubs: Club[], venues: Venue[]): Set<string
   return keys;
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+/** The CLI body; exported so a test can run it against a local table. */
+export async function runShift(argv: string[]): Promise<void> {
+  const args = parseArgs(argv);
   const { tenant } = args;
 
   const repo = await import('./repo.js');
+  const { recordScheduleDiff } = await import('./medicoach-sync/schedule.js');
   const [all, clubs, venues] = await Promise.all([
     repo.listSeries(tenant),
     repo.listClubs(tenant),
@@ -371,7 +373,12 @@ async function main() {
   for (const id of args.series) {
     const next = modifiedById.get(id);
     if (!next) continue;
-    await repo.updateSeries(tenant, id, { fixtures: next.fixtures, version: next.version });
+    // Medicoach sync (Slice 4): stamp + queue every mapped fixture whose date moved.
+    const stored = byId.get(id)!;
+    const after = { ...stored, fixtures: next.fixtures } as Series;
+    const scheduleSync = await recordScheduleDiff(repo, tenant, stored, after, 'cli');
+    await repo.updateSeries(tenant, id, { fixtures: after.fixtures, version: next.version });
+    await scheduleSync.enqueue();
     console.log(`updated ${id}`);
   }
   console.log('Done.');
@@ -379,7 +386,7 @@ async function main() {
 
 // Run only as a script, not when imported by the test.
 if (process.argv[1] && /shift-fixture-dates\.(ts|js)$/.test(process.argv[1])) {
-  main().catch((e) => {
+  runShift(process.argv.slice(2)).catch((e) => {
     console.error(e);
     process.exitCode = 1;
   });

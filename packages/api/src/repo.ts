@@ -71,6 +71,30 @@ import {
   operatorMarkerKey,
   operatorGsi1,
   OPERATORS_GSI1PK,
+  fixtureResultKey,
+  fixtureResultsListKey,
+  syncCursorKey,
+  syncHealthKey,
+  syncLogKey,
+  syncLogsListKey,
+  syncPartitionPk,
+  syncConflictKey,
+  syncConflictsListKey,
+  pendingSyncKey,
+  pendingSyncListKey,
+  reportOpenKey,
+  reportOpenListKey,
+  umpireKey,
+  umpireGsi1,
+  umpiresListGsi1pk,
+  fixtureOfficialsKey,
+  fixtureOfficialsListKey,
+  captainsReportKey,
+  captainsReportsListKey,
+  captainsReportCounterKey,
+  captainsReportNotifyKey,
+  whatsappMessageKey,
+  captainsReportPartitionPk,
 } from './keys.js';
 import { PLATFORM_TENANT } from './types.js';
 import type {
@@ -96,10 +120,22 @@ import type {
   RejectSnapshot,
   RegistrationReview,
   RegistrationReviewResolution,
+  StoredFixtureResult,
+  SyncHealth,
+  SyncLogEntry,
+  SyncConflict,
+  PendingScheduleSync,
+  ReportOpenMarker,
+  Umpire,
+  FixtureOfficials,
+  FixtureOfficialsRecord,
+  CaptainsReport,
+  CaptainsReportDelivery,
 } from './types.js';
 
 import { tableName } from './env.js';
 import { teamIdsForClub } from './teams.js';
+import { isoInstant } from './medicoach-sync-contract.js';
 
 const TABLE = tableName();
 // DYNAMO_ENDPOINT points at a local DynamoDB (dynalite) for offline dev; any
@@ -875,6 +911,46 @@ export async function putSeries(tenant: string, series: Series): Promise<Series>
   return series;
 }
 
+/**
+ * Replace a series ONLY while the stored item is still at `expectedVersion` — the version a
+ * CLI read when it built its working copy (`null` ⇒ the series must not exist yet;
+ * `undefined` ⇒ a legacy item stored without a version). Throws
+ * VersionConflictError when the series drifted (an admin edit, a medicoach apply) since that
+ * read, so a bulk CLI can never overwrite a newer write with a stale snapshot.
+ */
+export async function putSeriesIfVersion(
+  tenant: string,
+  series: Series,
+  expectedVersion: number | null | undefined,
+): Promise<Series> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: {
+          ...seriesKey(tenant, series.id),
+          ...seriesGsi1(tenant, series.startDate),
+          ...series,
+          version: series.version ?? 1,
+        },
+        ...(expectedVersion === null
+          ? { ConditionExpression: 'attribute_not_exists(pk)' }
+          : expectedVersion === undefined
+            ? { ConditionExpression: 'attribute_exists(pk) AND attribute_not_exists(version)' }
+            : {
+                ConditionExpression: 'version = :v',
+                ExpressionAttributeValues: { ':v': expectedVersion },
+              }),
+      }),
+    );
+  } catch (err: unknown) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException')
+      throw new VersionConflictError();
+    throw err;
+  }
+  return series;
+}
+
 /** Version-checked replace of a series (fixtures embedded). 409 on conflict. */
 export async function updateSeries(
   tenant: string,
@@ -914,6 +990,1229 @@ export async function updateSeries(
 
 export async function deleteSeries(tenant: string, seriesId: string): Promise<void> {
   await ddb.send(new DeleteCommand({ TableName: TABLE, Key: seriesKey(tenant, seriesId) }));
+}
+
+// ── Medicoach sync: fixture results, cursor, audit log (ADR 0016) ──
+
+/** Every stored result (tombstones included) for a tenant — one Query on one partition. */
+export async function listFixtureResults(tenant: string): Promise<StoredFixtureResult[]> {
+  const { pk, skPrefix } = fixtureResultsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<StoredFixtureResult>(i)!);
+}
+
+export async function getFixtureResult(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+): Promise<StoredFixtureResult | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: fixtureResultKey(tenant, seriesId, fixtureId) }),
+  );
+  return stripKeys<StoredFixtureResult>(res.Item);
+}
+
+/**
+ * Write a result (or a clear tombstone) ONLY if its `orderAt` is strictly newer than the
+ * stored one — the conditional Put is the ordering guarantee, so two concurrent pulls (cron
+ * + "Sync now") can never let an older change win. Returns false when the stored item is
+ * as new or newer (a replay or an out-of-order change), which is not an error.
+ */
+export async function putFixtureResultIfNewer(
+  tenant: string,
+  result: StoredFixtureResult,
+): Promise<boolean> {
+  // Never persist a player ref on the result (POPIA), whatever the caller passed.
+  const { captainRef: _playerRef, ...rest } = result as StoredFixtureResult & {
+    captainRef?: unknown;
+  };
+  // One canonical spelling: the condition below compares strings (ADR 0016).
+  const item = { ...rest, orderAt: isoInstant(rest.orderAt) };
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { ...item, ...fixtureResultKey(tenant, result.seriesId, result.fixtureId) },
+        ConditionExpression: 'attribute_not_exists(pk) OR orderAt < :o',
+        ExpressionAttributeValues: { ':o': item.orderAt },
+      }),
+    );
+    return true;
+  } catch (err: unknown) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') return false;
+    throw err;
+  }
+}
+
+/** Scrub a player ref a pre-POPIA-fix result item may still carry (idempotent). */
+export async function removeFixtureResultCaptainRef(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: fixtureResultKey(tenant, seriesId, fixtureId),
+        UpdateExpression: 'REMOVE captainRef',
+        ConditionExpression: 'attribute_exists(pk)',
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
+async function listFixtureResultKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
+  const { pk, skPrefix } = fixtureResultsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+/** The puller's cursor, or null before the first pull (⇒ a full resync). */
+export async function getSyncCursor(tenant: string): Promise<string | null> {
+  const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: syncCursorKey(tenant) }));
+  const cursor = res.Item?.cursor;
+  return typeof cursor === 'string' ? cursor : null;
+}
+
+/** The cursor with its last-moved time (admin sync page). */
+export async function getSyncCursorRow(
+  tenant: string,
+): Promise<{ cursor: string; updatedAt?: string } | null> {
+  const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: syncCursorKey(tenant) }));
+  const cursor = res.Item?.cursor;
+  if (typeof cursor !== 'string') return null;
+  const updatedAt = res.Item?.updatedAt;
+  return { cursor, ...(typeof updatedAt === 'string' ? { updatedAt } : {}) };
+}
+
+export async function putSyncCursor(tenant: string, cursor: string): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...syncCursorKey(tenant), cursor, updatedAt: new Date().toISOString() },
+    }),
+  );
+}
+
+/** The sync's last success/failure (admin page), or null before the first run. */
+export async function getSyncHealth(tenant: string): Promise<SyncHealth | null> {
+  const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: syncHealthKey(tenant) }));
+  return stripKeys<SyncHealth>(res.Item);
+}
+
+/** Merge `patch` into the tenant's SYNCHEALTH# row (only the fields given are written). */
+export async function putSyncHealth(tenant: string, patch: SyncHealth): Promise<void> {
+  const entries = Object.entries(patch).filter(([, v]) => v !== undefined);
+  if (!entries.length) return;
+  await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: syncHealthKey(tenant),
+      UpdateExpression: `SET ${entries.map(([k]) => `#${k} = :${k}`).join(', ')}`,
+      ExpressionAttributeNames: Object.fromEntries(entries.map(([k]) => [`#${k}`, k])),
+      ExpressionAttributeValues: Object.fromEntries(entries.map(([k, v]) => [`:${k}`, v])),
+    }),
+  );
+}
+
+/** SYNCLOG# rows self-expire after this long (DynamoDB TTL on `expiresAt`). */
+const SYNC_LOG_TTL_SECONDS = 90 * 24 * 3600;
+
+export async function putSyncLog(tenant: string, entry: SyncLogEntry): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...entry,
+        ...syncLogKey(tenant, entry.at, entry.id),
+        expiresAt: Math.floor(Date.parse(entry.at) / 1000) + SYNC_LOG_TTL_SECONDS,
+      },
+    }),
+  );
+}
+
+/** A tenant's sync audit rows, newest first. */
+export async function listSyncLogs(tenant: string, limit = 50): Promise<SyncLogEntry[]> {
+  const { pk, skPrefix } = syncLogsListKey(tenant);
+  const res = await ddb.send(
+    new QueryCommand({
+      TableName: TABLE,
+      KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+      ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+      ScanIndexForward: false,
+      Limit: limit,
+    }),
+  );
+  return (res.Items ?? []).map((i) => {
+    const { expiresAt: _ttl, ...rest } = stripKeys<SyncLogEntry & { expiresAt?: number }>(i)!;
+    return rest;
+  });
+}
+
+// ── Medicoach sync: conflicts, outbox, report-open markers (ADR 0016, Slices 3–4) ──
+// All three live in the tenant's SYNC partition, so erasure and cohort clearing (which
+// enumerate that partition) already remove them.
+
+export async function getSyncConflict(tenant: string, ref: string): Promise<SyncConflict | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: syncConflictKey(tenant, ref) }),
+  );
+  return stripKeys<SyncConflict>(res.Item);
+}
+
+export async function putSyncConflict(tenant: string, conflict: SyncConflict): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...conflict, ...syncConflictKey(tenant, conflict.ref) },
+    }),
+  );
+}
+
+export async function listSyncConflicts(tenant: string): Promise<SyncConflict[]> {
+  const { pk, skPrefix } = syncConflictsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<SyncConflict>(i)!);
+}
+
+export async function deleteSyncConflict(tenant: string, ref: string): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: TABLE, Key: syncConflictKey(tenant, ref) }));
+}
+
+/**
+ * Enqueue (or collapse onto) a fixture's outbox row: the latest snapshot wins. Conditional on
+ * the stored row's `schedule.changedAt` being OLDER, so a slower writer holding an older
+ * snapshot (two concurrent edits, a CLI racing an admin) can never replace a newer one. An
+ * older or equal snapshot is a silent no-op — the newer one already in the row goes out.
+ */
+export async function putPendingSync(tenant: string, pending: PendingScheduleSync): Promise<void> {
+  // One canonical spelling: the condition compares strings (ADR 0016).
+  const row = {
+    ...pending,
+    schedule: { ...pending.schedule, changedAt: isoInstant(pending.schedule.changedAt) },
+  };
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { ...row, ...pendingSyncKey(tenant, row.ref) },
+        ConditionExpression: 'attribute_not_exists(pk) OR #sch.changedAt < :c',
+        ExpressionAttributeNames: { '#sch': 'schedule' },
+        ExpressionAttributeValues: { ':c': row.schedule.changedAt },
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
+export async function listPendingSync(tenant: string): Promise<PendingScheduleSync[]> {
+  const { pk, skPrefix } = pendingSyncListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<PendingScheduleSync>(i)!);
+}
+
+/**
+ * Delete an outbox row ONLY while it still holds the snapshot that was sent (`changedAt`):
+ * an edit enqueued while the push was in flight overwrote the row and must still go out.
+ * Returns false when the row moved on (or is gone).
+ */
+export async function deletePendingSyncIfUnchanged(
+  tenant: string,
+  ref: string,
+  changedAt: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new DeleteCommand({
+        TableName: TABLE,
+        Key: pendingSyncKey(tenant, ref),
+        ConditionExpression: '#sch.changedAt = :c',
+        ExpressionAttributeNames: { '#sch': 'schedule' },
+        ExpressionAttributeValues: { ':c': changedAt },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/**
+ * Mark (or clear) THIS snapshot as held until the series' withheld venue/time is revealed
+ * (ADR 0011 × 0016). A row that moved on (a newer snapshot) or is gone is left alone.
+ */
+export async function setPendingSyncHeld(
+  tenant: string,
+  ref: string,
+  changedAt: string,
+  held: boolean,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: pendingSyncKey(tenant, ref),
+        UpdateExpression: held ? 'SET heldUntilReveal = :t' : 'REMOVE heldUntilReveal',
+        ConditionExpression: 'attribute_exists(pk) AND #sch.changedAt = :c',
+        ExpressionAttributeNames: { '#sch': 'schedule' },
+        ExpressionAttributeValues: { ':c': changedAt, ...(held ? { ':t': true } : {}) },
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
+/** Record a failed push of THIS snapshot (attempts + 1, lastError); a newer row is left alone. */
+export async function markPendingSyncFailed(
+  tenant: string,
+  ref: string,
+  changedAt: string,
+  error: string,
+  at: string,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: pendingSyncKey(tenant, ref),
+        UpdateExpression:
+          'SET attempts = if_not_exists(attempts, :zero) + :one, lastError = :e, lastAttemptAt = :at',
+        ConditionExpression: 'attribute_exists(pk) AND #sch.changedAt = :c',
+        ExpressionAttributeNames: { '#sch': 'schedule' },
+        ExpressionAttributeValues: {
+          ':zero': 0,
+          ':one': 1,
+          ':e': error.slice(0, 300),
+          ':at': at,
+          ':c': changedAt,
+        },
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
+/**
+ * Restart THIS snapshot's attempt count (the admin's "Retry" on a stuck row): it is sent on
+ * the flush that follows and only shows as stuck again after five more failures.
+ */
+export async function resetPendingSyncAttempts(
+  tenant: string,
+  ref: string,
+  changedAt: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: pendingSyncKey(tenant, ref),
+        UpdateExpression: 'SET attempts = :zero REMOVE lastError, lastAttemptAt',
+        ConditionExpression: 'attribute_exists(pk) AND #sch.changedAt = :c',
+        ExpressionAttributeNames: { '#sch': 'schedule' },
+        ExpressionAttributeValues: { ':zero': 0, ':c': changedAt },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+export async function putReportOpenMarker(tenant: string, marker: ReportOpenMarker): Promise<void> {
+  await ddb.send(
+    new PutCommand({ TableName: TABLE, Item: { ...marker, ...reportOpenKey(tenant, marker.ref) } }),
+  );
+}
+
+export async function listReportOpenMarkers(tenant: string): Promise<ReportOpenMarker[]> {
+  const { pk, skPrefix } = reportOpenListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<ReportOpenMarker>(i)!);
+}
+
+export async function deleteReportOpenMarker(tenant: string, ref: string): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: TABLE, Key: reportOpenKey(tenant, ref) }));
+}
+
+/** One failed attempt to open/notify a marker's reports. */
+export async function markReportOpenFailed(
+  tenant: string,
+  ref: string,
+  error: string,
+  at: string,
+): Promise<number> {
+  const res = await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: reportOpenKey(tenant, ref),
+      UpdateExpression:
+        'SET attempts = if_not_exists(attempts, :zero) + :one, lastError = :e, lastAttemptAt = :at',
+      ExpressionAttributeValues: { ':zero': 0, ':one': 1, ':e': error.slice(0, 300), ':at': at },
+      ReturnValues: 'UPDATED_NEW',
+    }),
+  );
+  return Number(res.Attributes?.attempts ?? 0);
+}
+
+async function listSyncPartitionKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p',
+    ExpressionAttributeValues: { ':p': syncPartitionPk(tenant) },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+// ── Umpires + fixture officials ──
+// The registry is a handful of rows per tenant; officials are one small item per fixture
+// in a single tenant partition (see fixtureOfficialsKey), never inside the Series item.
+
+export class UmpireExistsError extends Error {
+  constructor() {
+    super('umpire id already exists');
+    this.name = 'UmpireExistsError';
+  }
+}
+
+export async function listUmpires(tenant: string): Promise<Umpire[]> {
+  const items = await queryAll({
+    TableName: TABLE,
+    IndexName: 'gsi1',
+    KeyConditionExpression: 'gsi1pk = :p',
+    ExpressionAttributeValues: { ':p': umpiresListGsi1pk(tenant) },
+  });
+  return items.map((i) => stripKeys<Umpire>(i)!);
+}
+
+export async function getUmpire(tenant: string, umpireId: string): Promise<Umpire | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: umpireKey(tenant, umpireId) }),
+  );
+  return stripKeys<Umpire>(res.Item);
+}
+
+/** Insert a NEW umpire; throws UmpireExistsError if the id is taken. */
+export async function createUmpire(tenant: string, umpire: Umpire): Promise<Umpire> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: {
+          ...umpireKey(tenant, umpire.id),
+          ...umpireGsi1(tenant, umpire.displayName),
+          ...umpire,
+        },
+        ConditionExpression: 'attribute_not_exists(pk)',
+      }),
+    );
+  } catch (err) {
+    if (isCcf(err)) throw new UmpireExistsError();
+    throw err;
+  }
+  return umpire;
+}
+
+/** Replace an umpire record (last write wins — a small, rarely contended row). */
+export async function putUmpire(tenant: string, umpire: Umpire): Promise<Umpire> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...umpireKey(tenant, umpire.id),
+        ...umpireGsi1(tenant, umpire.displayName),
+        ...umpire,
+      },
+    }),
+  );
+  return umpire;
+}
+
+export async function listFixtureOfficials(tenant: string): Promise<FixtureOfficialsRecord[]> {
+  const { pk, skPrefix } = fixtureOfficialsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<FixtureOfficialsRecord>(i)!);
+}
+
+export async function getFixtureOfficials(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+): Promise<FixtureOfficialsRecord | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: fixtureOfficialsKey(tenant, seriesId, fixtureId) }),
+  );
+  return stripKeys<FixtureOfficialsRecord>(res.Item);
+}
+
+/** Write one fixture's officials. An empty appointment deletes the item. */
+export async function putFixtureOfficials(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+  officials: FixtureOfficials,
+): Promise<void> {
+  const key = fixtureOfficialsKey(tenant, seriesId, fixtureId);
+  if (!officials.umpires.length && !officials.referee) {
+    await ddb.send(new DeleteCommand({ TableName: TABLE, Key: key }));
+    return;
+  }
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...key, ...officials, seriesId, fixtureId },
+    }),
+  );
+}
+
+/** Drop every officials item for a series (the series itself is being deleted). */
+export async function deleteFixtureOfficialsForSeries(
+  tenant: string,
+  seriesId: string,
+): Promise<number> {
+  const keys = (await listFixtureOfficials(tenant))
+    .filter((o) => o.seriesId === seriesId)
+    .map((o) => fixtureOfficialsKey(tenant, o.seriesId, o.fixtureId));
+  if (keys.length) await batchDelete(keys);
+  return keys.length;
+}
+
+/** pk/sk pairs for every umpire + officials item — the erasure sweep needs keys. */
+async function listUmpireAndOfficialsKeys(
+  tenant: string,
+): Promise<Array<{ pk: string; sk: string }>> {
+  const umpires = (await listUmpires(tenant)).map((u) => umpireKey(tenant, u.id));
+  const officials = (await listFixtureOfficials(tenant)).map((o) =>
+    fixtureOfficialsKey(tenant, o.seriesId, o.fixtureId),
+  );
+  return [...umpires, ...officials];
+}
+
+// ── Captain's reports (ADR 0016, Slice 2) ──
+// One tenant partition: the reports, the CR-YYYY-NNNN counters and the NOTIFY# ledger.
+
+/** A report write refused because the report is not in the state the caller expected. */
+export class CaptainsReportStateError extends Error {
+  constructor(message = "captain's report is no longer open") {
+    super(message);
+    this.name = 'CaptainsReportStateError';
+  }
+}
+
+const reportKeyOf = (
+  tenant: string,
+  r: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+) => captainsReportKey(tenant, r.seriesId, r.fixtureId, r.clubId);
+
+export async function getCaptainsReport(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+  clubId: string,
+): Promise<CaptainsReport | null> {
+  const res = await ddb.send(
+    new GetCommand({
+      TableName: TABLE,
+      Key: captainsReportKey(tenant, seriesId, fixtureId, clubId),
+    }),
+  );
+  return stripKeys<CaptainsReport>(res.Item);
+}
+
+/** Every report in the tenant (a few per fixture weekend — one Query on one partition). */
+export async function listCaptainsReports(tenant: string): Promise<CaptainsReport[]> {
+  const { pk, skPrefix } = captainsReportsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<CaptainsReport>(i)!);
+}
+
+/** Both sides' reports for one fixture (the trailing `#` keeps f1 from matching f10). */
+export async function listCaptainsReportsForFixture(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+): Promise<CaptainsReport[]> {
+  const { pk, skPrefix } = captainsReportsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': `${skPrefix}${seriesId}#${fixtureId}#` },
+  });
+  return items.map((i) => stripKeys<CaptainsReport>(i)!);
+}
+
+/**
+ * Store a NEW report, or re-open a VOID one (a result cleared and then re-recorded). Returns
+ * false when a pending or submitted report already exists — opening is idempotent per
+ * fixture + club.
+ */
+export async function openCaptainsReportIfAbsent(
+  tenant: string,
+  report: CaptainsReport,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { ...report, ...reportKeyOf(tenant, report) },
+        ConditionExpression: 'attribute_not_exists(pk) OR #s = :void',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':void': 'void' },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/** Create a report a club files by hand; refuses (false) if one exists for that side. */
+export async function createCaptainsReport(
+  tenant: string,
+  report: CaptainsReport,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { ...report, ...reportKeyOf(tenant, report) },
+        ConditionExpression: 'attribute_not_exists(pk)',
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/** The editable fields of a report (what a draft save or a submit writes). */
+export type CaptainsReportFields = Pick<
+  CaptainsReport,
+  'captainName' | 'umpires' | 'general' | 'declaration'
+>;
+
+/**
+ * Save a draft. Only a PENDING report takes it — and when `memberId` is given (the link
+ * path), only while the report is still addressed to that recipient.
+ */
+export async function saveCaptainsReportDraft(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+  fields: CaptainsReportFields,
+  opts: { memberId?: string } = {},
+): Promise<CaptainsReport> {
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression:
+          'SET captainName = :c, umpires = :u, #gen = :g, declaration = :d, updatedAt = :at',
+        ConditionExpression:
+          'attribute_exists(pk) AND #s = :pending' +
+          (opts.memberId ? ' AND (recipient.memberId = :m OR chairMemberId = :m)' : ''),
+        ExpressionAttributeNames: { '#s': 'status', '#gen': 'general' },
+        ExpressionAttributeValues: {
+          ':c': fields.captainName,
+          ':u': fields.umpires,
+          ':g': fields.general,
+          ':d': !!fields.declaration,
+          ':at': new Date().toISOString(),
+          ':pending': 'pending',
+          ...(opts.memberId ? { ':m': opts.memberId } : {}),
+        },
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return stripKeys<CaptainsReport>(res.Attributes)!;
+  } catch (err) {
+    if (isCcf(err)) throw new CaptainsReportStateError();
+    throw err;
+  }
+}
+
+/** The next `CR-YYYY-NNNN` for a tenant/year — an atomic ADD on the counter item. */
+export async function nextCaptainsReportRef(tenant: string, year: string): Promise<string> {
+  const res = await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: captainsReportCounterKey(tenant, year),
+      UpdateExpression: 'ADD n :one',
+      ExpressionAttributeValues: { ':one': 1 },
+      ReturnValues: 'UPDATED_NEW',
+    }),
+  );
+  const n = Number(res.Attributes?.n ?? 0);
+  return `CR-${year}-${String(n).padStart(4, '0')}`;
+}
+
+/**
+ * Submit a report — FIRST SUBMIT WINS. The conditional update only succeeds while the report
+ * is pending (and, on the link path, still addressed to `memberId`); a second submit, from the
+ * portal or the link, gets CaptainsReportStateError.
+ *
+ * The CR-<year>-NNNN number is allocated only AFTER that conditional write succeeded (unless
+ * the caller passes `ref`), so a losing or failed submit never burns a number.
+ */
+export async function submitCaptainsReport(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'> & { matchDate?: string },
+  fields: CaptainsReportFields,
+  meta: { ref?: string; submittedBy: string; via: 'portal' | 'link'; memberId?: string },
+): Promise<CaptainsReport> {
+  const submitted = await submitCaptainsReportFields(tenant, key, fields, meta);
+  if (meta.ref) return submitted;
+  const year = (submitted.matchDate ?? key.matchDate ?? new Date().toISOString()).slice(0, 4);
+  const ref = await nextCaptainsReportRef(tenant, year);
+  const res = await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: reportKeyOf(tenant, key),
+      UpdateExpression: 'SET #ref = :ref',
+      ConditionExpression: 'attribute_exists(pk) AND attribute_not_exists(#ref)',
+      ExpressionAttributeNames: { '#ref': 'ref' },
+      ExpressionAttributeValues: { ':ref': ref },
+      ReturnValues: 'ALL_NEW',
+    }),
+  );
+  return stripKeys<CaptainsReport>(res.Attributes)!;
+}
+
+/** The first-submit-wins write itself (with `ref` only when the caller supplied one). */
+async function submitCaptainsReportFields(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+  fields: CaptainsReportFields,
+  meta: { ref?: string; submittedBy: string; via: 'portal' | 'link'; memberId?: string },
+): Promise<CaptainsReport> {
+  const at = new Date().toISOString();
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression:
+          'SET captainName = :c, umpires = :u, #gen = :g, declaration = :d, #s = :submitted, ' +
+          (meta.ref ? '#ref = :ref, ' : '') +
+          'submittedBy = :by, submittedVia = :via, submittedAt = :at, updatedAt = :at',
+        ConditionExpression:
+          'attribute_exists(pk) AND #s = :pending' +
+          (meta.memberId ? ' AND (recipient.memberId = :m OR chairMemberId = :m)' : ''),
+        ExpressionAttributeNames: {
+          '#s': 'status',
+          '#gen': 'general',
+          ...(meta.ref ? { '#ref': 'ref' } : {}),
+        },
+        ExpressionAttributeValues: {
+          ':c': fields.captainName,
+          ':u': fields.umpires,
+          ':g': fields.general,
+          ':d': !!fields.declaration,
+          ':submitted': 'submitted',
+          ':pending': 'pending',
+          ...(meta.ref ? { ':ref': meta.ref } : {}),
+          ':by': meta.submittedBy,
+          ':via': meta.via,
+          ':at': at,
+          ...(meta.memberId ? { ':m': meta.memberId } : {}),
+        },
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return stripKeys<CaptainsReport>(res.Attributes)!;
+  } catch (err) {
+    if (isCcf(err)) throw new CaptainsReportStateError("captain's report already submitted");
+    throw err;
+  }
+}
+
+/**
+ * A corrected result: a still-PENDING report takes the new summary. Submitted and void
+ * reports are left exactly as they are (false).
+ */
+export async function updatePendingCaptainsReportSummary(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+  resultSummary: string | null,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression: 'SET resultSummary = :r, updatedAt = :at',
+        ConditionExpression: 'attribute_exists(pk) AND #s = :pending',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: {
+          ':r': resultSummary,
+          ':pending': 'pending',
+          ':at': new Date().toISOString(),
+        },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/**
+ * A fixture's result was cleared: a PENDING report becomes void (its link dies with it); a
+ * SUBMITTED one is kept and flagged for the admin. Returns what happened.
+ */
+export async function voidOrFlagCaptainsReport(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+  reason: string,
+): Promise<'voided' | 'flagged' | 'none'> {
+  const at = new Date().toISOString();
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression: 'SET #s = :void, voidedAt = :at, updatedAt = :at',
+        ConditionExpression: 'attribute_exists(pk) AND #s = :pending',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':void': 'void', ':pending': 'pending', ':at': at },
+      }),
+    );
+    return 'voided';
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression: 'SET flagged = :f, updatedAt = :at',
+        ConditionExpression: 'attribute_exists(pk) AND #s = :submitted',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':submitted': 'submitted', ':f': { reason, at }, ':at': at },
+      }),
+    );
+    return 'flagged';
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+  return 'none';
+}
+
+/**
+ * Append notice outcomes (one per channel) to a report. `notifiedAt` is set only the first
+ * time a channel was actually sent; `reminderSentAt` stamps the one pre-expiry reminder.
+ */
+export async function recordCaptainsReportDeliveries(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+  deliveries: CaptainsReportDelivery[],
+  opts: { notifiedAt?: string; reminderSentAt?: string } = {},
+): Promise<void> {
+  const at = new Date().toISOString();
+  const sets = [
+    'deliveries = list_append(if_not_exists(deliveries, :empty), :d)',
+    'updatedAt = :at',
+  ];
+  const values: Record<string, unknown> = { ':d': deliveries, ':empty': [], ':at': at };
+  if (opts.notifiedAt) {
+    sets.push('notifiedAt = if_not_exists(notifiedAt, :n)');
+    values[':n'] = opts.notifiedAt;
+  }
+  if (opts.reminderSentAt) {
+    sets.push('reminderSentAt = :rs');
+    values[':rs'] = opts.reminderSentAt;
+  }
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression: `SET ${sets.join(', ')}`,
+        ConditionExpression: 'attribute_exists(pk)',
+        ExpressionAttributeValues: values,
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err; // the report was erased meanwhile: nothing to record on
+  }
+}
+
+/** WAMSG# lookups live 30 days — Meta's statuses arrive within minutes to days. */
+const WHATSAPP_MESSAGE_TTL_SECONDS = 30 * 24 * 3600;
+
+export interface WhatsAppMessageRef {
+  tenant: string;
+  seriesId: string;
+  fixtureId: string;
+  clubId: string;
+}
+
+/** Remember which report a WhatsApp message id belongs to (for the status webhook). */
+export async function putWhatsAppMessageRef(wamid: string, ref: WhatsAppMessageRef): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...whatsappMessageKey(wamid),
+        ...ref,
+        kind: 'captains-report',
+        expiresAt: Math.floor(Date.now() / 1000) + WHATSAPP_MESSAGE_TTL_SECONDS,
+      },
+    }),
+  );
+}
+
+export async function getWhatsAppMessageRef(wamid: string): Promise<WhatsAppMessageRef | null> {
+  const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: whatsappMessageKey(wamid) }));
+  if (!res.Item) return null;
+  const { tenant, seriesId, fixtureId, clubId } = res.Item as Record<string, string>;
+  return { tenant, seriesId, fixtureId, clubId };
+}
+
+/**
+ * Set Meta's delivery status on one WhatsApp delivery of a report (by list position, only
+ * while that position still holds the message id). False when it no longer does.
+ */
+export async function setCaptainsReportProviderStatus(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+  index: number,
+  messageId: string,
+  update: Pick<CaptainsReportDelivery, 'providerStatus' | 'providerAt' | 'providerError'>,
+): Promise<boolean> {
+  if (!Number.isInteger(index) || index < 0) return false;
+  const p = `deliveries[${index}]`;
+  const sets = [`${p}.providerStatus = :s`, `${p}.providerAt = :pa`];
+  const values: Record<string, unknown> = {
+    ':s': update.providerStatus,
+    ':pa': update.providerAt,
+    ':id': messageId,
+  };
+  if (update.providerError) {
+    sets.push(`${p}.providerError = :pe`);
+    values[':pe'] = update.providerError;
+  }
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression: `SET ${sets.join(', ')}`,
+        ConditionExpression: `attribute_exists(pk) AND ${p}.messageId = :id`,
+        ExpressionAttributeValues: values,
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/** Why a "Send to captain" write was refused (re-read to tell the caller which). */
+export class CaptainsReportForwardConflict extends Error {
+  constructor() {
+    super('the report changed while it was being sent on');
+    this.name = 'CaptainsReportForwardConflict';
+  }
+}
+
+/**
+ * Re-address a PENDING report to the captain the chair picked. Conditional on the report
+ * still being pending, still addressed to `expectedMemberId` (no concurrent forward) and
+ * under `maxForwards`. Returns the updated report.
+ */
+export async function forwardCaptainsReport(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+  next: {
+    recipient: CaptainsReport['recipient'];
+    chairMemberId?: string;
+    recipientContact: NonNullable<CaptainsReport['recipientContact']>;
+    captainName: string;
+  },
+  guard: { expectedMemberId: string; maxForwards: number },
+): Promise<CaptainsReport> {
+  const sets = [
+    'recipient = :r',
+    'recipientContact = :rc',
+    'captainName = :cn',
+    'forwardCount = if_not_exists(forwardCount, :zero) + :one',
+    'updatedAt = :at',
+  ];
+  const values: Record<string, unknown> = {
+    ':r': next.recipient,
+    ':rc': next.recipientContact,
+    ':cn': next.captainName,
+    ':zero': 0,
+    ':one': 1,
+    ':at': new Date().toISOString(),
+    ':pending': 'pending',
+    ':m': guard.expectedMemberId,
+    ':max': guard.maxForwards,
+  };
+  if (next.chairMemberId) {
+    sets.push('chairMemberId = :cm');
+    values[':cm'] = next.chairMemberId;
+  }
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression: `SET ${sets.join(', ')}`,
+        ConditionExpression:
+          'attribute_exists(pk) AND #s = :pending AND recipient.memberId = :m AND ' +
+          '(attribute_not_exists(forwardCount) OR forwardCount < :max)',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: values,
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return stripKeys<CaptainsReport>(res.Attributes)!;
+  } catch (err) {
+    if (isCcf(err)) throw new CaptainsReportForwardConflict();
+    throw err;
+  }
+}
+
+/**
+ * The union office attributes a free-text umpire entry of a SUBMITTED report to a registry
+ * umpire. Conditional on the entry still being that free-text name with no umpire id.
+ */
+export async function attributeCaptainsReportUmpire(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+  index: number,
+  freeTextName: string,
+  entry: CaptainsReport['umpires'][number],
+): Promise<CaptainsReport> {
+  const p = `umpires[${index}]`;
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression: `SET ${p} = :e, updatedAt = :at`,
+        ConditionExpression:
+          `attribute_exists(pk) AND #s = :submitted AND attribute_exists(${p}) AND ` +
+          `attribute_not_exists(${p}.umpireId) AND ${p}.#n = :name`,
+        ExpressionAttributeNames: { '#s': 'status', '#n': 'name' },
+        ExpressionAttributeValues: {
+          ':e': entry,
+          ':at': new Date().toISOString(),
+          ':submitted': 'submitted',
+          ':name': freeTextName,
+        },
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return stripKeys<CaptainsReport>(res.Attributes)!;
+  } catch (err) {
+    if (isCcf(err)) throw new CaptainsReportStateError('that umpire entry has changed');
+    throw err;
+  }
+}
+
+/** NOTIFY# rows outlive the reports' 14-day opening window comfortably, then self-expire. */
+const NOTIFY_LEDGER_TTL_SECONDS = 120 * 24 * 3600;
+
+/**
+ * Claim the right to notify `audience` about a report. True ⇒ the caller sends; false ⇒ a
+ * send was already claimed (a replay, a retried run) and nothing must go out again.
+ */
+export async function claimCaptainsReportNotify(
+  tenant: string,
+  reportId: string,
+  audience: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: {
+          ...captainsReportNotifyKey(tenant, reportId, audience),
+          status: 'in_progress',
+          startedAt: new Date().toISOString(),
+          expiresAt: Math.floor(Date.now() / 1000) + NOTIFY_LEDGER_TTL_SECONDS,
+        },
+        ConditionExpression: 'attribute_not_exists(pk)',
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/** Record a claimed send's per-channel outcome (status only — no addresses). */
+export async function completeCaptainsReportNotify(
+  tenant: string,
+  reportId: string,
+  audience: string,
+  results: Array<{ channel: string; status: string; error?: string }>,
+): Promise<void> {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: captainsReportNotifyKey(tenant, reportId, audience),
+      UpdateExpression: 'SET #s = :done, #res = :r, completedAt = :at',
+      ExpressionAttributeNames: { '#s': 'status', '#res': 'results' },
+      ExpressionAttributeValues: {
+        ':done': 'completed',
+        ':r': results,
+        ':at': new Date().toISOString(),
+      },
+    }),
+  );
+}
+
+/**
+ * Release a claimed send that reached nobody (every channel failed), so the REPORTOPEN#
+ * retry can claim it again. Only an `in_progress` claim is released — a completed one stays.
+ */
+export async function releaseCaptainsReportNotify(
+  tenant: string,
+  reportId: string,
+  audience: string,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new DeleteCommand({
+        TableName: TABLE,
+        Key: captainsReportNotifyKey(tenant, reportId, audience),
+        ConditionExpression: '#s = :p',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':p': 'in_progress' },
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
+/** One report's NOTIFY# ledger keys (every audience) — for club erasure. */
+async function listCaptainsReportNotifyKeys(
+  tenant: string,
+  reportId: string,
+): Promise<Array<{ pk: string; sk: string }>> {
+  const prefix = captainsReportNotifyKey(tenant, reportId, '');
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': prefix.pk, ':s': prefix.sk },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+/**
+ * A deleted series' medicoach-sync state (ADR 0016): its FIXRESULT# results, the outbox rows
+ * (PENDINGSYNC#), held conflicts (SYNCCONFLICT#) and report-open markers (REPORTOPEN#) of its
+ * fixtures are deleted, and its still-PENDING captain's reports are voided (their links die;
+ * submitted ones are kept as filed). Idempotent.
+ */
+export async function deleteSeriesSyncState(
+  tenant: string,
+  seriesId: string,
+): Promise<{ deleted: number; voided: number }> {
+  const results = fixtureResultsListKey(tenant);
+  const keys = (
+    await queryAll({
+      TableName: TABLE,
+      KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+      ExpressionAttributeValues: {
+        ':p': results.pk,
+        ':s': `${results.skPrefix}${seriesId}#`,
+      },
+      ProjectionExpression: 'pk, sk',
+    })
+  ).map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+  const [pending, conflicts, markers, reports] = await Promise.all([
+    listPendingSync(tenant),
+    listSyncConflicts(tenant),
+    listReportOpenMarkers(tenant),
+    listCaptainsReports(tenant),
+  ]);
+  for (const p of pending) if (p.seriesId === seriesId) keys.push(pendingSyncKey(tenant, p.ref));
+  for (const x of conflicts) if (x.seriesId === seriesId) keys.push(syncConflictKey(tenant, x.ref));
+  for (const m of markers) if (m.seriesId === seriesId) keys.push(reportOpenKey(tenant, m.ref));
+  if (keys.length) await batchDelete(uniqueKeys(keys));
+  let voided = 0;
+  for (const r of reports)
+    if (r.seriesId === seriesId && r.status === 'pending')
+      if ((await voidOrFlagCaptainsReport(tenant, r, 'series deleted')) === 'voided') voided++;
+  return { deleted: keys.length, voided };
+}
+
+/** Every key in the captain's-report partition (reports, counters, ledger) — for erasure. */
+async function listCaptainsReportPartitionKeys(
+  tenant: string,
+): Promise<Array<{ pk: string; sk: string }>> {
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p',
+    ExpressionAttributeValues: { ':p': captainsReportPartitionPk(tenant) },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+/** One veterans affiliation (VETAFFIL#) by veterans club + the player's natural key. */
+export async function getVeteransAffiliation(
+  tenant: string,
+  vetsClubId: string,
+  naturalKey: string,
+): Promise<VeteransAffiliation | null> {
+  const res = await ddb.send(
+    new GetCommand({
+      TableName: TABLE,
+      Key: veteransAffiliationKey(tenant, vetsClubId, naturalKey),
+    }),
+  );
+  return stripKeys<VeteransAffiliation>(res.Item);
 }
 
 // ── Season runs (ADR 0008) ──
@@ -5269,6 +6568,16 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   // the same exposure — miss them and a deleted tenant's ground list survives.
   for (const k of await listExportLogKeys(tenant)) keys.push(k);
   for (const k of await listVenueKeys(tenant)) keys.push(k);
+  // Medicoach sync (ADR 0016): results (may hold a captain's player ref — PII) and the
+  // SYNC partition (cursor + audit rows) have no gsi1/META listing; enumerate them.
+  for (const k of await listFixtureResultKeys(tenant)) keys.push(k);
+  for (const k of await listSyncPartitionKeys(tenant)) keys.push(k);
+  // Umpires carry contact details; officials are per-fixture rows. Neither is in a club
+  // partition or the series listing, so enumerate both explicitly.
+  for (const k of await listUmpireAndOfficialsKeys(tenant)) keys.push(k);
+  // Captain's reports carry names and ratings; the partition also holds the counters and the
+  // NOTIFY# ledger. No gsi1/META listing — enumerate the partition.
+  for (const k of await listCaptainsReportPartitionKeys(tenant)) keys.push(k);
 
   const unique = uniqueKeys(keys);
   await batchDelete(unique);
@@ -5330,6 +6639,17 @@ export async function clearCohort(tenant: string): Promise<number> {
   }
   for (const s of await listSeries(tenant)) keys.push(seriesKey(tenant, s.id));
   for (const r of await listSeasonRuns(tenant)) keys.push(seasonRunKey(tenant, r.id));
+  // Results belong to the series being cleared (and may hold a player ref — PII). The SYNC
+  // partition goes too: a surviving cursor would stop the next pull re-fetching the results.
+  for (const k of await listFixtureResultKeys(tenant)) keys.push(k);
+  for (const k of await listSyncPartitionKeys(tenant)) keys.push(k);
+  // Officials hang off the series being cleared; the umpire registry itself is union data,
+  // not cohort data, so it stays.
+  for (const o of await listFixtureOfficials(tenant))
+    keys.push(fixtureOfficialsKey(tenant, o.seriesId, o.fixtureId));
+
+  // Captain's reports hang off the fixtures being cleared (reports, counters, ledger).
+  for (const k of await listCaptainsReportPartitionKeys(tenant)) keys.push(k);
 
   // Safety: never delete the tenant config or any user record.
   for (const k of keys) {
@@ -5482,6 +6802,14 @@ export async function eraseClubData(
   // Invite markers aren't in the gsi1 listing — enumerate + delete them explicitly
   // (they carry recipient contact in their stored results).
   for (const k of await listClubInviteKeys(tenant, club.id)) keys.push(k);
+
+  // Captain's reports filed for/by this club (they name its captain and rate umpires) and
+  // their NOTIFY# ledger rows (per report + recipient).
+  for (const r of await listCaptainsReports(tenant)) {
+    if (r.clubId !== club.id) continue;
+    keys.push(reportKeyOf(tenant, r));
+    keys.push(...(await listCaptainsReportNotifyKeys(tenant, r.id)));
+  }
 
   // Veterans affiliations WHERE THIS CLUB IS THE VETERANS CLUB (its affiliates). The pointing
   // player rows live in OTHER (primary) clubs; scrub their veteransClub/veteransClubId BEFORE

@@ -1880,6 +1880,8 @@ function StructureReviewModal({
     try {
       setOutcome(await onApply(regenIds));
     } catch (e) {
+      // The admin cancelled the medicoach-sync confirmation: nothing went wrong.
+      if ((e as Error)?.name === 'ResyncCancelled') return;
       // Shown inline even when the toast has fired: the admin is reading this modal, and
       // the line says which thing moved (the structure, or the season) and what to do.
       setErr(seasonRunErrorMessage(e, 'Could not apply the structure — try again'));

@@ -93,6 +93,7 @@ import type {
   SeasonRun,
   Series,
   Clash,
+  Umpire,
   Venue,
   WithheldField,
 } from './types';
@@ -133,6 +134,7 @@ import { PlayerDetailModal } from './PlayerDetailModal';
 import { RegLinkModal } from './RegLinkModal';
 import { ReleaseDialog } from './ReleaseDialog';
 import { ClashPanel } from './ClashPanel';
+import { UmpireCell, doubleBookingIndex } from './umpires';
 import { ClubNameModal } from './ClubNameModal';
 import {
   Icon,
@@ -208,6 +210,48 @@ type SelectedPlayerState = PlayerRegistration & { clubName?: string };
    Only the operator-facing moves get a pill — a plain allocated ground or a Union T20
    slot is the normal case and gets none. Prefixes match what the allocator/import write
    (see packages/engine/src/venues.ts and packages/api/src/import-planb-fixtures.ts). */
+/**
+ * A fixture's display status. A medicoach result (joined onto the fixture by GET /series,
+ * ADR 0016) makes it completed whatever the stored status says.
+ */
+function fixtureStatus(f: { status?: string; result?: unknown }): string {
+  return f.result ? 'completed' : f.status || 'scheduled';
+}
+
+interface FixtureResultView {
+  homeScore: string | null;
+  awayScore: string | null;
+  summary: string | null;
+  noResult: boolean;
+  medicoachMatchUrl: string | null;
+}
+
+/** Read-only medicoach result under a fixture's status pill: score, summary, link. */
+function FixtureResult({ result }: { result: FixtureResultView }) {
+  const score =
+    result.homeScore || result.awayScore
+      ? `${result.homeScore ?? '–'} v ${result.awayScore ?? '–'}`
+      : null;
+  return (
+    <div className="fix-row-result" aria-label="Result from medicoach">
+      {score && <div className="fix-row-result-score">{score}</div>}
+      {(result.summary || result.noResult) && (
+        <div className="fix-row-result-summary">{result.summary || 'No result'}</div>
+      )}
+      {result.medicoachMatchUrl && (
+        <a
+          className="fix-row-result-link"
+          href={result.medicoachMatchUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          View in medicoach
+        </a>
+      )}
+    </div>
+  );
+}
+
 function venueReasonPill(reason?: string, status?: string): string | null {
   if (!reason || status === 'home') return null;
   if (reason.startsWith(VENUE_REASON_PREFIX.movedToAvoid)) return 'moved';
@@ -285,6 +329,12 @@ interface AdminFixturesProps {
   onRebaseSeasonRun?;
   onFetchSeasonRun?;
   onGenerateStageSeries?;
+  /** The umpire registry (admin view, contacts included). Absent ⇒ Umpires column read-only. */
+  umpires?: Umpire[];
+  /** Appoint a fixture's umpires (own call — never the series PATCH). */
+  onSaveOfficials?: (seriesId: string, fixtureId: string, umpireIds: string[]) => Promise<unknown>;
+  /** Add an umpire from the picker's "add umpire" option. */
+  onCreateUmpire?: (displayName: string) => Promise<Umpire>;
 }
 
 // Export row shape shared by the per-series and whole-season exports — the same
@@ -446,6 +496,9 @@ export function AdminFixtures({
   onRebaseSeasonRun,
   onFetchSeasonRun,
   onGenerateStageSeries,
+  umpires = [],
+  onSaveOfficials,
+  onCreateUmpire,
 }: AdminFixturesProps) {
   const vt = useVertical().terms;
   const copy = useCopy();
@@ -456,7 +509,13 @@ export function AdminFixtures({
   // Owned here, not in SeasonRunsPanel, so its own button and the header button share it.
   const [launcherOpen, setLauncherOpen] = useStateA(false);
   const [viewerOpen, setViewerOpen] = useStateA(false);
-  const [activeId, setActiveId] = useStateA(allSeries[0]?.id);
+  // `?series=<id>` (from the Medicoach sync page) opens that series; else the first one.
+  const [activeId, setActiveId] = useStateA(
+    () =>
+      (typeof window !== 'undefined'
+        ? new URLSearchParams(window.location.search).get('series')
+        : null) ?? allSeries[0]?.id,
+  );
   const active = allSeries.find((s) => s.id === activeId) || allSeries[0];
   const [confirm, setConfirm] = useStateA<ConfirmDialogState | null>(null); // shared confirmation modal state (recall/reveal)
   const [releaseFor, setReleaseFor] = useStateA<ReleaseSeriesState | null>(null); // series whose ReleaseDialog is open
@@ -783,6 +842,10 @@ export function AdminFixtures({
               allSeasonRuns={allSeasonRuns}
               onAllocateVenues={onAllocateVenues}
               onCheckClashes={onCheckClashes}
+              allSeries={allSeries}
+              umpires={umpires}
+              onSaveOfficials={onSaveOfficials}
+              onCreateUmpire={onCreateUmpire}
             />
           )}
         </>
@@ -1114,11 +1177,33 @@ export function FixtureTable({
   allSeasonRuns = [] as SeasonRun[],
   onAllocateVenues,
   onCheckClashes,
+  // Umpire allocation: every series (for the cross-series double-booking warning), the
+  // registry, and the officials write. Without them the column renders names read-only.
+  allSeries = undefined as Series[] | undefined,
+  umpires = [] as Umpire[],
+  onSaveOfficials = undefined as
+    | ((seriesId: string, fixtureId: string, umpireIds: string[]) => Promise<unknown>)
+    | undefined,
+  onCreateUmpire = undefined as ((displayName: string) => Promise<Umpire>) | undefined,
 }) {
   const vt = useVertical().terms;
   const copy = useCopy();
   const showOvers = useVertical().sport === 'cricket';
   const clubBy = (id) => clubs.find((c) => c.id === id);
+  const umpirePool: Series[] = useMemoA(
+    () => (allSeries?.some((s) => s.id === series.id) ? allSeries : [...(allSeries ?? []), series]),
+    [allSeries, series],
+  );
+  // One pass over every appointment: which fixtures put an umpire at two grounds at once.
+  const umpireWarnings = useMemoA(
+    () =>
+      doubleBookingIndex(
+        umpirePool,
+        clubs,
+        (id) => umpires.find((u) => u.id === id)?.displayName ?? id,
+      ),
+    [umpirePool, clubs, umpires],
+  );
   // Resolve a fixture id → team for this series (participant snapshot, else clubId).
   const teamBy = (id) => resolveTeam(series, id, clubBy);
   const [editingId, setEditingId] = useStateA<string | null>(null);
@@ -1244,15 +1329,14 @@ export function FixtureTable({
     totalKm += r.c.roundTripKm;
     totalCost += r.c.fuelR;
   });
-  const rows =
-    filter === 'all' ? allRows : allRows.filter((r) => (r.f.status || 'scheduled') === filter);
+  const rows = filter === 'all' ? allRows : allRows.filter((r) => fixtureStatus(r.f) === filter);
 
   const statusCounts = {
     all: allRows.length,
-    scheduled: allRows.filter((r) => (r.f.status || 'scheduled') === 'scheduled').length,
-    completed: allRows.filter((r) => r.f.status === 'completed').length,
-    postponed: allRows.filter((r) => r.f.status === 'postponed').length,
-    cancelled: allRows.filter((r) => r.f.status === 'cancelled').length,
+    scheduled: allRows.filter((r) => fixtureStatus(r.f) === 'scheduled').length,
+    completed: allRows.filter((r) => fixtureStatus(r.f) === 'completed').length,
+    postponed: allRows.filter((r) => fixtureStatus(r.f) === 'postponed').length,
+    cancelled: allRows.filter((r) => fixtureStatus(r.f) === 'cancelled').length,
   };
 
   return (
@@ -1403,6 +1487,7 @@ export function FixtureTable({
               <th>Away (visitors)</th>
               <th style={{ width: 90, textAlign: 'right' }}>Distance</th>
               <th style={{ width: 110, textAlign: 'right' }}>Travel</th>
+              <th style={{ width: 170 }}>Umpires</th>
               <th style={{ width: 110 }}>Status</th>
               <th style={{ width: 80 }}></th>
             </tr>
@@ -1436,7 +1521,7 @@ export function FixtureTable({
                   />
                 );
               }
-              const status = f.status || 'scheduled';
+              const status = fixtureStatus(f);
               return (
                 <tr
                   key={f.id}
@@ -1448,7 +1533,9 @@ export function FixtureTable({
                     <span className="fix-row-rd">R{f.round}</span>
                   </td>
                   <td>
-                    <span className="fix-row-date">{formatWeekdayDay(f.date)}</span>
+                    <span className="fix-row-date">
+                      {f.dateTbc ? 'Date TBC' : formatWeekdayDay(f.date)}
+                    </span>
                     {/* Shown only when the schedule set a start time (double-headers,
                         morning/afternoon slots) — most series have neither. "Time TBC"
                         below only appears when the series itself uses times elsewhere;
@@ -1532,7 +1619,20 @@ export function FixtureTable({
                     )}
                   </td>
                   <td>
+                    <UmpireCell
+                      series={series}
+                      fixture={f}
+                      allSeries={umpirePool}
+                      clubs={clubs}
+                      umpires={umpires}
+                      warnings={umpireWarnings.get(`${series.id}#${f.id}`)}
+                      onSave={onSaveOfficials}
+                      onCreate={onCreateUmpire}
+                    />
+                  </td>
+                  <td>
                     <span className={`fix-status ${status}`}>{status}</span>
+                    {f.result && <FixtureResult result={f.result} />}
                   </td>
                   <td>
                     <div className="fix-row-actions">
@@ -1573,7 +1673,7 @@ export function FixtureTable({
             {rows.length === 0 && (
               <tr>
                 <td
-                  colSpan={9}
+                  colSpan={10}
                   style={{
                     padding: '28px',
                     textAlign: 'center',
@@ -1974,7 +2074,7 @@ function EditFixtureRow({
 
   return (
     <tr className="fix-edit-tr">
-      <td colSpan={9}>
+      <td colSpan={10}>
         <div className="fix-edit-grid">
           <div className="fix-edit-field">
             <label htmlFor={`${uid}-round`}>Round</label>
@@ -2192,7 +2292,11 @@ function EditFixtureRow({
               onChange={(e) => u('status', e.target.value)}
             >
               <option value="scheduled">Scheduled</option>
-              <option value="completed">Completed</option>
+              {/* Medicoach owns the result of a synced fixture (ADR 0016) — it turns
+                  completed when the result arrives, never by hand. */}
+              <option value="completed" disabled={fixture.syncMapped === true}>
+                {fixture.syncMapped ? 'Completed (set by medicoach)' : 'Completed'}
+              </option>
               <option value="postponed">Postponed</option>
               <option value="cancelled">Cancelled</option>
             </select>
