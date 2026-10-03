@@ -144,7 +144,10 @@ Nothing the sync cannot place is guessed at:
 
 Schedule (date, time, venue, postponed, cancelled, plus `dateTbc`) is most-recent-wins on each
 side's `changedAt`; smart club keeps its own as the fixture's `schedule.changedAt`
-(`medicoach-sync/schedule.ts`).
+(`medicoach-sync/schedule.ts`). Medicoach sends epoch `1970-01-01T00:00:00.000Z` for a fixture
+it never edited; a smart-club fixture with no `schedule.changedAt` (never edited since import)
+counts as that same epoch inbound, so medicoach's never-edited rows never apply over it while
+any real medicoach edit does.
 
 - **Inbound.** After a page's results and knockout slot fills, every fixture whose medicoach
   schedule differs and is newer is applied with the gates an admin edit passes: the
@@ -188,8 +191,14 @@ side's `changedAt`; smart club keeps its own as the fixture's `schedule.changedA
   `heldUntilReveal` (flagged at enqueue and re-checked against the live series on every
   flush, so a recall holds rows queued before it) and shown on the admin page as "held until
   released/revealed". The release (false→true) of a series that withholds nothing, and the
-  reveal that clears the last withheld field, stamp every fixture of a mapped series and
-  re-queue it with its real schedule. A row whose series no longer exists is dropped, never
+  reveal that clears the last withheld field, re-queue every fixture of a mapped series with
+  its real schedule and its EXISTING `schedule.changedAt` — never re-stamped, so a medicoach
+  edit made while the series was a draft or withheld still wins (most recent change wins). A
+  fixture smart club never edited goes out at `1970-01-01T00:00:00.001Z`: one millisecond
+  after medicoach's never-edited epoch, so smart club's real values (a newly revealed venue
+  medicoach never had) still win over a never-edited medicoach row. A row already held for the
+  fixture carries the same or a newer `changedAt`, so the conditional enqueue keeps it (the
+  flush un-holds it). A row whose series no longer exists is dropped, never
   pushed. Inbound changes still apply to a draft or withheld series (they leak nothing). The
   initial migration bundle carries `venueWithheld`/`timeWithheld` on its own.
 - **Generate/rebase guard.** On a sync tenant, regenerating a stage, or rebasing a run whose

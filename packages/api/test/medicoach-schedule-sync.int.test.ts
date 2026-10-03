@@ -70,7 +70,7 @@ interface Push {
 }
 const pushes: Push[] = [];
 /** How the stub answers a push: per-ref status, or a whole-request HTTP failure. */
-let pushStatus: (ref: string) => string = () => 'applied';
+let pushStatus: (ref: string, schedule: Record<string, unknown>) => string = () => 'applied';
 let pushHttpFail: number | null = null;
 
 function startStub(): Promise<void> {
@@ -91,14 +91,16 @@ function startStub(): Promise<void> {
         pushes.push({ verified: check.ok, body });
         if (!check.ok) return void res.writeHead(401).end('{}');
         if (pushHttpFail) return void res.writeHead(pushHttpFail).end('{"error":"down"}');
-        const results = body.changes.map((c: { ref: string }) => {
-          const status = pushStatus(c.ref);
-          return {
-            ref: c.ref,
-            status,
-            ...(status === 'error' ? { message: 'fixture locked' } : {}),
-          };
-        });
+        const results = body.changes.map(
+          (c: { ref: string; schedule: Record<string, unknown> }) => {
+            const status = pushStatus(c.ref, c.schedule);
+            return {
+              ref: c.ref,
+              status,
+              ...(status === 'error' ? { message: 'fixture locked' } : {}),
+            };
+          },
+        );
         return void res
           .writeHead(200, { 'content-type': 'application/json' })
           .end(JSON.stringify({ version: 1, results }));
@@ -1092,18 +1094,28 @@ describe('Slice 4 — a draft or withheld series is held until released/revealed
     assert.equal(pushes.length, 0);
     assert.equal((await repo.listPendingSync(T)).length, 1);
 
+    const editedAt = ((await fixtureOf(SW, 'f1')).schedule as { changedAt: string }).changedAt;
     assert.equal((await reveal(['time'])).status, 200);
     const rows = (await repo.listPendingSync(T)).sort((a, b) => a.ref.localeCompare(b.ref));
+    // Never re-stamped: f1 keeps its held row (edit instant; the flush un-holds it), f2 —
+    // never edited by smart club — goes out at NEVER_EDITED_CHANGED_AT.
     assert.deepEqual(
-      rows.map((r) => [r.ref, r.heldUntilReveal, r.schedule.scheduledTime, r.schedule.venue]),
+      rows.map((r) => [r.ref, r.schedule.scheduledTime, r.schedule.venue, r.schedule.changedAt]),
       [
-        [REF(SW, 'f1'), undefined, '2026-10-04T10:00:00+02:00', 'Lahee Park'],
-        [REF(SW, 'f2'), undefined, '2026-10-04T13:30:00+02:00', 'Kingsmead Oval'],
+        [REF(SW, 'f1'), '2026-10-04T10:00:00+02:00', 'Lahee Park', editedAt],
+        [
+          REF(SW, 'f2'),
+          '2026-10-04T13:30:00+02:00',
+          'Kingsmead Oval',
+          schedule.NEVER_EDITED_CHANGED_AT,
+        ],
       ],
     );
-    // Stamped on the fixtures in the reveal write (most-recent-wins on the next pull).
-    const f2 = await fixtureOf(SW, 'f2');
-    assert.equal((f2.schedule as { changedAt: string }).changedAt, rows[1].schedule.changedAt);
+    assert.equal(
+      ((await fixtureOf(SW, 'f1')).schedule as { changedAt: string }).changedAt,
+      editedAt,
+    );
+    assert.equal((await fixtureOf(SW, 'f2')).schedule, undefined, 'the reveal stamps nothing');
     const stored = (await repo.getSeries(T, SW))!;
     assert.equal(stored.withheld, undefined);
     assert.ok(stored.revealedAt?.time);
@@ -1168,21 +1180,88 @@ describe('Slice 4 — a draft or withheld series is held until released/revealed
 
     // The draft edit recalled the approval; approve, then release with nothing withheld.
     assert.equal((await patchSeries(SD, { approved: true })).status, 200);
+    const editedAt = ((await fixtureOf(SD, 'f1')).schedule as { changedAt: string }).changedAt;
     assert.equal((await patchSeries(SD, { released: true })).status, 200);
     const rows = (await repo.listPendingSync(T)).sort((a, b) => a.ref.localeCompare(b.ref));
     assert.deepEqual(
-      rows.map((r) => [r.ref, r.heldUntilReveal, r.schedule.scheduledTime]),
+      rows.map((r) => [r.ref, r.schedule.scheduledTime, r.schedule.changedAt]),
       [
-        [REF(SD, 'f1'), undefined, '2026-11-01T10:00:00+02:00'],
-        [REF(SD, 'f2'), undefined, '2026-11-01T13:30:00+02:00'],
+        [REF(SD, 'f1'), '2026-11-01T10:00:00+02:00', editedAt],
+        [REF(SD, 'f2'), '2026-11-01T13:30:00+02:00', schedule.NEVER_EDITED_CHANGED_AT],
       ],
     );
-    const f2 = await fixtureOf(SD, 'f2');
-    assert.equal((f2.schedule as { changedAt: string }).changedAt, rows[1].schedule.changedAt);
+    assert.equal((await fixtureOf(SD, 'f2')).schedule, undefined, 'the release stamps nothing');
     const sent = await flush();
     assert.equal(sent.held, 0);
     assert.equal(sent.counts.applied, 2);
     assert.deepEqual(await repo.listPendingSync(T), []);
+  });
+
+  /** Medicoach's most-recent-wins on a push, against the instant of its own last edit. */
+  const medicoachWins = (mcChangedAt: string) => (_ref: string, sched: Record<string, unknown>) =>
+    Date.parse(String(sched.changedAt)) > Date.parse(mcChangedAt) ? 'applied' : 'stale';
+
+  test('a medicoach edit made during the draft is not overwritten by the release', async () => {
+    await seedDraft();
+    // Medicoach moves f2 to Lahee Park at MC_AT while the series is still a draft; smart club
+    // has not pulled it yet. The release comes later, with no smart-club edit of f2.
+    pushStatus = medicoachWins(MC_AT);
+    assert.equal((await patchSeries(SD, { released: true })).status, 200);
+    const row = (await repo.listPendingSync(T)).find((r) => r.ref === REF(SD, 'f2'))!;
+    assert.equal(row.schedule.changedAt, schedule.NEVER_EDITED_CHANGED_AT);
+    assert.ok(Date.parse(row.schedule.changedAt) < Date.parse(MC_AT));
+
+    const out = await flush();
+    assert.equal(out.counts.stale, 2, "medicoach's edit is newer: the push is stale");
+    assert.equal(out.counts.applied, 0);
+
+    pages = [
+      changesPage([
+        {
+          ref: REF(SD, 'f2'),
+          schedule: { scheduledTime: '2026-11-01T13:30:00+02:00', venue: 'Lahee Park' },
+        },
+      ]),
+    ];
+    const summary = await pull();
+    assert.equal(summary.counts.scheduleApplied, 1);
+    const f2 = await fixtureOf(SD, 'f2');
+    assert.equal(f2.venueName, 'Lahee Park');
+    assert.equal((f2.schedule as { changedAt: string }).changedAt, MC_AT);
+  });
+
+  test('a withheld venue revealed: medicoach never edited it, so smart club wins', async () => {
+    await repo.putSeries(
+      T,
+      series(SW, [fx('f1', { venueId: 'v-lahee', venueName: 'Lahee Park' })], {
+        withheld: { venue: true },
+      }),
+    );
+    pushStatus = medicoachWins(schedule.EPOCH_CHANGED_AT);
+    assert.equal((await reveal(['venue'])).status, 200);
+    const out = await flush();
+    assert.equal(out.counts.applied, 1);
+    assert.equal(pushes[0].body.changes[0].schedule.venue, 'Lahee Park');
+    assert.equal(pushes[0].body.changes[0].schedule.changedAt, schedule.NEVER_EDITED_CHANGED_AT);
+
+    // Medicoach's never-edited row (epoch, its old venue) never applies over smart club's
+    // never-edited fixture (no changedAt counts as epoch).
+    pages = [
+      changesPage([
+        {
+          ref: REF(SW, 'f1'),
+          schedule: {
+            scheduledTime: '2026-10-04T09:00:00+02:00',
+            venue: 'Kingsmead Oval',
+            changedAt: schedule.EPOCH_CHANGED_AT,
+          },
+        },
+      ]),
+    ];
+    const summary = await pull();
+    assert.equal(summary.counts.scheduleStale, 1);
+    assert.equal(summary.counts.scheduleApplied, 0);
+    assert.equal((await fixtureOf(SW, 'f1')).venueName, 'Lahee Park');
   });
 
   test('released with venue withheld, edited, then recalled: the flush sends nothing', async () => {

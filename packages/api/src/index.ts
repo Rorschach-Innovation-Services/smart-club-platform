@@ -4055,9 +4055,9 @@ async function applySeriesPatch(
     // of the reveal intent, so they are ignored rather than persisted through this action.
     const revealWithheld = Object.keys(withheld).length ? withheld : undefined;
     // Medicoach sync (ADR 0016): fixtures of a withheld series were held back from medicoach's
-    // public match centre. Once nothing is withheld any more, every fixture is stamped and
-    // re-queued with its real schedule — in the same write, version-checked against the
-    // series the stamps were computed from, so a concurrent edit is a plain 409.
+    // public match centre. Once nothing is withheld any more, every fixture is re-queued with
+    // its real schedule and its EXISTING changedAt (never re-stamped: a medicoach edit made
+    // while it was withheld must still win) once the reveal landed.
     const requeue = await requeueRevealedSeries(repo, tenant, {
       ...current,
       withheld: revealWithheld,
@@ -4067,9 +4067,7 @@ async function applySeriesPatch(
       revealed = await repo.updateSeries(tenant, id, {
         withheld: revealWithheld,
         revealedAt,
-        ...(requeue.fixtures
-          ? { fixtures: requeue.fixtures, version: patch.version ?? current.version }
-          : { version: patch.version }),
+        version: patch.version,
       });
     } catch (err) {
       if (err instanceof VersionConflictError) throw new HttpError(409, 'series changed; refetch');
@@ -4207,25 +4205,22 @@ async function applySeriesPatch(
     patch.fixtures = after.fixtures;
   }
   // A draft's schedule was held back from medicoach (ADR 0016); the release of a series that
-  // withholds nothing makes it public, so every fixture is stamped and queued with its real
-  // schedule in this same (version-checked) write. A release WITH withholding stays held
-  // until the reveal of the last field (the reveal branch above).
+  // withholds nothing makes it public, so once this write landed every fixture is queued with
+  // its real schedule and its EXISTING changedAt — never re-stamped, so a medicoach edit made
+  // while it was a draft still wins. A release WITH withholding stays held until the reveal
+  // of the last field (the reveal branch above).
   if (patch.released === true && !current.released) {
     const requeue = await requeueRevealedSeries(repo, tenant, {
       ...current,
       ...patch,
       id,
     } as Series);
-    if (requeue.fixtures) {
-      patch.fixtures = requeue.fixtures;
-      patch.version ??= current.version;
-      const edits = scheduleSync;
-      scheduleSync = {
-        refs: edits?.refs ?? [],
-        newRefs: edits?.newRefs ?? [],
-        enqueue: async () => (await edits?.enqueue(), requeue.enqueue()),
-      };
-    }
+    const edits = scheduleSync;
+    scheduleSync = {
+      refs: edits?.refs ?? [],
+      newRefs: edits?.newRefs ?? [],
+      enqueue: async () => (await edits?.enqueue(), requeue.enqueue()),
+    };
   }
   let written: Series;
   try {

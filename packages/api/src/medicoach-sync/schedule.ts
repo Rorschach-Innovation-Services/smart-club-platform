@@ -29,9 +29,11 @@
  * (a draft, or recalled) or currently withholds venue and/or time is never pushed. Its row is
  * kept as `heldUntilReveal` (flagged at enqueue, and re-checked against the live series on
  * every flush), and the release (nothing withheld) or the reveal that clears the last
- * withheld field re-queues every fixture of the series with its real schedule
- * (`requeueRevealedSeries`). A row whose series was deleted is dropped, never pushed. Inbound changes still apply to a withheld series — they leak
- * nothing. The initial migration bundle carries its own `venueWithheld`/`timeWithheld`.
+ * withheld field re-queues every fixture of the series with its real schedule and its
+ * existing `changedAt` — never re-stamped, so a medicoach edit made meanwhile still wins
+ * (`requeueRevealedSeries`). A row whose series was deleted is dropped, never pushed.
+ * Inbound changes still apply to a withheld series — they leak nothing. The initial
+ * migration bundle carries its own `venueWithheld`/`timeWithheld`.
  */
 import { randomUUID } from 'node:crypto';
 import { isSlotRef } from '../../../engine/src/formats.js';
@@ -316,44 +318,59 @@ export async function recordScheduleDiff(
 }
 
 /**
+ * The `changedAt` a fixture smart club never edited since import carries on the wire: one
+ * millisecond after medicoach's never-edited epoch (`1970-01-01T00:00:00.000Z`), so smart
+ * club's real values (a newly revealed venue, say) still win over a never-edited medicoach
+ * row, while any real medicoach edit wins over them.
+ */
+export const NEVER_EDITED_CHANGED_AT = '1970-01-01T00:00:00.001Z';
+
+/**
+ * Inbound counterpart: a smart-club fixture with no `schedule.changedAt` (never edited since
+ * import) counts as medicoach's epoch, so a never-edited medicoach row is never newer than it
+ * and any real medicoach edit is.
+ */
+export const EPOCH_CHANGED_AT = '1970-01-01T00:00:00.000Z';
+
+/**
  * The write that makes a series' real schedule public — the release (false→true) of a series
  * withholding nothing, or the reveal that clears its LAST withheld field (ADR 0011) — means
- * medicoach must now get it: every fixture of a sync-mapped series is stamped
- * `schedule.changedAt = now` (returned for the caller to write in the same update) and, via
- * `enqueue()` once that write landed, queued with its real schedule — overwriting any row
- * held while the series was a draft or withheld. A no-op (`fixtures` undefined) for a series
- * that still holds its schedule (`seriesHoldsSchedule`: draft or withholding a field), an
- * unmapped series or a tenant without the sync.
+ * medicoach must now get it: `enqueue()` (called once that write landed) queues every fixture
+ * of a sync-mapped series with its real schedule and its EXISTING `schedule.changedAt` —
+ * never re-stamped, so a medicoach edit made while the series was a draft or withheld still
+ * wins ("most recent change wins") — or `NEVER_EDITED_CHANGED_AT` when smart club never
+ * edited it. A row already held for the fixture carries the same or a newer `changedAt`, so
+ * the conditional `putPendingSync` keeps it (the flush un-holds it against the live series).
+ * Queues nothing for a series that still holds its schedule (`seriesHoldsSchedule`: draft or
+ * withholding a field), an unmapped series or a tenant without the sync.
  */
 export async function requeueRevealedSeries(
   repo: Pick<RepoModule, 'getTenantConfig' | 'putPendingSync' | 'getSeasonRun'>,
   tenant: string,
   revealed: Series,
   opts: { config?: TenantConfig | null; now?: () => Date } = {},
-): Promise<{ fixtures?: ScheduleFixture[]; enqueue(): Promise<number> }> {
+): Promise<{ enqueue(): Promise<number> }> {
   const none = { enqueue: async () => 0 };
   if (seriesHoldsSchedule(revealed) || !Array.isArray(revealed.fixtures)) return none;
   const config = opts.config !== undefined ? opts.config : await repo.getTenantConfig(tenant);
   if (!(await seriesMappedForSync(repo, tenant, revealed, config))) return none;
   const nowIso = (opts.now?.() ?? new Date()).toISOString();
   const rows: PendingScheduleSync[] = [];
-  const fixtures = (revealed.fixtures as ScheduleFixture[]).map((f) => {
-    if (!f?.id) return f;
-    const next: ScheduleFixture = { ...f, schedule: { ...(f.schedule ?? {}), changedAt: nowIso } };
+  for (const f of revealed.fixtures as ScheduleFixture[]) {
+    if (!f?.id) continue;
+    const changedAt = f.schedule?.changedAt || NEVER_EDITED_CHANGED_AT;
     rows.push({
-      ref: fixtureSyncRef(tenant, String(revealed.id), next),
+      ref: fixtureSyncRef(tenant, String(revealed.id), f),
       seriesId: String(revealed.id),
       fixtureId: String(f.id),
-      schedule: fixtureSchedule(revealed, next, nowIso),
+      schedule: fixtureSchedule(revealed, f, changedAt),
       origin: 'admin',
       enqueuedAt: nowIso,
       attempts: 0,
     });
-    return next;
-  });
+  }
   if (!rows.length) return none;
   return {
-    fixtures,
     enqueue: async () => {
       for (const r of rows) await repo.putPendingSync(tenant, r);
       return rows.length;
@@ -684,8 +701,10 @@ export async function applyInboundSchedule(
     const i = fixtures.findIndex((f) => f?.id === fixtureId);
     if (!series || i < 0) return 'missing';
     const fixture = fixtures[i];
-    const ours = fixture.schedule?.changedAt;
-    if (ours && !(Date.parse(schedule.changedAt) > Date.parse(ours))) return 'stale';
+    // Never edited by smart club since import = epoch: medicoach's never-edited rows (epoch)
+    // are never newer; any real medicoach edit is.
+    const ours = fixture.schedule?.changedAt || EPOCH_CHANGED_AT;
+    if (!(Date.parse(schedule.changedAt) > Date.parse(ours))) return 'stale';
 
     if (!('config' in cache)) cache.config = await repo.getTenantConfig(tenant);
     const config = cache.config ?? null;
