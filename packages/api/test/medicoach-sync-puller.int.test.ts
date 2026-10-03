@@ -548,6 +548,19 @@ describe('medicoach sync puller', () => {
     assert.equal(row.error, 'medicoach answered HTTP 503');
   });
 
+  test('a run that stops at the page cap with more to fetch is logged for the admin', async () => {
+    // A medicoach that always answers hasMore (here with no rows and the same cursor):
+    // the run must stop, and the admin sync page must say so (a quiet run logs nothing).
+    pages = [{ ...quiet('loop-cursor'), hasMore: true }];
+    const summary = await run();
+    assert.equal(summary.pages, puller.MAX_PAGES_PER_RUN);
+    assert.match(summary.error ?? '', /stopped after 50 pages/);
+    const [row] = await repo.listSyncLogs('dolphins');
+    assert.ok(row, 'a SYNCLOG row is written');
+    assert.equal(row.outcome, 'error');
+    assert.match(row.error ?? '', /stopped after 50 pages/);
+  });
+
   test('a response outside the contract is rejected without echoing values', async () => {
     const page = example('changes-live-result');
     page.fixtures[0].result.recordedAt = 'yesterday';

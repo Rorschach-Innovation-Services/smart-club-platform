@@ -365,6 +365,7 @@ export async function runMedicoachSync(
     });
   };
 
+  let moreToFetch = false;
   try {
     for (let page = 0; page < MAX_PAGES_PER_RUN; page++) {
       const pq = changesPathAndQuery(tenant, cursor ?? undefined, PAGE_LIMIT);
@@ -562,9 +563,18 @@ export async function runMedicoachSync(
         await repo.putSyncCursor(tenant, data.nextCursor);
         cursor = data.nextCursor;
       }
+      moreToFetch = data.hasMore;
       if (!data.hasMore) break;
     }
     summary.cursorAfter = cursor;
+    if (moreToFetch) {
+      // The page cap stopped a run medicoach says isn't finished. A backlog drains over the
+      // next runs; a medicoach that never stops answering hasMore would otherwise cost 50
+      // requests every 15 minutes with nothing on the admin page, so it is always logged.
+      summary.error = `stopped after ${MAX_PAGES_PER_RUN} pages with more still to fetch; the next run continues`;
+      await record('error', summary.error);
+      return summary;
+    }
     await record('ok');
     return summary;
   } catch (err) {
