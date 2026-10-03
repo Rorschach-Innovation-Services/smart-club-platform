@@ -346,9 +346,7 @@ export async function sendCaptainsReportDueWhatsApp(
   if (!key) throw new WhatsAppTemplatePendingError();
   const { name, lang } = WHATSAPP_TEMPLATES[key];
   const params =
-    key === 'captainsReportOpen'
-      ? captainsReportOpenParams(input)
-      : captainsReportDueParams(input);
+    key === 'captainsReportOpen' ? captainsReportOpenParams(input) : captainsReportDueParams(input);
   return sendTemplate(
     input.to,
     name,

@@ -221,7 +221,10 @@ const isLive = (def: WhatsAppTemplateDefinition) => def.status === 'registered';
  * WhatsApp channel is then skipped as `template-pending`). Overridable for tests.
  */
 export function captainsReportTemplateKey(
-  templates: Record<'captainsReportOpen' | 'captainsReportDue', WhatsAppTemplateDefinition> = WHATSAPP_TEMPLATES,
+  templates: Record<
+    'captainsReportOpen' | 'captainsReportDue',
+    WhatsAppTemplateDefinition
+  > = WHATSAPP_TEMPLATES,
 ): 'captainsReportOpen' | 'captainsReportDue' | null {
   if (isLive(templates.captainsReportOpen)) return 'captainsReportOpen';
   if (isLive(templates.captainsReportDue)) return 'captainsReportDue';
