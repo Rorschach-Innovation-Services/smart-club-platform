@@ -511,5 +511,15 @@ export const captainsReportNotifyKey = (tenant: string, reportId: string, audien
   sk: `NOTIFY#capreport#${reportId}#${audience}`,
 });
 
+/**
+ * The WhatsApp status webhook's lookup: Meta posts statuses by message id (wamid) with no
+ * tenant, so each captain's-report WhatsApp send writes `WAMSG#<wamid>` → its report. Global
+ * (not tenant-prefixed) and self-expiring (`expiresAt`); it holds ids only, no PII.
+ */
+export const whatsappMessageKey = (wamid: string) => ({
+  pk: `WAMSG#${wamid}`,
+  sk: 'WAMSG',
+});
+
 /** Prefix used to erase an entire tenant's non-user items. */
 export const tenantErasurePrefix = (tenant: string) => `${tenantPrefix(tenant)}#`;

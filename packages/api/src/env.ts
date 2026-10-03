@@ -102,3 +102,22 @@ export function captainsReportLinkSecret(): string {
 export function captainsReportLinkBase(): string {
   return (process.env.CAPTAINS_REPORT_LINK_BASE_URL || 'http://localhost:5173').replace(/\/+$/, '');
 }
+
+/**
+ * The Meta app secret that signs WhatsApp webhooks (`X-Hub-Signature-256`). The status
+ * webhook FAILS CLOSED while it is empty (every POST is refused). Set before configuring the
+ * callback in Meta (or the medicoach forwarder):
+ *   sst secret set WhatsappAppSecret <meta app secret> --stage <stage>
+ */
+export function whatsappAppSecret(): string {
+  return process.env.WHATSAPP_APP_SECRET ?? fromSstResource('WhatsappAppSecret', 'value') ?? '';
+}
+
+/** The token Meta echoes in the webhook GET verify handshake. Empty ⇒ every handshake fails. */
+export function whatsappWebhookVerifyToken(): string {
+  return (
+    process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN ??
+    fromSstResource('WhatsappWebhookVerifyToken', 'value') ??
+    ''
+  );
+}

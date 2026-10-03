@@ -1256,6 +1256,41 @@ export interface CaptainsReportRecipient {
   kind: 'captain' | 'chair' | 'portal';
   memberId: string;
   name: string;
+  /** Set when the chair sent the report on to the match captain ("Send to captain"). */
+  forwardedBy?: { name: string; via: 'link' | 'portal'; at: string };
+}
+
+/**
+ * Why a notice channel was not sent: `no-contact` (no email AND no cell on file), `no-email`,
+ * `no-cell`, `dry-run` (NOTIFY_DRY_RUN / no provider credentials), `template-pending` (no
+ * approved WhatsApp template), `send-failed` (the provider refused or errored).
+ */
+export type CaptainsReportDeliveryReason =
+  | 'no-contact'
+  | 'no-email'
+  | 'no-cell'
+  | 'dry-run'
+  | 'template-pending'
+  | 'send-failed';
+
+/**
+ * One channel of one notice about a report (the opening, a chair's forward, the reminder).
+ * Never carries an address. `messageId` (the provider's id) is kept server-side only: the
+ * WhatsApp status webhook matches on it; views strip it.
+ */
+export interface CaptainsReportDelivery {
+  channel: 'email' | 'whatsapp';
+  status: 'sent' | 'failed' | 'skipped';
+  reason?: CaptainsReportDeliveryReason;
+  at: string;
+  messageId?: string;
+  purpose: 'opened' | 'forwarded' | 'reminder';
+  recipientKind: 'captain' | 'chair';
+  /** Meta's latest delivery status for a sent WhatsApp message (status webhook). */
+  providerStatus?: 'sent' | 'delivered' | 'read' | 'failed';
+  providerAt?: string;
+  /** Meta's error title for a failed WhatsApp message (no address, no body). */
+  providerError?: string;
 }
 
 /**
@@ -1272,7 +1307,11 @@ export interface CaptainsReport {
   fixtureId: string;
   clubId: string;
   status: CaptainsReportStatus;
-  source: 'auto' | 'manual';
+  /**
+   * `auto` opened by a pulled result; `manual` filed from the portal for a listed fixture;
+   * `manual-unlisted` filed for a match that is not in the fixture list (seriesId `unlisted`).
+   */
+  source: 'auto' | 'manual' | 'manual-unlisted';
   /** The medicoach sync ref for the fixture (fixture refs carry no personal data). */
   fixtureRef?: string;
   matchDate: string;
@@ -1299,6 +1338,31 @@ export interface CaptainsReport {
   voidedAt?: string;
   /** Set when the result behind a SUBMITTED report was cleared — the admin should look. */
   flagged?: { reason: string; at: string };
+  /**
+   * When the emailed/WhatsApp link stops working (ISO): 23:59:59 SAST on the later of the
+   * match date + 7 days and the day the result first arrived + 3 days. Absent on reports
+   * opened before it was stored (then: match date + 7 days).
+   */
+  linkExpiresAt?: string;
+  /** Per-channel outcome of every notice sent about this report (no addresses). */
+  deliveries?: CaptainsReportDelivery[];
+  /** When a notice about this report first reached someone (a channel `sent`). */
+  notifiedAt?: string;
+  /** When the one pre-expiry reminder went out. */
+  reminderSentAt?: string;
+  /**
+   * After "Send to captain": the chair's own link id, which keeps working until the report
+   * is submitted (first submit wins). Server-only — never served.
+   */
+  chairMemberId?: string;
+  /** How many times the chair has sent the report on (max 3). */
+  forwardCount?: number;
+  /**
+   * The captain recipient's notify contact, kept so the reminder can reach them (a captain's
+   * roster key is a hashed ID number and is never stored). Server-only — never served or
+   * logged; deleted with the report.
+   */
+  recipientContact?: { email?: string; cell?: string };
   createdAt: string;
   updatedAt: string;
 }

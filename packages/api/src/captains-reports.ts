@@ -40,9 +40,12 @@ import { chairContactOf } from './club-contacts.js';
 import { captainsReportLinkBase, captainsReportLinkSecret } from './env.js';
 import { hasFeature } from './features.js';
 import { toE164 } from './notify/e164.js';
+import { isWithheld } from './series-projection.js';
 import { TENANT_UTC_OFFSET_MINUTES } from './tenant-time.js';
 import type {
   CaptainsReport,
+  CaptainsReportDelivery,
+  CaptainsReportDeliveryReason,
   CaptainsReportRecipient,
   Club,
   Series,
@@ -53,13 +56,17 @@ import type { SyncResult } from './medicoach-sync-contract.js';
 
 type RepoModule = typeof import('./repo.js');
 
-/**
- * A result for a match older than this never opens reports (a late backfill, a re-pull):
- * the link would already be dead. The club can still file from the portal at any time.
- */
-export const MAX_REPORT_AGE_DAYS = 7;
-/** A link works until the end of this day after the match (23:59:59 SAST), unless used first. */
+/** A link works at least until the end of this day after the match (23:59:59 SAST). */
 export const LINK_VALID_DAYS = 7;
+/**
+ * …and at least until the end of this day after the result first arrived, so a late result
+ * still leaves the captain time to report. A report opens only while that expiry is ahead.
+ */
+export const RESULT_GRACE_DAYS = 3;
+/** The one reminder goes this long before the link expires. */
+export const REMINDER_LEAD_DAYS = 2;
+/** How many times a chair may send a report on to a captain. */
+export const MAX_FORWARDS = 3;
 /** REPORTOPEN# retries (the puller's own try included) before giving up with Sentry. */
 export const REPORT_OPEN_MAX_ATTEMPTS = 5;
 /**
@@ -150,19 +157,50 @@ export function verifyReportLinkToken(token: string, secret: string, nowMs: numb
   return { ok: true, payload: p };
 }
 
+/** 23:59:59 SAST on the day `plusDays` after `date` (YYYY-MM-DD), in epoch seconds. */
+const endOfSastDay = (date: string, plusDays: number) =>
+  Math.floor(
+    (Date.parse(`${date}T23:59:59Z`) - TENANT_UTC_OFFSET_MINUTES * 60_000 + plusDays * DAY_MS) /
+      1000,
+  );
+
+/** The SAST calendar day of an instant. */
+const sastDay = (ms: number) =>
+  new Date(ms + TENANT_UTC_OFFSET_MINUTES * 60_000).toISOString().slice(0, 10);
+
 /**
- * When a report link stops working: 23:59:59 SAST on the day LINK_VALID_DAYS after the match
- * (epoch seconds). There is no due date — the link is simply single-use and short-lived.
+ * When a report link stops working (epoch seconds): 23:59:59 SAST on the later of the day
+ * LINK_VALID_DAYS after the match and the day RESULT_GRACE_DAYS after the result first
+ * arrived (`receivedAtMs`; omitted ⇒ the match rule alone). There is no due date — the link
+ * is single-submission and short-lived.
  */
-export function reportLinkExpiry(matchDate: string): number {
-  const endOfMatchDayUtc =
-    Date.parse(`${matchDate}T23:59:59Z`) - TENANT_UTC_OFFSET_MINUTES * 60_000;
-  return Math.floor((endOfMatchDayUtc + LINK_VALID_DAYS * DAY_MS) / 1000);
+export function reportLinkExpiry(matchDate: string, receivedAtMs?: number): number {
+  const byMatch = endOfSastDay(matchDate, LINK_VALID_DAYS);
+  if (receivedAtMs === undefined || !Number.isFinite(receivedAtMs)) return byMatch;
+  return Math.max(byMatch, endOfSastDay(sastDay(receivedAtMs), RESULT_GRACE_DAYS));
 }
 
-/** The link for a report: `${base}/r/<token>`, expiring per `reportLinkExpiry`. */
+/** A stored report's link expiry (epoch seconds); older reports fall back to the match rule. */
+export function reportExpirySeconds(
+  r: Pick<CaptainsReport, 'linkExpiresAt' | 'matchDate'>,
+): number {
+  const stored = r.linkExpiresAt ? Date.parse(r.linkExpiresAt) : NaN;
+  return Number.isFinite(stored) ? Math.floor(stored / 1000) : reportLinkExpiry(r.matchDate);
+}
+
+/** "Sunday, 11 Oct" — the SAST day a link expires, as the email and pages show it. */
+export function fmtExpiry(epochSeconds: number): string {
+  return new Date(epochSeconds * 1000).toLocaleDateString('en-GB', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'short',
+    timeZone: 'Africa/Johannesburg',
+  });
+}
+
+/** The link for a report: `${base}/r/<token>`, expiring at the report's stored expiry. */
 export function reportLink(tenant: string, report: CaptainsReport, secret: string, base: string) {
-  const exp = reportLinkExpiry(report.matchDate);
+  const exp = reportExpirySeconds(report);
   const token = signReportLinkToken(
     { t: tenant, r: report.id, m: report.recipient.memberId, e: exp },
     secret,
@@ -173,17 +211,77 @@ export function reportLink(tenant: string, report: CaptainsReport, secret: strin
 // ───────────────────────── Projections ─────────────────────────
 
 /**
- * What a club member / link holder / admin sees: never the recipient's opaque memberId, and
- * never the `deadline` reports opened before the due date was dropped still carry.
+ * What a club member / link holder / admin sees: never the recipient's opaque memberId, the
+ * chair's kept link id, the captain's contact or a provider message id, and never the
+ * `deadline` reports opened before the due date was dropped still carry. `venueWithheld` is
+ * set while the series withholds the venue from clubs (the venue is then left out).
  */
-export type CaptainsReportView = Omit<CaptainsReport, 'recipient' | 'deadline'> & {
+export type CaptainsReportView = Omit<
+  CaptainsReport,
+  'recipient' | 'deadline' | 'chairMemberId' | 'recipientContact' | 'deliveries'
+> & {
   recipient: Omit<CaptainsReportRecipient, 'memberId'>;
+  deliveries?: Array<Omit<CaptainsReportDelivery, 'messageId'>>;
+  venueWithheld?: true;
 };
 
-export function reportView(r: CaptainsReport, _nowIso?: string): CaptainsReportView {
+/** Series id of a report for a match that is not in the fixture list. */
+export const UNLISTED_SERIES_ID = 'unlisted';
+
+/** A fixture's venue as the console shows it: override, allocated venue, else home ground. */
+export function liveFixtureVenue(series: Series, fixtureId: string): string | undefined {
+  const fixture = (series.fixtures as StoredFixture[] | undefined)?.find(
+    (f) => f?.id === fixtureId,
+  );
+  if (!fixture) return undefined;
+  const home = fixture.home
+    ? series.participants?.find((p) => p.teamId === fixture.home)?.venue
+    : undefined;
+  return fixture.venueOverride || fixture.venueName || home || undefined;
+}
+
+/**
+ * Where to read a report's venue from: the LIVE series (re-evaluated on every read, so a reveal
+ * shows the venue later). `forClub` applies the club projection's rule (ADR 0011): an
+ * unreleased series or one withholding its venue shows none. Admins (forClub false) see it.
+ */
+export interface ReportViewScope {
+  series: Series | null | undefined;
+  forClub: boolean;
+}
+
+function scopedVenue(
+  r: CaptainsReport,
+  scope: ReportViewScope | undefined,
+): { venue?: string; venueWithheld?: true } {
+  const stored = r.venue ? { venue: r.venue } : {};
+  if (!scope || r.source === 'manual-unlisted' || r.seriesId === UNLISTED_SERIES_ID) return stored;
+  const s = scope.series;
+  if (!s) return scope.forClub ? {} : stored;
+  if (scope.forClub) {
+    if (!s.released) return {};
+    if (isWithheld(s, 'venue')) return { venueWithheld: true };
+  }
+  const venue = liveFixtureVenue(s, r.fixtureId) || r.venue;
+  return venue ? { venue } : {};
+}
+
+export function reportView(r: CaptainsReport, scope?: ReportViewScope): CaptainsReportView {
   const { memberId: _m, ...recipient } = r.recipient;
-  const { deadline: _d, ...rest } = r;
-  return { ...rest, recipient };
+  const {
+    deadline: _d,
+    chairMemberId: _c,
+    recipientContact: _rc,
+    deliveries,
+    venue: _v,
+    ...rest
+  } = r;
+  return {
+    ...rest,
+    ...scopedVenue(r, scope),
+    recipient,
+    ...(deliveries ? { deliveries: deliveries.map(({ messageId: _id, ...d }) => d) } : {}),
+  };
 }
 
 // ───────────────────────── Input parsing ─────────────────────────
@@ -297,12 +395,15 @@ export interface ResultEventLike {
   ref: string;
   result: SyncResult;
   config: TenantConfig;
+  /** When the result first arrived (a retry passes its marker's time); default now. */
+  receivedAt?: Date;
 }
 
 /** One outbound notice (the default sender fans it out over email + WhatsApp). */
 export interface ReportNotice {
   tenant: string;
   reportId: string;
+  purpose: CaptainsReportDelivery['purpose'];
   recipientKind: 'captain' | 'chair';
   to: { name: string; email?: string; cell?: string };
   /** The chair, cc'd by email when the captain is the recipient. */
@@ -311,14 +412,23 @@ export interface ReportNotice {
   matchLine: string;
   matchDateText: string;
   orgName: string;
+  /** "Sunday, 11 Oct" — when the link stops working. */
+  expiresText: string;
   token: string;
   url: string;
   channels: Array<'email' | 'whatsapp'>;
+  /** The one pre-expiry reminder (same link). */
+  reminder?: boolean;
+  /** The chair who sent the report on to this captain. */
+  forwardedBy?: string;
 }
 
 export interface NoticeResult {
   channel: 'email' | 'whatsapp';
   status: 'sent' | 'skipped' | 'failed';
+  reason?: CaptainsReportDeliveryReason;
+  /** The provider's message id (a `dry-run-` id means nothing was sent). Never logged. */
+  messageId?: string;
   error?: string;
 }
 
@@ -335,6 +445,7 @@ export interface CaptainsReportDeps {
 export interface OpenOutcome {
   skipped?: 'import' | 'no-go-live' | 'before-go-live' | 'too-old' | 'no-fixture';
   opened: string[];
+  /** Reports whose notice actually reached someone (a channel sent). */
   notified: string[];
 }
 
@@ -371,7 +482,7 @@ function playerNaturalKey(ref: string | null | undefined, tenant: string): strin
   return /^[A-Za-z0-9_-]{1,128}$/.test(key) ? key : null;
 }
 
-const hasContact = (c: { email?: string; cell?: string }) =>
+export const hasContact = (c: { email?: string; cell?: string }) =>
   (!!c.email && EMAIL_RE.test(c.email)) || !!toE164(c.cell);
 
 /**
@@ -406,8 +517,8 @@ async function resolveCaptain(
  * Open the reports for a newly stored result. Idempotent per fixture + club: an existing
  * pending/submitted report is left alone (a void one is re-opened with a NEW recipient id, so
  * old links stay dead). Skipped for imported results, matches before the tenant's
- * `integrations.medicoach.goLiveDate` (unset ⇒ not live ⇒ skipped), and matches older than
- * MAX_REPORT_AGE_DAYS.
+ * `integrations.medicoach.goLiveDate` (unset ⇒ not live ⇒ skipped), and results whose link
+ * would already have expired (`reportLinkExpiry`).
  */
 export async function openCaptainReports(
   event: ResultEventLike,
@@ -437,10 +548,12 @@ export async function openCaptainReports(
   if (!series || !fixture?.date) return { ...out, skipped: 'no-fixture' };
   const matchDate = fixture.date;
   if (matchDate < goLive) return { ...out, skipped: 'before-go-live' };
-  // Too old = the link would already be dead. Judged on the link's own expiry (end of the 7th
-  // day after the match, SAST), not on the UTC date, which lags SAST by two hours: from
-  // 00:00 to 02:00 SAST on day 8 the UTC date still reads day 7.
-  if (reportLinkExpiry(matchDate) * 1000 <= now().getTime()) return { ...out, skipped: 'too-old' };
+  // Too old = the link would already be dead: its expiry (the later of match + 7 days and
+  // result received + 3 days, end of that SAST day) has passed. A retry judges this on the
+  // time the result first arrived, so a long-failing opening does not stretch the window.
+  const receivedAtMs = (event.receivedAt ?? now()).getTime();
+  const expiry = reportLinkExpiry(matchDate, receivedAtMs);
+  if (expiry * 1000 <= now().getTime()) return { ...out, skipped: 'too-old' };
 
   const officials = await repo.getFixtureOfficials(tenant, seriesId, fixtureId);
   const umpiresSnapshot: AppointedUmpire[] = (officials?.umpires ?? []).map((u) => ({
@@ -448,9 +561,9 @@ export async function openCaptainReports(
     name: u.name,
   }));
   const byTeam = new Map((series.participants ?? []).map((p) => [p.teamId, p]));
-  const homeTeam = fixture.home;
-  const homeVenue = homeTeam ? byTeam.get(homeTeam)?.venue : undefined;
-  const venue = fixture.venueOverride || fixture.venueName || homeVenue || '';
+  // A series withholding its venue (ADR 0011) keeps it off the report: the link and the club
+  // portal re-read the live series, so the reveal shows it later.
+  const venue = isWithheld(series, 'venue') ? '' : (liveFixtureVenue(series, fixtureId) ?? '');
 
   const clubs = new Map<string, Club | null>();
   const sides = (['home', 'away'] as const).map((side) => {
@@ -501,6 +614,8 @@ export async function openCaptainReports(
       captainName: captain?.name ?? '',
       umpires: [],
       general: '',
+      linkExpiresAt: new Date(expiry * 1000).toISOString(),
+      ...(captain ? { recipientContact: contactOnly(captain) } : {}),
       createdAt: nowIso,
       updatedAt: nowIso,
     };
@@ -509,29 +624,26 @@ export async function openCaptainReports(
       // NOTIFY# ledger claim makes this a no-op when the first send was already claimed.
       const existing = await repo.getCaptainsReport(tenant, seriesId, fixtureId, club.id);
       if (!existing || existing.status !== 'pending' || existing.source !== 'auto') continue;
-      const toCaptain = existing.recipient.kind === 'captain' && captain;
-      const sent = await notifyReportOpened(
-        deps,
-        tenant,
-        config,
-        existing,
-        toCaptain ? captain : chair,
-        toCaptain ? chair : null,
-      );
+      const toCaptain = existing.recipient.kind === 'captain';
+      const captainContact = existing.recipientContact
+        ? { name: existing.recipient.name, ...existing.recipientContact }
+        : captain;
+      const sent = await notifyRecipient(deps, tenant, config, existing, {
+        contact: toCaptain && captainContact ? captainContact : chair,
+        ccChair: toCaptain && captainContact ? chair : null,
+        purpose: existing.recipient.forwardedBy ? 'forwarded' : 'opened',
+      });
       if (sent === 'sent') out.notified.push(existing.id);
       else if (sent === 'failed') failedNotices.push(existing.id);
       continue;
     }
     out.opened.push(report.id);
 
-    const sent = await notifyReportOpened(
-      deps,
-      tenant,
-      config,
-      report,
+    const sent = await notifyRecipient(deps, tenant, config, report, {
       contact,
-      captain ? chair : null,
-    );
+      ccChair: captain ? chair : null,
+      purpose: 'opened',
+    });
     if (sent === 'sent') out.notified.push(report.id);
     else if (sent === 'failed') failedNotices.push(report.id);
   }
@@ -544,21 +656,60 @@ export async function openCaptainReports(
   return out;
 }
 
+const contactOnly = (c: { email?: string; cell?: string }) => ({
+  ...(c.email ? { email: c.email } : {}),
+  ...(c.cell ? { cell: c.cell } : {}),
+});
+
+/** A result's outcome as a stored delivery: a dry-run "send" is recorded as not sent. */
+function deliveryOf(
+  r: NoticeResult,
+  purpose: CaptainsReportDelivery['purpose'],
+  recipientKind: CaptainsReportDelivery['recipientKind'],
+  at: string,
+): CaptainsReportDelivery {
+  const dry = r.status === 'sent' && !!r.messageId?.startsWith('dry-run-');
+  const status = dry ? 'skipped' : r.status;
+  const reason: CaptainsReportDeliveryReason | undefined = dry
+    ? 'dry-run'
+    : (r.reason ?? (r.status === 'failed' ? 'send-failed' : undefined));
+  return {
+    channel: r.channel,
+    status,
+    ...(reason ? { reason } : {}),
+    at,
+    ...(status === 'sent' && r.messageId ? { messageId: r.messageId } : {}),
+    purpose,
+    recipientKind,
+  };
+}
+
 /**
- * Claim the NOTIFY# ledger row, then send. 'already' when the send was already claimed;
- * 'failed' when no channel delivered and at least one FAILED (not merely skipped for want of
- * a contact) — the claim is then released so a retry can send again. A partial success (one
- * channel sent) is done.
+ * Claim the NOTIFY# ledger row, send, and record the per-channel outcome on the report.
+ *
+ *  - 'already': the send was already claimed (a replay, a retried run) — nothing sent.
+ *  - 'sent': at least one channel actually went out (`notifiedAt` is set).
+ *  - 'undelivered': nothing went out but nothing failed either (no contact, dry run, no
+ *    approved template) — recorded honestly, and never counted as notified.
+ *  - 'failed': nothing went out and a channel FAILED. For the opening/forward audience
+ *    (`recipient#<memberId>`) the claim is released so the REPORTOPEN# retry can send again;
+ *    a reminder is best-effort and keeps its claim (at most one).
  */
-async function notifyReportOpened(
+async function notifyRecipient(
   deps: CaptainsReportDeps,
   tenant: string,
   config: TenantConfig,
   report: CaptainsReport,
-  contact: { name: string; email?: string; cell?: string },
-  ccChair: { email?: string } | null,
-): Promise<'sent' | 'already' | 'failed'> {
+  opts: {
+    contact: { name: string; email?: string; cell?: string };
+    ccChair: { email?: string } | null;
+    purpose: CaptainsReportDelivery['purpose'];
+    forwardedBy?: string;
+  },
+): Promise<'sent' | 'undelivered' | 'already' | 'failed'> {
   const { repo } = deps;
+  const now = deps.now ?? (() => new Date());
+  const { contact, ccChair, purpose } = opts;
   // Everything that can throw BEFORE a send is resolved before the ledger claim, so a
   // failure (e.g. the link secret unset) leaves the claim free for the REPORTOPEN# retry.
   const secret = (deps.linkSecret ?? captainsReportLinkSecret)();
@@ -566,9 +717,13 @@ async function notifyReportOpened(
   const { token, url } = reportLink(tenant, report, secret, base);
   // The ledger audience is per RECIPIENT (its random memberId), not per report: a report
   // voided by a cleared result and re-opened by a re-recorded one gets a new memberId (a new
-  // link) and must be notified again, while a replay of the same opening never is.
-  const audience = `recipient#${report.recipient.memberId}`;
+  // link) and must be notified again, while a replay of the same opening never is. The one
+  // reminder has its own audience.
+  const reminder = purpose === 'reminder';
+  const audience = `${reminder ? 'reminder' : 'recipient'}#${report.recipient.memberId}`;
   if (!(await repo.claimCaptainsReportNotify(tenant, report.id, audience))) return 'already';
+  const recipientKind: 'captain' | 'chair' =
+    report.recipient.kind === 'captain' ? 'captain' : 'chair';
   const home = report.side === 'home' ? report.clubName : report.opponentName;
   const away = report.side === 'home' ? report.opponentName : report.clubName;
   const cc =
@@ -578,48 +733,105 @@ async function notifyReportOpened(
   const notice: ReportNotice = {
     tenant,
     reportId: report.id,
-    recipientKind: report.recipient.kind === 'captain' ? 'captain' : 'chair',
+    purpose,
+    recipientKind,
     to: contact,
     ...(cc ? { ccEmail: cc } : {}),
     clubName: report.clubName,
     matchLine: `${home} v ${away}`,
     matchDateText: fmtDay(report.matchDate),
     orgName: orgCopy(config).name,
+    expiresText: fmtExpiry(reportExpirySeconds(report)),
     token,
     url,
     channels: hasFeature(config, 'whatsappInvites', true) ? ['email', 'whatsapp'] : ['email'],
+    ...(reminder ? { reminder: true } : {}),
+    ...(opts.forwardedBy ? { forwardedBy: opts.forwardedBy } : {}),
   };
-  const send = deps.sendNotice ?? sendReportNotice;
   let results: NoticeResult[];
-  try {
-    results = await send(notice);
-  } catch (err) {
+  if (!hasContact(contact)) {
+    // Nobody to send to: say so on every channel instead of calling the providers.
     results = notice.channels.map((channel) => ({
       channel,
-      status: 'failed' as const,
-      error: err instanceof Error ? err.message : 'send failed',
+      status: 'skipped' as const,
+      reason: 'no-contact' as const,
     }));
+  } else {
+    const send = deps.sendNotice ?? defaultSender;
+    try {
+      results = await send(notice);
+    } catch (err) {
+      results = notice.channels.map((channel) => ({
+        channel,
+        status: 'failed' as const,
+        reason: 'send-failed' as const,
+        error: err instanceof Error ? err.message : 'send failed',
+      }));
+    }
   }
-  if (!results.some((r) => r.status === 'sent') && results.some((r) => r.status === 'failed')) {
+  const at = now().toISOString();
+  const deliveries = results.map((r) => deliveryOf(r, purpose, recipientKind, at));
+  const delivered = deliveries.some((d) => d.status === 'sent');
+  const failed = !delivered && deliveries.some((d) => d.status === 'failed');
+  await repo.recordCaptainsReportDeliveries(tenant, report, deliveries, {
+    ...(delivered ? { notifiedAt: at } : {}),
+    ...(reminder ? { reminderSentAt: at } : {}),
+  });
+  for (const d of deliveries)
+    if (d.channel === 'whatsapp' && d.status === 'sent' && d.messageId)
+      await repo.putWhatsAppMessageRef(d.messageId, {
+        tenant,
+        seriesId: report.seriesId,
+        fixtureId: report.fixtureId,
+        clubId: report.clubId,
+      });
+  if (failed && !reminder) {
     await repo.releaseCaptainsReportNotify(tenant, report.id, audience);
     return 'failed';
   }
-  await repo.completeCaptainsReportNotify(tenant, report.id, audience, results);
-  return 'sent';
+  await repo.completeCaptainsReportNotify(
+    tenant,
+    report.id,
+    audience,
+    results.map(({ channel, status, reason }) => ({
+      channel,
+      status,
+      ...(reason ? { error: reason } : {}),
+    })),
+  );
+  return delivered ? 'sent' : 'undelivered';
 }
 
-/** The default sender: SES email (+ cc) and the `captains_report_due` WhatsApp template. */
+let defaultSender: (n: ReportNotice) => Promise<NoticeResult[]> = (n) => sendReportNotice(n);
+
+/**
+ * Replace the sender used when no `deps.sendNotice` is given (the HTTP routes, e.g. "Send to
+ * captain"). For integration tests and local tooling only; `undefined` restores SES + Meta.
+ */
+export function setDefaultReportNoticeSender(
+  fn: ((n: ReportNotice) => Promise<NoticeResult[]>) | undefined,
+): void {
+  defaultSender = fn ?? ((n) => sendReportNotice(n));
+}
+
+/**
+ * The default sender: SES email (+ cc) and the captain's-report WhatsApp template (v2 once
+ * registered, else v1 — see `captainsReportTemplateKey`). Each channel says why it was not
+ * sent (`no-email`, `no-cell`, `template-pending`, `send-failed`); a dry-run send returns a
+ * `dry-run-` message id, which the caller records as not sent.
+ */
 export async function sendReportNotice(n: ReportNotice): Promise<NoticeResult[]> {
   const { sendCaptainsReportDueEmail } = await import('./notify/email.js');
-  const { sendCaptainsReportDueWhatsApp } = await import('./notify/whatsapp.js');
+  const { sendCaptainsReportDueWhatsApp, WhatsAppTemplatePendingError } =
+    await import('./notify/whatsapp.js');
   const errMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
   return Promise.all(
     n.channels.map(async (channel): Promise<NoticeResult> => {
       if (channel === 'email') {
         if (!n.to.email || !EMAIL_RE.test(n.to.email))
-          return { channel, status: 'skipped', error: 'no valid email on file' };
+          return { channel, status: 'skipped', reason: 'no-email' };
         try {
-          await sendCaptainsReportDueEmail({
+          const { messageId } = await sendCaptainsReportDueEmail({
             to: n.to.email,
             ...(n.ccEmail ? { cc: n.ccEmail } : {}),
             recipientName: n.to.name,
@@ -627,27 +839,32 @@ export async function sendReportNotice(n: ReportNotice): Promise<NoticeResult[]>
             clubName: n.clubName,
             matchLine: n.matchLine,
             matchDateText: n.matchDateText,
+            expiresText: n.expiresText,
             link: n.url,
             orgName: n.orgName,
+            ...(n.reminder ? { reminder: true } : {}),
+            ...(n.forwardedBy ? { forwardedBy: n.forwardedBy } : {}),
           });
-          return { channel, status: 'sent' };
+          return { channel, status: 'sent', messageId };
         } catch (err) {
-          return { channel, status: 'failed', error: errMessage(err) };
+          return { channel, status: 'failed', reason: 'send-failed', error: errMessage(err) };
         }
       }
       const e164 = toE164(n.to.cell);
-      if (!e164) return { channel, status: 'skipped', error: 'no valid cell on file' };
+      if (!e164) return { channel, status: 'skipped', reason: 'no-cell' };
       try {
-        await sendCaptainsReportDueWhatsApp({
+        const { messageId } = await sendCaptainsReportDueWhatsApp({
           to: e164,
           recipientName: n.to.name,
           clubName: n.clubName,
-          match: `${n.matchLine}, ${n.matchDateText}`,
+          match: `${n.matchLine} on ${n.matchDateText}`,
           token: n.token,
         });
-        return { channel, status: 'sent' };
+        return { channel, status: 'sent', messageId };
       } catch (err) {
-        return { channel, status: 'failed', error: errMessage(err) };
+        if (err instanceof WhatsAppTemplatePendingError)
+          return { channel, status: 'skipped', reason: 'template-pending' };
+        return { channel, status: 'failed', reason: 'send-failed', error: errMessage(err) };
       }
     }),
   );
@@ -711,7 +928,7 @@ export interface ReportRetrySummary {
 /**
  * Retry every pending REPORTOPEN# marker for a tenant (each cron run and "Sync now"). The
  * marker's result is re-read from its FIXRESULT# item, so the usual rules apply unchanged
- * (import source, goLiveDate, the 7-day window). A marker whose result is gone, cleared, or
+ * (import source, goLiveDate, the link window — judged on when the result first arrived). A marker whose result is gone, cleared, or
  * older than the one it was written for (the store never happened) is simply dropped.
  * After REPORT_OPEN_MAX_ATTEMPTS failures the marker is dropped and Sentry told.
  */
@@ -747,6 +964,7 @@ export async function retryPendingReportOpens(
           ref: m.ref,
           result: syncResultOf(stored, m.captainRef ?? null),
           config,
+          receivedAt: new Date(m.createdAt),
         },
         deps,
       );
@@ -795,7 +1013,7 @@ export async function loadLinkedReport(
   nowMs: number,
   secret: string,
 ): Promise<
-  | { ok: true; tenant: string; report: CaptainsReport; memberId: string }
+  | { ok: true; tenant: string; report: CaptainsReport; memberId: string; isChairLink: boolean }
   | { ok: false; status: 404 | 410; error: string }
 > {
   const check = verifyReportLinkToken(token, secret, nowMs);
@@ -815,7 +1033,214 @@ export async function loadLinkedReport(
   if (!report) return { ok: false, status: 404, error: 'not found' };
   if (report.status === 'submitted')
     return { ok: false, status: 410, error: 'this report has already been submitted' };
-  if (report.status === 'void' || report.recipient.memberId !== memberId)
+  // The current recipient's link, or — after "Send to captain" — the chair's kept link.
+  const isCurrent = report.recipient.memberId === memberId;
+  const isKeptChairLink = !!report.chairMemberId && report.chairMemberId === memberId;
+  if (report.status === 'void' || (!isCurrent && !isKeptChairLink))
     return { ok: false, status: 410, error: 'this link is no longer valid' };
-  return { ok: true, tenant, report, memberId };
+  const isChairLink = isKeptChairLink || (isCurrent && report.recipient.kind === 'chair');
+  return { ok: true, tenant, report, memberId, isChairLink };
+}
+
+// ───────────────────────── "Send to captain" ─────────────────────────
+
+/** A refused report action, with the HTTP status the route answers. */
+export class ReportFlowError extends Error {
+  constructor(
+    readonly status: 400 | 403 | 404 | 409 | 429,
+    message: string,
+    readonly code?: string,
+  ) {
+    super(message);
+    this.name = 'ReportFlowError';
+  }
+}
+
+/**
+ * An opaque, report-scoped handle for a forward candidate: HMAC(link secret, tenant | report |
+ * roster key). The roster key is a hashed ID number, so it never leaves the server.
+ */
+export function forwardCandidateId(
+  secret: string,
+  tenant: string,
+  reportId: string,
+  naturalKey: string,
+): string {
+  return createHmac('sha256', secret)
+    .update(`capreport-forward.v1|${tenant}|${reportId}|${naturalKey}`)
+    .digest('base64url')
+    .slice(0, 22);
+}
+
+interface ForwardCandidate {
+  id: string;
+  name: string;
+  contact: { name: string; email?: string; cell?: string };
+}
+
+/**
+ * Who a chair may send a report to: the club's OWN registered players (active roster rows),
+ * never minors, and only those with an email or a cell on file. Names only leave the server.
+ */
+export async function forwardCandidates(
+  repo: RepoModule,
+  tenant: string,
+  report: CaptainsReport,
+  secret: string,
+): Promise<ForwardCandidate[]> {
+  const players = await repo.listPlayers(tenant, report.clubId);
+  return players
+    .filter((p) => (p.status ?? 'active') === 'active' && !p.isMinor)
+    .map((p) => {
+      const contact = {
+        name: `${p.firstName ?? ''} ${p.lastName ?? ''}`.trim(),
+        email: p.email?.trim() || undefined,
+        cell: p.cell?.trim() || undefined,
+      };
+      return { id: forwardCandidateId(secret, tenant, report.id, p.naturalKey), contact };
+    })
+    .filter((c) => c.contact.name && hasContact(c.contact))
+    .map((c) => ({ id: c.id, name: c.contact.name, contact: c.contact }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * The chair sends a PENDING report on to the match captain: a new link (new memberId) for the
+ * picked player, the recipient re-pointed (`kind: 'captain'`, `forwardedBy`), and the captain
+ * notified (the chair cc'd by email). The chair's own link keeps working until the report is
+ * submitted — first submit wins. At most MAX_FORWARDS per report.
+ */
+export async function forwardReport(
+  deps: CaptainsReportDeps,
+  input: {
+    tenant: string;
+    report: CaptainsReport;
+    candidateId: string;
+    via: 'link' | 'portal';
+  },
+): Promise<CaptainsReport> {
+  const { repo } = deps;
+  const now = deps.now ?? (() => new Date());
+  const { tenant, report, via } = input;
+  if (report.status !== 'pending')
+    throw new ReportFlowError(409, "captain's report already submitted", 'report_closed');
+  if ((report.forwardCount ?? 0) >= MAX_FORWARDS)
+    throw new ReportFlowError(
+      429,
+      `this report has already been sent on ${MAX_FORWARDS} times`,
+      'forward_limit',
+    );
+  const secret = (deps.linkSecret ?? captainsReportLinkSecret)();
+  const picked = (await forwardCandidates(repo, tenant, report, secret)).find(
+    (c) => c.id === input.candidateId,
+  );
+  if (!picked) throw new ReportFlowError(404, 'that player cannot be sent the report');
+  const [club, config] = await Promise.all([
+    repo.getClub(tenant, report.clubId),
+    repo.getTenantConfig(tenant),
+  ]);
+  if (!club || !config) throw new ReportFlowError(404, 'report not found');
+  const chair = chairContactOf(club);
+  const byName = chair.name || club.name;
+  const chairMemberId =
+    report.chairMemberId ??
+    (report.recipient.kind === 'chair' ? report.recipient.memberId : undefined);
+  let updated: CaptainsReport;
+  try {
+    updated = await repo.forwardCaptainsReport(
+      tenant,
+      report,
+      {
+        recipient: {
+          kind: 'captain',
+          memberId: randomUUID(),
+          name: picked.name,
+          forwardedBy: { name: byName, via, at: now().toISOString() },
+        },
+        ...(chairMemberId ? { chairMemberId } : {}),
+        recipientContact: contactOnly(picked.contact),
+        captainName: report.captainName || picked.name,
+      },
+      { expectedMemberId: report.recipient.memberId, maxForwards: MAX_FORWARDS },
+    );
+  } catch (err) {
+    if (!(err instanceof repo.CaptainsReportForwardConflict)) throw err;
+    const fresh = await repo.getCaptainsReport(
+      tenant,
+      report.seriesId,
+      report.fixtureId,
+      report.clubId,
+    );
+    if (!fresh || fresh.status !== 'pending')
+      throw new ReportFlowError(409, "captain's report already submitted", 'report_closed');
+    if ((fresh.forwardCount ?? 0) >= MAX_FORWARDS)
+      throw new ReportFlowError(429, `this report has already been sent on ${MAX_FORWARDS} times`);
+    throw new ReportFlowError(409, 'the report changed meanwhile — try again');
+  }
+  await notifyRecipient(deps, tenant, config, updated, {
+    contact: picked.contact,
+    ccChair: chair,
+    purpose: 'forwarded',
+    forwardedBy: byName,
+  });
+  return (
+    (await repo.getCaptainsReport(tenant, report.seriesId, report.fixtureId, report.clubId)) ??
+    updated
+  );
+}
+
+// ───────────────────────── The one reminder ─────────────────────────
+
+export interface ReminderSummary {
+  /** Pending reports inside the reminder window that had not been reminded yet. */
+  due: number;
+  /** Reminders that reached someone. */
+  sent: number;
+  /** Reminders recorded but not delivered (no contact, dry run, every channel failed). */
+  undelivered: number;
+}
+
+/**
+ * Remind the current recipient of every PENDING report whose link expires within
+ * REMINDER_LEAD_DAYS — once, at most (NOTIFY# audience `reminder#<memberId>`), on the same
+ * channels with the same link. Runs in the 15-minute sync run (sync-enabled tenants only).
+ * A captain recipient is reached through the contact stored when the report was addressed
+ * to them; a chair through the club's current chair contact.
+ */
+export async function sendReportReminders(
+  tenant: string,
+  deps: CaptainsReportDeps,
+): Promise<ReminderSummary> {
+  const { repo } = deps;
+  const now = deps.now ?? (() => new Date());
+  const out: ReminderSummary = { due: 0, sent: 0, undelivered: 0 };
+  const nowMs = now().getTime();
+  const due = (await repo.listCaptainsReports(tenant)).filter((r) => {
+    if (r.status !== 'pending' || r.reminderSentAt) return false;
+    if (r.recipient.kind !== 'captain' && r.recipient.kind !== 'chair') return false;
+    const exp = reportExpirySeconds(r) * 1000;
+    return nowMs < exp && nowMs >= exp - REMINDER_LEAD_DAYS * DAY_MS;
+  });
+  if (!due.length) return out;
+  const config = await repo.getTenantConfig(tenant);
+  if (!config) return out;
+  const clubs = new Map<string, Club | null>();
+  for (const r of due) {
+    if (!clubs.has(r.clubId)) clubs.set(r.clubId, await repo.getClub(tenant, r.clubId));
+    const club = clubs.get(r.clubId);
+    if (!club) continue;
+    const chair = chairContactOf(club);
+    const toCaptain = r.recipient.kind === 'captain';
+    if (toCaptain && !r.recipientContact) continue; // opened before contacts were kept
+    out.due++;
+    const contact = toCaptain ? { name: r.recipient.name, ...r.recipientContact } : chair;
+    const sent = await notifyRecipient(deps, tenant, config, r, {
+      contact,
+      ccChair: toCaptain ? chair : null,
+      purpose: 'reminder',
+    });
+    if (sent === 'sent') out.sent++;
+    else if (sent !== 'already') out.undelivered++;
+  }
+  return out;
 }

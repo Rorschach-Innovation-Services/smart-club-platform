@@ -60,6 +60,11 @@ export interface ReportUmpireEntry {
   concerns: Record<string, boolean>;
   otherConcern: string;
   comments: string;
+  /**
+   * Set by the union office when a free-text umpire was added to the registry or linked to an
+   * existing umpire afterwards: the ratings then count for `umpireId`. Audit only.
+   */
+  attributed?: { action: 'registered' | 'linked'; by: string; at: string; freeTextName: string };
 }
 
 export const emptyUmpireEntry = (over: Partial<ReportUmpireEntry> = {}): ReportUmpireEntry => ({

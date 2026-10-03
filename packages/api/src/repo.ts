@@ -92,6 +92,7 @@ import {
   captainsReportsListKey,
   captainsReportCounterKey,
   captainsReportNotifyKey,
+  whatsappMessageKey,
   captainsReportPartitionPk,
 } from './keys.js';
 import { PLATFORM_TENANT } from './types.js';
@@ -127,6 +128,7 @@ import type {
   FixtureOfficials,
   FixtureOfficialsRecord,
   CaptainsReport,
+  CaptainsReportDelivery,
 } from './types.js';
 
 import { tableName } from './env.js';
@@ -1597,7 +1599,7 @@ export async function saveCaptainsReportDraft(
           'SET captainName = :c, umpires = :u, #gen = :g, declaration = :d, updatedAt = :at',
         ConditionExpression:
           'attribute_exists(pk) AND #s = :pending' +
-          (opts.memberId ? ' AND recipient.memberId = :m' : ''),
+          (opts.memberId ? ' AND (recipient.memberId = :m OR chairMemberId = :m)' : ''),
         ExpressionAttributeNames: { '#s': 'status', '#gen': 'general' },
         ExpressionAttributeValues: {
           ':c': fields.captainName,
@@ -1684,7 +1686,7 @@ async function submitCaptainsReportFields(
           'submittedBy = :by, submittedVia = :via, submittedAt = :at, updatedAt = :at',
         ConditionExpression:
           'attribute_exists(pk) AND #s = :pending' +
-          (meta.memberId ? ' AND recipient.memberId = :m' : ''),
+          (meta.memberId ? ' AND (recipient.memberId = :m OR chairMemberId = :m)' : ''),
         ExpressionAttributeNames: {
           '#s': 'status',
           '#gen': 'general',
@@ -1785,6 +1787,222 @@ export async function voidOrFlagCaptainsReport(
     if (!isCcf(err)) throw err;
   }
   return 'none';
+}
+
+/**
+ * Append notice outcomes (one per channel) to a report. `notifiedAt` is set only the first
+ * time a channel was actually sent; `reminderSentAt` stamps the one pre-expiry reminder.
+ */
+export async function recordCaptainsReportDeliveries(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+  deliveries: CaptainsReportDelivery[],
+  opts: { notifiedAt?: string; reminderSentAt?: string } = {},
+): Promise<void> {
+  const at = new Date().toISOString();
+  const sets = [
+    'deliveries = list_append(if_not_exists(deliveries, :empty), :d)',
+    'updatedAt = :at',
+  ];
+  const values: Record<string, unknown> = { ':d': deliveries, ':empty': [], ':at': at };
+  if (opts.notifiedAt) {
+    sets.push('notifiedAt = if_not_exists(notifiedAt, :n)');
+    values[':n'] = opts.notifiedAt;
+  }
+  if (opts.reminderSentAt) {
+    sets.push('reminderSentAt = :rs');
+    values[':rs'] = opts.reminderSentAt;
+  }
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression: `SET ${sets.join(', ')}`,
+        ConditionExpression: 'attribute_exists(pk)',
+        ExpressionAttributeValues: values,
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err; // the report was erased meanwhile: nothing to record on
+  }
+}
+
+/** WAMSG# lookups live 30 days — Meta's statuses arrive within minutes to days. */
+const WHATSAPP_MESSAGE_TTL_SECONDS = 30 * 24 * 3600;
+
+export interface WhatsAppMessageRef {
+  tenant: string;
+  seriesId: string;
+  fixtureId: string;
+  clubId: string;
+}
+
+/** Remember which report a WhatsApp message id belongs to (for the status webhook). */
+export async function putWhatsAppMessageRef(wamid: string, ref: WhatsAppMessageRef): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...whatsappMessageKey(wamid),
+        ...ref,
+        kind: 'captains-report',
+        expiresAt: Math.floor(Date.now() / 1000) + WHATSAPP_MESSAGE_TTL_SECONDS,
+      },
+    }),
+  );
+}
+
+export async function getWhatsAppMessageRef(wamid: string): Promise<WhatsAppMessageRef | null> {
+  const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: whatsappMessageKey(wamid) }));
+  if (!res.Item) return null;
+  const { tenant, seriesId, fixtureId, clubId } = res.Item as Record<string, string>;
+  return { tenant, seriesId, fixtureId, clubId };
+}
+
+/**
+ * Set Meta's delivery status on one WhatsApp delivery of a report (by list position, only
+ * while that position still holds the message id). False when it no longer does.
+ */
+export async function setCaptainsReportProviderStatus(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+  index: number,
+  messageId: string,
+  update: Pick<CaptainsReportDelivery, 'providerStatus' | 'providerAt' | 'providerError'>,
+): Promise<boolean> {
+  if (!Number.isInteger(index) || index < 0) return false;
+  const p = `deliveries[${index}]`;
+  const sets = [`${p}.providerStatus = :s`, `${p}.providerAt = :pa`];
+  const values: Record<string, unknown> = {
+    ':s': update.providerStatus,
+    ':pa': update.providerAt,
+    ':id': messageId,
+  };
+  if (update.providerError) {
+    sets.push(`${p}.providerError = :pe`);
+    values[':pe'] = update.providerError;
+  }
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression: `SET ${sets.join(', ')}`,
+        ConditionExpression: `attribute_exists(pk) AND ${p}.messageId = :id`,
+        ExpressionAttributeValues: values,
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/** Why a "Send to captain" write was refused (re-read to tell the caller which). */
+export class CaptainsReportForwardConflict extends Error {
+  constructor() {
+    super('the report changed while it was being sent on');
+    this.name = 'CaptainsReportForwardConflict';
+  }
+}
+
+/**
+ * Re-address a PENDING report to the captain the chair picked. Conditional on the report
+ * still being pending, still addressed to `expectedMemberId` (no concurrent forward) and
+ * under `maxForwards`. Returns the updated report.
+ */
+export async function forwardCaptainsReport(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+  next: {
+    recipient: CaptainsReport['recipient'];
+    chairMemberId?: string;
+    recipientContact: NonNullable<CaptainsReport['recipientContact']>;
+    captainName: string;
+  },
+  guard: { expectedMemberId: string; maxForwards: number },
+): Promise<CaptainsReport> {
+  const sets = [
+    'recipient = :r',
+    'recipientContact = :rc',
+    'captainName = :cn',
+    'forwardCount = if_not_exists(forwardCount, :zero) + :one',
+    'updatedAt = :at',
+  ];
+  const values: Record<string, unknown> = {
+    ':r': next.recipient,
+    ':rc': next.recipientContact,
+    ':cn': next.captainName,
+    ':zero': 0,
+    ':one': 1,
+    ':at': new Date().toISOString(),
+    ':pending': 'pending',
+    ':m': guard.expectedMemberId,
+    ':max': guard.maxForwards,
+  };
+  if (next.chairMemberId) {
+    sets.push('chairMemberId = :cm');
+    values[':cm'] = next.chairMemberId;
+  }
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression: `SET ${sets.join(', ')}`,
+        ConditionExpression:
+          'attribute_exists(pk) AND #s = :pending AND recipient.memberId = :m AND ' +
+          '(attribute_not_exists(forwardCount) OR forwardCount < :max)',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: values,
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return stripKeys<CaptainsReport>(res.Attributes)!;
+  } catch (err) {
+    if (isCcf(err)) throw new CaptainsReportForwardConflict();
+    throw err;
+  }
+}
+
+/**
+ * The union office attributes a free-text umpire entry of a SUBMITTED report to a registry
+ * umpire. Conditional on the entry still being that free-text name with no umpire id.
+ */
+export async function attributeCaptainsReportUmpire(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+  index: number,
+  freeTextName: string,
+  entry: CaptainsReport['umpires'][number],
+): Promise<CaptainsReport> {
+  const p = `umpires[${index}]`;
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression: `SET ${p} = :e, updatedAt = :at`,
+        ConditionExpression:
+          `attribute_exists(pk) AND #s = :submitted AND attribute_exists(${p}) AND ` +
+          `attribute_not_exists(${p}.umpireId) AND ${p}.#n = :name`,
+        ExpressionAttributeNames: { '#s': 'status', '#n': 'name' },
+        ExpressionAttributeValues: {
+          ':e': entry,
+          ':at': new Date().toISOString(),
+          ':submitted': 'submitted',
+          ':name': freeTextName,
+        },
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return stripKeys<CaptainsReport>(res.Attributes)!;
+  } catch (err) {
+    if (isCcf(err)) throw new CaptainsReportStateError('that umpire entry has changed');
+    throw err;
+  }
 }
 
 /** NOTIFY# rows outlive the reports' 14-day opening window comfortably, then self-expire. */

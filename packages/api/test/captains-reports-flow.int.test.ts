@@ -54,7 +54,6 @@ const isoDay = (offsetDays: number) =>
 const MATCH_DATE = isoDay(-1);
 const GO_LIVE = isoDay(-30);
 const CAPTAIN_KEY = '0'.repeat(64); // the example's captainRef natural key
-const CAPTAIN_REF = `smartclub:dolphins:player:${CAPTAIN_KEY}`;
 
 let ddb: Server;
 let app: (typeof import('../src/index.js'))['app'];
@@ -223,21 +222,6 @@ const liveResultPage = (source: 'live' | 'manual' | 'import' = 'live') => {
   return p;
 };
 
-const runPull = () =>
-  puller.runMedicoachSync('dolphins', 'cron', {
-    repo,
-    url: stubUrl,
-    secret: SECRET,
-    log: (l) => logLines.push(l),
-    captainsReports: {
-      log: (l) => logLines.push(l),
-      sendNotice: async (n) => {
-        notices.push(n);
-        return n.channels.map((channel) => ({ channel, status: 'sent' as const }));
-      },
-    },
-  });
-
 const reportsOf = async () =>
   (await repo.listCaptainsReports('dolphins')).sort((a, b) => a.id.localeCompare(b.id));
 
@@ -257,18 +241,6 @@ const completeBody = {
   general: 'Good game',
   umpires: [fullUmpire('u-ngubane', 'A.Ngubane'), fullUmpire('u-dlamini', 'S.Dlamini')],
 };
-
-/** How many stored items (any partition) contain `needle` anywhere. */
-async function tableItemsContaining(needle: string): Promise<number> {
-  const { DynamoDBClient, ScanCommand } = await import('@aws-sdk/client-dynamodb');
-  const c = new DynamoDBClient({
-    endpoint: process.env.DYNAMO_ENDPOINT,
-    region: 'localhost',
-    credentials: { accessKeyId: 'local', secretAccessKey: 'local' },
-  });
-  const items = (await c.send(new ScanCommand({ TableName: TABLE }))).Items ?? [];
-  return items.filter((i) => JSON.stringify(i).includes(needle)).length;
-}
 
 async function resetTable() {
   const { DynamoDBClient, ScanCommand, DeleteItemCommand } =
@@ -308,7 +280,23 @@ beforeEach(async () => {
 // ── Helpers for this file ──
 type NoticeResultLike = import('../src/captains-reports.js').NoticeResult;
 let respond: (n: Notice) => NoticeResultLike[] = (n) =>
-  n.channels.map((channel, i) => ({ channel, status: 'sent', messageId: `wamid.${n.reportId}.${channel}.${i}` }));
+  n.channels.map((channel, i) => ({
+    channel,
+    status: 'sent',
+    messageId: `wamid.${n.reportId}.${channel}.${i}`,
+  }));
+
+const defaultRespond = respond;
+beforeEach(async () => {
+  respond = defaultRespond;
+  // Routes (forward) use the module's default sender: capture it the same way.
+  const { setDefaultReportNoticeSender } = await import('../src/captains-reports.js');
+  setDefaultReportNoticeSender(capture.sendNotice);
+});
+after(async () => {
+  const { setDefaultReportNoticeSender } = await import('../src/captains-reports.js');
+  setDefaultReportNoticeSender(undefined);
+});
 
 const capture = {
   log: (l: string) => logLines.push(l),
@@ -330,7 +318,8 @@ const pull = (nowIso?: string) =>
 
 const own = async () => (await reportsOf()).find((r) => r.clubId === 'umzinto')!;
 const opp = async () => (await reportsOf()).find((r) => r.clubId === 'african-warriors')!;
-const linkGet = (token: string, suffix = '') => app.request(`/captains-report-link/${token}${suffix}`);
+const linkGet = (token: string, suffix = '') =>
+  app.request(`/captains-report-link/${token}${suffix}`);
 const json = async <T = Record<string, unknown>>(res: Response) => (await res.json()) as T;
 const clubPath = (id: string, suffix = '') =>
   `/club/captains-reports/${encodeURIComponent(id)}${suffix}`;
@@ -454,12 +443,14 @@ describe('per-channel delivery on each report', () => {
 
   test('the real sender in dry-run records "dry-run", not "sent"', async () => {
     page = liveResultPage('live');
+    const { setDefaultReportNoticeSender } = await import('../src/captains-reports.js');
+    setDefaultReportNoticeSender(undefined); // the real SES + Meta senders (NOTIFY_DRY_RUN=1)
     await puller.runMedicoachSync('dolphins', 'cron', {
       repo,
       url: stubUrl,
       secret: SECRET,
       log: () => {},
-      captainsReports: { log: () => {} }, // default SES + Meta senders (NOTIFY_DRY_RUN=1)
+      captainsReports: { log: () => {} },
     });
     const a = await own();
     assert.equal(a.notifiedAt, undefined);
@@ -557,9 +548,10 @@ describe('Send to captain', () => {
     const linked = await json<{ canForward: boolean }>(await linkGet(token));
     assert.equal(linked.canForward, true);
 
-    const cands = await json<{ candidates: Array<{ id: string; name: string }>; remaining: number }>(
-      await linkGet(token, '/forward-candidates'),
-    );
+    const cands = await json<{
+      candidates: Array<{ id: string; name: string }>;
+      remaining: number;
+    }>(await linkGet(token, '/forward-candidates'));
     assert.deepEqual(
       cands.candidates.map((c) => c.name),
       ['Adult Player', 'Cellonly Player'],
@@ -643,7 +635,8 @@ describe('Send to captain', () => {
         body: JSON.stringify({ candidateId }),
       });
     assert.equal((await forward('not-a-candidate')).status, 404);
-    for (let i = 0; i < 3; i++) assert.equal((await forward(cands.candidates[i % 2].id)).status, 200);
+    for (let i = 0; i < 3; i++)
+      assert.equal((await forward(cands.candidates[i % 2].id)).status, 200);
     const fourth = await forward(cands.candidates[0].id);
     assert.equal(fourth.status, 429);
     assert.equal((await own()).forwardCount, 3);
@@ -693,7 +686,9 @@ describe('Send to captain', () => {
       body: JSON.stringify({ candidateId: cands.candidates[1].id }),
     });
     assert.equal(fwd.status, 200);
-    const view = await json<{ recipient: { kind: string; name: string; forwardedBy?: { via: string } } }>(fwd);
+    const view = await json<{
+      recipient: { kind: string; name: string; forwardedBy?: { via: string } };
+    }>(fwd);
     assert.equal(view.recipient.kind, 'captain');
     assert.equal(view.recipient.forwardedBy?.via, 'portal');
     assert.equal(notices[0].to.cell, '0820000002');
@@ -740,9 +735,18 @@ describe('the reminder', () => {
     });
     const { sendReportReminders } = await import('../src/captains-reports.js');
     notices.length = 0;
-    await sendReportReminders('dolphins', { repo, now: () => new Date(expiryMs - DAY), ...capture });
+    await sendReportReminders('dolphins', {
+      repo,
+      now: () => new Date(expiryMs - DAY),
+      ...capture,
+    });
     assert.equal(notices.filter((n) => n.reportId === report.id).length, 0);
-    await sendReportReminders('dolphins', { repo, now: () => new Date(expiryMs + 1000), ...capture });
+    notices.length = 0;
+    await sendReportReminders('dolphins', {
+      repo,
+      now: () => new Date(expiryMs + 1000),
+      ...capture,
+    });
     assert.equal(notices.length, 0);
   });
 
@@ -862,12 +866,12 @@ describe('a free-text umpire on a filed report', () => {
     assert.equal(out.umpires[0].attributed?.by, 'admin@test');
     assert.equal(out.umpires[0].ratings.decisions, 4, 'ratings kept');
     // Already attributed ⇒ 409; unknown umpire ⇒ 400; reps ⇒ 403; bad index ⇒ 404.
-    assert.equal((await attribute(r.id, 0, { umpireId: 'u-ngubane', action: 'linked' })).status, 409);
-    assert.equal((await attribute(r.id, 5, { umpireId: 'u-ngubane' })).status, 404);
     assert.equal(
-      (await attribute(r.id, 0, { umpireId: 'u-ngubane' }, REP_UMZINTO)).status,
-      403,
+      (await attribute(r.id, 0, { umpireId: 'u-ngubane', action: 'linked' })).status,
+      409,
     );
+    assert.equal((await attribute(r.id, 5, { umpireId: 'u-ngubane' })).status, 404);
+    assert.equal((await attribute(r.id, 0, { umpireId: 'u-ngubane' }, REP_UMZINTO)).status, 403);
   });
 
   test('an unknown registry id is refused', async () => {
@@ -894,7 +898,13 @@ describe('POST /integrations/whatsapp/status', () => {
                 messaging_product: 'whatsapp',
                 metadata: { phone_number_id: '123', display_phone_number: '27000000000' },
                 statuses: [
-                  { id, status, timestamp: String(ts), recipient_id: '27820000001', ...(errors ? { errors } : {}) },
+                  {
+                    id,
+                    status,
+                    timestamp: String(ts),
+                    recipient_id: '27820000001',
+                    ...(errors ? { errors } : {}),
+                  },
                 ],
               },
             },
@@ -905,7 +915,10 @@ describe('POST /integrations/whatsapp/status', () => {
   const post = (body: string, sig?: string) =>
     app.request('/integrations/whatsapp/status', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', ...(sig ? { 'x-hub-signature-256': sig } : {}) },
+      headers: {
+        'content-type': 'application/json',
+        ...(sig ? { 'x-hub-signature-256': sig } : {}),
+      },
       body,
     });
 
@@ -940,7 +953,11 @@ describe('POST /integrations/whatsapp/status', () => {
   test('matches statuses by message id onto the report delivery; never downgrades', async () => {
     process.env.WHATSAPP_APP_SECRET = APP_SECRET;
     respond = (n) =>
-      n.channels.map((channel) => ({ channel, status: 'sent', messageId: `wamid.${channel}.${n.to.email}` }));
+      n.channels.map((channel) => ({
+        channel,
+        status: 'sent',
+        messageId: `wamid.${channel}.${n.to.email}`,
+      }));
     page = liveResultPage('manual');
     await pull();
     const r = await own();
@@ -951,7 +968,10 @@ describe('POST /integrations/whatsapp/status', () => {
 
     let body = statusBody(id, 'delivered', t0);
     assert.equal((await post(body, sign(body))).status, 200);
-    assert.equal((await own()).deliveries!.find((d) => d.channel === 'whatsapp')!.providerStatus, 'delivered');
+    assert.equal(
+      (await own()).deliveries!.find((d) => d.channel === 'whatsapp')!.providerStatus,
+      'delivered',
+    );
 
     body = statusBody(id, 'read', t0 + 5);
     await post(body, sign(body));

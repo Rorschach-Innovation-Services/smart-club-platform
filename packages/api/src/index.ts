@@ -76,7 +76,13 @@ import {
   seriesHoldsSchedule,
   type ScheduleFixture,
 } from './medicoach-sync/schedule.js';
-import { captainsReportLinkSecret, medicoachSyncSecret, medicoachSyncUrl } from './env.js';
+import {
+  captainsReportLinkSecret,
+  medicoachSyncSecret,
+  medicoachSyncUrl,
+  whatsappAppSecret,
+  whatsappWebhookVerifyToken,
+} from './env.js';
 import { VersionConflictError, LastAdminError } from './repo.js';
 import { clubIdFromName } from './club-id.js';
 import {
@@ -211,13 +217,25 @@ import { chairContactOf } from './club-contacts.js';
 import {
   captainsReportId,
   checkUmpireIds,
+  forwardCandidates,
+  forwardReport,
+  hasContact,
   loadLinkedReport,
+  MAX_FORWARDS,
   NOTICE_FAILED_ERROR,
   parseCaptainsReportId,
   parseReportFields,
+  ReportFlowError,
   ReportInputError,
   reportView,
+  UNLISTED_SERIES_ID,
 } from './captains-reports.js';
+import {
+  applyWhatsAppStatuses,
+  parseStatuses,
+  verifyMetaSignature,
+  verifyTokenMatches,
+} from './notify/whatsapp-status.js';
 import { submissionProblems } from '../../engine/src/captainsReport.js';
 import { hasFeature, hasModule } from './features.js';
 import {
@@ -1813,6 +1831,37 @@ async function registerWithoutClearance(
   return {};
 }
 
+/* ─── WhatsApp delivery statuses (public, Meta-signed) ───
+   Registered before the authenticated `/integrations/*` middleware: Meta (or medicoach's
+   forwarder, re-signing with the same app secret) calls it without a session. See
+   notify/whatsapp-status.ts. GET is Meta's verify handshake; POST fails closed without the
+   app secret or with a bad X-Hub-Signature-256. */
+app.get('/integrations/whatsapp/status', (c) => {
+  const mode = c.req.query('hub.mode');
+  const token = c.req.query('hub.verify_token');
+  const challenge = c.req.query('hub.challenge') ?? '';
+  if (mode === 'subscribe' && verifyTokenMatches(token, whatsappWebhookVerifyToken()))
+    return c.text(challenge);
+  return c.text('Forbidden', 403);
+});
+
+app.post('/integrations/whatsapp/status', async (c) => {
+  const raw = await c.req.text();
+  if (!verifyMetaSignature(raw, c.req.header('x-hub-signature-256'), whatsappAppSecret()))
+    return c.json({ error: 'invalid signature' }, 401);
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    return c.json({ error: 'invalid JSON' }, 400);
+  }
+  // A repo failure answers 500 so Meta (or the forwarder) retries; applying is idempotent.
+  const summary = await applyWhatsAppStatuses(repo, parseStatuses(payload));
+  if (summary.matched)
+    console.log(`[whatsapp-status] matched ${summary.matched}, unknown ${summary.unknown}`);
+  return c.text('OK');
+});
+
 // ───────────────────── Authenticated routes ─────────────────────
 
 app.use('/me', authenticate);
@@ -1855,6 +1904,7 @@ app.use('/umpires/*', authenticate, requireTenantMembership);
 app.use('/umpires', authenticate, requireTenantMembership);
 app.use('/club/*', authenticate, requireTenantMembership);
 app.use('/captains-reports', authenticate, requireTenantMembership);
+app.use('/captains-reports/*', authenticate, requireTenantMembership);
 app.use('/tenant/config', authenticate, requireTenantMembership);
 app.use('/tenant/support', authenticate, requireTenantMembership);
 app.use('/admin/*', authenticate, requireTenantMembership, requireAdmin);
@@ -4766,22 +4816,138 @@ async function clubReport(ra: RequestAuth, id: string): Promise<CaptainsReport> 
   return report;
 }
 
+/**
+ * Report views with the venue re-read from the LIVE series (ADR 0011): club members and link
+ * holders never see a venue the series withholds, and see it once revealed. Admins see it.
+ */
+async function reportViews(
+  tenant: string,
+  reports: CaptainsReport[],
+  forClub: boolean,
+): Promise<ReturnType<typeof reportView>[]> {
+  const series = new Map<string, Promise<Series | null>>();
+  const seriesOf = (id: string) => {
+    if (!series.has(id)) series.set(id, repo.getSeries(tenant, id));
+    return series.get(id)!;
+  };
+  return Promise.all(
+    reports.map(async (r) =>
+      reportView(r, {
+        series: r.seriesId === UNLISTED_SERIES_ID ? null : await seriesOf(r.seriesId),
+        forClub,
+      }),
+    ),
+  );
+}
+
+const clubView = async (ra: RequestAuth, r: CaptainsReport) =>
+  (await reportViews(ra.tenant, [r], ra.membership.role !== 'admin'))[0];
+
+/** A refused forward / attribution as the HTTP error the client reads. */
+function flowError(err: unknown): never {
+  if (err instanceof ReportFlowError)
+    throw new HttpError(err.status, err.message, err.code ? { code: err.code } : undefined);
+  throw err;
+}
+
 app.get('/club/captains-reports', async (c) => {
   const ra = c.get('requestAuth')!;
   const clubId = c.req.query('clubId') ?? ra.membership.clubIds[0];
   if (!clubId) throw new HttpError(400, 'clubId is required');
   assertClubAccess(ra, clubId);
-  const at = now();
   const reports = (await repo.listCaptainsReports(ra.tenant))
     .filter((r) => r.clubId === clubId)
-    .sort((a, b) => b.matchDate.localeCompare(a.matchDate))
-    .map((r) => reportView(r, at));
-  return c.json(reports);
+    .sort((a, b) => b.matchDate.localeCompare(a.matchDate));
+  return c.json(await reportViews(ra.tenant, reports, ra.membership.role !== 'admin'));
 });
 
 app.get('/club/captains-reports/:id', async (c) => {
   const ra = c.get('requestAuth')!;
-  return c.json(reportView(await clubReport(ra, c.req.param('id')), now()));
+  return c.json(await clubView(ra, await clubReport(ra, c.req.param('id'))));
+});
+
+/** "Send to captain" from the portal: the club's eligible players (names + opaque ids). */
+app.get('/club/captains-reports/:id/forward-candidates', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const report = await clubReport(ra, c.req.param('id'));
+  const candidates = await forwardCandidates(repo, ra.tenant, report, captainsReportLinkSecret());
+  return c.json({
+    candidates: candidates.map(({ id, name }) => ({ id, name })),
+    remaining: Math.max(0, MAX_FORWARDS - (report.forwardCount ?? 0)),
+  });
+});
+
+app.post('/club/captains-reports/:id/forward', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const report = await clubReport(ra, c.req.param('id'));
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as { candidateId?: unknown };
+  if (typeof body.candidateId !== 'string' || !body.candidateId)
+    throw new HttpError(400, 'candidateId is required');
+  const updated = await forwardReport(
+    { repo },
+    { tenant: ra.tenant, report, candidateId: body.candidateId, via: 'portal' },
+  ).catch(flowError);
+  return c.json(await clubView(ra, updated));
+});
+
+/**
+ * File a report for a match that is NOT in the fixture list (a friendly, a re-arranged game):
+ * free-text opponent, a date that is not in the future, competition and venue; umpires from
+ * the registry or free text. Created and submitted in one go (`source: 'manual-unlisted'`).
+ */
+app.post('/club/captains-reports/unlisted', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as Record<string, unknown>;
+  const clubId = typeof body.clubId === 'string' ? body.clubId : '';
+  if (!clubId) throw new HttpError(400, 'clubId is required');
+  assertClubAccess(ra, clubId);
+  const text = (v: unknown, max: number, field: string, required = false) => {
+    const t = typeof v === 'string' ? v.trim() : '';
+    if (required && !t) throw new HttpError(400, `${field} is required`);
+    if (t.length > max) throw new HttpError(400, `${field} is too long (max ${max})`);
+    return t;
+  };
+  const opponentName = text(body.opponentName, 120, 'the opponent', true);
+  const competition = text(body.competition, 120, 'the competition');
+  const venue = text(body.venue, 120, 'the venue');
+  const matchDate = typeof body.matchDate === 'string' ? body.matchDate : '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(matchDate) || !dayjs(matchDate).isValid())
+    throw new HttpError(400, 'the match date must be a date (YYYY-MM-DD)');
+  if (matchDate > tenantToday())
+    throw new HttpError(400, 'this match has not been played yet', { code: 'match_in_future' });
+  const club = await repo.getClub(ra.tenant, clubId);
+  if (!club) throw new HttpError(404, 'club not found');
+  const at = now();
+  const fixtureId = randomUUID();
+  const report: CaptainsReport = {
+    id: captainsReportId(UNLISTED_SERIES_ID, fixtureId, clubId),
+    seriesId: UNLISTED_SERIES_ID,
+    fixtureId,
+    clubId,
+    status: 'pending',
+    source: 'manual-unlisted',
+    matchDate,
+    side: 'home',
+    clubName: club.name,
+    opponentName,
+    competition,
+    ...(venue ? { venue } : {}),
+    umpiresSnapshot: [],
+    recipient: { kind: 'portal', memberId: randomUUID(), name: ra.email ?? '' },
+    captainName: '',
+    umpires: [],
+    general: '',
+    createdAt: at,
+    updatedAt: at,
+  };
+  const { fields } = await reportFieldsFrom(ra.tenant, report, { ...body, submit: true });
+  if (!(await repo.createCaptainsReport(ra.tenant, report)))
+    throw new HttpError(409, 'a report already exists for this match', { code: 'report_exists' });
+  const saved = await writeReport(ra.tenant, report, fields, true, {
+    submittedBy: ra.email ?? 'portal',
+    via: 'portal',
+  });
+  return c.json(reportView(saved), 201);
 });
 
 app.put('/club/captains-reports/:id', async (c) => {
@@ -4796,7 +4962,7 @@ app.put('/club/captains-reports/:id', async (c) => {
     submittedBy: ra.email ?? 'portal',
     via: 'portal',
   });
-  return c.json(reportView(saved, now()));
+  return c.json(await clubView(ra, saved));
 });
 
 /**
@@ -4876,7 +5042,7 @@ app.post('/club/captains-reports', async (c) => {
     submittedBy: ra.email ?? 'portal',
     via: 'portal',
   });
-  return c.json(reportView(saved, now()), 201);
+  return c.json(await clubView(ra, saved), 201);
 });
 
 /** Admin: every report, filtered by status and match-date range. */
@@ -4885,16 +5051,62 @@ app.get('/captains-reports', requireAdmin, async (c) => {
   const status = c.req.query('status');
   const from = c.req.query('from');
   const to = c.req.query('to');
-  const at = now();
   const reports = (await repo.listCaptainsReports(ra.tenant))
     .filter((r) => (!from || r.matchDate >= from) && (!to || r.matchDate <= to))
-    .map((r) => reportView(r, at))
-    .filter((r) => {
-      if (!status) return true;
-      return r.status === status;
-    })
+    .filter((r) => !status || r.status === status)
     .sort((a, b) => b.matchDate.localeCompare(a.matchDate) || a.id.localeCompare(b.id));
-  return c.json(reports);
+  return c.json(await reportViews(ra.tenant, reports, false));
+});
+
+/**
+ * Admin: clubs a captain's-report notice cannot reach — no chair email and no usable cell
+ * (sync tenants only; other tenants get an empty list).
+ */
+app.get('/captains-reports/contact-gaps', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  if (!cfg || !hasFeature(cfg, 'medicoachSync')) return c.json({ enabled: false, clubs: [] });
+  const clubs = (await repo.listClubs(ra.tenant))
+    .filter((club) => !hasContact(chairContactOf(club)))
+    .map((club) => ({ id: club.id, name: club.name }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return c.json({ enabled: true, clubs });
+});
+
+/**
+ * Admin: attribute a FREE-TEXT umpire on a submitted report to a registry umpire (one the
+ * admin just added to the registry, `action: 'registered'`, or an existing one, 'linked'), so
+ * its ratings count for that umpire. The entry keeps an `attributed` audit stamp.
+ */
+app.post('/captains-reports/:id/umpires/:index/attribute', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const key = parseCaptainsReportId(c.req.param('id'));
+  const index = Number(c.req.param('index'));
+  if (!key || !Number.isInteger(index) || index < 0 || index > 1)
+    throw new HttpError(404, 'umpire entry not found');
+  const report = await repo.getCaptainsReport(ra.tenant, key.seriesId, key.fixtureId, key.clubId);
+  const entry = report?.umpires[index];
+  if (!report || !entry) throw new HttpError(404, 'umpire entry not found');
+  if (report.status !== 'submitted')
+    throw new HttpError(409, 'only a submitted report can be attributed');
+  if (entry.umpireId) throw new HttpError(409, 'this umpire is already in the registry');
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as Record<string, unknown>;
+  const umpireId = typeof body.umpireId === 'string' ? body.umpireId : '';
+  const action = body.action === 'registered' ? 'registered' : 'linked';
+  const reg = umpireId ? await repo.getUmpire(ra.tenant, umpireId) : null;
+  if (!reg || reg.mergedInto) throw new HttpError(400, 'unknown umpire');
+  try {
+    const saved = await repo.attributeCaptainsReportUmpire(ra.tenant, report, index, entry.name, {
+      ...entry,
+      umpireId: reg.id,
+      name: reg.displayName,
+      attributed: { action, by: ra.email ?? 'admin', at: now(), freeTextName: entry.name },
+    });
+    return c.json(reportView(saved));
+  } catch (err) {
+    if (err instanceof repo.CaptainsReportStateError) throw new HttpError(409, err.message);
+    throw err;
+  }
 });
 
 /**
@@ -4916,13 +5128,18 @@ async function linkedReportOr410(c: Context<HonoEnv>) {
   return found;
 }
 
-async function linkPayload(tenant: string, report: CaptainsReport) {
-  const [cfg, umpires] = await Promise.all([
+async function linkPayload(tenant: string, report: CaptainsReport, isChairLink: boolean) {
+  const [cfg, umpires, views] = await Promise.all([
     repo.getTenantConfig(tenant),
     repo.listUmpires(tenant),
+    reportViews(tenant, [report], true),
   ]);
   return {
-    report: reportView(report, now()),
+    report: views[0],
+    // "Send to captain" is offered to the CHAIR's link only; a captain's link never gets a
+    // roster (the picker route answers 403 for it).
+    canForward: isChairLink,
+    forwardsRemaining: Math.max(0, MAX_FORWARDS - (report.forwardCount ?? 0)),
     registry: umpires
       .filter((u) => u.active)
       .map((u) => ({ id: u.id, displayName: u.displayName }))
@@ -4936,12 +5153,36 @@ async function linkPayload(tenant: string, report: CaptainsReport) {
 }
 
 app.get('/captains-report-link/:token', async (c) => {
-  const { tenant, report } = await linkedReportOr410(c);
-  return c.json(await linkPayload(tenant, report));
+  const { tenant, report, isChairLink } = await linkedReportOr410(c);
+  return c.json(await linkPayload(tenant, report, isChairLink));
+});
+
+/** The chair's link only: the club's eligible players for "Send to captain" (names only). */
+app.get('/captains-report-link/:token/forward-candidates', async (c) => {
+  const { tenant, report, isChairLink } = await linkedReportOr410(c);
+  if (!isChairLink) throw new HttpError(403, 'only the club chair can send this report on');
+  const candidates = await forwardCandidates(repo, tenant, report, captainsReportLinkSecret());
+  return c.json({
+    candidates: candidates.map(({ id, name }) => ({ id, name })),
+    remaining: Math.max(0, MAX_FORWARDS - (report.forwardCount ?? 0)),
+  });
+});
+
+app.post('/captains-report-link/:token/forward', async (c) => {
+  const { tenant, report, isChairLink } = await linkedReportOr410(c);
+  if (!isChairLink) throw new HttpError(403, 'only the club chair can send this report on');
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as { candidateId?: unknown };
+  if (typeof body.candidateId !== 'string' || !body.candidateId)
+    throw new HttpError(400, 'candidateId is required');
+  const updated = await forwardReport(
+    { repo },
+    { tenant, report, candidateId: body.candidateId, via: 'link' },
+  ).catch(flowError);
+  return c.json(await linkPayload(tenant, updated, true));
 });
 
 app.put('/captains-report-link/:token', async (c) => {
-  const { tenant, report, memberId } = await linkedReportOr410(c);
+  const { tenant, report, memberId, isChairLink } = await linkedReportOr410(c);
   const { fields, submit } = await reportFieldsFrom(
     tenant,
     report,
@@ -4952,7 +5193,7 @@ app.put('/captains-report-link/:token', async (c) => {
     via: 'link',
     memberId,
   });
-  return c.json(await linkPayload(tenant, saved));
+  return c.json(await linkPayload(tenant, saved, isChairLink));
 });
 
 /* ─── Season runs (ADR 0008) ───

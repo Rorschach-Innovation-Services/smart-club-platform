@@ -7,9 +7,15 @@
  *      pull (the rows stay queued with their attempt count);
  *   2. pull and apply changes (`runMedicoachSync`) — throws on an HTTP/contract failure;
  *   3. retry captain's reports whose opening failed earlier (REPORTOPEN# markers) — always,
- *      even when the pull failed, since it needs nothing from medicoach.
+ *      even when the pull failed, since it needs nothing from medicoach;
+ *   4. send the one reminder for pending reports whose link expires within 2 days.
  */
-import { retryPendingReportOpens, type ReportRetrySummary } from '../captains-reports.js';
+import {
+  retryPendingReportOpens,
+  sendReportReminders,
+  type ReminderSummary,
+  type ReportRetrySummary,
+} from '../captains-reports.js';
 import { hasFeature } from '../features.js';
 import { runMedicoachSync, type PullerDeps, type SyncRunSummary } from './puller.js';
 import { flushScheduleOutbox, type FlushSummary } from './schedule.js';
@@ -17,6 +23,7 @@ import { flushScheduleOutbox, type FlushSummary } from './schedule.js';
 export interface TenantSyncSummary extends SyncRunSummary {
   push?: FlushSummary;
   reports?: ReportRetrySummary;
+  reminders?: ReminderSummary;
 }
 
 export async function runTenantSync(
@@ -61,5 +68,18 @@ export async function runTenantSync(
     throw err;
   }
   const reports = await retryReports();
-  return { ...summary, ...(push ? { push } : {}), reports };
+  let reminders: ReminderSummary | undefined;
+  try {
+    reminders = await sendReportReminders(tenant, {
+      repo,
+      ...(deps.now ? { now: deps.now } : {}),
+      ...(deps.captainsReports ?? {}),
+    });
+  } catch (err) {
+    // A reminder failure never fails the sync run; the next run tries again.
+    console.error(
+      `[medicoach-sync] ${tenant}: report reminders failed — ${err instanceof Error ? err.message : 'error'}`,
+    );
+  }
+  return { ...summary, ...(push ? { push } : {}), reports, ...(reminders ? { reminders } : {}) };
 }
