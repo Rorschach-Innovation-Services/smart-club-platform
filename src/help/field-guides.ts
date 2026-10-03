@@ -32,7 +32,6 @@ export type FieldGuideId =
   | 'match-formats'
   | 'match-days'
   | 'default-time-slots'
-  | 'travel-cost'
   | 'venue-aliases';
 
 export const FIELD_GUIDES: Record<FieldGuideId, FieldGuide> = {
@@ -175,13 +174,6 @@ export const FIELD_GUIDES: Record<FieldGuideId, FieldGuide> = {
       'Filled in when a stage is given set start times or double-headers, and on templates that come with start times.',
     example: '08:00 morning and 13:30 afternoon.',
     convention: 'Leave empty for 08:00 and 13:30.',
-  },
-  'travel-cost': {
-    label: 'Travel cost',
-    meaning: 'The fuel cost per kilometre and how many cars travel to an away match.',
-    howUsed:
-      'Used for the travel estimates on the fixtures screens and schedule exports. A series with its own figures keeps them.',
-    example: 'R 4.50 per km, 3 cars per away trip.',
   },
   'venue-aliases': {
     label: 'Venue aliases',

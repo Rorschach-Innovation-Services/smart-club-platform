@@ -285,7 +285,7 @@ export type CheckClashes = (
   candidates: unknown[],
 ) => Promise<{ results: ClashResult[] }>;
 
-/* ─── AdminFixtures — series cards + drilldown fixture table with distance + travel-cost ─── */
+/* ─── AdminFixtures — series cards + drilldown fixture table with travel distance ─── */
 interface AdminFixturesProps {
   clubs: Club[];
   // `Series.fixtures` is `unknown[]` (frontend strict ratchet, deferred) and this
@@ -400,7 +400,6 @@ export function seriesScheduleRows(
       Suburb: home?.ground?.suburb || '',
       Away: away?.name || 'TBD',
       'Distance (km)': hasGeo && cost ? Number(cost.distanceKm.toFixed(1)) : '—',
-      'Travel (R)': hasGeo && cost ? Math.round(cost.fuelR) : '—',
       Status: f.status || 'scheduled',
     };
   });
@@ -416,7 +415,6 @@ export const SCHEDULE_COLS = [
   'Suburb',
   'Away',
   'Distance (km)',
-  'Travel (R)',
   'Status',
 ] as const;
 
@@ -526,10 +524,9 @@ export function AdminFixtures({
   // The tenant's travel-cost defaults (ADR 0014); a series' own values win.
   const travel = resolveCompetitionDefaults(tenantConfig).travel;
 
-  // Aggregate distance + fuel per series
+  // Aggregate distance per series
   const seriesAgg = (s) => {
-    let totalKm = 0,
-      totalCost = 0;
+    let totalKm = 0;
     s.fixtures.forEach((f) => {
       const home = teamBy(s, f.home),
         away = teamBy(s, f.away);
@@ -537,9 +534,8 @@ export function AdminFixtures({
       const t = seriesTravel(s, travel);
       const c = fixtureCost(home, away, t.costPerKm, t.carsPerAwayTrip, fixtureVenue(f));
       totalKm += c.roundTripKm;
-      totalCost += c.fuelR;
     });
-    return { totalKm, totalCost };
+    return { totalKm };
   };
 
   function exportSchedule(s: Series) {
@@ -620,7 +616,7 @@ export function AdminFixtures({
       title: `Reveal ${noun} to all ${vt.clubs}?`,
       body:
         field === 'venue'
-          ? `Every ${vt.club} in ${s.name} will see the allocated grounds, distance and travel cost immediately. This can't be withdrawn without recalling the whole release.`
+          ? `Every ${vt.club} in ${s.name} will see the allocated grounds and travel distance immediately. This can't be withdrawn without recalling the whole release.`
           : `Every ${vt.club} in ${s.name} will see the start times immediately. This can't be withdrawn without recalling the whole release.`,
       yesLabel: field === 'venue' ? 'Reveal venues' : 'Reveal times',
       onYes: () => {
@@ -650,7 +646,7 @@ export function AdminFixtures({
             Every league runs a season, stage by stage, on the setup your platform operator created
             for it. A one-off cup or festival is a season too: your operator can add a One-off
             tournament structure for it. Home venues flow from the affiliation form. Travel distance
-            and fuel cost are calculated for every away fixture.{' '}
+            is calculated for every away fixture.{' '}
             <a className="help-link" href={GUIDE_URL} target="_blank" rel="noopener noreferrer">
               Open the full guide
             </a>
@@ -802,12 +798,6 @@ export function AdminFixtures({
                       <div className="series-card-stat-l">Total km</div>
                       <div className="series-card-stat-n">
                         {Math.round(agg.totalKm).toLocaleString()}
-                      </div>
-                    </div>
-                    <div className="series-card-stat">
-                      <div className="series-card-stat-l">Travel</div>
-                      <div className="series-card-stat-n" style={{ color: 'var(--green)' }}>
-                        R {Math.round(agg.totalCost).toLocaleString()}
                       </div>
                     </div>
                   </div>
@@ -1100,11 +1090,7 @@ function SeasonViewer({
                         {SCHEDULE_COLS.map((col) => (
                           <th
                             key={col}
-                            style={
-                              col === 'Distance (km)' || col === 'Travel (R)'
-                                ? { textAlign: 'right' }
-                                : undefined
-                            }
+                            style={col === 'Distance (km)' ? { textAlign: 'right' } : undefined}
                           >
                             {col}
                           </th>
@@ -1124,7 +1110,6 @@ function SeasonViewer({
                             <td>{row.Suburb}</td>
                             <td>{row.Away}</td>
                             <td style={{ textAlign: 'right' }}>{row['Distance (km)']}</td>
-                            <td style={{ textAlign: 'right' }}>{row['Travel (R)']}</td>
                             <td>
                               <span className={`fix-status ${row.Status}`}>{row.Status}</span>
                             </td>
@@ -1323,11 +1308,9 @@ export function FixtureTable({
     );
     return { f, home, away, c };
   });
-  let totalKm = 0,
-    totalCost = 0;
+  let totalKm = 0;
   allRows.forEach((r) => {
     totalKm += r.c.roundTripKm;
-    totalCost += r.c.fuelR;
   });
   const rows = filter === 'all' ? allRows : allRows.filter((r) => fixtureStatus(r.f) === filter);
 
@@ -1365,19 +1348,6 @@ export function FixtureTable({
             <div className="fix-header-agg-n">
               <CountUp to={Math.round(totalKm)} />
               <span className="unit">km</span>
-            </div>
-          </div>
-          <div className="fix-header-agg">
-            <div className="fix-header-agg-l">Travel cost</div>
-            <div className="fix-header-agg-n">
-              R <CountUp to={Math.round(totalCost)} />
-            </div>
-          </div>
-          <div className="fix-header-agg">
-            <div className="fix-header-agg-l">@ R / km</div>
-            <div className="fix-header-agg-n">
-              R {ownTravel.costPerKm.toFixed(2)}
-              <span className="unit">× {ownTravel.carsPerAwayTrip} cars</span>
             </div>
           </div>
         </div>
@@ -1486,7 +1456,6 @@ export function FixtureTable({
               <th>Venue · Suburb</th>
               <th>Away (visitors)</th>
               <th style={{ width: 90, textAlign: 'right' }}>Distance</th>
-              <th style={{ width: 110, textAlign: 'right' }}>Travel</th>
               <th style={{ width: 170 }}>Umpires</th>
               <th style={{ width: 110 }}>Status</th>
               <th style={{ width: 80 }}></th>
@@ -1608,16 +1577,6 @@ export function FixtureTable({
                       <span className="fix-row-dist">—</span>
                     )}
                   </td>
-                  <td style={{ textAlign: 'right' }}>
-                    {c.distanceKm > 0 ? (
-                      <span className="fix-row-cost">
-                        <span className="cur">R</span>
-                        {Math.round(c.fuelR).toLocaleString()}
-                      </span>
-                    ) : (
-                      <span className="fix-row-cost">—</span>
-                    )}
-                  </td>
                   <td>
                     <UmpireCell
                       series={series}
@@ -1673,7 +1632,7 @@ export function FixtureTable({
             {rows.length === 0 && (
               <tr>
                 <td
-                  colSpan={10}
+                  colSpan={9}
                   style={{
                     padding: '28px',
                     textAlign: 'center',
@@ -1696,10 +1655,6 @@ export function FixtureTable({
             <div className="fix-totals-l">Total km (round-trip)</div>
             <div className="fix-totals-n">{Math.round(totalKm).toLocaleString()} km</div>
           </div>
-          <div className="fix-totals-item">
-            <div className="fix-totals-l">Season fuel total</div>
-            <div className="fix-totals-n green">R {Math.round(totalCost).toLocaleString()}</div>
-          </div>
         </div>
       </div>
 
@@ -1714,8 +1669,8 @@ export function FixtureTable({
               </div>
               <div className="fix-release-text-sub">
                 Published {formatStamp(series.releasedAt)} · every club portal now shows their
-                schedule{series.withheld?.venue ? '' : ' + travel costs'}. No email or WhatsApp is
-                sent — each club shares fixtures with its players when it chooses.
+                schedule. No email or WhatsApp is sent — each club shares fixtures with its players
+                when it chooses.
               </div>
               {(series.withheld?.venue || series.withheld?.time) && (
                 <div
@@ -2074,7 +2029,7 @@ function EditFixtureRow({
 
   return (
     <tr className="fix-edit-tr">
-      <td colSpan={10}>
+      <td colSpan={9}>
         <div className="fix-edit-grid">
           <div className="fix-edit-field">
             <label htmlFor={`${uid}-round`}>Round</label>
