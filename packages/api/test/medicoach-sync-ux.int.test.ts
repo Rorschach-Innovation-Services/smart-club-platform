@@ -445,6 +445,19 @@ describe('plain-language errors and the last successful sync', () => {
     assert.ok(Date.parse(body.health!.lastSuccessAt!) >= Date.parse(body.health!.lastErrorAt!));
   });
 
+  test('"Sync now" that fails answers 502 in plain language, the technical text beside it', async () => {
+    pullHttpFail = 401;
+    const res = await post('sync-now', {});
+    assert.equal(res.status, 502);
+    const body = (await res.json()) as { error: string; code: string; technical: string };
+    assert.equal(
+      body.error,
+      'medicoach rejected our credentials — check the MedicoachSyncSecret matches on both sides.',
+    );
+    assert.equal(body.code, 'sync_failed');
+    assert.equal(body.technical, 'medicoach answered HTTP 401');
+  });
+
   test('a dry run is never recorded as a successful sync', async () => {
     await run.runTenantSync(T, 'cron', deps({ secret: '' }));
     const body = await status();

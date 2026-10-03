@@ -93,6 +93,28 @@ describe('UmpireCell', () => {
     expect(onSave).toHaveBeenCalledWith('s1', 'f1', ['u-a-ngubane', 'u-b-tyali']);
   });
 
+  it('works from the keyboard: arrows move through the suggestions, Enter picks, Escape closes', async () => {
+    const { onSave, user } = renderCell();
+    await user.click(screen.getByRole('button', { name: 'Assign umpires' }));
+    const input = screen.getByLabelText('Umpire 1');
+    await user.type(input, 'a');
+    await user.keyboard('{ArrowDown}');
+    expect(screen.getAllByRole('option')[0]).toHaveFocus();
+    await user.keyboard('{ArrowDown}');
+    expect(screen.getAllByRole('option')[1]).toHaveFocus();
+    await user.keyboard('{ArrowUp}{ArrowUp}');
+    expect(input).toHaveFocus();
+    await user.keyboard('{ArrowDown}{Enter}');
+    expect(screen.getByRole('button', { name: /^Remove A\.Ngubane/ })).toBeInTheDocument();
+    const second = screen.getByLabelText('Umpire 2');
+    await user.type(second, 'ty');
+    await user.keyboard('{Escape}');
+    expect(second).toHaveValue('');
+    expect(screen.queryByRole('listbox')).toBeNull();
+    await user.click(screen.getByRole('button', { name: /save umpires/i }));
+    expect(onSave).toHaveBeenCalledWith('s1', 'f1', ['u-a-ngubane']);
+  });
+
   it('never offers an inactive (merged) umpire', async () => {
     const { user } = renderCell();
     await user.click(screen.getByRole('button', { name: 'Assign umpires' }));
