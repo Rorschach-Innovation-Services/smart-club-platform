@@ -399,7 +399,7 @@ export function AdminCaptainsReportsView({
                     const low = r.umpires.some(hasLowRating);
                     return (
                       <tr key={r.id}>
-                        <td>
+                        <td data-label="Match">
                           <div style={{ fontWeight: 700 }}>{matchLine(r)}</div>
                           <div className="ump-sub">
                             {fmtDate(r.matchDate)} · {r.competition}
@@ -408,26 +408,26 @@ export function AdminCaptainsReportsView({
                             <Pill tone="navy">Not in the fixture list</Pill>
                           )}
                         </td>
-                        <td>{r.clubName}</td>
-                        <td>
+                        <td data-label="Report from">{r.clubName}</td>
+                        <td data-label="Notice">
                           <NoticeChips report={r} />
                         </td>
-                        <td>
+                        <td data-label="Umpires">
                           {r.umpiresSnapshot.length ? (
                             r.umpiresSnapshot.map((u) => u.name).join(', ')
                           ) : (
                             <span className="ump-none">None appointed</span>
                           )}
                         </td>
-                        <td>
+                        <td data-label="Status">
                           <CaptainsReportStatusPill report={r} />
                           {r.ref && <div className="ump-sub">{r.ref}</div>}
                         </td>
-                        <td>
+                        <td data-label="Ratings">
                           {avgs.length ? avgs.map((a) => a.toFixed(1)).join(' · ') : '—'}{' '}
                           {low && <Pill tone="coral">Low</Pill>}
                         </td>
-                        <td>
+                        <td className="cr-admin-actions">
                           {r.status === 'submitted' && (
                             <Btn tone="outline" size="sm" onClick={() => setOpenId(r.id)}>
                               View

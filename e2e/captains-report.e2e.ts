@@ -320,6 +320,44 @@ test("the away chair sends the report on to a captain from the link; the chair's
   // …and the chair's own link still opens it (first submit wins — the next test files it).
   await p.reload();
   await expect(p.getByText("Crusaders / Captain's Report")).toBeVisible();
+
+  // On a phone: the sticky submit bar never covers the last field, and the disabled submit
+  // button and the placeholder meet WCAG AA contrast.
+  await p.setViewportSize({ width: 375, height: 740 });
+  await p.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  const declaration = p.getByRole('checkbox');
+  await declaration.focus();
+  const bar = p.locator('.cr-footer');
+  const [boxField, boxBar] = [await declaration.boundingBox(), await bar.boundingBox()];
+  expect(boxField && boxBar && boxField.y + boxField.height <= boxBar.y).toBeTruthy();
+  const captainName = p.getByRole('combobox', { name: "Captain's name" });
+  await captainName.focus();
+  const [boxName, boxBar2] = [await captainName.boundingBox(), await bar.boundingBox()];
+  expect(boxName && boxBar2 && boxName.y + boxName.height <= boxBar2.y).toBeTruthy();
+  const ratio = await p.evaluate(() => {
+    const rgb = (c: string) => (c.match(/[\d.]+/g) ?? []).map(Number);
+    const lum = ([r, g, b]: number[]) => {
+      const f = (v: number) => {
+        const x = v / 255;
+        return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+      };
+      return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+    };
+    const contrast = (a: string, b: string) => {
+      const [l1, l2] = [lum(rgb(a)), lum(rgb(b))].sort((x, y) => y - x);
+      return (l1 + 0.05) / (l2 + 0.05);
+    };
+    const btn = document.querySelector('.cr-footer .btn[disabled]') as HTMLElement;
+    const s = getComputedStyle(btn);
+    const input = document.querySelector('input[placeholder="Full name"]') as HTMLElement;
+    return {
+      button:
+        Number(getComputedStyle(btn).opacity) === 1 ? contrast(s.color, s.backgroundColor) : 0,
+      placeholder: contrast(getComputedStyle(input, '::placeholder').color, 'rgb(255, 255, 255)'),
+    };
+  });
+  expect(ratio.button).toBeGreaterThanOrEqual(4.5);
+  expect(ratio.placeholder).toBeGreaterThanOrEqual(4.5);
   await ctx.close();
 });
 
@@ -382,6 +420,18 @@ test('the union office sees both reports and the umpire averages', async ({ page
   await expect(rows).toHaveCount(1);
   await rows.first().getByRole('button', { name: 'View' }).click();
   await expect(browser.getByText(`Umpire 1: ${UMP_A}`)).toBeVisible();
+
+  // On a phone each report is a labelled card: nothing runs off the right edge.
+  await browser.getByRole('button', { name: /^All reports|← All reports/ }).click();
+  await browser.getByRole('button', { name: /low ratings/i }).click();
+  await browser.setViewportSize({ width: 375, height: 740 });
+  const card = browser.getByRole('row', { name: /UKZN v Crusaders/ }).first();
+  for (const label of ['Status', 'Ratings', 'Notice']) {
+    const cell = card.locator(`td[data-label="${label}"]`);
+    const box = await cell.boundingBox();
+    expect(box && box.x >= 0 && box.x + box.width <= 375, `${label} fits`).toBeTruthy();
+  }
+  await browser.setViewportSize({ width: 1280, height: 800 });
 
   await browser.locator('aside.nav .nav-item', { hasText: 'Umpires' }).click();
   // UMP_A: (2+4+4+4+4)/5 = 3.6 from UKZN, 5.0 from Crusaders and 3.0 from the unlisted

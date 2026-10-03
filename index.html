@@ -4063,6 +4063,22 @@
         align-items: center;
         margin: 6px 0;
       }
+      /* Captain's report pages: readable placeholder and disabled-button text (WCAG AA
+         4.5:1) — the global placeholder tint and the 50%-opacity disabled button fall short
+         on the public link page, where these carry instructions. */
+      .cr-layout .field-input::placeholder,
+      .cr-layout .field-textarea::placeholder,
+      .cr-link-shell .field-input::placeholder {
+        color: #5f6368;
+      }
+      .cr-layout .btn[disabled],
+      .cr-link-shell .btn[disabled] {
+        opacity: 1;
+        background: #e8eaed;
+        border-color: #e8eaed;
+        color: #4a4f55;
+        box-shadow: none;
+      }
       .cr-link-shell {
         min-height: 100vh;
         background: var(--paper, #f6f8fb);
@@ -4107,6 +4123,18 @@
         .cr-aside {
           display: none;
         }
+        /* The sticky submit bar (~64px) must never sit over the field being edited:
+           focus/scroll-into-view keeps clear of it, and the form ends with room for it. */
+        html:has(.cr-footer),
+        .main:has(.cr-footer) {
+          scroll-padding-bottom: 96px;
+        }
+        .cr-layout .rp-form > :not(.cr-footer) {
+          scroll-margin-bottom: 96px;
+        }
+        .cr-layout .rp-form {
+          padding-bottom: 12px;
+        }
         .cr-footer {
           position: sticky;
           bottom: 12px;
@@ -4124,6 +4152,64 @@
         }
       }
       @media (max-width: 640px) {
+        /* Admin list: one labelled card per report instead of a 7-column table. */
+        .tbl-w:has(.cr-admin-table) {
+          border: 0;
+          background: transparent;
+          overflow: visible;
+        }
+        .cr-admin-table thead {
+          display: none;
+        }
+        .tbl.cr-admin-table {
+          min-width: 0;
+        }
+        .cr-admin-table,
+        .cr-admin-table tbody,
+        .cr-admin-table tr,
+        .cr-admin-table td {
+          display: block;
+          width: 100%;
+        }
+        .cr-admin-table tr {
+          background: var(--white, #fff);
+          border: 1px solid var(--line);
+          border-radius: 12px;
+          padding: 10px 12px;
+          margin-bottom: 10px;
+        }
+        .tbl.cr-admin-table td {
+          border: 0;
+          padding: 4px 0;
+          display: grid;
+          grid-template-columns: 96px minmax(0, 1fr);
+          gap: 8px;
+          align-items: start;
+          overflow-wrap: anywhere;
+        }
+        .cr-admin-table td::before {
+          content: attr(data-label);
+          font-size: 11px;
+          font-weight: 600;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
+          color: var(--muted);
+          padding-top: 2px;
+        }
+        .cr-admin-table td[data-label='Match'] {
+          display: block;
+          padding-bottom: 6px;
+        }
+        .cr-admin-table td[data-label='Match']::before,
+        .cr-admin-table td.cr-admin-actions::before {
+          content: none;
+        }
+        .cr-admin-table td.cr-admin-actions {
+          display: block;
+        }
+        .cr-admin-table td.cr-admin-actions:empty {
+          display: none;
+        }
         .cr-teams {
           grid-template-columns: 1fr;
           gap: 12px;
