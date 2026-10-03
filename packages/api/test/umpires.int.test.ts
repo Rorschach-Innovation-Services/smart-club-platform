@@ -372,14 +372,236 @@ describe('merge', () => {
       ['u-j-kok', 'u-s-gasa'],
     );
 
-    // Re-running finds nothing to re-point.
+    // Merging it again (a stale page, a double-click) is refused and names where it went.
     const again = await call('POST', '/umpires/u-sipho-gasa/merge', { targetId: 'u-s-gasa' });
-    assert.equal(((await again.json()) as { repointed: number }).repointed, 0);
+    assert.equal(again.status, 409);
+    const refused = (await again.json()) as {
+      code: string;
+      error: string;
+      mergedInto: string;
+      mergedIntoName: string;
+    };
+    assert.equal(refused.code, 'umpire_already_merged');
+    assert.equal(refused.mergedInto, 'u-s-gasa');
+    assert.equal(refused.mergedIntoName, 'S.Gasa');
+    assert.match(refused.error, /already merged into S\.Gasa/);
+    // …whichever target this request named.
+    const elsewhere = await call('POST', '/umpires/u-sipho-gasa/merge', { targetId: 'u-j-kok' });
+    assert.equal(elsewhere.status, 409);
+    assert.equal(((await elsewhere.json()) as { code: string }).code, 'umpire_already_merged');
+    // Nothing was re-pointed by the refused calls.
+    assert.deepEqual(
+      (await repo.getFixtureOfficials('dolphins', 's-merge', 'f2'))!.umpires.map((u) => u.umpireId),
+      ['u-j-kok', 'u-s-gasa'],
+    );
     // A merged entry can't come back.
     assert.equal((await call('PATCH', '/umpires/u-sipho-gasa', { active: true })).status, 409);
     assert.equal(
       (await call('POST', '/umpires/u-s-gasa/merge', { targetId: 'u-s-gasa' })).status,
       400,
     );
+  });
+});
+
+/* ─── Upload appointments (admin): the CLI's parser + matcher behind a preview/confirm pair ─── */
+
+describe('upload appointments', () => {
+  const OCT = new Date(Date.UTC(2026, 9, 1));
+  const at = (h: number, m = 0) => new Date(Date.UTC(1899, 11, 30, h, m));
+
+  /** One "Premier league T20" section, in the union sheet's layout. */
+  async function workbook(rows: unknown[][]): Promise<string> {
+    const ExcelJS = (await import('exceljs')).default;
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('T20 Runner');
+    ws.getRow(1).values = [
+      'Ref',
+      'Month',
+      'Day',
+      'Time',
+      'Date',
+      'Home Team',
+      'Away Team',
+      'Venue',
+      'Umpire',
+      'Umpire',
+    ];
+    rows.forEach((r, i) => (ws.getRow(i + 2).values = r as never));
+    return Buffer.from(await wb.xlsx.writeBuffer()).toString('base64');
+  }
+  const sheetRow = (time: Date, home: string, away: string, venue: string, ...umps: string[]) => [
+    'Premier league T20',
+    OCT,
+    'Sunday',
+    time,
+    4,
+    home,
+    away,
+    venue,
+    ...umps,
+  ];
+
+  const T20 = 's-upload-t20';
+  async function seedUpload() {
+    for (const [id, name] of [
+      ['home-club', 'Home Club'],
+      ['away-club', 'Away Club'],
+      ['other-club', 'Other Club'],
+    ])
+      await repo.putClub('dolphins', { id, name } as never);
+    await repo.putSeries(
+      'dolphins',
+      series(T20, {
+        name: 'Premier T20',
+        maxOvers: 20,
+        fixtures: [
+          {
+            id: 'f1',
+            round: 1,
+            date: '2026-10-04',
+            time: '09:00',
+            home: 'home-club',
+            away: 'away-club',
+            venueName: 'Kingsmead Oval',
+          },
+          {
+            id: 'f2',
+            round: 1,
+            date: '2026-10-04',
+            time: '13:30',
+            home: 'away-club',
+            away: 'other-club',
+            venueName: 'Lahee Park',
+          },
+        ],
+      } as Partial<Series>),
+    );
+    if (!(await repo.getUmpire('dolphins', 'u-u-known')))
+      await createUmpire({ displayName: 'U.Known' });
+  }
+
+  type Preview = {
+    summary: Record<string, number>;
+    rows: Array<{
+      sheetRow: number;
+      fixtureId: string;
+      action: string;
+      differences: Array<{ field: string; sheet: string; fixture: string }>;
+      skipReason?: string;
+    }>;
+    unmatched: Array<{ sheetRow: number; kind: string; reason: string }>;
+    unknownUmpires: string[];
+    toCreate: Array<{ displayName: string }>;
+    planHash: string;
+  };
+  const preview = async (body: Record<string, unknown>, auth = ADMIN) =>
+    call('POST', '/umpires/appointments/preview', { filename: 'runner.xlsx', ...body }, auth);
+
+  test('preview: matched, venue/time differences, unknown umpires and unmatched rows; nothing written', async () => {
+    await seedUpload();
+    const dataBase64 = await workbook([
+      sheetRow(at(9), 'Home Club', 'Away Club', 'Kingsmead Oval', 'U.Known', 'N.Ewbie'),
+      sheetRow(at(14), 'Other Club', 'Away Club', 'Toti Oval 1', 'U.Known'),
+      sheetRow(at(9), 'Nobody CC', 'Away Club', 'Kingsmead Oval', 'Z.Elsewhere'),
+    ]);
+    const res = await preview({ dataBase64 });
+    assert.equal(res.status, 200, await res.clone().text());
+    const p = (await res.json()) as Preview;
+    assert.equal(p.summary.rows, 3);
+    assert.equal(p.summary.matched, 2);
+    assert.equal(p.summary.notMatched, 1);
+    const byRow = new Map(p.rows.map((r) => [r.sheetRow, r]));
+    assert.equal(byRow.get(2)!.fixtureId, 'f1');
+    assert.equal(byRow.get(2)!.action, 'skipped');
+    assert.match(byRow.get(2)!.skipReason!, /unknown umpire: N\.Ewbie/);
+    assert.equal(byRow.get(3)!.action, 'new');
+    assert.deepEqual(byRow.get(3)!.differences, [
+      { field: 'time', sheet: '14:00', fixture: '13:30' },
+      { field: 'venue', sheet: 'Toti Oval 1', fixture: 'Lahee Park' },
+    ]);
+    assert.deepEqual(p.unknownUmpires, ['N.Ewbie']);
+    assert.deepEqual(p.toCreate, []);
+    assert.equal(p.unmatched[0].kind, 'unknown-team');
+    assert.equal(
+      await repo.getFixtureOfficials('dolphins', T20, 'f2'),
+      null,
+      'preview writes nothing',
+    );
+
+    // Ticking "create these umpires" re-plans: row 2 becomes writable.
+    const withCreate = (await (
+      await preview({ dataBase64, createUmpires: true })
+    ).json()) as Preview;
+    assert.deepEqual(
+      withCreate.toCreate.map((u) => u.displayName),
+      ['N.Ewbie'],
+    );
+    assert.equal(withCreate.rows.find((r) => r.sheetRow === 2)!.action, 'new');
+  });
+
+  test('confirm writes like the CLI --confirm; a stale preview is refused with the fresh one', async () => {
+    await seedUpload();
+    const dataBase64 = await workbook([
+      sheetRow(at(9), 'Home Club', 'Away Club', 'Kingsmead Oval', 'U.Known', 'N.Ewbie'),
+    ]);
+    const p = (await (await preview({ dataBase64, createUmpires: true })).json()) as Preview;
+
+    const stale = await call('POST', '/umpires/appointments/confirm', {
+      filename: 'runner.xlsx',
+      dataBase64,
+      createUmpires: true,
+      planHash: 'not-the-hash',
+    });
+    assert.equal(stale.status, 409);
+    const staleBody = (await stale.json()) as { code: string; preview: Preview };
+    assert.equal(staleBody.code, 'plan_changed');
+    assert.equal(staleBody.preview.planHash, p.planHash);
+
+    const ok = await call('POST', '/umpires/appointments/confirm', {
+      filename: 'runner.xlsx',
+      dataBase64,
+      createUmpires: true,
+      planHash: p.planHash,
+    });
+    assert.equal(ok.status, 200, await ok.clone().text());
+    assert.deepEqual(await ok.json(), { written: 1, created: 1 });
+    const f1 = await repo.getFixtureOfficials('dolphins', T20, 'f1');
+    assert.deepEqual(
+      f1!.umpires.map((u) => u.name),
+      ['U.Known', 'N.Ewbie'],
+    );
+    assert.equal(f1!.updatedBy, 'admin@test');
+    // A second upload of the same sheet has nothing left to write.
+    const again = (await (await preview({ dataBase64, createUmpires: true })).json()) as Preview;
+    assert.equal(again.summary.unchanged, 1);
+    assert.deepEqual(again.toCreate, []);
+  });
+
+  test('admin only; xlsx only; 2 MB at most; unknown sections are named', async () => {
+    const dataBase64 = await workbook([sheetRow(at(9), 'Home Club', 'Away Club', 'X', 'U.Known')]);
+    assert.equal((await preview({ dataBase64 }, REP)).status, 403);
+    const notXlsx = await preview({ filename: 'runner.csv', dataBase64 });
+    assert.equal(notXlsx.status, 400);
+    assert.match(((await notXlsx.json()) as { error: string }).error, /\.xlsx/);
+    const garbage = await preview({ dataBase64: Buffer.from('hello').toString('base64') });
+    assert.equal(garbage.status, 400);
+    const huge = await preview({
+      dataBase64: 'A'.repeat(Math.ceil((2 * 1024 * 1024 * 4) / 3) + 8),
+    });
+    assert.equal(huge.status, 413);
+    assert.match(((await huge.json()) as { error: string }).error, /2 MB/);
+
+    const ExcelJS = (await import('exceljs')).default;
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Runner');
+    ws.getRow(1).values = ['Ref', 'Month', 'Date', 'Home Team', 'Away Team'];
+    ws.getRow(2).values = ['Under 9 festival', OCT, 4, 'Home Club', 'Away Club'];
+    const unknown = await preview({
+      dataBase64: Buffer.from(await wb.xlsx.writeBuffer()).toString('base64'),
+    });
+    assert.equal(unknown.status, 400);
+    const body = (await unknown.json()) as { code: string; sections: string[] };
+    assert.equal(body.code, 'unknown_sections');
+    assert.deepEqual(body.sections, ['Under 9 festival']);
   });
 });

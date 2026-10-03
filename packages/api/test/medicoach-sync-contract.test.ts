@@ -15,6 +15,8 @@ import {
   MEDICOACH_SYNC_VERSION,
   SchedulePushRequestSchema,
   SchedulePushResponseSchema,
+  VENUE_MAX_LENGTH,
+  capVenue,
   changesPathAndQuery,
   parseFixtureRef,
   parseTeamRef,
@@ -88,6 +90,35 @@ describe('contract examples', () => {
       ChangesResponseSchema.parse(ok).fixtures[0].result!.medicoachMatchUrl,
       'https://live.medicoach.co.za/m/1',
     );
+  });
+
+  test('a venue longer than 200 characters is accepted and truncated, never rejected', () => {
+    const long = `Kingsmead ${'x'.repeat(300)}`;
+    const raw = JSON.parse(readFileSync(path.join(EXAMPLES, 'changes-live-result.json'), 'utf8'));
+    raw.fixtures[0].schedule.venue = long;
+    const parsed = ChangesResponseSchema.parse(raw);
+    assert.equal(parsed.fixtures[0].schedule.venue, long.slice(0, VENUE_MAX_LENGTH));
+    assert.equal(VENUE_MAX_LENGTH, 200);
+
+    const push = JSON.parse(
+      readFileSync(path.join(EXAMPLES, 'schedule-push-request.json'), 'utf8'),
+    );
+    push.changes[0].schedule.venue = long;
+    assert.equal(
+      SchedulePushRequestSchema.parse(push).changes[0].schedule.venue!.length,
+      VENUE_MAX_LENGTH,
+    );
+    // Exactly 200 and shorter pass through unchanged; null stays null.
+    assert.equal(capVenue('a'.repeat(200)), 'a'.repeat(200));
+    assert.equal(capVenue('Lahee Park'), 'Lahee Park');
+    assert.equal(capVenue(null), null);
+  });
+
+  test('truncation never splits a surrogate pair', () => {
+    const v = `${'a'.repeat(199)}🏏tail`;
+    const capped = capVenue(v)!;
+    assert.ok(capped.length <= VENUE_MAX_LENGTH);
+    assert.equal(capped, 'a'.repeat(199));
   });
 });
 

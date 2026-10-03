@@ -16,8 +16,10 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import ExcelJS from 'exceljs';
 import {
+  appointmentPlanHash,
   matchAppointments,
   parseAppointmentsWorkbook,
+  planAppointmentImport,
   parseArgs,
   planNewUmpires,
   planWrites,
@@ -483,6 +485,12 @@ describe('matchAppointments', () => {
     // Same ground, different spelling ⇒ no note.
     assert.deepEqual(matched[1].notes, []);
     assert.equal(matched[0].fixture.time, '13:00');
+    // The same differences, structured for the console's preview table.
+    assert.deepEqual(matched[0].differences, [
+      { field: 'time', sheet: '10:00', fixture: '13:00' },
+      { field: 'venue', sheet: 'Toti Oval', fixture: 'Gledhow' },
+    ]);
+    assert.deepEqual(matched[1].differences, []);
   });
 
   test('unknown teams, missing fixtures and duplicate rows are listed and not matched', () => {
@@ -663,6 +671,65 @@ describe('umpire resolution and the write plan', () => {
     const doubles = sheetDoubleBookings(planWrites(matched, byName, new Map()).writes);
     assert.equal(doubles.length, 1);
     assert.equal(doubles[0].umpireId, 'u-s-gasa');
+  });
+});
+
+describe('planAppointmentImport', () => {
+  const rows = [
+    // Writable: one matched fixture, two umpires, a referee — all three unknown.
+    row({
+      sheetRow: 1,
+      home: 'Dawnheights',
+      away: 'Amazimtoti',
+      umpires: ['V.New', 'S.Gasa'],
+      referee: 'R.Ref',
+    }),
+    // Matched, but three umpires: never written, so its unknown names are never created.
+    row({
+      sheetRow: 2,
+      home: 'Tongaat Cricket Assoication',
+      away: 'Southern Natal',
+      umpires: ['S.Gasa', 'X.One', 'X.Two'],
+    }),
+    // Not matched at all.
+    row({ sheetRow: 3, home: 'Nobody FC', away: 'Southern Natal', umpires: ['Z.Unmatched'] }),
+  ];
+  const registry = [umpire('u-s-gasa', 'S.Gasa', ['sgasa'])];
+  const inputs = { series: ALL, clubs: CLUBS, registry, existing: new Map(), at: 'x' };
+
+  test('--create-umpires creates only umpires named on rows that will be written', () => {
+    const plan = planAppointmentImport(rows, { ...inputs, createUmpires: true });
+    assert.deepEqual(plan.toCreate.map((u) => u.displayName).sort(), ['R.Ref', 'V.New']);
+    assert.deepEqual([...plan.unknownNames].sort(), ['R.Ref', 'V.New']);
+    assert.deepEqual(
+      plan.plan.writes.map((w) => [w.match.row.sheetRow, w.action]),
+      [[1, 'new']],
+    );
+    assert.deepEqual(
+      plan.plan.skipped.map((s) => s.match.row.sheetRow),
+      [2],
+    );
+    assert.equal(plan.unmatched.length, 1);
+  });
+
+  test('without it, nothing is created and the row naming them is skipped', () => {
+    const plan = planAppointmentImport(rows, { ...inputs, createUmpires: false });
+    assert.deepEqual(plan.toCreate, []);
+    assert.equal(plan.plan.writes.length, 0);
+    const skipped = new Map(plan.plan.skipped.map((s) => [s.match.row.sheetRow, s.reason]));
+    assert.match(skipped.get(1)!, /unknown umpire: V\.New, R\.Ref/);
+    assert.match(skipped.get(2)!, /3 umpires/);
+  });
+
+  test('the preview hash moves when what would be written moves', () => {
+    const a = planAppointmentImport(rows, { ...inputs, createUmpires: true });
+    const b = planAppointmentImport(rows, { ...inputs, createUmpires: true });
+    assert.equal(appointmentPlanHash(a), appointmentPlanHash(b));
+    const stored = new Map([
+      ['s-vet-prem#f1', { umpires: [{ umpireId: 'u-s-gasa', name: 'S.Gasa' }] }],
+    ]);
+    const c = planAppointmentImport(rows, { ...inputs, existing: stored, createUmpires: true });
+    assert.notEqual(appointmentPlanHash(a), appointmentPlanHash(c));
   });
 });
 
