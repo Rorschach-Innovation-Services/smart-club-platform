@@ -163,39 +163,17 @@ export const WHATSAPP_TEMPLATES = {
    * `/r/<token>` page is tenant-independent, like `/verify`): every tenant shares one
    * template. Non-prod stages send the same button — they normally dry-run anyway.
    *
-   * Approved and Active in Meta since 3 Oct 2026 (Utility, English, 3 body params, dynamic URL
-   * button `https://platform.club.medicoach.co.za/r/{{1}}`). `bodyText` is still the
-   * reconstruction from the parameter order (the arity contract) — confirm it against Business
-   * Manager's copy.
+   * Created in Meta 3 Oct 2026; EDITED IN PLACE to the v2 copy on 4 Oct 2026 (Utility,
+   * English, 3 body params, dynamic URL button `https://platform.club.medicoach.co.za/r/{{1}}`).
+   * The v2 copy names the UNION instead of the club (no awkward "Crusaders's") and drops
+   * "works once" (a link can be opened and drafted many times; it is SUBMITTED once).
+   * Meta keeps serving the previously approved body until the edit clears review, so during
+   * that window {{2}} (now the union) renders inside the old club-possessive sentence —
+   * cosmetic only, same arity. `bodyText` is the exact copy submitted; confirm against
+   * Business Manager after the edit is approved.
    */
   captainsReportDue: {
     name: 'captains_report_due',
-    lang: 'en',
-    paramCount: 3,
-    params: ['recipient name', 'club name', 'match (teams + date)'],
-    bodyText:
-      'Hello {{1}},\n\n' +
-      "{{2}}'s captain's report for {{3}} is open. Please rate the umpires.\n\n" +
-      'Tap the button below to open the report. The link works once and expires 7 days after the match.',
-    status: 'registered',
-    urlButton: {
-      urlTemplate: 'https://platform.club.medicoach.co.za/r/{{1}}',
-      suffix: 'signed report token',
-    },
-  },
-
-  /**
-   * Captain's report open, v2 copy: names the union instead of the club (no awkward
-   * "Crusaders's") and drops "works once" (a link can be opened and saved as a draft many
-   * times; it is SUBMITTED once). Same URL button as `captains_report_due`.
-   *
-   * NOT YET CREATED IN META. `bodyText` is the exact copy to submit (Utility, English). This
-   * `status` is the ONE switch for the captain's-report sender: while it is not "registered"
-   * the sender keeps using `captains_report_due` (`captainsReportTemplateKey`); flip it to
-   * "registered" once Meta approves the template.
-   */
-  captainsReportOpen: {
-    name: 'captains_report_open',
     lang: 'en',
     paramCount: 3,
     params: ['recipient name', 'org name', 'match line + date'],
@@ -203,7 +181,7 @@ export const WHATSAPP_TEMPLATES = {
       'Hello {{1}},\n\n' +
       "The {{2}} captain's report for {{3}} is open. Please rate the umpires.\n\n" +
       'Tap the button below to open it. You can submit it once; the link expires on the date shown in the report.',
-    status: 'pending',
+    status: 'registered',
     urlButton: {
       urlTemplate: 'https://platform.club.medicoach.co.za/r/{{1}}',
       suffix: 'signed report token',
@@ -212,21 +190,3 @@ export const WHATSAPP_TEMPLATES = {
 } as const satisfies Record<string, WhatsAppTemplateDefinition>;
 
 export type WhatsAppTemplateKey = keyof typeof WHATSAPP_TEMPLATES;
-
-const isLive = (def: WhatsAppTemplateDefinition) => def.status === 'registered';
-
-/**
- * Which template the captain's-report sender uses: the v2 `captains_report_open` once it is
- * registered in Meta, else the v1 `captains_report_due`; null when neither is approved (the
- * WhatsApp channel is then skipped as `template-pending`). Overridable for tests.
- */
-export function captainsReportTemplateKey(
-  templates: Record<
-    'captainsReportOpen' | 'captainsReportDue',
-    WhatsAppTemplateDefinition
-  > = WHATSAPP_TEMPLATES,
-): 'captainsReportOpen' | 'captainsReportDue' | null {
-  if (isLive(templates.captainsReportOpen)) return 'captainsReportOpen';
-  if (isLive(templates.captainsReportDue)) return 'captainsReportDue';
-  return null;
-}

@@ -805,8 +805,8 @@ export function setDefaultReportNoticeSender(
 }
 
 /**
- * The default sender: SES email (+ cc) and the captain's-report WhatsApp template (v2 once
- * registered, else v1 — see `captainsReportTemplateKey`). Each channel says why it was not
+ * The default sender: SES email (+ cc) and the `captains_report_due` WhatsApp template
+ * (v2 copy, edited in place in Meta 4 Oct 2026). Each channel says why it was not
  * sent (`no-email`, `no-cell`, `template-pending`, `send-failed`); a dry-run send returns a
  * `dry-run-` message id, which the caller records as not sent.
  */

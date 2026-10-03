@@ -15,7 +15,7 @@
  * Dry-run: NOTIFY_DRY_RUN=1 or missing token/phone-id → log + synthetic id.
  */
 import { randomUUID } from 'node:crypto';
-import { WHATSAPP_TEMPLATES, captainsReportTemplateKey } from './whatsapp-templates.js';
+import { WHATSAPP_TEMPLATES } from './whatsapp-templates.js';
 
 const TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
@@ -308,26 +308,13 @@ export interface CaptainsReportDueWhatsAppInput {
 }
 
 /**
- * Build the three body params for `captains_report_due`, in order: {{1}} recipient name
- * (fallback 'there'), {{2}} club name, {{3}} match. The link is NOT a body
- * param — it rides in the URL button (see `captainsReportDue.urlButton`).
+ * Build the three body params for `captains_report_due` (v2 copy, edited in place in Meta
+ * on 4 Oct 2026), in order: {{1}} recipient name (fallback 'there'), {{2}} the union's
+ * display name ("KZN Dolphins"), {{3}} match line + date ("Umzinto v African Warriors on
+ * Sun 4 Oct 2026"). The link is NOT a body param — it rides in the URL button
+ * (see `captainsReportDue.urlButton`).
  */
 export function captainsReportDueParams(
-  input: Pick<CaptainsReportDueWhatsAppInput, 'recipientName' | 'clubName' | 'match'>,
-): TemplateParam[] {
-  return [
-    { type: 'text', text: cleanParam(input.recipientName || 'there') },
-    { type: 'text', text: cleanParam(input.clubName) },
-    { type: 'text', text: cleanParam(input.match) },
-  ];
-}
-
-/**
- * Build the three body params for `captains_report_open` (v2), in order: {{1}} recipient name
- * (fallback 'there'), {{2}} the union's display name ("KZN Dolphins"), {{3}} match line +
- * date ("Umzinto v African Warriors on Sun 4 Oct 2026"). The link rides in the URL button.
- */
-export function captainsReportOpenParams(
   input: Pick<CaptainsReportDueWhatsAppInput, 'recipientName' | 'orgName' | 'match'>,
 ): TemplateParam[] {
   return [
@@ -338,23 +325,20 @@ export function captainsReportOpenParams(
 }
 
 /**
- * Captain's report link over WhatsApp (URL button with the token as its suffix), on the
- * template `captainsReportTemplateKey` picks (v2 once registered, else v1). Throws
- * `WhatsAppTemplatePendingError` when no captain's-report template is approved.
+ * Captain's report link over WhatsApp (URL button with the token as its suffix). Throws
+ * `WhatsAppTemplatePendingError` while the registry entry is not `registered` — the
+ * channel is then skipped as `template-pending`, never failed.
  */
 export async function sendCaptainsReportDueWhatsApp(
   input: CaptainsReportDueWhatsAppInput,
 ): Promise<{ messageId: string }> {
-  const key = captainsReportTemplateKey();
-  if (!key) throw new WhatsAppTemplatePendingError();
-  const { name, lang } = WHATSAPP_TEMPLATES[key];
-  const params =
-    key === 'captainsReportOpen' ? captainsReportOpenParams(input) : captainsReportDueParams(input);
+  const { name, lang, status } = WHATSAPP_TEMPLATES.captainsReportDue;
+  if (status !== 'registered') throw new WhatsAppTemplatePendingError();
   return sendTemplate(
     input.to,
     name,
     lang,
-    params,
+    captainsReportDueParams(input),
     `captain's report link for ${input.clubName}`,
     input.token,
   );

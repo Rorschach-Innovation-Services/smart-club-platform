@@ -141,13 +141,16 @@ real recipient until the token/phone-id secrets and (for WhatsApp) an approved t
 - Watch the comm log for `failed` WhatsApp rows after wiring a real token: they carry Meta's
   error code/message and usually mean the template name/language or a body param is off.
 
-## captains_report_open (v2) — to create
+## captains_report_due — v2 copy, edited in place (4 Oct 2026)
 
-Replaces `captains_report_due`'s copy ("works once" was ambiguous; "{{2}}'s" read badly for
-clubs such as Crusaders). Create it in WhatsApp Manager on the same WABA:
+The planned separate `captains_report_open` template was NOT created. Both copies take 3
+body params, so the existing `captains_report_due` was EDITED in WhatsApp Manager to the v2
+body instead ("works once" was ambiguous; "{{2}}'s" read badly for clubs such as Crusaders;
+{{2}} now carries the UNION name, not the club). Meta serves the previously approved body
+until the edit clears review — during that window the union name renders inside the old
+club-possessive sentence, which is cosmetic only.
 
-- Name `captains_report_open`, category **Utility**, language **English (en)**.
-- Body (3 variables):
+Current body (3 variables — the registry's `bodyText` must match it exactly):
 
 ```
 Hello {{1}},
@@ -157,11 +160,9 @@ The {{2}} captain's report for {{3}} is open. Please rate the umpires.
 Tap the button below to open it. You can submit it once; the link expires on the date shown in the report.
 ```
 
-- Sample values: `{{1}}` = `Sanele Mthembu`, `{{2}}` = `KZN Dolphins`,
-  `{{3}}` = `Umzinto CC v African Warriors on Sun 20 Sep 2026`.
-- Button: **Visit website**, dynamic URL `https://platform.club.medicoach.co.za/r/{{1}}`
-  (sample suffix: any token-like string, e.g. `abc123.def456`), button text e.g. `Open report`.
-
-Until it is approved the sender keeps using `captains_report_due`. Once Meta shows it Active,
-flip `captainsReportOpen.status` to `'registered'` in
-`packages/api/src/notify/whatsapp-templates.ts` (the one switch) and deploy.
+- Params: `{{1}}` recipient name, `{{2}}` union name (e.g. `KZN Dolphins`),
+  `{{3}}` match line + date (e.g. `Umzinto CC v African Warriors on Sun 20 Sep 2026`).
+- Button (unchanged): **Visit website**, dynamic URL
+  `https://platform.club.medicoach.co.za/r/{{1}}` — the signed report token is the suffix.
+- Meta allows one edit per day / ten per month; if an edit is rejected, the previous
+  approved version keeps sending.

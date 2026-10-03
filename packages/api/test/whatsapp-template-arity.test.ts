@@ -16,11 +16,9 @@ const {
   fixturesParams,
   clearanceParams,
   captainsReportDueParams,
-  captainsReportOpenParams,
   urlButtonComponent,
 } = await import('../src/notify/whatsapp.js');
-const { WHATSAPP_TEMPLATES, captainsReportTemplateKey } =
-  await import('../src/notify/whatsapp-templates.js');
+const { WHATSAPP_TEMPLATES } = await import('../src/notify/whatsapp-templates.js');
 
 const LINK = 'https://club.example.com/sign-in';
 
@@ -55,14 +53,6 @@ const BUILDERS = [
   {
     key: 'captainsReportDue' as const,
     params: captainsReportDueParams({
-      recipientName: 'Sanele Mthembu',
-      clubName: 'Umzinto CC',
-      match: 'Umzinto v African Warriors, Sun 4 Oct 2026',
-    }),
-  },
-  {
-    key: 'captainsReportOpen' as const,
-    params: captainsReportOpenParams({
       recipientName: 'Sanele Mthembu',
       orgName: 'KZN Dolphins',
       match: 'Umzinto v African Warriors on Sun 4 Oct 2026',
@@ -128,28 +118,29 @@ describe('whatsapp URL buttons', () => {
   test('the report link never rides in the body params', () => {
     const params = captainsReportDueParams({
       recipientName: 'A',
-      clubName: 'B',
+      orgName: 'O',
       match: 'C',
     });
     for (const p of params) assert.doesNotMatch(p.text, /https?:\/\//);
   });
 });
 
-describe("captain's report template v2 (captains_report_open)", () => {
-  const v2 = WHATSAPP_TEMPLATES.captainsReportOpen;
+describe("captain's report template (v2 copy, edited in place in Meta 4 Oct 2026)", () => {
+  const due = WHATSAPP_TEMPLATES.captainsReportDue;
 
   test('three body params: recipient name, union name, match line + date', () => {
-    assert.equal(v2.name, 'captains_report_open');
-    assert.equal(v2.paramCount, 3);
-    assert.deepEqual(v2.params, ['recipient name', 'org name', 'match line + date']);
+    assert.equal(due.name, 'captains_report_due');
+    assert.equal(due.status, 'registered');
+    assert.equal(due.paramCount, 3);
+    assert.deepEqual(due.params, ['recipient name', 'org name', 'match line + date']);
     assert.equal(
-      v2.bodyText,
+      due.bodyText,
       'Hello {{1}},\n\n' +
         "The {{2}} captain's report for {{3}} is open. Please rate the umpires.\n\n" +
         'Tap the button below to open it. You can submit it once; the link expires on the date shown in the report.',
     );
     assert.deepEqual(
-      captainsReportOpenParams({
+      captainsReportDueParams({
         recipientName: 'Sanele',
         orgName: 'KZN Dolphins',
         match: 'Umzinto v AW on Sun 20 Sep 2026',
@@ -159,41 +150,15 @@ describe("captain's report template v2 (captains_report_open)", () => {
   });
 
   test('the copy says "submit it once" and never "works once" or a possessive club name', () => {
-    assert.match(v2.bodyText, /You can submit it once; the link expires on the date shown/);
-    assert.doesNotMatch(v2.bodyText, /works once/);
-    assert.doesNotMatch(v2.bodyText, /'s captain's report/);
+    assert.match(due.bodyText, /You can submit it once; the link expires on the date shown/);
+    assert.doesNotMatch(due.bodyText, /works once/);
+    assert.doesNotMatch(due.bodyText, /'s captain's report/);
   });
 
-  test('same URL button as v1', () => {
-    assert.deepEqual(v2.urlButton, WHATSAPP_TEMPLATES.captainsReportDue.urlButton);
-  });
-
-  test('the sender uses v2 only once it is registered, else falls back to v1', () => {
-    const base = {
-      captainsReportOpen: { ...v2, status: 'pending' as const },
-      captainsReportDue: WHATSAPP_TEMPLATES.captainsReportDue,
-    };
-    assert.equal(captainsReportTemplateKey(base), 'captainsReportDue');
-    assert.equal(
-      captainsReportTemplateKey({
-        ...base,
-        captainsReportOpen: { ...v2, status: 'registered' as const },
-      }),
-      'captainsReportOpen',
-    );
-    assert.equal(
-      captainsReportTemplateKey({
-        captainsReportOpen: { ...v2, status: 'pending' as const },
-        captainsReportDue: { ...WHATSAPP_TEMPLATES.captainsReportDue, status: 'pending' as const },
-      }),
-      null,
-    );
-    // Today: v2 is pending, so the live sender still uses v1.
-    assert.equal(captainsReportTemplateKey(), 'captainsReportDue');
-  });
-
-  test('the report link never rides in the v2 body params', () => {
-    for (const p of captainsReportOpenParams({ recipientName: 'A', orgName: 'O', match: 'B' }))
-      assert.doesNotMatch(p.text, /https?:\/\//);
+  test("there is exactly one captain's-report template in the registry", () => {
+    const names = Object.values(WHATSAPP_TEMPLATES)
+      .map((d) => d.name)
+      .filter((n) => n.startsWith('captains_report'));
+    assert.deepEqual(names, ['captains_report_due']);
   });
 });
