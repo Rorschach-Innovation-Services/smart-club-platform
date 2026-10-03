@@ -23,6 +23,9 @@ example with its own zod schema (drift fails CI).
 - Player: `smartclub:<t>:player:<naturalKey>` (same as the bundle; PERSONAL DATA — never log).
 - Smart club never stores medicoach ids; medicoach owns ref ↔ id.
 
+## Field limits
+- venue: string | null — at most 200 characters; senders must not exceed it and receivers truncate anything longer.
+
 ## 1. GET /integrations/smartclub/changes?tenant=<t>&since=<cursor>&limit=<n>
 - `since` = opaque cursor string from a previous `nextCursor`; omit or `0` for a full resync.
 - `limit` default 100, max 500. When more remain, `hasMore: true` — the caller loops with `nextCursor`.
@@ -47,7 +50,7 @@ FixtureChange = {
     scheduledTime: string | null,   // ISO-8601 with offset, e.g. "2026-10-04T09:00:00+02:00"
     timeTbc: boolean,
     dateTbc: boolean,
-    venue: string | null,           // free text
+    venue: string | null,           // free text, at most 200 characters (see Field limits)
     postponed: boolean,
     cancelled: boolean,
     changedAt: string               // ISO-8601 UTC: last schedule write in medicoach (any origin);
@@ -96,7 +99,8 @@ Body:
     ref: string,
     schedule: {
       scheduledTime: string | null, timeTbc: boolean, dateTbc: boolean,
-      venue: string | null, postponed: boolean, cancelled: boolean,
+      venue: string | null,         // at most 200 characters (see Field limits)
+      postponed: boolean, cancelled: boolean,
       changedAt: string            // ISO-8601 UTC: when the change was written in smart club
     }
   }>                              // max 100

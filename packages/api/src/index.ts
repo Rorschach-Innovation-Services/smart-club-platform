@@ -63,11 +63,15 @@ import {
 } from './medicoach-sync/series-results.js';
 import { MedicoachSyncError } from './medicoach-sync/puller.js';
 import { runTenantSync } from './medicoach-sync/run.js';
+import { explainSyncError } from './medicoach-sync/explain.js';
 import { carrySyncOwnedFields, fixtureSyncRef } from './fixture-identity.js';
 import {
   buildInboundFixture,
   describeSchedule,
   fixtureSchedule,
+  flushScheduleOutbox,
+  scheduleParts,
+  STUCK_ATTEMPTS,
   fixturesEditRecallsApproval,
   recordScheduleDiff,
   requeueRevealedSeries,
@@ -4325,7 +4329,8 @@ function inSeasonClashRefusal(
  * Admin "Sync now" (ADR 0016): run the medicoach puller for the caller's tenant right away,
  * instead of waiting for the 15-minute cron. Same code path as the cron; returns the run
  * summary (counts only — never a pulled payload). 409 when the tenant has no sync; 502 when
- * medicoach can't be reached or answers outside the contract. With the sync secrets unset
+ * medicoach can't be reached or answers outside the contract (`error` in plain language,
+ * `technical` the puller's own text). With the sync secrets unset
  * the run is a dry run (`status: 'dry-run'`, nothing requested).
  */
 app.post('/integrations/medicoach/sync-now', async (c) => {
@@ -4341,7 +4346,12 @@ app.post('/integrations/medicoach/sync-now', async (c) => {
       throw new HttpError(409, 'the medicoach sync is not enabled for this tenant');
     return c.json(summary);
   } catch (err) {
-    if (err instanceof MedicoachSyncError) throw new HttpError(502, err.message);
+    // The admin reads the plain-language reason; the technical text rides along.
+    if (err instanceof MedicoachSyncError)
+      throw new HttpError(502, explainSyncError(err.message), {
+        code: 'sync_failed',
+        technical: err.message,
+      });
     throw err;
   }
 });
@@ -4357,18 +4367,30 @@ app.get('/integrations/medicoach/status', async (c) => {
   const config = await repo.getTenantConfig(tenant);
   const enabled = hasFeature(config, 'medicoachSync');
   if (!enabled) return c.json({ enabled: false });
-  const [cursor, logs, pending, conflicts, markers] = await Promise.all([
+  const [cursor, logs, pending, conflicts, markers, health] = await Promise.all([
     repo.getSyncCursorRow(tenant),
     repo.listSyncLogs(tenant, 20),
     repo.listPendingSync(tenant),
     repo.listSyncConflicts(tenant),
     repo.listReportOpenMarkers(tenant),
+    repo.getSyncHealth(tenant),
   ]);
   return c.json({
     enabled: true,
     dryRun: !medicoachSyncUrl() || !medicoachSyncSecret(),
     cursor,
-    logs,
+    // When the sync last worked / last failed; `lastErrorText` is the failure in plain
+    // language (the technical `lastError` stays for the page's "Details").
+    health: health
+      ? {
+          ...health,
+          ...(health.lastError ? { lastErrorText: explainSyncError(health.lastError) } : {}),
+        }
+      : null,
+    // Rows written before SYNCLOG carried `message` are explained here.
+    logs: logs.map((l) =>
+      l.error && !l.message ? { ...l, message: explainSyncError(l.error) } : l,
+    ),
     outbox: {
       count: pending.length,
       // Rows kept back because their series is a draft or still withholds venue/time
@@ -4391,7 +4413,10 @@ app.get('/integrations/medicoach/status', async (c) => {
           seriesId: p.seriesId,
           fixtureId: p.fixtureId,
           attempts: p.attempts,
+          // Still retried every run; flagged so the page offers Retry and Drop.
+          stuck: p.attempts >= STUCK_ATTEMPTS,
           lastError: p.lastError ?? null,
+          lastErrorText: explainSyncError(p.lastError),
           lastAttemptAt: p.lastAttemptAt ?? null,
           enqueuedAt: p.enqueuedAt,
           proposed: describeSchedule(p.schedule),
@@ -4406,9 +4431,14 @@ app.get('/integrations/medicoach/status', async (c) => {
   });
 });
 
-/** A conflict as the inbox shows it: the stored row plus readable proposed text. */
+/** A conflict as the inbox shows it: the stored row plus readable proposed text, and the
+ * proposal in the same parts as `current` so the two read side by side. */
 function conflictView(x: SyncConflict) {
-  return { ...x, proposedText: describeSchedule(x.proposed) };
+  return {
+    ...x,
+    proposedText: describeSchedule(x.proposed),
+    proposedParts: scheduleParts(x.proposed),
+  };
 }
 
 app.get('/integrations/medicoach/conflicts', async (c) => {
@@ -4528,6 +4558,57 @@ app.post('/integrations/medicoach/conflicts/discard', async (c) => {
   }
   await repo.deleteSyncConflict(tenant, ref);
   return c.json({ status: 'discarded' });
+});
+
+/** The `ref` and live row of an outbox action body (404 when nothing is queued for it). */
+async function outboxRowOf(c: Context<HonoEnv>, tenant: string) {
+  const ref = await conflictRefOf(c);
+  const row = (await repo.listPendingSync(tenant)).find((p) => p.ref === ref);
+  if (!row) throw new HttpError(404, 'nothing is waiting to be sent for that fixture');
+  return row;
+}
+
+/**
+ * Retry an outbox row now (the admin page offers it on a stuck row, STUCK_ATTEMPTS+ failed
+ * pushes): its attempt count restarts and the tenant's outbox is flushed right away — the
+ * same flush the cron runs. Answers what became of THIS row: `sent` (medicoach answered a
+ * success status), `failed` (with the new error, technical + plain), `held` (its series is a
+ * draft or withholds venue/time) or `dry-run` (the sync secrets are unset).
+ */
+app.post('/integrations/medicoach/outbox/retry', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const row = await outboxRowOf(c, tenant);
+  await repo.resetPendingSyncAttempts(tenant, row.ref, row.schedule.changedAt);
+  const flushed = await flushScheduleOutbox(tenant, 'manual', {
+    repo,
+    url: medicoachSyncUrl(),
+    secret: medicoachSyncSecret(),
+  });
+  const after = (await repo.listPendingSync(tenant)).find((p) => p.ref === row.ref);
+  if (!after) return c.json({ status: 'sent' });
+  if (after.heldUntilReveal) return c.json({ status: 'held' });
+  if (flushed.status === 'dry-run') return c.json({ status: 'dry-run' });
+  if (after.schedule.changedAt !== row.schedule.changedAt || !after.attempts)
+    return c.json({ status: 'queued' });
+  return c.json({
+    status: 'failed',
+    attempts: after.attempts,
+    lastError: after.lastError ?? null,
+    lastErrorText: explainSyncError(after.lastError),
+  });
+});
+
+/**
+ * Drop an outbox row: this smart-club schedule change is never sent, and medicoach keeps its
+ * own version until the fixture is next edited here. Only the snapshot the admin was shown is
+ * dropped — an edit queued meanwhile replaced the row and still goes out (409).
+ */
+app.post('/integrations/medicoach/outbox/drop', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const row = await outboxRowOf(c, tenant);
+  if (!(await repo.deletePendingSyncIfUnchanged(tenant, row.ref, row.schedule.changedAt)))
+    throw new HttpError(409, 'a newer change for that fixture was queued meanwhile; refresh');
+  return c.json({ status: 'dropped' });
 });
 
 app.post('/series/:id/clash-check', requireAdmin, async (c) => {
@@ -4696,7 +4777,9 @@ app.patch('/umpires/:id', requireAdmin, async (c) => {
 /**
  * Merge a duplicate (`:id`, the source) into `targetId`: every appointment naming the source
  * now names the target, the target takes over the source's aliases, and the source is
- * deactivated with `mergedInto` set. Idempotent — re-running finds nothing left to re-point.
+ * deactivated with `mergedInto` set. A source that is already merged (a stale page, a
+ * double-click) is 409 `umpire_already_merged`, naming the umpire it went into. The source is
+ * retired LAST, so a merge that failed part-way can simply be run again.
  */
 app.post('/umpires/:id/merge', requireAdmin, async (c) => {
   const ra = c.get('requestAuth')!;
@@ -4710,6 +4793,15 @@ app.post('/umpires/:id/merge', requireAdmin, async (c) => {
     repo.getUmpire(ra.tenant, targetId),
   ]);
   if (!source) throw new HttpError(404, 'umpire not found');
+  if (source.mergedInto) {
+    const into = await repo.getUmpire(ra.tenant, source.mergedInto);
+    const name = into?.displayName ?? source.mergedInto;
+    throw new HttpError(409, `${source.displayName} is already merged into ${name}`, {
+      code: 'umpire_already_merged',
+      mergedInto: source.mergedInto,
+      mergedIntoName: name,
+    });
+  }
   if (!target) throw new HttpError(404, 'target umpire not found');
   if (!target.active) throw new HttpError(409, 'cannot merge into an inactive umpire');
   const at = now();
@@ -4752,6 +4844,93 @@ app.post('/umpires/:id/merge', requireAdmin, async (c) => {
   await repo.putUmpire(ra.tenant, mergedTarget);
   await repo.putUmpire(ra.tenant, retiredSource);
   return c.json({ target: mergedTarget, source: retiredSource, repointed });
+});
+
+/* ─── Upload appointments (admin) ───
+   The weekly appointments workbook, uploaded from the Umpires page: the CLI's own parser,
+   matcher and write plan (import-umpire-appointments.ts) — no second parser. `preview` writes
+   nothing; `confirm` re-plans from the same file and writes exactly what the CLI's --confirm
+   would, refusing (409 `plan_changed`, with the fresh preview) if the plan moved since the
+   preview the admin saw. Direct JSON/base64 transport like structure intake: xlsx only, 2 MB. */
+
+const APPOINTMENTS_MAX_BYTES = 2 * 1024 * 1024; // 2 MB
+const APPOINTMENTS_MAX_BASE64_LENGTH = Math.ceil((APPOINTMENTS_MAX_BYTES * 4) / 3) + 4;
+
+/** Parse and plan an uploaded appointments workbook for the caller's tenant. */
+async function planAppointmentsUpload(c: Context<HonoEnv>, tenant: string) {
+  const body = (await c.req.json().catch(() => null)) as {
+    filename?: unknown;
+    dataBase64?: unknown;
+    createUmpires?: unknown;
+    planHash?: unknown;
+  } | null;
+  const filename = typeof body?.filename === 'string' ? body.filename : '';
+  const dataBase64 = typeof body?.dataBase64 === 'string' ? body.dataBase64 : '';
+  if (!dataBase64) throw new HttpError(400, 'dataBase64 is required');
+  if (dataBase64.length > APPOINTMENTS_MAX_BASE64_LENGTH)
+    throw new HttpError(413, 'the workbook is larger than 2 MB');
+  if (filename && !/\.xlsx$/i.test(filename))
+    throw new HttpError(400, 'upload the appointments sheet as an Excel .xlsx file');
+  const buffer = Buffer.from(dataBase64, 'base64');
+  // Every .xlsx is a zip: anything else (an old .xls, a CSV renamed) is refused unread.
+  if (buffer.length < 4 || buffer.readUInt32LE(0) !== 0x04034b50)
+    throw new HttpError(400, 'that file is not an Excel .xlsx workbook');
+  const imp = await import('./import-umpire-appointments.js');
+  const wb = new ExcelJS.Workbook();
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await wb.xlsx.load(buffer as any);
+  } catch {
+    throw new HttpError(400, 'unable to read the workbook — check the file is a valid .xlsx');
+  }
+  let parsed: ReturnType<typeof imp.parseAppointmentsWorkbook>;
+  try {
+    parsed = imp.parseAppointmentsWorkbook(wb);
+  } catch (err) {
+    throw new HttpError(400, err instanceof Error ? err.message : 'unreadable appointments sheet');
+  }
+  const sections = imp.unknownSections(parsed.rows);
+  if (sections.length)
+    throw new HttpError(
+      400,
+      `The sheet has section(s) this union isn't set up for: ${sections.map((x) => `"${x}"`).join(', ')}. Ask your operator to add them, or remove those rows.`,
+      { code: 'unknown_sections', sections },
+    );
+  const [series, clubs, registry, officials] = await Promise.all([
+    repo.listSeries(tenant),
+    repo.listClubs(tenant),
+    repo.listUmpires(tenant),
+    repo.listFixtureOfficials(tenant),
+  ]);
+  const existing = new Map(officials.map((o) => [`${o.seriesId}#${o.fixtureId}`, o]));
+  const plan = imp.planAppointmentImport(parsed.rows, {
+    series,
+    clubs,
+    registry,
+    existing,
+    createUmpires: body?.createUmpires === true,
+    at: now(),
+  });
+  return { imp, parsed, plan, planHash: body?.planHash };
+}
+
+app.post('/umpires/appointments/preview', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const { imp, parsed, plan } = await planAppointmentsUpload(c, tenant);
+  return c.json(imp.appointmentPreview(parsed, plan));
+});
+
+app.post('/umpires/appointments/confirm', requireAdmin, async (c) => {
+  const { tenant, email } = c.get('requestAuth')!;
+  const { imp, parsed, plan, planHash } = await planAppointmentsUpload(c, tenant);
+  if (typeof planHash !== 'string' || planHash !== imp.appointmentPlanHash(plan))
+    throw new HttpError(
+      409,
+      'Appointments or umpires changed since your preview. Check the updated preview, then confirm again.',
+      { code: 'plan_changed', preview: imp.appointmentPreview(parsed, plan) },
+    );
+  const out = await imp.writeAppointmentImport(repo, tenant, plan, email ?? 'unknown', now());
+  return c.json(out);
 });
 
 /* ─── Captain's reports (ADR 0016, Slice 2) ───
@@ -5566,7 +5745,11 @@ function syncResyncGate(
       s.fixtures.length > 0,
   );
   if (!synced.length) return null;
-  const orphanedRefs = synced.flatMap((s) => {
+  const teamName = (s: Series, side: unknown) =>
+    s.participants?.find((p) => p.teamId === side)?.name ?? String(side ?? '?');
+  // Each orphaned fixture as clubs know it (teams + date) — the console's confirmation lists
+  // these, so the admin sees which matches lose their medicoach link.
+  const orphaned = synced.flatMap((s) => {
     const after = next?.get(s.id);
     const nextById = new Map(
       ((after?.fixtures as ScheduleFixture[] | undefined) ?? []).map((f) => [f?.id, f]),
@@ -5578,13 +5761,28 @@ function syncResyncGate(
         const g = nextById.get(f.id);
         return !g || !sameMatch(f, g);
       })
-      .map((f) => fixtureSyncRef(tenant, s.id, f));
+      .map((f) => ({
+        ref: fixtureSyncRef(tenant, s.id, f),
+        seriesId: s.id,
+        seriesName: s.name,
+        fixtureId: String(f.id),
+        home: teamName(s, f.home),
+        away: teamName(s, f.away),
+        ...(f.date ? { date: f.date } : {}),
+        ...(f.time ? { time: f.time } : {}),
+      }));
   });
+  const orphanedRefs = orphaned.map((o) => o.ref);
   if (allowResync !== true)
     throw new HttpError(
       409,
       `${synced.length} released series in this stage ${synced.length === 1 ? 'is' : 'are'} synced with medicoach — a ${action} would orphan ${orphanedRefs.length} fixture ref(s) there. Ask your operator; it needs allowResync.`,
-      { code: 'sync_resync_required', seriesIds: synced.map((s) => s.id), orphanedRefs },
+      {
+        code: 'sync_resync_required',
+        seriesIds: synced.map((s) => s.id),
+        orphanedRefs,
+        orphaned,
+      },
     );
   return orphanedRefs;
 }

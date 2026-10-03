@@ -53,11 +53,31 @@ export function isoInstant(value: string): string {
 const isoWithOffset = z.string().datetime({ offset: true });
 const ref = z.string().min(1);
 
+/**
+ * `venue: string | null — at most 200 characters; senders must not exceed it and receivers
+ * truncate anything longer.` (contract v1 clarification, identical in both repos.)
+ */
+export const VENUE_MAX_LENGTH = 200;
+
+/**
+ * A venue cut to `VENUE_MAX_LENGTH` UTF-16 units — what a sender sends and what a receiver
+ * keeps. A cut that would leave half of a surrogate pair (an emoji) drops that half too, so
+ * the result is always valid text and never longer than the cap.
+ */
+export function capVenue<T extends string | null | undefined>(venue: T): T {
+  if (typeof venue !== 'string' || venue.length <= VENUE_MAX_LENGTH) return venue;
+  let cut = venue.slice(0, VENUE_MAX_LENGTH);
+  const last = cut.charCodeAt(cut.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+  return cut as T;
+}
+
 export const SyncScheduleSchema = z.object({
   scheduledTime: isoWithOffset.nullable(),
   timeTbc: z.boolean(),
   dateTbc: z.boolean(),
-  venue: z.string().nullable(),
+  /** At most VENUE_MAX_LENGTH characters: a longer one is accepted and truncated. */
+  venue: z.string().nullable().transform(capVenue),
   postponed: z.boolean(),
   cancelled: z.boolean(),
   /** Last schedule write in medicoach (pull) / in smart club (push), any origin. */

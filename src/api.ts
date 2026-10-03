@@ -547,12 +547,21 @@ export const getSeasonRun = (id: string) => request<SeasonRun>(`/season-runs/${i
 // `derivedFrom.fromStage` that no longer resolves).
 export const rebaseSeasonRun = (
   id: string,
-  body: { structureId: string; structureVersion: number; version: number },
+  body: {
+    structureId: string;
+    structureVersion: number;
+    version: number;
+    /** Medicoach sync: consent to orphan the synced fixtures of released series. */
+    allowResync?: true;
+  },
 ) =>
-  request<SeasonRun & { warnings?: string[] }>(`/season-runs/${id}/rebase`, {
-    method: 'POST',
-    body,
-  });
+  request<SeasonRun & { warnings?: string[]; orphanedRefs?: string[] }>(
+    `/season-runs/${id}/rebase`,
+    {
+      method: 'POST',
+      body,
+    },
+  );
 /**
  * Generate one stage of a season run ON THE SERVER (ADR 0014): it materialises the stage
  * with the shared engine and writes one series per group through the same gates as
@@ -610,6 +619,78 @@ export const mergeUmpire = (id: string, targetId: string) =>
     `/umpires/${encodeURIComponent(id)}/merge`,
     { method: 'POST', body: { targetId } },
   );
+// ── Upload appointments (admin) ── the CLI's parser/matcher behind a preview → confirm pair.
+export interface AppointmentPreviewRow {
+  sheetRow: number;
+  section: string;
+  date: string;
+  time?: string;
+  home: string;
+  away: string;
+  venue: string;
+  umpires: string[];
+  referee?: string;
+}
+export interface AppointmentPreview {
+  sheet: string;
+  problems: string[];
+  summary: {
+    rows: number;
+    matched: number;
+    notMatched: number;
+    new: number;
+    changed: number;
+    unchanged: number;
+    skipped: number;
+    toCreate: number;
+    doubleBookings: number;
+  };
+  rows: Array<
+    AppointmentPreviewRow & {
+      seriesId: string;
+      seriesName: string;
+      fixtureId: string;
+      fixture: { date: string; time?: string };
+      action: 'new' | 'changed' | 'unchanged' | 'skipped';
+      appointed?: string[];
+      previous?: string[];
+      skipReason?: string;
+      differences: Array<{ field: 'time' | 'venue'; sheet: string; fixture: string }>;
+      tieBroken: boolean;
+    }
+  >;
+  unmatched: Array<
+    AppointmentPreviewRow & {
+      kind: 'unknown-team' | 'no-fixture' | 'ambiguous' | 'duplicate';
+      reason: string;
+    }
+  >;
+  unknownUmpires: string[];
+  toCreate: Array<{ id: string; displayName: string }>;
+  doubleBookings: Array<{
+    umpireId: string;
+    date: string;
+    a: { venue: string; time?: string };
+    b: { venue: string; time?: string };
+  }>;
+  planHash: string;
+}
+export const previewUmpireAppointments = async (file: File, createUmpires: boolean) =>
+  request<AppointmentPreview>('/umpires/appointments/preview', {
+    method: 'POST',
+    body: { filename: file.name, dataBase64: await fileToBase64(file), createUmpires },
+  });
+/** 409 `plan_changed` carries the fresh preview on `details.preview`. */
+export const confirmUmpireAppointments = async (
+  file: File,
+  createUmpires: boolean,
+  planHash: string,
+) =>
+  request<{ written: number; created: number }>('/umpires/appointments/confirm', {
+    method: 'POST',
+    body: { filename: file.name, dataBase64: await fileToBase64(file), createUmpires, planHash },
+  });
+
 // A fixture's umpires (max two). Stored apart from the series, so it never bumps the
 // series version, withdraws approval or runs the clash gate. `[]` clears the fixture.
 export const putFixtureOfficials = (seriesId: string, fixtureId: string, umpireIds: string[]) =>
@@ -637,6 +718,8 @@ export interface MedicoachSyncConflict {
   current: { date?: string; time?: string; venue?: string; status?: string; dateTbc?: boolean };
   proposed: MedicoachSyncSchedule;
   proposedText: string;
+  /** `proposed` in the same parts as `current`, for the side-by-side view. */
+  proposedParts?: MedicoachSchedulePartsView;
   fields: string[];
   reason: 'venue-unresolved' | 'clash';
   detail: string[];
@@ -655,12 +738,31 @@ export interface MedicoachSyncLog {
   fixtures: number;
   counts: Record<string, number | undefined>;
   push?: Record<string, number>;
+  /** Technical failure text (shown under "Details"). */
   error?: string;
+  /** The failure in plain language. */
+  message?: string;
+}
+/** The schedule parts the conflict inbox compares (same shape on both sides). */
+export interface MedicoachSchedulePartsView {
+  date?: string;
+  time?: string;
+  venue?: string;
+  status?: string;
+  dateTbc?: boolean;
 }
 export interface MedicoachSyncStatus {
   enabled: boolean;
   dryRun?: boolean;
   cursor?: { cursor: string; updatedAt?: string } | null;
+  /** When the sync last worked / last failed (a quiet run leaves no log row). */
+  health?: {
+    lastAttemptAt?: string;
+    lastSuccessAt?: string;
+    lastErrorAt?: string;
+    lastError?: string;
+    lastErrorText?: string;
+  } | null;
   logs?: MedicoachSyncLog[];
   outbox?: {
     count: number;
@@ -677,7 +779,10 @@ export interface MedicoachSyncStatus {
       seriesId: string;
       fixtureId: string;
       attempts: number;
+      /** Failed 5+ pushes: still retried, but the page offers Retry and Drop. */
+      stuck?: boolean;
       lastError: string | null;
+      lastErrorText?: string;
       lastAttemptAt: string | null;
       enqueuedAt: string;
       proposed: string;
@@ -701,6 +806,18 @@ export const applyMedicoachConflict = (ref: string) =>
   });
 export const discardMedicoachConflict = (ref: string) =>
   request<{ status: string }>('/integrations/medicoach/conflicts/discard', {
+    method: 'POST',
+    body: { ref },
+  });
+/** Retry a stuck outbox row now: `sent`, `failed` (with why), `held`, `queued` or `dry-run`. */
+export const retryMedicoachOutbox = (ref: string) =>
+  request<{ status: string; lastErrorText?: string }>('/integrations/medicoach/outbox/retry', {
+    method: 'POST',
+    body: { ref },
+  });
+/** Stop sending one smart-club change; medicoach keeps its version. */
+export const dropMedicoachOutbox = (ref: string) =>
+  request<{ status: string }>('/integrations/medicoach/outbox/drop', {
     method: 'POST',
     body: { ref },
   });

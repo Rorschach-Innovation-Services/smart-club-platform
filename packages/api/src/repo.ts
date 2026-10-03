@@ -74,6 +74,7 @@ import {
   fixtureResultKey,
   fixtureResultsListKey,
   syncCursorKey,
+  syncHealthKey,
   syncLogKey,
   syncLogsListKey,
   syncPartitionPk,
@@ -120,6 +121,7 @@ import type {
   RegistrationReview,
   RegistrationReviewResolution,
   StoredFixtureResult,
+  SyncHealth,
   SyncLogEntry,
   SyncConflict,
   PendingScheduleSync,
@@ -1104,6 +1106,27 @@ export async function putSyncCursor(tenant: string, cursor: string): Promise<voi
   );
 }
 
+/** The sync's last success/failure (admin page), or null before the first run. */
+export async function getSyncHealth(tenant: string): Promise<SyncHealth | null> {
+  const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: syncHealthKey(tenant) }));
+  return stripKeys<SyncHealth>(res.Item);
+}
+
+/** Merge `patch` into the tenant's SYNCHEALTH# row (only the fields given are written). */
+export async function putSyncHealth(tenant: string, patch: SyncHealth): Promise<void> {
+  const entries = Object.entries(patch).filter(([, v]) => v !== undefined);
+  if (!entries.length) return;
+  await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: syncHealthKey(tenant),
+      UpdateExpression: `SET ${entries.map(([k]) => `#${k} = :${k}`).join(', ')}`,
+      ExpressionAttributeNames: Object.fromEntries(entries.map(([k]) => [`#${k}`, k])),
+      ExpressionAttributeValues: Object.fromEntries(entries.map(([k, v]) => [`:${k}`, v])),
+    }),
+  );
+}
+
 /** SYNCLOG# rows self-expire after this long (DynamoDB TTL on `expiresAt`). */
 const SYNC_LOG_TTL_SECONDS = 90 * 24 * 3600;
 
@@ -1290,6 +1313,33 @@ export async function markPendingSyncFailed(
     );
   } catch (err) {
     if (!isCcf(err)) throw err;
+  }
+}
+
+/**
+ * Restart THIS snapshot's attempt count (the admin's "Retry" on a stuck row): it is sent on
+ * the flush that follows and only shows as stuck again after five more failures.
+ */
+export async function resetPendingSyncAttempts(
+  tenant: string,
+  ref: string,
+  changedAt: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: pendingSyncKey(tenant, ref),
+        UpdateExpression: 'SET attempts = :zero REMOVE lastError, lastAttemptAt',
+        ConditionExpression: 'attribute_exists(pk) AND #sch.changedAt = :c',
+        ExpressionAttributeNames: { '#sch': 'schedule' },
+        ExpressionAttributeValues: { ':zero': 0, ':c': changedAt },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
   }
 }
 

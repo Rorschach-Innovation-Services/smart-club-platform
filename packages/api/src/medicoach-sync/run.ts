@@ -9,6 +9,10 @@
  *   3. retry captain's reports whose opening failed earlier (REPORTOPEN# markers) — always,
  *      even when the pull failed, since it needs nothing from medicoach;
  *   4. send the one reminder for pending reports whose link expires within 2 days.
+ *
+ * Every real (non-dry) run also stamps SYNCHEALTH#: the last successful pull, or the last
+ * failure and its technical text — a quiet run writes no SYNCLOG#, so this is how the admin
+ * page knows when the sync last worked.
  */
 import {
   retryPendingReportOpens,
@@ -17,7 +21,12 @@ import {
   type ReportRetrySummary,
 } from '../captains-reports.js';
 import { hasFeature } from '../features.js';
-import { runMedicoachSync, type PullerDeps, type SyncRunSummary } from './puller.js';
+import {
+  MedicoachSyncError,
+  runMedicoachSync,
+  type PullerDeps,
+  type SyncRunSummary,
+} from './puller.js';
 import { flushScheduleOutbox, type FlushSummary } from './schedule.js';
 
 export interface TenantSyncSummary extends SyncRunSummary {
@@ -58,14 +67,30 @@ export async function runTenantSync(
       ...(deps.now ? { now: deps.now } : {}),
       ...(deps.captainsReports ?? {}),
     });
+  const now = () => (deps.now ?? (() => new Date()))().toISOString();
+  // Best-effort: losing the health stamp must never mask the run's own outcome.
+  const stamp = (patch: Parameters<typeof repo.putSyncHealth>[1]) =>
+    repo
+      .putSyncHealth(tenant, patch)
+      .catch((e) => console.error(`[medicoach-sync] ${tenant}: health stamp failed`, e));
   let summary: SyncRunSummary;
   try {
     summary = await runMedicoachSync(tenant, trigger, deps);
   } catch (err) {
+    const at = now();
+    await stamp({
+      lastAttemptAt: at,
+      lastErrorAt: at,
+      lastError: err instanceof MedicoachSyncError ? err.message : 'internal error',
+    });
     await retryReports().catch((e) =>
       console.error(`[medicoach-sync] ${tenant}: report retry failed`, e),
     );
     throw err;
+  }
+  if (summary.status === 'ok') {
+    const at = now();
+    await stamp({ lastAttemptAt: at, lastSuccessAt: at });
   }
   const reports = await retryReports();
   let reminders: ReminderSummary | undefined;

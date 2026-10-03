@@ -1429,10 +1429,25 @@ describe('Slice 4 — generate and rebase refuse to orphan synced refs', () => {
       code: string;
       seriesIds: string[];
       orphanedRefs: string[];
+      orphaned: Array<Record<string, unknown>>;
     };
     assert.equal(err.code, 'sync_resync_required');
     assert.deepEqual(err.seriesIds, [SID]);
     assert.deepEqual(err.orphanedRefs, [REF(SID, 'f1')]);
+    // What the console's confirmation lists: the fixture as clubs know it (teams + date).
+    const stored = ((await repo.getSeries(T, SID))!.fixtures as Array<Record<string, unknown>>)[0];
+    assert.deepEqual(err.orphaned, [
+      {
+        ref: REF(SID, 'f1'),
+        seriesId: SID,
+        seriesName: (await repo.getSeries(T, SID))!.name,
+        fixtureId: 'f1',
+        home: 'g-x',
+        away: 'g-y',
+        date: stored.date,
+        ...(stored.time ? { time: stored.time } : {}),
+      },
+    ]);
     assert.equal((await repo.getSeasonRun(T, RUN))!.version, run.version, 'nothing written');
 
     const ok = await generate({

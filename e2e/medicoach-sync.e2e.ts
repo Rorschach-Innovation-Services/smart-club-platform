@@ -14,8 +14,8 @@ import {
 /**
  * The admin "Medicoach sync" page (ADR 0016, Slices 3–4) end to end: a STUB medicoach on :4799
  * (the port playwright.config.ts points the stack's MEDICOACH_SYNC_URL at) proposes a
- * reschedule that would double-book a ground. "Sync now" holds it in the conflict inbox; Apply
- * is refused while it still clashes; Discard keeps smart club's schedule and queues it for
+ * reschedule that would double-book a ground. "Sync now" holds it in the conflict inbox; Accept
+ * is refused while it still clashes; Keep keeps smart club's schedule and queues it for
  * medicoach; the next "Sync now" pushes it (signed) and the outbox empties.
  *
  * A stack reused without the sync env answers "Sync now" with a dry run, and the spec skips.
@@ -185,19 +185,26 @@ test('a clashing medicoach reschedule is held, refused on Apply, discarded and p
   await signInAsAdmin(browser);
   await browser.locator('aside.nav .nav-item', { hasText: 'Medicoach sync' }).click();
   await expect(browser.getByRole('heading', { name: /Medicoach sync/ })).toBeVisible();
-  const row = browser.getByTestId('mcs-conflicts').getByRole('row', { name: /UKZN v Crusaders/ });
+  const row = browser
+    .getByTestId('mcs-conflicts')
+    .getByRole('article', { name: /UKZN v Crusaders/ });
   await expect(row).toHaveCount(1);
   await expect(row).toContainText('Would double-book a ground');
-  await expect(row).toContainText(`${DATE} 13:30 · ${OVAL}`);
+  // Both versions side by side: smart club's 09:00 at the Park, medicoach's 13:30 at the Oval.
+  const time = row.getByRole('row', { name: /Time/ });
+  await expect(time).toContainText('09:00');
+  await expect(time).toContainText('13:30');
+  await expect(row.getByRole('row', { name: /Venue/ })).toContainText(OVAL);
+  await expect(browser.getByText(/Last successful sync/)).toBeVisible();
 
-  // Apply re-runs the clash gate: still clashing → refused, still held.
-  await row.getByRole('button', { name: 'Apply' }).click();
-  await expect(browser.getByText(/Not applied: Change blocked/)).toBeVisible();
+  // Accept re-runs the clash gate: still clashing → refused, still held.
+  await row.getByRole('button', { name: "Accept medicoach's change" }).click();
+  await expect(browser.getByText(/Not accepted: Change blocked/)).toBeVisible();
   await expect(row).toHaveCount(1);
 
-  // Discard: smart club's schedule stands and is queued for medicoach.
-  await row.getByRole('button', { name: 'Discard' }).click();
-  await expect(browser.getByText('Nothing to review.')).toBeVisible();
+  // Keep: smart club's schedule stands and is queued for medicoach.
+  await row.getByRole('button', { name: "Keep smart club's version" }).click();
+  await expect(browser.getByText(/Nothing to review/)).toBeVisible();
   const waiting = browser
     .locator('.mcs-stat', { hasText: 'Waiting to send' })
     .locator('.mcs-stat-value');
@@ -209,7 +216,7 @@ test('a clashing medicoach reschedule is held, refused on Apply, discarded and p
   const pushed = pushes.flatMap((p) => p.refs);
   expect(pushed).toContain(REF_F2);
   expect(pushes.every((p) => p.verified)).toBe(true);
-  await expect(browser.getByText('Nothing to review.')).toBeVisible();
+  await expect(browser.getByText(/Nothing to review/)).toBeVisible();
 
   // The fixture kept smart club's schedule.
   const series = await request.get(`${API_BASE}/series`, { headers: admin() });

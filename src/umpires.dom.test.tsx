@@ -7,7 +7,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-utils';
-import { AdminUmpiresView, UmpireCell, doubleBookingIndex } from './umpires';
+import { AdminUmpiresView, UmpireCell, doubleBookingIndex, mergeErrorMessage } from './umpires';
+import { ApiError } from './api';
 import type { CaptainsReport, Club, Series, Umpire } from './types';
 
 const ump = (id: string, displayName: string, over: Partial<Umpire> = {}): Umpire => ({
@@ -90,6 +91,28 @@ describe('UmpireCell', () => {
     expect(screen.queryByLabelText('Umpire 3')).toBeNull();
     await user.click(screen.getByRole('button', { name: /save umpires/i }));
     expect(onSave).toHaveBeenCalledWith('s1', 'f1', ['u-a-ngubane', 'u-b-tyali']);
+  });
+
+  it('works from the keyboard: arrows move through the suggestions, Enter picks, Escape closes', async () => {
+    const { onSave, user } = renderCell();
+    await user.click(screen.getByRole('button', { name: 'Assign umpires' }));
+    const input = screen.getByLabelText('Umpire 1');
+    await user.type(input, 'a');
+    await user.keyboard('{ArrowDown}');
+    expect(screen.getAllByRole('option')[0]).toHaveFocus();
+    await user.keyboard('{ArrowDown}');
+    expect(screen.getAllByRole('option')[1]).toHaveFocus();
+    await user.keyboard('{ArrowUp}{ArrowUp}');
+    expect(input).toHaveFocus();
+    await user.keyboard('{ArrowDown}{Enter}');
+    expect(screen.getByRole('button', { name: /^Remove A\.Ngubane/ })).toBeInTheDocument();
+    const second = screen.getByLabelText('Umpire 2');
+    await user.type(second, 'ty');
+    await user.keyboard('{Escape}');
+    expect(second).toHaveValue('');
+    expect(screen.queryByRole('listbox')).toBeNull();
+    await user.click(screen.getByRole('button', { name: /save umpires/i }));
+    expect(onSave).toHaveBeenCalledWith('s1', 'f1', ['u-a-ngubane']);
   });
 
   it('never offers an inactive (merged) umpire', async () => {
@@ -270,5 +293,37 @@ describe('AdminUmpiresView', () => {
     await user.selectOptions(screen.getByLabelText('Merge A.Ngubane into'), 'u-s-gasa');
     await user.click(screen.getByRole('button', { name: 'Merge' }));
     expect(onMerge).toHaveBeenCalledWith('u-a-ngubane', 'u-s-gasa');
+  });
+});
+
+describe('Upload appointments and merge refusals', () => {
+  it('the Umpires page offers Upload appointments', async () => {
+    const onUpload = vi.fn();
+    renderWithProviders(
+      <AdminUmpiresView
+        umpires={UMPIRES}
+        allSeries={[S2]}
+        onCreate={vi.fn()}
+        onPatch={vi.fn()}
+        onMerge={vi.fn()}
+        onUpload={onUpload}
+      />,
+    );
+    await userEvent.click(screen.getByRole('button', { name: 'Upload appointments' }));
+    expect(onUpload).toHaveBeenCalled();
+  });
+
+  it('a merge refused because the umpire is already merged says where it went', () => {
+    const err = new ApiError(
+      409,
+      'Sipho Gasa is already merged into S.Gasa',
+      'umpire_already_merged',
+      {
+        mergedInto: 'u-s-gasa',
+        mergedIntoName: 'S.Gasa',
+      },
+    );
+    expect(mergeErrorMessage(err)).toBe('Already merged into S.Gasa');
+    expect(mergeErrorMessage(new ApiError(409, 'other', 'something_else'))).toBeNull();
   });
 });

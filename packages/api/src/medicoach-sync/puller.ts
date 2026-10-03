@@ -52,6 +52,7 @@ import { hasFeature } from '../features.js';
 import { fixtureSyncRef } from '../fixture-identity.js';
 import {
   ChangesResponseSchema,
+  capVenue,
   changesPathAndQuery,
   isoInstant,
   parseFixtureRef,
@@ -61,6 +62,7 @@ import {
   type SyncResult,
 } from '../medicoach-sync-contract.js';
 import type { Series, StoredFixtureResult, SyncLogEntry, TenantConfig } from '../types.js';
+import { explainSyncError } from './explain.js';
 import {
   applyInboundSchedule,
   wallClock,
@@ -224,8 +226,9 @@ export function scheduleDifferences(
     if (theirs !== (fixture.time ?? '')) fields.push('time');
   }
   const homeVenue = series.participants?.find((p) => p.teamId === fixture.home)?.venue;
-  const ours = fixture.venueOverride || fixture.venueName || homeVenue || null;
-  if (s.venue !== null && venueKey(s.venue) !== venueKey(ours)) fields.push('venue');
+  // Compared at the contract's 200-character cap: medicoach can never hold more of ours.
+  const ours = capVenue(fixture.venueOverride || fixture.venueName || homeVenue || null);
+  if (s.venue !== null && venueKey(capVenue(s.venue)) !== venueKey(ours)) fields.push('venue');
   const ourStatus = fixture.status ?? 'scheduled';
   const theirStatus = s.cancelled ? 'cancelled' : s.postponed ? 'postponed' : null;
   if (
@@ -361,7 +364,7 @@ export async function runMedicoachSync(
         ? { scheduleDiffersRefs: scheduleRefs.slice(0, MAX_LOGGED_REFS) }
         : {}),
       ...(staleRefs.length ? { scheduleStaleRefs: staleRefs.slice(0, MAX_LOGGED_REFS) } : {}),
-      ...(error ? { error } : {}),
+      ...(error ? { error, message: explainSyncError(error) } : {}),
     });
   };
 

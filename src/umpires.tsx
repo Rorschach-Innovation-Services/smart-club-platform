@@ -2,8 +2,9 @@
    Appointments are written with their own call (PUT …/officials), never through the series
    PATCH, so assigning an umpire never withdraws approval or runs the clash gate. */
 
-import { useMemo, useState } from 'react';
+import { useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Btn, Icon, Pill } from './atoms';
+import { ApiError } from './api';
 import {
   MAX_UMPIRES_PER_FIXTURE,
   findUmpireDoubleBookings,
@@ -142,7 +143,29 @@ function UmpireSlot({
 }) {
   const [q, setQ] = useState('');
   const [busy, setBusy] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const listId = useId();
   const chosen = value ? umpires.find((u) => u.id === value) : undefined;
+  // Keyboard: ArrowDown from the box enters the suggestions, arrows move through them (Up
+  // from the first returns to the box), Enter picks (a native button click), Escape closes.
+  const items = () => [...(listRef.current?.querySelectorAll('button') ?? [])];
+  const close = (e: KeyboardEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setQ('');
+    inputRef.current?.focus();
+  };
+  const onListKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    const all = items();
+    const i = all.indexOf(document.activeElement as HTMLButtonElement);
+    if (e.key === 'Escape') return close(e);
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    const next = e.key === 'ArrowDown' ? i + 1 : i - 1;
+    if (next < 0) inputRef.current?.focus();
+    else all[Math.min(next, all.length - 1)]?.focus();
+  };
   if (value) {
     return (
       <div className="ump-slot">
@@ -172,16 +195,34 @@ function UmpireSlot({
       <label className="ump-slot-l">
         {label}
         <input
+          ref={inputRef}
           type="text"
           value={q}
           placeholder="Type a name…"
           onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowDown' && q.trim()) {
+              e.preventDefault();
+              items()[0]?.focus();
+            } else if (e.key === 'Escape' && q) close(e);
+          }}
           aria-label={label}
+          role="combobox"
+          aria-expanded={!!q.trim()}
+          aria-controls={listId}
+          aria-autocomplete="list"
         />
       </label>
       {/* Suggestions open once typing starts, so two empty slots don't both list the panel. */}
       {q.trim() && (
-        <div className="ump-options" role="listbox" aria-label={`${label} suggestions`}>
+        <div
+          ref={listRef}
+          id={listId}
+          className="ump-options"
+          role="listbox"
+          aria-label={`${label} suggestions`}
+          onKeyDown={onListKey}
+        >
           {options.map((u) => (
             <button
               type="button"
@@ -348,6 +389,16 @@ export function UmpireCell({
 
 /* ─── Admin Umpires page ─── */
 
+/**
+ * The toast for a refused merge, or null for the generic copy: an umpire someone already
+ * merged (a stale page, a double-click) names the umpire it went into.
+ */
+export function mergeErrorMessage(err: unknown): string | null {
+  if (!(err instanceof ApiError) || err.code !== 'umpire_already_merged') return null;
+  const name = err.details?.mergedIntoName;
+  return typeof name === 'string' && name ? `Already merged into ${name}` : 'Already merged';
+}
+
 interface UmpireDraft {
   displayName: string;
   fullName: string;
@@ -381,6 +432,8 @@ export interface AdminUmpiresViewProps {
   onCreate: (body: Partial<Umpire>) => Promise<unknown>;
   onPatch: (id: string, body: Partial<Umpire>) => Promise<unknown>;
   onMerge: (sourceId: string, targetId: string) => Promise<unknown>;
+  /** Opens the "Upload appointments" page. Absent ⇒ no button. */
+  onUpload?: () => void;
   /** Captain's reports — rating averages are computed here, in the browser (ADR 0004). */
   reports?: CaptainsReport[];
 }
@@ -415,6 +468,7 @@ export function AdminUmpiresView({
   onCreate,
   onPatch,
   onMerge,
+  onUpload,
 }: AdminUmpiresViewProps) {
   const [q, setQ] = useState('');
   const [filter, setFilter] = useState<'active' | 'inactive' | 'all'>('active');
@@ -482,11 +536,16 @@ export function AdminUmpiresView({
           </h1>
           <p className="ph-desc">
             The union&apos;s umpire panel. Appoint umpires to fixtures from the Fixtures &amp;
-            Venues table, or load the weekly appointments sheet with the importer. Contact details
-            are only ever shown to admins.
+            Venues table, or upload the weekly appointments sheet. Contact details are only ever
+            shown to admins.
           </p>
         </div>
-        <div className="ph-right">
+        <div className="ph-actions">
+          {onUpload && (
+            <Btn tone="outline" icon={Icon.Upload} onClick={onUpload}>
+              Upload appointments
+            </Btn>
+          )}
           <Btn tone="teal" icon={Icon.Plus} onClick={() => setAdding({ ...emptyDraft })}>
             Add umpire
           </Btn>
@@ -550,6 +609,7 @@ export function AdminUmpiresView({
           <button
             key={k}
             className={`filter-pill ${filter === k ? 'active' : ''}`}
+            aria-pressed={filter === k}
             onClick={() => setFilter(k)}
           >
             {l}
@@ -559,7 +619,7 @@ export function AdminUmpiresView({
       </div>
 
       <div className="tbl-w" style={{ marginTop: 14 }}>
-        <table className="tbl">
+        <table className="tbl upl-tbl" aria-label="Umpires">
           <thead>
             <tr>
               <th>Umpire</th>
@@ -567,7 +627,9 @@ export function AdminUmpiresView({
               <th style={{ textAlign: 'right' }}>Appointments</th>
               <th>Ratings</th>
               <th>Status</th>
-              <th style={{ width: 220 }}></th>
+              <th>
+                <span className="sr-only">Actions</span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -581,9 +643,13 @@ export function AdminUmpiresView({
             {!loading && list.length === 0 && (
               <tr>
                 <td colSpan={6} className="ump-empty">
-                  {umpires.length
-                    ? 'No umpires match this search.'
-                    : 'No umpires yet. Add one, or run the appointments importer.'}
+                  {!umpires.length
+                    ? 'No umpires yet. Add one, or upload this week’s appointments sheet.'
+                    : q.trim()
+                      ? 'No umpires match this search.'
+                      : filter === 'inactive'
+                        ? 'No inactive or merged umpires.'
+                        : 'No active umpires. Reactivate one from the Inactive list, or add one.'}
                 </td>
               </tr>
             )}
@@ -628,11 +694,11 @@ export function AdminUmpiresView({
               const mergeTargets = active.filter((t) => t.id !== u.id);
               return (
                 <tr key={u.id}>
-                  <td>
+                  <td data-label="Umpire">
                     <div style={{ fontWeight: 700 }}>{u.displayName}</div>
                     {u.fullName && <div className="ump-sub">{u.fullName}</div>}
                   </td>
-                  <td>
+                  <td data-label="Contact">
                     {u.phone || u.email ? (
                       <>
                         {u.phone && <div>{u.phone}</div>}
@@ -642,9 +708,11 @@ export function AdminUmpiresView({
                       <span className="ump-none">—</span>
                     )}
                   </td>
-                  <td style={{ textAlign: 'right' }}>{counts.get(u.id) ?? 0}</td>
+                  <td data-label="Appointed" className="ump-num">
+                    {counts.get(u.id) ?? 0}
+                  </td>
                   {/* Averages over submitted captain's reports (computed in the browser). */}
-                  <td>
+                  <td data-label="Ratings">
                     {(() => {
                       const r = ratings.get(u.id);
                       if (!r) return <span className="ump-none">No ratings yet</span>;
@@ -667,7 +735,7 @@ export function AdminUmpiresView({
                       );
                     })()}
                   </td>
-                  <td>
+                  <td data-label="Status">
                     {u.active ? (
                       <Pill tone="teal" dot>
                         Active
@@ -680,7 +748,7 @@ export function AdminUmpiresView({
                       </Pill>
                     )}
                   </td>
-                  <td>
+                  <td data-label="Actions">
                     {merging?.id === u.id ? (
                       <div className="ump-merge">
                         <select

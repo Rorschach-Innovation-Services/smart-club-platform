@@ -412,6 +412,15 @@ export const syncCursorKey = (tenant: string) => ({
   sk: `SYNCCURSOR#${tenant}`,
 });
 
+/**
+ * The sync's health for the admin page: when a run last succeeded / failed (and why). Written
+ * on every run, quiet ones included — a quiet run leaves no SYNCLOG# row.
+ */
+export const syncHealthKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `SYNCHEALTH#${tenant}`,
+});
+
 /** One audit row per notable sync run: counts and outcomes only, never player refs. */
 export const syncLogKey = (tenant: string, iso: string, id: string) => ({
   pk: `${tenantPrefix(tenant)}#SYNC`,
