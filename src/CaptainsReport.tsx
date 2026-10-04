@@ -1406,8 +1406,25 @@ export function CaptainsReportView({
 
 /* ─── Public submit-once link page: /r/:token ─── */
 
+/**
+ * A broken Meta template (3–4 Oct 2026) baked a literal `{{1}}` into the button's base
+ * URL, so delivered links open `/r/{{1}}<token>` (the browser may keep it percent-encoded).
+ * Tokens are base64url + '.', which can never contain braces, so stripping the junk prefix
+ * is always safe — and it makes every already-sent button work without resending.
+ */
+export function cleanLinkToken(raw: string): string {
+  let decoded = raw;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    // Malformed percent-sequence: keep the raw value; the API will refuse it normally.
+  }
+  return decoded.replace(/^(\{\{\d\}\})+/, '');
+}
+
 export function CaptainsReportLinkPage() {
-  const { token = '' } = useParams();
+  const { token: rawToken = '' } = useParams();
+  const token = cleanLinkToken(rawToken);
   const qc = useQueryClient();
   const [done, setDone] = useState<CaptainsReport | null>(null);
   const [error, setError] = useState<string | null>(null);
