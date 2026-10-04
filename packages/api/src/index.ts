@@ -63,6 +63,7 @@ import {
 } from './medicoach-sync/series-results.js';
 import { MedicoachSyncError } from './medicoach-sync/puller.js';
 import { runTenantSync } from './medicoach-sync/run.js';
+import { buildMatchMonitor } from './medicoach-sync/live.js';
 import { explainSyncError } from './medicoach-sync/explain.js';
 import { carrySyncOwnedFields, fixtureSyncRef } from './fixture-identity.js';
 import {
@@ -4429,6 +4430,33 @@ app.get('/integrations/medicoach/status', async (c) => {
     // Report notices that reached nobody (every channel failed) and are waiting on a retry.
     noticesFailed: markers.filter((m) => m.lastError?.startsWith(NOTICE_FAILED_ERROR)).length,
   });
+});
+
+/**
+ * Admin "Match monitor" (Medicoach sync): one SAST day's fixtures (released series) joined to
+ * their live-scoring state in medicoach: first ball, score and overs, last scoring input,
+ * innings times, end, and long gaps between balls. Read-through on every call (the page
+ * polls); nothing is stored. `date` defaults to today in SAST. A medicoach failure still
+ * answers 200 with the fixtures, `reachable: false` and the reason in plain language.
+ */
+app.get('/integrations/medicoach/live', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const config = await repo.getTenantConfig(tenant);
+  if (!hasFeature(config, 'medicoachSync'))
+    throw new HttpError(409, 'the medicoach sync is not enabled for this tenant');
+  const date =
+    c.req.query('date') ?? new Date(Date.now() + 2 * 3_600_000).toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(`${date}T00:00:00Z`)))
+    throw new HttpError(400, 'date must be YYYY-MM-DD');
+  const [series, clubs] = await Promise.all([repo.listSeries(tenant), repo.listClubs(tenant)]);
+  return c.json(
+    await buildMatchMonitor(
+      tenant,
+      date,
+      { series, clubs },
+      { url: medicoachSyncUrl(), secret: medicoachSyncSecret() },
+    ),
+  );
 });
 
 /** A conflict as the inbox shows it: the stored row plus readable proposed text, and the

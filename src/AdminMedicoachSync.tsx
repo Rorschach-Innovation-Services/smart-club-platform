@@ -12,12 +12,15 @@
  *     failed 5+ times is "stuck" (still retried) and offers Retry now / Drop;
  *   - changes held until a draft or withheld series is released/revealed, each linked to it;
  *   - recent activity, and "Sync now": flush the outbox, then pull, right away.
+ * A second tab, "Match monitor" (MatchMonitor.tsx), follows every game of a day live from
+ * medicoach's scoring: start times, score now, last input, innings change, finish, delays.
  */
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState, type ReactNode } from 'react';
 import * as api from './api';
 import { ApiError } from './api';
 import { Btn, Modal, Pill } from './atoms';
+import { MatchMonitor } from './MatchMonitor';
 import { qk } from './query';
 import type { Series } from './types';
 
@@ -319,6 +322,21 @@ export function AdminMedicoachSyncView({
   const status = useQuery({ queryKey: qk.medicoachSync(), queryFn: api.getMedicoachSyncStatus });
   const [busy, setBusy] = useState<string | null>(null);
   const [dropping, setDropping] = useState<Failure | null>(null);
+  const [tab, setTab] = useState<'monitor' | 'sync'>(() => {
+    try {
+      return localStorage.getItem('smartclub.medicoachSync.tab') === 'sync' ? 'sync' : 'monitor';
+    } catch {
+      return 'monitor';
+    }
+  });
+  const pickTab = (next: 'monitor' | 'sync') => {
+    setTab(next);
+    try {
+      localStorage.setItem('smartclub.medicoachSync.tab', next);
+    } catch {
+      /* per-browser convenience only */
+    }
+  };
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: qk.medicoachSync() });
     queryClient.invalidateQueries({ queryKey: qk.series() });
@@ -363,34 +381,77 @@ export function AdminMedicoachSyncView({
             Medicoach <em>sync</em>
           </h1>
           <p className="ph-desc">
-            Results and reschedules come in from medicoach every 15 minutes, and fixture changes
-            made here go out to medicoach on the same run. Changes that would double-book a ground,
-            or name a ground we don&apos;t know, wait here for you.
+            {tab === 'monitor' ? (
+              <>
+                Every game of the day as medicoach&apos;s live scoring sees it: start time, score
+                now, the scorer&apos;s last input, innings change and finish, with late starts and
+                delays between balls flagged.
+              </>
+            ) : (
+              <>
+                Results and reschedules come in from medicoach every 15 minutes, and fixture changes
+                made here go out to medicoach on the same run. Changes that would double-book a
+                ground, or name a ground we don&apos;t know, wait here for you.
+              </>
+            )}
           </p>
         </div>
-        <div className="ph-actions">
-          <Btn
-            tone="ink"
-            size="sm"
-            disabled={busy !== null || !data?.enabled}
-            onClick={() =>
-              run(
-                'sync',
-                api.medicoachSyncNow,
-                (r) =>
-                  (r as { status?: string })?.status === 'dry-run'
-                    ? ['Dry run — the sync connection isn’t configured, so nothing was sent.']
-                    : ['Sync finished'],
-                'The sync did not finish',
-              )
-            }
-          >
-            {busy === 'sync' ? 'Syncing…' : 'Sync now'}
-          </Btn>
-        </div>
+        {tab === 'sync' && (
+          <div className="ph-actions">
+            <Btn
+              tone="ink"
+              size="sm"
+              disabled={busy !== null || !data?.enabled}
+              onClick={() =>
+                run(
+                  'sync',
+                  api.medicoachSyncNow,
+                  (r) =>
+                    (r as { status?: string })?.status === 'dry-run'
+                      ? ['Dry run — the sync connection isn’t configured, so nothing was sent.']
+                      : ['Sync finished'],
+                  'The sync did not finish',
+                )
+              }
+            >
+              {busy === 'sync' ? 'Syncing…' : 'Sync now'}
+            </Btn>
+          </div>
+        )}
       </div>
 
-      {status.isLoading ? (
+      <div className="mm-tabs" role="tablist" aria-label="Medicoach sync">
+        {(
+          [
+            ['monitor', 'Match monitor'],
+            ['sync', 'Sync health'],
+          ] as const
+        ).map(([k, label]) => (
+          <button
+            key={k}
+            role="tab"
+            aria-selected={tab === k}
+            className={`mm-tab${tab === k ? ' on' : ''}`}
+            onClick={() => pickTab(k)}
+          >
+            {label}
+            {k === 'sync' && (status.data?.conflicts?.length ?? 0) > 0 && (
+              <span className="mm-chip-n">{status.data!.conflicts!.length}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'monitor' ? (
+        status.data && !status.data.enabled ? (
+          <div className="mcs-empty">
+            The medicoach sync isn&apos;t switched on for this union. Your platform operator turns
+            it on.
+          </div>
+        ) : (
+          <MatchMonitor />
+        )
+      ) : status.isLoading ? (
         <div className="mcs-empty" role="status">
           Loading the sync status…
         </div>

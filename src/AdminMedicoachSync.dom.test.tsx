@@ -15,6 +15,7 @@ vi.mock('./api', async (importActual) => {
     dropMedicoachOutbox: vi.fn(),
     applyMedicoachConflict: vi.fn(),
     discardMedicoachConflict: vi.fn(),
+    getMatchMonitor: vi.fn(),
   };
 });
 
@@ -64,7 +65,11 @@ function renderPage(status: api.MedicoachSyncStatus) {
   return { onOpenSeries, onToast };
 }
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  // These suites are about the "Sync health" tab; the page remembers the last tab chosen.
+  localStorage.setItem('smartclub.medicoachSync.tab', 'sync');
+});
 
 describe('health', () => {
   it('shows the last successful sync prominently', async () => {
@@ -230,5 +235,72 @@ describe('outbox', () => {
     ).toBeInTheDocument();
     await userEvent.click(screen.getByRole('link', { name: /Promotion T20 draft/ }));
     expect(onOpenSeries).toHaveBeenCalledWith('s-draft');
+  });
+});
+
+describe('match monitor tab', () => {
+  const today = new Date(Date.now() + 2 * 3_600_000).toISOString().slice(0, 10);
+  const monitor = (over: Partial<api.MatchMonitorResponse> = {}): api.MatchMonitorResponse => ({
+    date: today,
+    generatedAt: new Date().toISOString(),
+    dryRun: false,
+    reachable: true,
+    unmatched: 0,
+    matches: [
+      {
+        ref: 'smartclub:dolphins:fixture:s1:f1',
+        seriesId: 's1',
+        seriesName: 'Premier T20',
+        fixtureId: 'f1',
+        home: 'UKZN CC',
+        away: 'Crusaders CC',
+        venue: 'Howard College Oval',
+        date: today,
+        time: '00:00',
+        fixtureStatus: 'scheduled',
+        live: null,
+      },
+    ],
+    ...over,
+  });
+
+  beforeEach(() => localStorage.removeItem('smartclub.medicoachSync.tab'));
+
+  it('opens on the monitor, lists the day and flags a start with no live scoring', async () => {
+    vi.mocked(api.getMatchMonitor).mockResolvedValue(monitor());
+    renderPage(baseStatus());
+    expect(
+      await screen.findByRole('tab', { name: 'Match monitor', selected: true }),
+    ).toBeInTheDocument();
+    const table = await screen.findByRole('table', { name: 'Games' });
+    expect(within(table).getByText('UKZN CC v Crusaders CC')).toBeInTheDocument();
+    expect(vi.mocked(api.getMatchMonitor)).toHaveBeenCalledWith(today);
+    // The demo fixture "started" at 00:00 SAST today: past the 15-minute grace unless it is
+    // just after midnight, when it is still awaiting its start.
+    const flag = within(table).queryByText(/No live scoring/);
+    if (Date.now() + 2 * 3_600_000 - Date.parse(`${today}T00:15:00Z`) >= 0)
+      expect(flag).toBeInTheDocument();
+  });
+
+  it('says plainly when medicoach is unreachable, and keeps the fixtures', async () => {
+    vi.mocked(api.getMatchMonitor).mockResolvedValue(
+      monitor({
+        reachable: false,
+        error: 'Couldn’t reach medicoach — timed out.',
+        technical: 'medicoach unreachable: TimeoutError',
+      }),
+    );
+    renderPage(baseStatus());
+    expect(await screen.findByText(/Live scoring unavailable/)).toBeInTheDocument();
+    expect(screen.getByText(/timed out/)).toBeInTheDocument();
+    expect(screen.getByRole('table', { name: 'Games' })).toBeInTheDocument();
+  });
+
+  it('switches to Sync health and remembers it', async () => {
+    vi.mocked(api.getMatchMonitor).mockResolvedValue(monitor());
+    renderPage(baseStatus());
+    await userEvent.click(await screen.findByRole('tab', { name: 'Sync health' }));
+    expect(await screen.findByTestId('mcs-health')).toBeInTheDocument();
+    expect(localStorage.getItem('smartclub.medicoachSync.tab')).toBe('sync');
   });
 });

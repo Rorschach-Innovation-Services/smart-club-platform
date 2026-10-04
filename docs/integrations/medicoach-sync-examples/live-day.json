@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "tenant": "dolphins",
+  "date": "2026-10-04",
+  "generatedAt": "2026-10-04T10:42:05.000Z",
+  "matches": [
+    {
+      "ref": "smartclub:dolphins:fixture:s-planb-premier-men-t20-g1:f3",
+      "status": "in_progress",
+      "startedAt": "2026-10-04T07:21:40.000Z",
+      "endedAt": null,
+      "lastInputAt": "2026-10-04T10:41:12.000Z",
+      "oversPerSide": 20,
+      "innings": [
+        {
+          "number": 1,
+          "battingSide": "home",
+          "runs": 184,
+          "wickets": 6,
+          "overs": "20.0",
+          "startedAt": "2026-10-04T07:21:40.000Z",
+          "endedAt": "2026-10-04T08:52:10.000Z"
+        },
+        {
+          "number": 2,
+          "battingSide": "away",
+          "runs": 97,
+          "wickets": 4,
+          "overs": "12.3",
+          "startedAt": "2026-10-04T09:18:30.000Z",
+          "endedAt": null
+        }
+      ],
+      "deliveries": 207,
+      "medianGapSec": 34,
+      "longGaps": [
+        {
+          "innings": 1,
+          "over": "11.1",
+          "at": "2026-10-04T08:09:55.000Z",
+          "gapSec": 410,
+          "reason": null
+        },
+        {
+          "innings": 1,
+          "over": "10.1",
+          "at": "2026-10-04T08:01:15.000Z",
+          "gapSec": 330,
+          "reason": "drinks"
+        },
+        {
+          "innings": 2,
+          "over": "6.4",
+          "at": "2026-10-04T09:52:20.000Z",
+          "gapSec": 185,
+          "reason": null
+        }
+      ],
+      "medicoachMatchUrl": "https://live.medicoach.co.za/match/example"
+    },
+    {
+      "ref": "smartclub:dolphins:fixture:s-planb-promotion-men-t20-g2:f7",
+      "status": "not_started",
+      "startedAt": null,
+      "endedAt": null,
+      "lastInputAt": null,
+      "oversPerSide": 20,
+      "innings": [],
+      "deliveries": 0,
+      "medianGapSec": null,
+      "longGaps": [],
+      "medicoachMatchUrl": null
+    }
+  ]
+}
