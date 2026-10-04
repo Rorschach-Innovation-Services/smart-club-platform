@@ -161,10 +161,36 @@ Response 200 (example: `live-day.json`):
       gapSec: number,
       reason: "drinks" | "interruption" | null  // a break the scorer recorded inside the gap
     }>,
+    undoCount: number | null,   // times the scorer pressed Undo; null = not tracked for this match
+    players: Array<{            // at most 60: both team sheets, then anyone added during play
+      side: "home" | "away",
+      name: string,             // as the scorer has it (max 120 chars)
+      ref: string | null,       // smart club player ref when the player came from smart club
+      addedDuringMatch: boolean,// added with "add player" after scoring began
+      addedAt: string | null    // when it was first seen in a save (ISO UTC)
+    }>,
     medicoachMatchUrl: string | null
   }>
 }
 ```
+`players` is PERSONAL DATA (names, and refs that are hashed ID numbers): never logged on either
+side. Smart club checks each player against the side's club roster (active registration at this
+club / inactive or clearance pending / registered at another club / not registered; a player
+with no ref is matched by name) and sends its admin page the status and the name — never the ref.
+
+What medicoach needs to add (neither is recorded today — Undo deletes events and "add player"
+writes only a name-map entry):
+- `undoCount`: count in `handleSaveLiveScoring`, where the previous blob is already loaded
+  (`previousLiveScoringData`): delivery ids present before and missing now, minus ids removed by
+  an Edit-Overs delete. Exact counting needs the clients to send an `undoCount` (or an undo log)
+  that the save schema keeps — today `SaveLiveScoringSchema` strips unknown fields. Until then
+  send `null` rather than a guess.
+- `addedDuringMatch` / `addedAt`: on the same save, a player id that appears in
+  `batsmenNames`/`bowlersNames` for the first time after the first ball (not in
+  `selectedPlayerIds` or the creation-time `guestPlayers`) is "added"; stamp `addedAt` with the
+  save time and keep it on the match so it survives later saves.
+- `ref`: the player's smart club ref via the ExternalRef reverse rows (`refForInstitution`),
+  filtered to the side's institution; `guest-`/`opponent-` ids have none.
 Deriving the fields in medicoach (cricket limited-overs, from the linked `PostMatchAnalysis`):
 - Ball times are each delivery's `timestamp` (scorer device clock, epoch ms). The innings `start`
   marker can be re-timestamped when the setup is edited, so `startedAt` is the first BALL's time.
@@ -177,7 +203,8 @@ Deriving the fields in medicoach (cricket limited-overs, from the linked `PostMa
 
 Consumer rules (smart club): nothing is stored; a failure answers the admin page with the day's
 fixtures and the reason. Smart club applies its own thresholds (late start, delay, scorer
-silence, long break) on top of these facts.
+silence, long break, undo count) on top of these facts and flags every player the roster can't
+vouch for.
 
 ## WhatsApp status forwarding (medicoach → smart club)
 

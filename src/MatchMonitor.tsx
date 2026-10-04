@@ -1,18 +1,25 @@
 /* ─── Union office: Medicoach sync → Match monitor ───
  *
- * Every game of one day from medicoach's live scoring, refreshed every 30 seconds while the
- * page is open on today: scheduled start against the first ball, the score and over now,
- * time since the scorer's last input, the innings break, the finish, and long gaps between
- * balls. Games that need the office now (start passed with no ball, scorer silent) sort to
- * the top. Thresholds are the admin's own, kept in this browser.
+ * Built around the FLAGS: the action board at the top lists every flag of the day, most
+ * urgent first (players not registered, a start with no live scoring, a silent scorer, then
+ * late starts, delays between balls, heavy use of undo, players added during the match, long
+ * innings breaks). New flags are marked; the office marks a flag as seen and it comes back
+ * only if it gets worse. Below it, every game: scheduled start against the first ball, the
+ * score now, the scorer's last input, the innings change, the finish and the scorer's undos
+ * and added players.
+ *
+ * Refreshed every 30 seconds while open on today (or yesterday, for evening games past
+ * midnight). Thresholds and "seen" marks are this browser's own.
  */
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import * as api from './api';
 import { Btn, Modal, Pill } from './atoms';
 import { qk } from './query';
 import {
   DEFAULT_THRESHOLDS,
+  FLAG_TYPES,
+  boardFlags,
   fmtDuration,
   monitorRow,
   sastClock,
@@ -21,6 +28,8 @@ import {
   scoreLines,
   sortRows,
   totals,
+  type BoardFlag,
+  type FlagKey,
   type MonitorPhase,
   type MonitorRow,
   type MonitorThresholds,
@@ -28,6 +37,9 @@ import {
 
 const POLL_MS = 30_000;
 const THRESHOLDS_KEY = 'smartclub.matchMonitor.thresholds';
+const SEEN_KEY = (date: string) => `smartclub.matchMonitor.seen.${date}`;
+/** A flag that appeared since the page opened stays marked "New" this long. */
+const NEW_FOR_MS = 10 * 60_000;
 
 const PHASE: Record<MonitorPhase, { label: string; tone: string }> = {
   upcoming: { label: 'Upcoming', tone: 'muted' },
@@ -39,27 +51,41 @@ const PHASE: Record<MonitorPhase, { label: string; tone: string }> = {
   off: { label: 'Postponed', tone: 'muted' },
 };
 
-type Filter = 'all' | 'attention' | 'live' | 'waiting' | 'done';
+const CHECK_LABEL: Record<api.PlayerCheck, { text: string; tone: 'ok' | 'bad' | 'muted' }> = {
+  registered: { text: 'Registered', tone: 'ok' },
+  'name-match': { text: 'Registered (name match)', tone: 'ok' },
+  'not-active': { text: 'Inactive / clearance pending', tone: 'bad' },
+  'other-club': { text: 'Registered at another club', tone: 'bad' },
+  unregistered: { text: 'Not registered', tone: 'bad' },
+  unchecked: { text: 'Not checked', tone: 'muted' },
+};
+
+type Filter = 'all' | 'live' | 'waiting' | 'done';
 const FILTERS: Array<[Filter, string]> = [
   ['all', 'All games'],
-  ['attention', 'Flagged'],
   ['live', 'Live'],
   ['waiting', 'Not started'],
   ['done', 'Finished'],
 ];
 const inFilter = (r: MonitorRow, f: Filter) =>
   f === 'all' ||
-  (f === 'attention' && r.flags.length > 0) ||
   (f === 'live' && (r.phase === 'live' || r.phase === 'break')) ||
   (f === 'waiting' && (r.phase === 'upcoming' || r.phase === 'awaiting')) ||
   (f === 'done' && (r.phase === 'done' || r.phase === 'abandoned'));
 
-function loadThresholds(): MonitorThresholds {
+function readJson<T>(key: string, fallback: T): T {
   try {
-    const raw = localStorage.getItem(THRESHOLDS_KEY);
-    return raw ? { ...DEFAULT_THRESHOLDS, ...JSON.parse(raw) } : DEFAULT_THRESHOLDS;
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
   } catch {
-    return DEFAULT_THRESHOLDS;
+    return fallback;
+  }
+}
+function writeJson(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* per-browser convenience only */
   }
 }
 
@@ -82,12 +108,19 @@ const dayLabel = (date: string, today: string) => {
 const sinceText = (min: number | null) =>
   min === null ? '' : min < 1 ? 'just now' : `${fmtDuration(min)} ago`;
 
+const seenKeyOf = (b: BoardFlag) => `${b.id}#${b.flag.signature}`;
+
 export function MatchMonitor() {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const today = sastToday(nowMs);
   const [date, setDate] = useState(today);
   const [filter, setFilter] = useState<Filter>('all');
-  const [t, setT] = useState<MonitorThresholds>(loadThresholds);
+  const [flagType, setFlagType] = useState<FlagKey | 'all'>('all');
+  const [t, setT] = useState<MonitorThresholds>(() => ({
+    ...DEFAULT_THRESHOLDS,
+    ...readJson<Partial<MonitorThresholds>>(THRESHOLDS_KEY, {}),
+  }));
+  const [seen, setSeen] = useState<string[]>(() => readJson<string[]>(SEEN_KEY(date), []));
   const [open, setOpen] = useState<string | null>(null);
   const isToday = date === today;
   // Yesterday too: an evening game still running after midnight belongs to yesterday's date.
@@ -98,6 +131,7 @@ export function MatchMonitor() {
     const id = window.setInterval(() => setNowMs(Date.now()), 15_000);
     return () => window.clearInterval(id);
   }, []);
+  useEffect(() => setSeen(readJson<string[]>(SEEN_KEY(date), [])), [date]);
 
   const q = useQuery({
     queryKey: qk.matchMonitor(date),
@@ -109,18 +143,46 @@ export function MatchMonitor() {
   const setThreshold = (k: keyof MonitorThresholds, v: number) => {
     const next = { ...t, [k]: v };
     setT(next);
-    try {
-      localStorage.setItem(THRESHOLDS_KEY, JSON.stringify(next));
-    } catch {
-      /* per-browser convenience only */
-    }
+    writeJson(THRESHOLDS_KEY, next);
   };
 
   const rows = useMemo(
     () => sortRows((q.data?.matches ?? []).map((m) => monitorRow(m, nowMs, t))),
     [q.data, nowMs, t],
   );
+  const flags = useMemo(() => boardFlags(rows), [rows]);
+
+  // "New": a flag (or a worse version of one) first seen after the page's first load.
+  const firstSeen = useRef<{ date: string; baseline: boolean; at: Map<string, number> }>({
+    date,
+    baseline: false,
+    at: new Map(),
+  });
+  if (firstSeen.current.date !== date) firstSeen.current = { date, baseline: false, at: new Map() };
+  if (q.data) {
+    const fs = firstSeen.current;
+    for (const b of flags)
+      if (!fs.at.has(seenKeyOf(b))) fs.at.set(seenKeyOf(b), fs.baseline ? Date.now() : 0);
+    fs.baseline = true;
+  }
+  const isNew = (b: BoardFlag) => {
+    const at = firstSeen.current.at.get(seenKeyOf(b)) ?? 0;
+    return at > 0 && nowMs - at < NEW_FOR_MS;
+  };
+
+  const seenSet = new Set(seen);
+  const active = flags.filter((b) => !seenSet.has(seenKeyOf(b)));
+  const done = flags.filter((b) => seenSet.has(seenKeyOf(b)));
+  const shownFlags = active.filter((b) => flagType === 'all' || b.flag.key === flagType);
+  const markSeen = (b: BoardFlag, on: boolean) => {
+    const k = seenKeyOf(b);
+    const next = on ? [...new Set([...seen, k])] : seen.filter((x) => x !== k);
+    setSeen(next);
+    writeJson(SEEN_KEY(date), next);
+  };
+
   const sum = totals(rows);
+  const alerts = active.filter((b) => b.flag.tone === 'alert').length;
   const shown = rows.filter((r) => inFilter(r, filter));
   const openRow = rows.find((r) => r.match.ref === open) ?? null;
   const updated = q.dataUpdatedAt
@@ -212,111 +274,220 @@ export function MatchMonitor() {
         </div>
       ) : (
         <>
-          <div className="mm-kpis" data-testid="mm-kpis">
-            <Kpi
-              label="Games"
-              value={sum.matches}
-              sub={`${rows.length - sum.matches || 'none'} postponed`}
-            />
-            <Kpi label="Live now" value={sum.live} sub="in play or between innings" />
-            <Kpi label="Finished" value={sum.done} sub={`of ${sum.matches}`} />
-            <Kpi
-              label="Late or not started"
-              value={sum.late}
-              sub={`${t.lateStartMin}+ min after the start`}
-              tone={sum.late ? 'warn' : ''}
-            />
-            <Kpi
-              label="Ball delays"
-              value={sum.delayed}
-              sub={`games with a ${t.ballGapMin}+ min gap`}
-              tone={sum.delayed ? 'warn' : ''}
-            />
-            <Kpi
-              label="Needs you now"
-              value={sum.attention}
-              sub="no ball yet, or scorer silent"
-              tone={sum.attention ? 'alert' : ''}
-            />
-          </div>
-
-          <div className="mm-tools">
-            <div className="mm-filters" role="tablist" aria-label="Show">
-              {FILTERS.map(([k, label]) => {
-                const n = rows.filter((r) => inFilter(r, k)).length;
-                return (
-                  <button
-                    key={k}
-                    role="tab"
-                    aria-selected={filter === k}
-                    className={`mm-chip${filter === k ? ' on' : ''}`}
-                    onClick={() => setFilter(k)}
-                  >
-                    {label} <span className="mm-chip-n">{n}</span>
-                  </button>
-                );
-              })}
-            </div>
-            <details className="mm-thresholds">
-              <summary>Flag thresholds</summary>
-              <div className="mm-th-grid">
-                <Threshold
-                  label="Late start after"
-                  unit="min"
-                  value={t.lateStartMin}
-                  options={[5, 10, 15, 20, 30]}
-                  onChange={(v) => setThreshold('lateStartMin', v)}
-                />
-                <Threshold
-                  label="Gap between balls over"
-                  unit="min"
-                  value={t.ballGapMin}
-                  options={[2, 3, 4, 5, 6, 8, 10]}
-                  onChange={(v) => setThreshold('ballGapMin', v)}
-                />
-                <Threshold
-                  label="No scorer input for"
-                  unit="min"
-                  value={t.quietMin}
-                  options={[5, 10, 15, 20]}
-                  onChange={(v) => setThreshold('quietMin', v)}
-                />
-                <Threshold
-                  label="Innings break over"
-                  unit="min"
-                  value={t.breakMin}
-                  options={[20, 25, 30, 40, 45]}
-                  onChange={(v) => setThreshold('breakMin', v)}
-                />
+          {/* ── Action board ── */}
+          <section className="mm-board" aria-labelledby="mm-board-h" data-testid="mm-board">
+            <div className="mm-board-head">
+              <div>
+                <h2 id="mm-board-h" className="mm-board-title">
+                  Action board
+                </h2>
+                <div className="mm-board-sum">
+                  {active.length === 0 ? (
+                    'Nothing needs you right now.'
+                  ) : (
+                    <>
+                      <strong className={alerts ? 'mm-alert-text' : ''}>
+                        {alerts} need{alerts === 1 ? 's' : ''} you now
+                      </strong>
+                      {' · '}
+                      {active.length - alerts} to keep an eye on
+                    </>
+                  )}
+                </div>
               </div>
-            </details>
+              <details className="mm-thresholds">
+                <summary>Flag thresholds</summary>
+                <div className="mm-th-grid">
+                  <Threshold
+                    label="Late start after"
+                    unit="min"
+                    value={t.lateStartMin}
+                    options={[5, 10, 15, 20, 30]}
+                    onChange={(v) => setThreshold('lateStartMin', v)}
+                  />
+                  <Threshold
+                    label="Gap between balls over"
+                    unit="min"
+                    value={t.ballGapMin}
+                    options={[2, 3, 4, 5, 6, 8, 10]}
+                    onChange={(v) => setThreshold('ballGapMin', v)}
+                  />
+                  <Threshold
+                    label="No scorer input for"
+                    unit="min"
+                    value={t.quietMin}
+                    options={[5, 10, 15, 20]}
+                    onChange={(v) => setThreshold('quietMin', v)}
+                  />
+                  <Threshold
+                    label="Innings break over"
+                    unit="min"
+                    value={t.breakMin}
+                    options={[20, 25, 30, 40, 45]}
+                    onChange={(v) => setThreshold('breakMin', v)}
+                  />
+                  <Threshold
+                    label="Undo used"
+                    unit="times"
+                    value={t.undoMax}
+                    options={[3, 5, 8, 10, 15]}
+                    onChange={(v) => setThreshold('undoMax', v)}
+                  />
+                </div>
+              </details>
+            </div>
+
+            {active.length > 0 && (
+              <div className="mm-filters" role="tablist" aria-label="Flag type">
+                <button
+                  role="tab"
+                  aria-selected={flagType === 'all'}
+                  className={`mm-chip${flagType === 'all' ? ' on' : ''}`}
+                  onClick={() => setFlagType('all')}
+                >
+                  All flags <span className="mm-chip-n">{active.length}</span>
+                </button>
+                {FLAG_TYPES.map(({ key, name }) => {
+                  const n = active.filter((b) => b.flag.key === key).length;
+                  if (!n) return null;
+                  const alert = active.some((b) => b.flag.key === key && b.flag.tone === 'alert');
+                  return (
+                    <button
+                      key={key}
+                      role="tab"
+                      aria-selected={flagType === key}
+                      className={`mm-chip${flagType === key ? ' on' : ''}${alert ? ' alert' : ''}`}
+                      onClick={() => setFlagType(key)}
+                    >
+                      {name} <span className="mm-chip-n">{n}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {active.length === 0 ? (
+              <div className="mm-allclear">
+                <span aria-hidden="true">✓</span>
+                {rows.length
+                  ? 'Every game is on track — no flags.'
+                  : 'No fixtures in a released series on this day.'}
+              </div>
+            ) : (
+              <ul className="mm-flagcards" aria-label="Flags">
+                {(shownFlags.length ? shownFlags : active).map((b) => (
+                  <FlagCard
+                    key={b.id}
+                    b={b}
+                    nowMs={nowMs}
+                    isNew={isNew(b)}
+                    onOpen={() => setOpen(b.row.match.ref)}
+                    onSeen={() => markSeen(b, true)}
+                  />
+                ))}
+              </ul>
+            )}
+
+            {done.length > 0 && (
+              <details className="mm-seen">
+                <summary>Seen ({done.length})</summary>
+                <ul className="mcs-list">
+                  {done.map((b) => (
+                    <li key={b.id}>
+                      <div>
+                        <span className={`mm-flag ${b.flag.tone}`}>{b.flag.label}</span>
+                        <div className="ump-sub">
+                          {b.row.match.home} v {b.row.match.away}
+                        </div>
+                      </div>
+                      <Btn tone="outline" size="sm" onClick={() => markSeen(b, false)}>
+                        Put back
+                      </Btn>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </section>
+
+          {/* ── The day in one line ── */}
+          <div className="mm-daystats" data-testid="mm-kpis">
+            <span>
+              <strong>{sum.matches}</strong> games
+            </span>
+            <span>
+              <strong>{sum.live}</strong> live
+            </span>
+            <span>
+              <strong>{sum.done}</strong> finished
+            </span>
+            <span className={sum.unregistered ? 'bad' : ''}>
+              <strong>{sum.unregistered}</strong> unregistered player
+              {sum.unregistered === 1 ? '' : 's'}
+            </span>
+            <span>
+              <strong>{rows.reduce((n, r) => n + r.playersAdded, 0)}</strong> added during play
+            </span>
+            <span>
+              <strong>{rows.reduce((n, r) => n + (r.undoCount ?? 0), 0)}</strong> undos
+            </span>
+            {rows.length - sum.matches > 0 && (
+              <span>
+                <strong>{rows.length - sum.matches}</strong> postponed
+              </span>
+            )}
           </div>
 
-          {!rows.length ? (
-            <div className="mcs-empty">No fixtures in a released series on this day.</div>
-          ) : !shown.length ? (
-            <div className="mcs-empty">No games match this filter.</div>
-          ) : (
-            <div className="tbl-w">
-              <table className="tbl mm-tbl" aria-label="Games">
-                <thead>
-                  <tr>
-                    <th>Game</th>
-                    <th>Start</th>
-                    <th>Score now</th>
-                    <th>Last input</th>
-                    <th>Innings change</th>
-                    <th>Finished</th>
-                    <th>Flags</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {shown.map((r) => (
-                    <GameRow key={r.match.ref} r={r} onOpen={() => setOpen(r.match.ref)} />
-                  ))}
-                </tbody>
-              </table>
-            </div>
+          {/* ── Every game ── */}
+          {rows.length > 0 && (
+            <>
+              <div className="mm-tools">
+                <h2 className="mcs-heading" style={{ margin: 0 }}>
+                  Every game
+                </h2>
+                <div className="mm-filters" role="tablist" aria-label="Show">
+                  {FILTERS.map(([k, label]) => {
+                    const n = rows.filter((r) => inFilter(r, k)).length;
+                    return (
+                      <button
+                        key={k}
+                        role="tab"
+                        aria-selected={filter === k}
+                        className={`mm-chip${filter === k ? ' on' : ''}`}
+                        onClick={() => setFilter(k)}
+                      >
+                        {label} <span className="mm-chip-n">{n}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              {!shown.length ? (
+                <div className="mcs-empty">No games match this filter.</div>
+              ) : (
+                <div className="tbl-w">
+                  <table className="tbl mm-tbl" aria-label="Games">
+                    <thead>
+                      <tr>
+                        <th>Game</th>
+                        <th>Start</th>
+                        <th>Score now</th>
+                        <th>Last input</th>
+                        <th>Innings change</th>
+                        <th>Finished</th>
+                        <th>Scorer</th>
+                        <th>Flags</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {shown.map((r) => (
+                        <GameRow key={r.match.ref} r={r} onOpen={() => setOpen(r.match.ref)} />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
           )}
           {!!q.data?.unmatched && (
             <p className="mcs-note">
@@ -332,23 +503,78 @@ export function MatchMonitor() {
   );
 }
 
-function Kpi({
-  label,
-  value,
-  sub,
-  tone = '',
+function FlagCard({
+  b,
+  nowMs,
+  isNew,
+  onOpen,
+  onSeen,
 }: {
-  label: string;
-  value: number;
-  sub: string;
-  tone?: string;
+  b: BoardFlag;
+  nowMs: number;
+  isNew: boolean;
+  onOpen: () => void;
+  onSeen: () => void;
 }) {
+  const [more, setMore] = useState(false);
+  const m = b.row.match;
+  const type = FLAG_TYPES.find((f) => f.key === b.flag.key)!.name;
+  const since = b.flag.since ? Date.parse(b.flag.since) : null;
+  const detail = b.flag.detail ?? [];
+  const visible = more ? detail : detail.slice(0, 3);
   return (
-    <div className={`mcs-stat mm-kpi ${tone}`}>
-      <div className="mcs-stat-label">{label}</div>
-      <div className="mcs-stat-value">{value}</div>
-      <div className="ump-sub">{sub}</div>
-    </div>
+    <li className={`mm-flagcard ${b.flag.tone}`} data-flag={b.flag.key}>
+      <div className="mm-fc-main">
+        <div className="mm-fc-type">
+          <span className={`mm-fc-dot ${b.flag.tone}`} aria-hidden="true" />
+          {b.flag.tone === 'alert' ? 'Act now' : 'Watch'} · {type}
+          {isNew && <span className="mm-new">New</span>}
+        </div>
+        <div className="mm-fc-title">{b.flag.label}</div>
+        <div className="mm-fc-game">
+          <strong>
+            {m.home} v {m.away}
+          </strong>
+          <span className="ump-sub">
+            {' '}
+            · {m.seriesName}
+            {m.venue ? ` · ${m.venue}` : ''}
+            {since !== null &&
+              ` · since ${sastClock(since)} (${fmtDuration((nowMs - since) / 60_000)})`}
+          </span>
+        </div>
+        {visible.length > 0 && (
+          <ul className="mm-fc-detail">
+            {visible.map((d) => (
+              <li key={d}>{d}</li>
+            ))}
+          </ul>
+        )}
+        {detail.length > 3 && (
+          <button className="mm-more" onClick={() => setMore(!more)}>
+            {more ? 'Show fewer' : `Show all ${detail.length}`}
+          </button>
+        )}
+      </div>
+      <div className="mm-fc-actions">
+        <Btn tone="ink" size="sm" onClick={onOpen}>
+          Open game
+        </Btn>
+        {m.live?.medicoachMatchUrl && (
+          <a
+            className="btn btn-outline btn-sm"
+            href={m.live.medicoachMatchUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            medicoach ↗
+          </a>
+        )}
+        <Btn tone="outline" size="sm" onClick={onSeen} aria-label={`Mark seen: ${b.flag.label}`}>
+          Mark seen
+        </Btn>
+      </div>
+    </li>
   );
 }
 
@@ -399,7 +625,10 @@ function GameRow({ r, onOpen }: { r: MonitorRow; onOpen: () => void }) {
       <td data-label="Game">
         <button
           className="mm-game"
-          onClick={onOpen}
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpen();
+          }}
           aria-label={`${label}: open the match timeline`}
         >
           {label}
@@ -477,6 +706,23 @@ function GameRow({ r, onOpen }: { r: MonitorRow; onOpen: () => void }) {
           <span className="ump-sub">—</span>
         )}
       </td>
+      <td data-label="Scorer">
+        {live ? (
+          <>
+            <div className={`mm-strong${r.flags.some((f) => f.key === 'undo') ? ' mm-late' : ''}`}>
+              {r.undoCount === null
+                ? 'Undo —'
+                : `${r.undoCount} undo${r.undoCount === 1 ? '' : 's'}`}
+            </div>
+            <div className={`ump-sub${r.ineligible ? ' mm-alert-text' : ''}`}>
+              {r.playersAdded} added
+              {r.ineligible ? ` · ${r.ineligible} unregistered` : ''}
+            </div>
+          </>
+        ) : (
+          <span className="ump-sub">—</span>
+        )}
+      </td>
       <td data-label="Flags">
         {r.flags.length ? (
           <div className="mm-flags">
@@ -496,7 +742,7 @@ function GameRow({ r, onOpen }: { r: MonitorRow; onOpen: () => void }) {
   );
 }
 
-/** One game's day on a line: the late start, each innings, the break and every long gap. */
+/** One game's day: flags, the timeline, delays, the scorer's corrections and the team sheets. */
 function GameDetail({
   r,
   nowMs,
@@ -545,12 +791,13 @@ function GameDetail({
       live?.endedAt ? sastClock(live.endedAt) : null,
     ],
   ];
+  const players = live?.players ?? [];
 
   return (
     <Modal
       eyebrow={`${m.seriesName}${m.venue ? ` · ${m.venue}` : ''}`}
       title={`${m.home} v ${m.away}`}
-      maxWidth={720}
+      maxWidth={760}
       onClose={onClose}
     >
       <div className="mm-detail">
@@ -566,13 +813,20 @@ function GameDetail({
           ))}
         </div>
         {r.flags.length > 0 && (
-          <div className="mm-flags" style={{ margin: '10px 0 4px' }}>
+          <ul className="mm-detail-flags">
             {r.flags.map((f) => (
-              <span key={f.key} className={`mm-flag ${f.tone}`}>
-                {f.label}
-              </span>
+              <li key={f.key} className={`mm-flagcard ${f.tone} compact`}>
+                <div className="mm-fc-title">{f.label}</div>
+                {f.detail && (
+                  <ul className="mm-fc-detail">
+                    {f.detail.map((d) => (
+                      <li key={d}>{d}</li>
+                    ))}
+                  </ul>
+                )}
+              </li>
             ))}
-          </div>
+          </ul>
         )}
 
         {canDraw ? (
@@ -673,6 +927,16 @@ function GameDetail({
                     : '—'}
                 </strong>
               </li>
+              <li>
+                <span>Undo pressed</span>
+                <strong className={r.flags.some((f) => f.key === 'undo') ? 'mm-late' : ''}>
+                  {r.undoCount === null ? 'not reported' : `${r.undoCount} times`}
+                </strong>
+              </li>
+              <li>
+                <span>Players added during play</span>
+                <strong>{r.playersAdded}</strong>
+              </li>
             </ul>
           </div>
           <div>
@@ -732,6 +996,49 @@ function GameDetail({
             )}
           </div>
         </div>
+
+        {players.length > 0 && (
+          <>
+            <h3 className="mcs-heading" style={{ marginTop: 16 }}>
+              Team sheets against the register
+            </h3>
+            <div className="mm-sheets">
+              {(['home', 'away'] as const).map((side) => (
+                <div key={side}>
+                  <div className="mm-sheet-h">{side === 'home' ? m.home : m.away}</div>
+                  <ul className="mcs-list mm-events">
+                    {players
+                      .filter((p) => p.side === side)
+                      .sort(
+                        (a, b) =>
+                          Number(CHECK_LABEL[b.check].tone === 'bad') -
+                            Number(CHECK_LABEL[a.check].tone === 'bad') ||
+                          Number(b.addedDuringMatch) - Number(a.addedDuringMatch),
+                      )
+                      .map((p) => (
+                        <li key={p.name}>
+                          <span>
+                            {p.name}
+                            {p.addedDuringMatch && (
+                              <span className="ump-sub">
+                                {' '}
+                                · added{p.addedAt ? ` ${sastClock(p.addedAt)}` : ''}
+                              </span>
+                            )}
+                          </span>
+                          <span className={`mm-check ${CHECK_LABEL[p.check].tone}`}>
+                            {p.check === 'other-club' && p.otherClub
+                              ? `At ${p.otherClub}`
+                              : CHECK_LABEL[p.check].text}
+                          </span>
+                        </li>
+                      ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
         {live?.medicoachMatchUrl && (
           <p className="mcs-note">
             <a

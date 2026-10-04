@@ -4435,7 +4435,8 @@ app.get('/integrations/medicoach/status', async (c) => {
 /**
  * Admin "Match monitor" (Medicoach sync): one SAST day's fixtures (released series) joined to
  * their live-scoring state in medicoach: first ball, score and overs, last scoring input,
- * innings times, end, and long gaps between balls. Read-through on every call (the page
+ * innings times, end, long gaps between balls, undo count, and each player checked against the
+ * club rosters (status + name only; refs never leave the server). Read-through (the page
  * polls); nothing is stored. `date` defaults to today in SAST. A medicoach failure still
  * answers 200 with the fixtures, `reachable: false` and the reason in plain language.
  */
@@ -4454,7 +4455,7 @@ app.get('/integrations/medicoach/live', async (c) => {
       tenant,
       date,
       { series, clubs },
-      { url: medicoachSyncUrl(), secret: medicoachSyncSecret() },
+      { url: medicoachSyncUrl(), secret: medicoachSyncSecret(), listPlayers: repo.listPlayers },
     ),
   );
 });

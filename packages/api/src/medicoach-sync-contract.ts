@@ -181,6 +181,23 @@ export const LiveGapSchema = z.object({
   reason: z.enum(['drinks', 'interruption']).nullable(),
 });
 
+/**
+ * A player in a live match: everyone on either side's team sheet, plus anyone the scorer added
+ * with "add player" during the match. PERSONAL DATA (name, and a ref that is a hashed ID
+ * number) — never log, never store; smart club resolves it to a registration status and sends
+ * the admin page the status, never the ref.
+ */
+export const LivePlayerSchema = z.object({
+  side: z.enum(['home', 'away']),
+  name: z.string().min(1).max(120),
+  /** `smartclub:<t>:player:<naturalKey>` when the player came from smart club; else null. */
+  ref: ref.nullable(),
+  /** Added by the scorer with "add player" after scoring began (not on the team sheet). */
+  addedDuringMatch: z.boolean(),
+  addedAt: isoUtc.nullable(),
+});
+export const LIVE_PLAYERS_MAX = 60;
+
 /** Gaps of at least this long are listed in `longGaps`; shorter ones only feed the median. */
 export const LIVE_GAP_FLOOR_SEC = 120;
 /** At most this many `longGaps` per match (the longest are kept). */
@@ -203,6 +220,10 @@ export const LiveMatchSchema = z.object({
   /** Median gap between consecutive balls of an innings, seconds. */
   medianGapSec: z.number().min(0).nullable(),
   longGaps: z.array(LiveGapSchema).max(LIVE_GAPS_MAX),
+  /** Times the scorer undid a ball (null: this scoring app doesn't report it). */
+  undoCount: z.number().int().min(0).nullable(),
+  /** Each side's players, team sheet first, then any added during the match. */
+  players: z.array(LivePlayerSchema).max(LIVE_PLAYERS_MAX),
   medicoachMatchUrl: z.string().url().nullable().transform(httpUrlOrNull),
 });
 
@@ -224,6 +245,7 @@ export type ChangesResponse = z.infer<typeof ChangesResponseSchema>;
 export type SchedulePushRequest = z.infer<typeof SchedulePushRequestSchema>;
 export type SchedulePushResponse = z.infer<typeof SchedulePushResponseSchema>;
 export type LiveMatch = z.infer<typeof LiveMatchSchema>;
+export type LivePlayer = z.infer<typeof LivePlayerSchema>;
 export type LiveResponse = z.infer<typeof LiveResponseSchema>;
 
 /* ─────────────────────────── Request paths ─────────────────────────── */

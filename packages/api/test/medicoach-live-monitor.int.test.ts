@@ -114,6 +114,8 @@ const liveMatch = (ref: string, over: Record<string, unknown> = {}) => ({
   longGaps: [
     { innings: 1, over: '9.1', at: '2026-10-04T08:20:00.000Z', gapSec: 300, reason: null },
   ],
+  undoCount: 3,
+  players: [],
   medicoachMatchUrl: 'https://live.medicoach.co.za/match/x',
   ...over,
 });
@@ -135,6 +137,8 @@ before(async () => {
     features: { medicoachSync: true },
   } as unknown as TenantConfig);
   for (const [id, name] of [
+    ['a', 'Crusaders CC'],
+    ['b', 'Umzinto CC'],
     ['c', 'Harlequins CC'],
     ['d', 'Pirates CC'],
   ])
@@ -156,6 +160,28 @@ before(async () => {
       leagues: [],
       version: 1,
     } as never);
+  const reg = (
+    clubId: string,
+    naturalKey: string,
+    firstName: string,
+    lastName: string,
+    status?: string,
+  ) =>
+    repo.createPlayer(T, {
+      naturalKey,
+      clubId,
+      firstName,
+      lastName,
+      dob: '1995-01-01',
+      isMinor: false,
+      consentAt: '2026-01-01T00:00:00.000Z',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      ...(status ? { status } : {}),
+    } as never);
+  await reg('a', 'nk-a1', 'Ann', 'Active');
+  await reg('a', 'nk-a2', 'Ian', 'Inactive', 'inactive');
+  await reg('c', 'nk-c1', 'Carl', 'Elsewhere');
+  await reg('b', 'nk-b1', 'Bea', 'Bee');
   await repo.putSeries(T, series('s1'));
   await repo.putSeries(T, series('s-draft', { released: false }));
 });
@@ -201,6 +227,76 @@ describe('match monitor', () => {
     assert.equal(f1.longGaps[0].gapSec, 300);
     assert.equal(r.matches[1].live, null);
     assert.equal(r.unmatched, 1);
+  });
+
+  test('checks every player against the rosters and never sends a player ref to the page', async () => {
+    const P = (key: string) => `smartclub:${T}:player:${key}`;
+    body = {
+      version: 1,
+      tenant: T,
+      date: DAY,
+      generatedAt: '2026-10-04T08:42:00.000Z',
+      matches: [
+        liveMatch(REF('s1', 'f1'), {
+          undoCount: 7,
+          players: [
+            {
+              side: 'home',
+              name: 'Ann Active',
+              ref: P('nk-a1'),
+              addedDuringMatch: false,
+              addedAt: null,
+            },
+            {
+              side: 'home',
+              name: 'Carl Elsewhere',
+              ref: P('nk-c1'),
+              addedDuringMatch: false,
+              addedAt: null,
+            },
+            {
+              side: 'home',
+              name: 'Ian Inactive',
+              ref: P('nk-a2'),
+              addedDuringMatch: false,
+              addedAt: null,
+            },
+            { side: 'away', name: 'BEA  bee', ref: null, addedDuringMatch: false, addedAt: null },
+            {
+              side: 'away',
+              name: 'Nobody Known',
+              ref: null,
+              addedDuringMatch: true,
+              addedAt: '2026-10-04T08:10:00.000Z',
+            },
+            {
+              side: 'away',
+              name: 'Ghost Ref',
+              ref: P('nk-none'),
+              addedDuringMatch: false,
+              addedAt: null,
+            },
+          ],
+        }),
+      ],
+    };
+    const res = await get(`?date=${DAY}`);
+    const raw = await res.text();
+    assert.doesNotMatch(raw, /:player:/, 'no player ref reaches the page');
+    const r = JSON.parse(raw) as MatchMonitorResponse;
+    const live = r.matches[0].live!;
+    assert.equal(live.undoCount, 7);
+    assert.deepEqual(
+      live.players.map((p) => [p.name, p.check, p.otherClub ?? null, p.addedDuringMatch]),
+      [
+        ['Ann Active', 'registered', null, false],
+        ['Carl Elsewhere', 'other-club', 'Harlequins CC', false],
+        ['Ian Inactive', 'not-active', null, false],
+        ['BEA  bee', 'name-match', null, false],
+        ['Nobody Known', 'unregistered', null, true],
+        ['Ghost Ref', 'unregistered', null, false],
+      ],
+    );
   });
 
   test('medicoach failing still lists the fixtures, with the reason in plain language', async () => {

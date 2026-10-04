@@ -828,7 +828,28 @@ export interface LiveMatch {
   deliveries: number;
   medianGapSec: number | null;
   longGaps: LiveGap[];
+  /** Times the scorer undid a ball; null when the scoring app doesn't report it. */
+  undoCount: number | null;
+  /** Each side's players, checked against the club rosters. */
+  players: MonitorPlayer[];
   medicoachMatchUrl: string | null;
+}
+/** What the club roster says about a player who appeared in a live match. */
+export type PlayerCheck =
+  | 'registered'
+  | 'name-match'
+  | 'not-active'
+  | 'other-club'
+  | 'unregistered'
+  | 'unchecked';
+export interface MonitorPlayer {
+  side: 'home' | 'away';
+  name: string;
+  /** Added by the scorer with "add player" during the match (not on the team sheet). */
+  addedDuringMatch: boolean;
+  addedAt: string | null;
+  check: PlayerCheck;
+  otherClub?: string;
 }
 /** A smart club fixture on the monitored day, joined to its medicoach live state. */
 export interface MonitorMatch {
@@ -838,6 +859,8 @@ export interface MonitorMatch {
   fixtureId: string;
   home: string;
   away: string;
+  homeClubId?: string;
+  awayClubId?: string;
   venue?: string;
   date: string;
   time?: string;

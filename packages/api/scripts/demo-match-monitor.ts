@@ -67,15 +67,21 @@ interface Scenario {
   /** The scorer stopped inputting this many minutes ago (game still in progress). */
   quietFor?: number;
   postponed?: boolean;
+  /** Times the scorer pressed undo. */
+  undo?: number;
+  /** Team-sheet problems to plant (see `teamSheets`). */
+  sheet?: Array<'added-unregistered' | 'added-registered' | 'other-club' | 'sheet-unregistered'>;
 }
 const SCENARIOS: Scenario[] = [
-  { label: 'finished, on time', startIn: -245, delay: 3, breakMin: 24 },
+  { label: 'finished, on time', startIn: -245, delay: 3, breakMin: 24, undo: 1 },
   {
     label: 'finished, late start + long break',
     startIn: -275,
     delay: 28,
     breakMin: 38,
     gaps: [[2, 61, 7]],
+    undo: 3,
+    sheet: ['other-club'],
   },
   {
     label: '2nd innings, delays between balls',
@@ -86,10 +92,24 @@ const SCENARIOS: Scenario[] = [
       [1, 44, 6],
       [2, 20, 9],
     ],
+    undo: 2,
+    sheet: ['added-unregistered'],
   },
-  { label: 'innings break', startIn: -105, delay: 2, breakMin: 30 },
-  { label: 'scorer silent', startIn: -55, delay: 4, quietFor: 14 },
-  { label: '1st innings, on track', startIn: -35, delay: 1 },
+  { label: 'innings break, heavy undo', startIn: -105, delay: 2, breakMin: 30, undo: 7 },
+  {
+    label: 'scorer silent, unregistered on the sheet',
+    startIn: -55,
+    delay: 4,
+    quietFor: 14,
+    undo: 11,
+    sheet: ['sheet-unregistered'],
+  },
+  {
+    label: '1st innings, a registered player added',
+    startIn: -35,
+    delay: 1,
+    sheet: ['added-registered'],
+  },
   { label: 'awaiting first ball', startIn: -25, delay: 60 },
   { label: 'no live scoring', startIn: -40, none: true },
   { label: 'upcoming', startIn: 45 },
@@ -98,6 +118,99 @@ const SCENARIOS: Scenario[] = [
 ];
 
 const scenarioByRef = new Map<string, Scenario>();
+
+/* ── Rosters: fictional registered players for every demo club (local only) ── */
+const FIRST = [
+  'Ayanda',
+  'Bongani',
+  'Caleb',
+  'Dylan',
+  'Ethan',
+  'Faraaz',
+  'Gareth',
+  'Hlumelo',
+  'Imraan',
+  'Jason',
+  'Kagiso',
+  'Luthando',
+  'Mpho',
+  'Nabeel',
+  'Owethu',
+  'Pieter',
+];
+const LAST = [
+  'Dlamini',
+  'Naidoo',
+  'Botha',
+  'Khumalo',
+  'Pillay',
+  'van Wyk',
+  'Mthembu',
+  'Govender',
+  'Smit',
+  'Zulu',
+  'Moodley',
+  'Ngcobo',
+  'Pretorius',
+  'Maharaj',
+  'Cele',
+  'Fourie',
+];
+
+/** A valid-format (Luhn) RSA ID for a fictional adult: born 1990–1999, SA citizen. */
+function demoIdNumber(seq: number): string {
+  const yy = String(90 + (seq % 10));
+  const mm = String(1 + (seq % 12)).padStart(2, '0');
+  const dd = String(1 + (seq % 28)).padStart(2, '0');
+  const body = `${yy}${mm}${dd}${String(5000 + seq).padStart(4, '0')}08`;
+  let sum = 0;
+  for (let i = 0; i < 12; i++) {
+    let d = Number(body[i]);
+    if (i % 2 === 1) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+  }
+  return `${body}${(10 - (sum % 10)) % 10}`;
+}
+
+interface RosterRow {
+  naturalKey: string;
+  firstName: string;
+  lastName: string;
+  status?: string;
+}
+const rosters = new Map<string, RosterRow[]>();
+
+async function seedRosters(clubIds: string[]) {
+  let seq = 0;
+  for (const clubId of clubIds) {
+    let rows = (await api(`/clubs/${clubId}/players`)) as RosterRow[];
+    const base = clubIds.indexOf(clubId) * 16;
+    for (let i = rows.length; i < 14; i++) {
+      seq = base + i;
+      await api(`/clubs/${clubId}/players`, {
+        method: 'POST',
+        body: JSON.stringify({
+          firstName: FIRST[(seq * 7) % FIRST.length],
+          lastName: LAST[(seq * 5 + clubIds.indexOf(clubId)) % LAST.length],
+          idNumber: demoIdNumber(seq),
+          race: 'Prefer not to say',
+          gender: 'Male',
+          nationality: 'South African',
+          cell: `0600000${String(seq).padStart(3, '0')}`,
+          team: 'premier',
+          district: 'Demo',
+        }),
+      }).catch((err) =>
+        console.warn(`  (roster ${clubId}: ${(err as Error).message.slice(0, 80)})`),
+      );
+    }
+    rows = (await api(`/clubs/${clubId}/players`)) as RosterRow[];
+    rosters.set(clubId, rows);
+  }
+}
 
 /* ── Seed: switch the sync on, put the fixtures around now ── */
 function slot(nowMs: number, startIn: number) {
@@ -145,6 +258,13 @@ async function seed() {
       body: JSON.stringify({ fixtures, approved: true, released: true, version: s.version }),
     });
   }
+  const clubIds = new Set<string>();
+  for (const s of (await api('/series')) as Array<{
+    fixtures: Array<{ home?: string; away?: string }>;
+  }>)
+    for (const f of s.fixtures) for (const c of [f.home, f.away]) if (c) clubIds.add(c);
+  await seedRosters([...clubIds]);
+  console.log(`· rosters ready for ${rosters.size} clubs (fictional players)`);
   console.log(`· ${scenarioByRef.size} fixtures placed around ${slot(now, 0).time} SAST, sync on`);
 }
 
@@ -218,7 +338,73 @@ const overs = (legal: number) => `${Math.floor(legal / 6)}.${legal % 6}`;
 const label = (legalBefore: number) => `${Math.floor(legalBefore / 6)}.${(legalBefore % 6) + 1}`;
 const iso = (ms: number) => new Date(ms).toISOString();
 
-function liveFor(ref: string, sc: Scenario, scheduled: number, now: number) {
+/**
+ * Each side's eleven from its club roster (with smart club refs, as imported players carry),
+ * plus the scenario's planted problems: a player added mid-match who isn't registered, one
+ * added by name who is, a registered player from another club, an unknown name on the sheet.
+ */
+function teamSheets(
+  homeClub: string,
+  awayClub: string,
+  sc: Scenario,
+  first: number,
+  started: boolean,
+) {
+  const refOf = (r: RosterRow) => `smartclub:${TENANT}:player:${r.naturalKey}`;
+  const eleven = (clubId: string, side: 'home' | 'away') =>
+    (rosters.get(clubId) ?? []).slice(0, 11).map((r) => ({
+      side,
+      name: `${r.firstName} ${r.lastName}`,
+      ref: refOf(r) as string | null,
+      addedDuringMatch: false,
+      addedAt: null as string | null,
+    }));
+  const players = [...eleven(homeClub, 'home'), ...eleven(awayClub, 'away')];
+  const at = (min: number) => (started ? iso(first + min * MIN) : null);
+  for (const kind of sc.sheet ?? []) {
+    if (kind === 'other-club') {
+      const other = [...rosters.entries()].find(
+        ([c]) => c !== homeClub && c !== awayClub,
+      )?.[1]?.[12];
+      if (other)
+        players[3] = {
+          ...players[3],
+          name: `${other.firstName} ${other.lastName}`,
+          ref: refOf(other),
+        };
+    } else if (kind === 'sheet-unregistered') {
+      players[16] = { ...players[16], name: 'Tumelo Sithebe', ref: null };
+    } else if (!started) continue;
+    else if (kind === 'added-unregistered')
+      players.push({
+        side: 'away',
+        name: 'Ricky Mabuza',
+        ref: null,
+        addedDuringMatch: true,
+        addedAt: at(38),
+      });
+    else if (kind === 'added-registered') {
+      const r = (rosters.get(homeClub) ?? [])[12];
+      if (r)
+        players.push({
+          side: 'home',
+          name: `${r.firstName} ${r.lastName}`,
+          ref: null,
+          addedDuringMatch: true,
+          addedAt: at(9),
+        });
+    }
+  }
+  return players;
+}
+
+function liveFor(
+  ref: string,
+  sc: Scenario,
+  scheduled: number,
+  now: number,
+  clubs: { home: string; away: string },
+) {
   const r = rng(ref);
   const homeBats = r() < 0.5;
   const first = scheduled + (sc.delay ?? 0) * MIN;
@@ -238,6 +424,8 @@ function liveFor(ref: string, sc: Scenario, scheduled: number, now: number) {
       deliveries: 0,
       medianGapSec: null,
       longGaps: [],
+      undoCount: 0,
+      players: teamSheets(clubs.home, clubs.away, sc, first, false),
     };
   const i1 = playInnings(r, 1, first, sc);
   const i2Start = i1.end + (sc.breakMin ?? 25) * MIN;
@@ -310,6 +498,8 @@ function liveFor(ref: string, sc: Scenario, scheduled: number, now: number) {
         gapSec: b.gapSec,
         reason: b.reason,
       })),
+    undoCount: sc.undo ?? 0,
+    players: teamSheets(clubs.home, clubs.away, sc, first, true),
   };
 }
 
@@ -326,7 +516,12 @@ async function liveDay(date: string) {
       const sc = scenarioByRef.get(ref);
       if (!sc || sc.none || sc.postponed || f.date !== date || !f.time) continue;
       const scheduled = Date.parse(`${f.date}T${f.time}:00+02:00`);
-      matches.push(liveFor(ref, sc, scheduled, now));
+      matches.push(
+        liveFor(ref, sc, scheduled, now, {
+          home: (f as { home?: string }).home ?? '',
+          away: (f as { away?: string }).away ?? '',
+        }),
+      );
     }
   return { version: 1, tenant: TENANT, date, generatedAt: new Date(now).toISOString(), matches };
 }

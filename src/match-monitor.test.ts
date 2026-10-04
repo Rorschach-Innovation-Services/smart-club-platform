@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_THRESHOLDS,
+  boardFlags,
   monitorRow,
   sastClock,
   sastToday,
@@ -9,7 +10,7 @@ import {
   sortRows,
   totals,
 } from './match-monitor';
-import type { LiveMatch, MonitorMatch } from './api';
+import type { LiveMatch, MonitorMatch, MonitorPlayer } from './api';
 
 // 10:00 SAST on Sat 4 Oct 2026 = 08:00 UTC.
 const at = (hhmm: string) => Date.parse(`2026-10-04T${hhmm}:00+02:00`);
@@ -51,6 +52,8 @@ const live = (over: Partial<LiveMatch> = {}): LiveMatch => ({
   deliveries: 80,
   medianGapSec: 38,
   longGaps: [],
+  undoCount: 0,
+  players: [],
   medicoachMatchUrl: null,
   ...over,
 });
@@ -88,8 +91,9 @@ describe('match monitor', () => {
       }),
       at('11:12'),
     );
-    expect(r.flags.map((f) => f.key)).toEqual(['late', 'quiet', 'delay']);
-    expect(r.flags[0].label).toBe('Started 25 min late');
+    // Alerts first: the silent scorer outranks the late start and the delays.
+    expect(r.flags.map((f) => f.key)).toEqual(['quiet', 'late', 'delay']);
+    expect(r.flags[1].label).toBe('Started 25 min late');
     // 150 s is under the 4-minute threshold; longest first.
     expect(r.delays.map((d) => d.over)).toEqual(['9.1', '7.2']);
     // A recorded drinks break is shown, never flagged as a delay.
@@ -103,7 +107,7 @@ describe('match monitor', () => {
       at('10:20'),
     );
     expect(waiting.phase).toBe('awaiting');
-    expect(waiting.flags).toEqual([
+    expect(waiting.flags).toMatchObject([
       { key: 'not-started', label: 'Not started · 20 min past start', tone: 'alert' },
     ]);
     const none = monitorRow(fixture(), at('10:40'));
@@ -210,6 +214,100 @@ describe('match monitor', () => {
       late: 2,
       delayed: 0,
       attention: 1,
+      unregistered: 0,
     });
+  });
+
+  const player = (over: Partial<MonitorPlayer>): MonitorPlayer => ({
+    side: 'home',
+    name: 'Sam Player',
+    addedDuringMatch: false,
+    addedAt: null,
+    check: 'registered',
+    ...over,
+  });
+
+  it('flags players the rosters cannot vouch for, and players added during the match', () => {
+    const r = monitorRow(
+      fixture({
+        live: live({
+          players: [
+            player({ name: 'On Sheet' }),
+            player({
+              name: 'Ann Added',
+              addedDuringMatch: true,
+              addedAt: iso('10:40'),
+              check: 'unregistered',
+            }),
+            player({
+              name: 'Ben Elsewhere',
+              side: 'away',
+              check: 'other-club',
+              otherClub: 'Clares CC',
+            }),
+            player({
+              name: 'Cal Late',
+              addedDuringMatch: true,
+              addedAt: iso('10:50'),
+              check: 'name-match',
+            }),
+            player({ name: 'Dee Pending', side: 'away', check: 'not-active' }),
+          ],
+        }),
+      }),
+      at('11:02'),
+    );
+    expect(r.flags.map((f) => [f.key, f.tone])).toEqual([
+      ['unregistered', 'alert'],
+      ['added', 'warn'],
+    ]);
+    const [unreg, added] = r.flags;
+    expect(unreg.label).toBe('3 players not registered to play');
+    expect(unreg.detail).toEqual([
+      'Ann Added — not registered with Crusaders · added during the match at 10:40',
+      'Ben Elsewhere — registered with Clares CC, not Umzinto',
+      'Dee Pending — registration at Umzinto is inactive or awaiting a clearance',
+    ]);
+    expect(unreg.since).toBe(iso('10:40'));
+    expect(added.label).toBe('2 players added during the match');
+    expect(added.detail).toEqual([
+      'Ann Added (Crusaders) at 10:40 — NOT registered',
+      'Cal Late (Crusaders) at 10:50 — registered',
+    ]);
+    expect([r.playersAdded, r.ineligible]).toEqual([2, 3]);
+  });
+
+  it('flags heavy use of undo, and re-raises a seen flag only when it gets worse', () => {
+    const at5 = monitorRow(fixture({ live: live({ undoCount: 5 }) }), at('11:02'));
+    expect(at5.flags.map((f) => f.label)).toEqual(['Undo used 5 times']);
+    expect(monitorRow(fixture({ live: live({ undoCount: 4 }) }), at('11:02')).flags).toEqual([]);
+    const at9 = monitorRow(fixture({ live: live({ undoCount: 9 }) }), at('11:02'));
+    const at10 = monitorRow(fixture({ live: live({ undoCount: 10 }) }), at('11:02'));
+    expect(at9.flags[0].signature).toBe(at5.flags[0].signature);
+    expect(at10.flags[0].signature).not.toBe(at5.flags[0].signature);
+    // A scoring app that doesn't report undos is never flagged for them.
+    expect(
+      monitorRow(fixture({ live: live({ undoCount: null }) }), at('11:02')).undoCount,
+    ).toBeNull();
+  });
+
+  it('puts every flag of the day on one board, alerts first, then by type and how long open', () => {
+    const rows = [
+      monitorRow(
+        fixture({ fixtureId: 'a', live: live({ startedAt: iso('10:30'), undoCount: 7 }) }),
+        at('11:02'),
+      ),
+      monitorRow(fixture({ fixtureId: 'b', time: '10:30' }), at('11:02')),
+      monitorRow(
+        fixture({ fixtureId: 'c', live: live({ players: [player({ check: 'unregistered' })] }) }),
+        at('11:02'),
+      ),
+    ];
+    expect(boardFlags(rows).map((b) => `${b.row.match.fixtureId}|${b.flag.key}`)).toEqual([
+      'c|unregistered',
+      'b|no-scoring',
+      'a|late',
+      'a|undo',
+    ]);
   });
 });
