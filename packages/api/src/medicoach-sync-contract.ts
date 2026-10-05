@@ -97,6 +97,27 @@ export function httpUrlOrNull(url: string | null | undefined): string | null {
   return typeof url === 'string' && /^https?:\/\//i.test(url) ? url : null;
 }
 
+/**
+ * Time on the ground and balls bowled for a played match (contract v1, additive, optional).
+ * From medicoach's ball-by-ball: first and last delivery timestamps (scorer device clock) and
+ * the legal balls / all deliveries recorded. Smart club uses it as a ground-usage and pitch-load
+ * proxy. A malformed block is dropped to null rather than failing the page: a bad ground
+ * figure must never hold up results.
+ */
+export const SyncPlaySchema = z
+  .object({
+    startedAt: isoUtc.nullable(),
+    endedAt: isoUtc.nullable(),
+    legalBalls: z.number().int().min(0).max(2000).nullable(),
+    deliveries: z.number().int().min(0).max(3000).nullable(),
+  })
+  .refine((p) => !p.startedAt || !p.endedAt || Date.parse(p.endedAt) >= Date.parse(p.startedAt), {
+    message: 'endedAt is before startedAt',
+  })
+  .refine((p) => p.legalBalls === null || p.deliveries === null || p.deliveries >= p.legalBalls, {
+    message: 'fewer deliveries than legal balls',
+  });
+
 export const SyncResultSchema = z.object({
   homeScore: z.string().nullable(),
   awayScore: z.string().nullable(),
@@ -114,6 +135,8 @@ export const SyncResultSchema = z.object({
   captainRef: ref.nullable(),
   /** A non-http(s) link is dropped to null rather than failing the page. */
   medicoachMatchUrl: z.string().url().nullable().transform(httpUrlOrNull),
+  /** Optional (a medicoach without it still parses); malformed ⇒ null, never a failed page. */
+  play: SyncPlaySchema.nullable().optional().catch(null),
 });
 
 export const FixtureChangeSchema = z.object({
@@ -153,6 +176,7 @@ export const SchedulePushResponseSchema = z.object({
 export type SyncSchedule = z.infer<typeof SyncScheduleSchema>;
 export type SyncTeams = z.infer<typeof SyncTeamsSchema>;
 export type SyncResult = z.infer<typeof SyncResultSchema>;
+export type SyncPlay = z.infer<typeof SyncPlaySchema>;
 export type FixtureChange = z.infer<typeof FixtureChangeSchema>;
 export type ChangesResponse = z.infer<typeof ChangesResponseSchema>;
 export type SchedulePushRequest = z.infer<typeof SchedulePushRequestSchema>;

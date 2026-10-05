@@ -13,14 +13,28 @@ import { isExcludedLeagueKey } from '../medicoach-export-build.js';
 import { isRecipeKnockoutSeries } from '../medicoach-bundle.js';
 import { httpUrlOrNull } from '../medicoach-sync-contract.js';
 import { recipesForTenant } from '../medicoach-recipes/index.js';
-import type { FixtureResultView, Series, StoredFixtureResult, TenantConfig } from '../types.js';
+import type {
+  FixtureResultView,
+  ResultConfirmation,
+  Series,
+  StoredFixtureResult,
+  TenantConfig,
+} from '../types.js';
 
 /** Fixture keys GET /series adds that are never stored on the series item. */
 export const RESPONSE_ONLY_FIXTURE_KEYS = ['result', 'syncMapped'] as const;
 
-/** The public view of a stored result: scores and the medicoach link, nothing personal. */
-export function toResultView(r: StoredFixtureResult): FixtureResultView | null {
+/**
+ * The public view of a stored result: scores, the medicoach link, ground time/balls and the
+ * office's confirmation — nothing personal. A confirmation counts only for the exact result
+ * it checked (same `recordedAt`); one for an earlier result reads as `changedSinceConfirmed`.
+ */
+export function toResultView(
+  r: StoredFixtureResult,
+  conf?: ResultConfirmation | null,
+): FixtureResultView | null {
   if (r.cleared || !r.recordedAt) return null;
+  const current = !!conf && conf.recordedAt === r.recordedAt;
   return {
     homeScore: r.homeScore ?? null,
     awayScore: r.awayScore ?? null,
@@ -31,6 +45,15 @@ export function toResultView(r: StoredFixtureResult): FixtureResultView | null {
     source: r.resultSource ?? 'manual',
     recordedAt: r.recordedAt,
     medicoachMatchUrl: httpUrlOrNull(r.medicoachMatchUrl),
+    play: r.play ?? null,
+    confirmation: current
+      ? {
+          confirmedAt: conf!.confirmedAt,
+          confirmedBy: conf!.confirmedBy,
+          ...(conf!.note ? { note: conf!.note } : {}),
+        }
+      : null,
+    changedSinceConfirmed: !!conf && !current,
   };
 }
 
@@ -60,10 +83,12 @@ export function joinFixtureResults(
   series: Series[],
   results: StoredFixtureResult[],
   mapped?: (s: Series) => boolean,
+  confirmations: ResultConfirmation[] = [],
 ): Series[] {
+  const confs = new Map(confirmations.map((c) => [`${c.seriesId}#${c.fixtureId}`, c]));
   const byKey = new Map<string, FixtureResultView>();
   for (const r of results) {
-    const view = toResultView(r);
+    const view = toResultView(r, confs.get(`${r.seriesId}#${r.fixtureId}`));
     if (view) byKey.set(`${r.seriesId}#${r.fixtureId}`, view);
   }
   if (!byKey.size && !mapped) return series;

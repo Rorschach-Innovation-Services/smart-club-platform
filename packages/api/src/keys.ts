@@ -17,7 +17,8 @@ export type EntityType =
   | 'REGREVIEW'
   | 'VETAFFIL'
   | 'VETREQ'
-  | 'UMPIRE';
+  | 'UMPIRE'
+  | 'SCORER';
 
 const tenantPrefix = (tenant: string) => `TENANT#${tenant}`;
 
@@ -159,6 +160,22 @@ export const umpireGsi1 = (tenant: string, displayName: string) => ({
 });
 
 export const umpiresListGsi1pk = (tenant: string) => `${tenantPrefix(tenant)}#TYPE#UMPIRE`;
+
+/**
+ * A scorer in the tenant's register — the same shape and listing as umpires (own partition +
+ * `META`, gsi1 by name). Holds contact details, so erasure enumerates it explicitly.
+ */
+export const scorerKey = (tenant: string, scorerId: string) => ({
+  pk: `${tenantPrefix(tenant)}#SCORER#${scorerId}`,
+  sk: 'META',
+});
+
+export const scorerGsi1 = (tenant: string, displayName: string) => ({
+  gsi1pk: `${tenantPrefix(tenant)}#TYPE#SCORER`,
+  gsi1sk: displayName || ' ',
+});
+
+export const scorersListGsi1pk = (tenant: string) => `${tenantPrefix(tenant)}#TYPE#SCORER`;
 
 /**
  * The officials appointed to ONE fixture. Deliberately NOT inside the Series item: an
@@ -404,6 +421,22 @@ export const fixtureResultKey = (tenant: string, seriesId: string, fixtureId: st
 export const fixtureResultsListKey = (tenant: string) => ({
   pk: `${tenantPrefix(tenant)}#FIXRESULT`,
   skPrefix: 'FIXRESULT#',
+});
+
+/**
+ * The union office's confirmation of ONE fixture's result ("checked and validated"). Its own
+ * item beside the result, never on it: the sync puller replaces the FIXRESULT# item whole on
+ * every newer result, which would wipe a field stored there. The confirmation names the
+ * `recordedAt` it checked, so a newer or cleared result simply stops matching it.
+ */
+export const resultConfirmationKey = (tenant: string, seriesId: string, fixtureId: string) => ({
+  pk: `${tenantPrefix(tenant)}#FIXRESULT`,
+  sk: `RESULTCONF#${seriesId}#${fixtureId}`,
+});
+
+export const resultConfirmationsListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#FIXRESULT`,
+  skPrefix: 'RESULTCONF#',
 });
 
 /** The medicoach sync puller's cursor (the last `nextCursor` it fully processed). */

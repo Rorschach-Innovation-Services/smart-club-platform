@@ -79,6 +79,8 @@ export type {
   UmpirePublic,
   OfficialRef,
   FixtureOfficials,
+  Scorer,
+  ScorerRef,
 } from '../packages/engine/src/umpires';
 // Captain's reports — the rating rules/shapes live in the engine; the stored report view is
 // what the API's club/admin/link routes return (recipient's opaque id stripped, late derived).

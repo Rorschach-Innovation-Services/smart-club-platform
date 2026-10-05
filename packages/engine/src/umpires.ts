@@ -41,10 +41,40 @@ export interface OfficialRef {
   name: string;
 }
 
+/**
+ * A fixture has at most two scorers: the appointed scorer and a backup (Dolphins match-week
+ * SOP: "Backup scorer — named for each venue; takes over if the scorer is absent").
+ */
+export const MAX_SCORERS_PER_FIXTURE = 2;
+
+/**
+ * A scorer in the union's register. Smart club only: medicoach has no per-person fixture
+ * assignment yet (its scorers hold an institution-wide Scorer role), so an appointment here
+ * is the union's roster — who scores which game — not a medicoach permission.
+ */
+export interface Scorer {
+  id: string;
+  displayName: string;
+  fullName?: string;
+  phone?: string;
+  email?: string;
+  active: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/** One appointed scorer, with the display name denormalised at write time. */
+export interface ScorerRef {
+  scorerId: string;
+  name: string;
+}
+
 /** The appointments for one fixture. */
 export interface FixtureOfficials {
   umpires: OfficialRef[];
   referee?: OfficialRef;
+  /** Slot order: [0] the scorer, [1] the backup. Absent ⇒ none appointed. */
+  scorers?: ScorerRef[];
   updatedAt?: string;
   updatedBy?: string;
 }

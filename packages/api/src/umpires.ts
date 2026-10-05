@@ -8,6 +8,7 @@
  */
 import { HttpError } from './auth.js';
 import {
+  MAX_SCORERS_PER_FIXTURE,
   MAX_UMPIRES_PER_FIXTURE,
   normaliseUmpireAlias,
   umpireAliasSet,
@@ -139,47 +140,78 @@ export function applyUmpireInput(
   return next;
 }
 
-/** A validated `PUT …/officials` body: registry ids, in slot order. */
+/**
+ * A validated `PUT …/officials` body: registry ids, in slot order. A key the body leaves out
+ * is left as stored (`undefined` here) — so saving the umpires never drops the scorers, or a
+ * referee the weekly appointments upload wrote.
+ */
 export interface OfficialsInput {
-  umpireIds: string[];
-  refereeId?: string;
+  umpireIds?: string[];
+  /** `null`: clear the referee. */
+  refereeId?: string | null;
+  scorerIds?: string[];
 }
 
-const refId = (v: unknown): string | undefined => {
+const refId = (v: unknown, key: 'umpireId' | 'scorerId' = 'umpireId'): string | undefined => {
   if (typeof v === 'string') return v.trim() || undefined;
-  if (v && typeof v === 'object' && typeof (v as { umpireId?: unknown }).umpireId === 'string')
-    return ((v as { umpireId: string }).umpireId || '').trim() || undefined;
+  if (v && typeof v === 'object' && typeof (v as Record<string, unknown>)[key] === 'string')
+    return (((v as Record<string, string>)[key] as string) || '').trim() || undefined;
   return undefined;
 };
 
 /**
- * Validate the officials body: `{ umpires: [{umpireId} | "id"], referee?: {umpireId} | null }`.
- * At most two umpires, no repeats, and the referee can't also stand as an umpire. Whether
- * each id exists in the registry is the route's job (it needs the repo).
+ * Validate the officials body:
+ * `{ umpires?: [{umpireId} | "id"], referee?: {umpireId} | null, scorers?: [{scorerId} | "id"] }`.
+ * At most two umpires and two scorers (scorer + backup), no repeats, and the referee can't
+ * also stand as an umpire. Whether each id exists in its register is the route's job.
  */
 export function parseOfficialsInput(raw: unknown): OfficialsInput {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw))
     throw new HttpError(400, 'body must be an object');
   const body = raw as Record<string, unknown>;
-  const list = body.umpires ?? [];
-  if (!Array.isArray(list)) throw new HttpError(400, 'umpires must be an array');
-  if (list.length > MAX_UMPIRES_PER_FIXTURE)
-    throw new HttpError(400, `a fixture takes at most ${MAX_UMPIRES_PER_FIXTURE} umpires`);
-  const umpireIds = list.map((u) => {
-    const id = refId(u);
-    if (!id) throw new HttpError(400, 'each umpire needs an umpireId');
-    return id;
-  });
-  if (new Set(umpireIds).size !== umpireIds.length)
-    throw new HttpError(400, 'the same umpire is appointed twice');
-  let refereeId: string | undefined;
-  if (body.referee != null) {
-    refereeId = refId(body.referee);
-    if (!refereeId) throw new HttpError(400, 'referee needs an umpireId');
-    if (umpireIds.includes(refereeId))
-      throw new HttpError(400, 'the referee cannot also stand as an umpire');
+  if (!('umpires' in body) && !('referee' in body) && !('scorers' in body))
+    throw new HttpError(400, 'send umpires, referee and/or scorers');
+  const out: OfficialsInput = {};
+  if ('umpires' in body) {
+    const list = body.umpires ?? [];
+    if (!Array.isArray(list)) throw new HttpError(400, 'umpires must be an array');
+    if (list.length > MAX_UMPIRES_PER_FIXTURE)
+      throw new HttpError(400, `a fixture takes at most ${MAX_UMPIRES_PER_FIXTURE} umpires`);
+    out.umpireIds = list.map((u) => {
+      const id = refId(u);
+      if (!id) throw new HttpError(400, 'each umpire needs an umpireId');
+      return id;
+    });
+    if (new Set(out.umpireIds).size !== out.umpireIds.length)
+      throw new HttpError(400, 'the same umpire is appointed twice');
   }
-  return { umpireIds, ...(refereeId ? { refereeId } : {}) };
+  if ('referee' in body) {
+    if (body.referee == null) out.refereeId = null;
+    else {
+      const id = refId(body.referee);
+      if (!id) throw new HttpError(400, 'referee needs an umpireId');
+      out.refereeId = id;
+    }
+  }
+  if (out.refereeId && out.umpireIds?.includes(out.refereeId))
+    throw new HttpError(400, 'the referee cannot also stand as an umpire');
+  if ('scorers' in body) {
+    const list = body.scorers ?? [];
+    if (!Array.isArray(list)) throw new HttpError(400, 'scorers must be an array');
+    if (list.length > MAX_SCORERS_PER_FIXTURE)
+      throw new HttpError(
+        400,
+        `a fixture takes at most ${MAX_SCORERS_PER_FIXTURE} scorers (a scorer and a backup)`,
+      );
+    out.scorerIds = list.map((x) => {
+      const id = refId(x, 'scorerId');
+      if (!id) throw new HttpError(400, 'each scorer needs a scorerId');
+      return id;
+    });
+    if (new Set(out.scorerIds).size !== out.scorerIds.length)
+      throw new HttpError(400, 'the same scorer is appointed twice');
+  }
+  return out;
 }
 
 /** Drop the read-only `officials` join from fixtures on their way into a write. */
@@ -228,7 +260,12 @@ export function joinOfficials(
   series: Series,
   bySeries: Map<string, Map<string, FixtureOfficialsRecord>>,
   namesById: Map<string, string>,
-  opts: { include: (fixture: Record<string, unknown>) => boolean; audit: boolean },
+  opts: {
+    include: (fixture: Record<string, unknown>) => boolean;
+    audit: boolean;
+    /** Scorer register names, so a renamed scorer shows the new name (like umpires). */
+    scorerNames?: Map<string, string>;
+  },
 ): Series {
   const rows = bySeries.get(series.id);
   if (!rows || !Array.isArray(series.fixtures)) return series;
@@ -245,6 +282,14 @@ export function joinOfficials(
     const officials: FixtureOfficials = {
       umpires: (row.umpires ?? []).map(name),
       ...(row.referee ? { referee: name(row.referee) } : {}),
+      ...(row.scorers?.length
+        ? {
+            scorers: row.scorers.map((x) => ({
+              scorerId: x.scorerId,
+              name: opts.scorerNames?.get(x.scorerId) ?? x.name,
+            })),
+          }
+        : {}),
       ...(opts.audit && row.updatedAt ? { updatedAt: row.updatedAt } : {}),
       ...(opts.audit && row.updatedBy ? { updatedBy: row.updatedBy } : {}),
     };
