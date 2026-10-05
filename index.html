@@ -1375,6 +1375,42 @@
     .sr-placement-row .field-select{min-width:0;width:100%}
   }
 
+  /* ─── League readiness on the admin Leagues page (LeagueReadiness.tsx): one status per
+     league, its facts, and the next step. Reuses .tbl/.pill/.btn; table → stacked rows
+     under 720px so nothing scrolls sideways. ─── */
+  .lr-summary{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}
+  .lr-sum{display:inline-flex;align-items:baseline;gap:6px;padding:6px 12px;border:1px solid var(--line);border-radius:999px;background:var(--white);font-size:12.5px;color:var(--ink3)}
+  .lr-sum strong{font-family:'Montserrat',sans-serif;font-weight:700;color:var(--ink)}
+  .lr-sum-ready{border-color:rgba(15,77,46,0.3);background:var(--green-pale)}
+  .lr-sum-needs-setup{border-color:var(--ink)}
+  .lr-note{margin:0 0 14px;font-size:12.5px;color:var(--muted)}
+  .lr-tbl td{vertical-align:top}
+  .lr-season{min-width:260px}
+  .lr-cell{display:flex;flex-direction:column;align-items:flex-start;gap:6px}
+  .lr-facts{display:grid;grid-template-columns:auto minmax(0,1fr);gap:2px 10px;margin:0;font-size:12px;line-height:1.5;color:var(--ink3)}
+  .lr-facts dt{font-weight:600;color:var(--muted)}
+  .lr-facts dd{margin:0;min-width:0;overflow-wrap:anywhere}
+  .lr-stages{margin:2px 0 0;padding:0;list-style:none;color:var(--muted)}
+  .lr-next{margin:0;font-size:12px;line-height:1.5;color:var(--ink)}
+  .lr-request{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;padding:8px 10px;border:1px dashed var(--line);border-radius:8px;background:var(--paper);max-width:100%}
+  .lr-request-text{flex:1 1 200px;min-width:0;font-size:12px;line-height:1.5;color:var(--ink3);user-select:all;overflow-wrap:anywhere}
+  .lr-clubs{font-size:12px;line-height:1.5;color:var(--ink3)}
+  .lr-clubs-t{font-weight:600;color:var(--muted)}
+  .lr-clubs ul{margin:2px 0 0;padding:0;list-style:none;display:flex;flex-wrap:wrap;gap:2px 12px}
+  .lr-link{padding:0;border:0;background:none;font:inherit;color:var(--brand-primary-mid,var(--green));text-decoration:underline;cursor:pointer}
+  .lr-muted{color:var(--muted)}
+  .lr-actions{display:flex;flex-wrap:wrap;gap:6px}
+  @media (max-width: 720px){
+    .tbl.lr-tbl{min-width:0}
+    .lr-tbl thead{display:none}
+    .lr-tbl tbody tr{display:block;padding:12px 14px}
+    .lr-tbl tbody td{display:block;padding:2px 0}
+    .lr-tbl td[data-label]{display:flex;gap:8px;align-items:center;font-size:12px}
+    .lr-tbl td[data-label]::before{content:attr(data-label);min-width:110px;font-weight:600;color:var(--muted)}
+    .lr-season{min-width:0;padding-top:8px !important}
+    .lr-row-actions .row{justify-content:flex-start !important;margin-top:8px}
+  }
+
   /* ─── Operator setup surfaces: season wizard, structure editor, calendar form,
      library heading. Builds on the explainer block above; existing tokens only,
      borders for depth, one accent. Used by platform-season-wizard.tsx,

@@ -599,8 +599,9 @@ describe('a tenant with no series still gets the season machinery', () => {
     renderPage();
     expect(screen.getByRole('heading', { name: /venues/i })).toBeTruthy();
     expect(screen.getByText(/no season running/i)).toBeTruthy();
-    // The header action, the Seasons card's CTA and the series empty state.
-    expect(screen.getAllByRole('button', { name: /^start a season$/i })).toHaveLength(3);
+    // The header action and the Seasons card's CTA. The series empty state no longer
+    // carries a third copy of the same button.
+    expect(screen.getAllByRole('button', { name: /^start a season$/i })).toHaveLength(2);
     expect(screen.getByText(/no series yet/i)).toBeTruthy();
   });
 
@@ -618,8 +619,8 @@ describe('a tenant with no series still gets the season machinery', () => {
   it('reports a failed season-setup fetch rather than rendering it as an empty season list', () => {
     renderPage({ structuresFailed: true });
     expect(screen.queryByText(/no season running/i)).toBeNull();
-    // Header + the series empty state; the Seasons card offers none.
-    expect(screen.getAllByRole('button', { name: /^start a season$/i })).toHaveLength(2);
+    // The header only; the Seasons card offers none, and the series empty state never does.
+    expect(screen.getAllByRole('button', { name: /^start a season$/i })).toHaveLength(1);
     expect(screen.getByText(/couldn.t load the season setup/i)).toBeTruthy();
   });
 
@@ -710,8 +711,8 @@ describe('the "Start a season" launcher — one entry point, routed by league', 
     { id: 'c2', name: 'Club 2', affiliation: 'complete', leagues: ['premier', 'friendlies'] },
   ] as unknown as Club[];
 
-  // What belongs to THIS boundary is the routing decision: a set-up league gets the season
-  // form, one without is listed disabled with the hand-off to the operator. No third path.
+  // What belongs to THIS boundary is the routing decision: a ready league can start in the
+  // same modal, one without setup is listed disabled with the hand-off to the operator.
   const renderPage = () => ({
     ...renderWithProviders(
       <AdminFixtures
@@ -738,27 +739,24 @@ describe('the "Start a season" launcher — one entry point, routed by league', 
     ),
   });
 
-  // Two buttons open the same launcher with no series yet (the header action and the
-  // empty-state CTA) — either proves the wiring, so the first one found is enough.
+  // Two buttons open the same modal with no series yet (the header action and the Seasons
+  // card's empty-state CTA) — either proves the wiring, so the first one found is enough.
   const openLauncher = async (user: ReturnType<typeof userEvent.setup>) =>
     user.click(screen.getAllByRole('button', { name: /^start a season$/i })[0]);
 
   const launcher = () => screen.getByRole('dialog', { name: /^start a season$/i });
-  const continueBtn = () => within(launcher()).getByRole('button', { name: /continue/i });
 
-  it('routes a season-capable league straight to the season form, in the same modal', async () => {
+  // One step: the league, the season and Start season are in the modal that opens — the
+  // old Continue → second form (which asked for the league again) is gone.
+  it('offers a ready league, the season label and Start season in the one modal', async () => {
     const user = userEvent.setup();
     renderPage();
     await openLauncher(user);
 
-    await user.selectOptions(
-      within(launcher()).getByRole('combobox', { name: 'League' }),
-      'premier',
-    );
-    await user.click(continueBtn());
-
-    expect(screen.getByRole('button', { name: /^start season$/i })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /continue/i })).toBeNull();
+    expect(within(launcher()).getByRole('combobox', { name: 'League' })).toHaveValue('premier');
+    expect(within(launcher()).getByRole('textbox', { name: 'Season' })).toBeTruthy();
+    expect(within(launcher()).getByRole('button', { name: /^start season$/i })).toBeEnabled();
+    expect(within(launcher()).queryByRole('button', { name: /continue/i })).toBeNull();
   });
 
   it('lists a league with no setup disabled, with the hand-off to the operator', async () => {
@@ -767,7 +765,10 @@ describe('the "Start a season" launcher — one entry point, routed by league', 
     await openLauncher(user);
 
     const select = within(launcher()).getByRole('combobox', { name: 'League' });
-    expect(within(select).getByRole('option', { name: 'Friendlies' })).toBeDisabled();
+    // Disabled, with its reason in the option itself.
+    expect(
+      within(select).getByRole('option', { name: 'Friendlies — not set up by your operator' }),
+    ).toBeDisabled();
     expect(
       within(launcher()).getByText(
         'Friendlies has no season setup. Ask your operator to set this league up.',
@@ -792,9 +793,9 @@ describe('the "Start a season" launcher — one entry point, routed by league', 
     expect(within(launcher()).queryByRole('radio', { name: /^one-off tournament/i })).toBeNull();
   });
 
-  it('groups the league select by whether the operator set it up', async () => {
-    // `leagues` above has one set-up league ('premier') and one without ('friendlies'),
-    // so both optgroups should render.
+  it('groups the league select by readiness', async () => {
+    // `leagues` above has one ready league ('premier') and one without setup
+    // ('friendlies'), so both optgroups should render.
     const user = userEvent.setup();
     renderPage();
     await openLauncher(user);
@@ -803,7 +804,7 @@ describe('the "Start a season" launcher — one entry point, routed by league', 
     const groups = Array.from(select.querySelectorAll('optgroup')).map((g) =>
       g.getAttribute('label'),
     );
-    expect(groups).toEqual(['Set up by your operator', 'Not set up yet — ask your operator']);
+    expect(groups).toEqual(['Ready to start', 'Needs operator setup']);
   });
 });
 

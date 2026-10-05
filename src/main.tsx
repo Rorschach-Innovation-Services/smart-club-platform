@@ -17,6 +17,7 @@ import {
 } from 'react-router-dom';
 import { QueryClientProvider, useQuery, useQueries } from '@tanstack/react-query';
 import { queryClient, qk } from './query';
+import { refreshSeasonSetup } from './season-setup-refresh';
 import { clubPlaysVeterans } from '../packages/engine/src/leagues';
 import { allocateVenues, buildLedger } from '../packages/engine/src/venues';
 import * as api from './api';
@@ -726,9 +727,11 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   }
   /* ─── Season runs (ADR 0008) ─── */
   function createSeasonRun(run) {
-    // A league with no setup (400 setup_missing) or a label already running (409
-    // season_exists) gets copy that says what to do, not the generic refresh line. A 409
-    // means this tab's runs list missed a season, so that is what it refetches.
+    // A league with no setup, or whose structure or calendar is gone (400 setup_missing /
+    // structure_missing / calendar_missing), or a label already running (409 season_exists)
+    // gets copy that says what to do, not the generic refresh line. A 409 means this tab's
+    // runs list missed a season, so that is what it refetches; the Start a season modal
+    // refetches the setup itself on a 400.
     return withToast(() => api.createSeasonRun(run), 'Could not start the season', {
       errorMessage: startSeasonErrorMessage,
       invalidate: [qk.seasonRuns()],
@@ -2714,6 +2717,18 @@ function Shell({
             onEdit={(L) => setShowLeagueForm(L)}
             onDeleteLeague={deleteLeague}
             toast={toastShow}
+            structures={allStructures}
+            calendars={allCalendars}
+            seasonRuns={allSeasonRuns}
+            allSeries={allSeries}
+            seasonSetupLoading={seasonSetupLoading}
+            seasonSetupFailed={structuresFailed || seasonRunsFailed}
+            onCreateSeasonRun={createSeasonRun}
+            onRefreshSeasonSetup={refetchSeasonSetup}
+            onOpenSeason={(runId) =>
+              navigate(`/admin/fixtures?tab=series&run=${encodeURIComponent(runId)}`)
+            }
+            onOpenClub={setActiveClub}
           />
         );
       if (view === 'insights')
@@ -3049,11 +3064,11 @@ function Shell({
           .slice(0, 2)
           .join('');
 
-  // Refetch the season setup: the runs list and the tenant config (where leagues carry
-  // their operator-created setup). The launcher calls it on open so what it shows is what
-  // the server will freeze.
+  // Refetch the season setup: the runs list, the authenticated config (structures) and the
+  // public tenant (leagues with their operator-created setup, and the calendars). The Start
+  // a season modal calls it on open so what it shows is what the server will freeze.
   function refetchSeasonSetup() {
-    return Promise.all([invalidate(qk.seasonRuns()), invalidate(qk.tenantConfig())]);
+    return refreshSeasonSetup(invalidate);
   }
 
   const shellView = (

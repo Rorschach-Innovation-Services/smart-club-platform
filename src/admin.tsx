@@ -89,22 +89,27 @@ import { resolveCompetitionDefaults } from '../packages/engine/src/defaults';
 import type {
   AdminClearanceView,
   Club,
+  CompetitionStructure,
   League,
   PlayerRegistration,
   SeasonCalendar,
   SeasonRun,
   Series,
   Clash,
+  TenantConfig,
   Umpire,
   Venue,
   WithheldField,
 } from './types';
 import {
   SeasonRunsPanel,
-  GenerateFixturesLauncher,
+  StartSeasonModal,
   SeriesOriginPill,
   seriesOrigin,
+  type StartSeasonRunRequest,
 } from './season-run';
+import { leaguesReadiness } from './league-readiness';
+import { LeagueSeasonCell, ReadinessSummary } from './LeagueReadiness';
 import { VenuesCard } from './venues-card';
 import { cqiBandTone, cqiBandRows, docComplianceRows, docTone } from './insights';
 import {
@@ -530,9 +535,9 @@ export function AdminFixtures({
   const copy = useCopy();
   // Overs are cricket label metadata — other sports never show them.
   const showOvers = useVertical().sport === 'cricket';
-  // The single "Start a season" entry point — only a league the operator has set up can
-  // continue to StartSeasonForm; the rest are listed with the hand-off to the operator.
-  // Owned here, not in SeasonRunsPanel, so its own button and the header button share it.
+  // The Start a season modal — only a league that is ready can start; the rest are listed
+  // with their reason. Owned here, not in SeasonRunsPanel, so the header button and the
+  // panel's empty-state CTA share it.
   const [launcherOpen, setLauncherOpen] = useStateA(false);
   const [viewerOpen, setViewerOpen] = useStateA(false);
   // `?series=<id>` (from the Medicoach sync page) opens that series; else the first one.
@@ -555,7 +560,10 @@ export function AdminFixtures({
     if (typeof window !== 'undefined') {
       const url = new URL(window.location.href);
       url.searchParams.set('tab', next);
-      if (next !== 'series') url.searchParams.delete('series');
+      if (next !== 'series') {
+        url.searchParams.delete('series');
+        url.searchParams.delete('run');
+      }
       window.history.replaceState(window.history.state, '', url);
     }
   };
@@ -587,6 +595,12 @@ export function AdminFixtures({
     if (tabbed) setTab('series');
     setLauncherOpen(true);
   };
+  // `?run=<id>` ("Open season" on the Leagues page) shows that season first.
+  const [initialRunId] = useStateA(() =>
+    typeof window !== 'undefined'
+      ? (new URLSearchParams(window.location.search).get('run') ?? undefined)
+      : undefined,
+  );
   const [confirm, setConfirm] = useStateA<ConfirmDialogState | null>(null); // shared confirmation modal state (recall/reveal)
   const [releaseFor, setReleaseFor] = useStateA<ReleaseSeriesState | null>(null); // series whose ReleaseDialog is open
   const clubBy = (id) => clubs.find((c) => c.id === id);
@@ -755,7 +769,7 @@ export function AdminFixtures({
           <Btn tone="outline" icon={Icon.Eye} size="sm" onClick={() => setViewerOpen(true)}>
             View season
           </Btn>
-          <Btn tone="outline" icon={Icon.Plus} size="sm" onClick={openLauncher}>
+          <Btn tone="teal" icon={Icon.Plus} size="sm" onClick={openLauncher}>
             Start a season
           </Btn>
           {/* Status only. Approve, release, reveal and recall live in ONE place — the
@@ -835,6 +849,7 @@ export function AdminFixtures({
                 allSeries={allSeries}
                 runs={allSeasonRuns}
                 onOpenLauncher={openLauncher}
+                initialRunId={initialRunId}
                 onPatchRun={onPatchSeasonRun}
                 onGenerate={onGenerateStageSeries}
                 onDeleteRun={onDeleteSeasonRun}
@@ -851,15 +866,12 @@ export function AdminFixtures({
         // The empty state's copy points "above" at the season setup panel — while that
         // panel is still loading, there's nothing there yet to point at, so render nothing.
         seasonSetupLoading ? null : (
+          // No Start button of its own: the page header and the Seasons card above both
+          // open the same modal, and a third copy only made the page harder to read.
           <EmptyState
             icon={Icon.Field}
             title="No series yet"
             sub="Start a season on a league your platform operator has set up and work through it stage by stage. For a one-off cup or festival, your operator can add a One-off tournament structure."
-            action={
-              <Btn tone="teal" icon={Icon.Plus} onClick={openLauncher}>
-                Start a season
-              </Btn>
-            }
           />
         )
       ) : (
@@ -1026,17 +1038,18 @@ export function AdminFixtures({
       )}
 
       {launcherOpen && (
-        <GenerateFixturesLauncher
+        <StartSeasonModal
           clubs={clubs}
           allLeagues={allLeagues}
           config={tenantConfig || { structures: [], calendars: [] }}
           existingRuns={allSeasonRuns}
+          allSeries={allSeries}
           onCreateRun={
             onCreateSeasonRun ||
             (() => Promise.reject(new Error('season-run creation is not wired for this host')))
           }
-          // Refetch runs + tenant config: opening the launcher must show what the server
-          // will freeze into the new season, not a config cached earlier.
+          // Refetch runs, tenant config and the public tenant (leagues + calendars): opening
+          // the modal must show what the server will freeze, not a config cached earlier.
           onRefreshConfig={onSeasonSetupChanged}
           onClose={() => setLauncherOpen(false)}
           toast={toast}
@@ -2416,6 +2429,12 @@ function EmptyCohort({ onShareLink, onInviteAdmin }) {
 }
 
 /* ─── AdminLeagues — manage the tenant league catalogue clubs opt into ─── */
+/**
+ * The catalogue, plus where each league stands for its season: set up by the operator or
+ * not, how many sides are affiliated, and the season running on it — with one next step
+ * per league (see `league-readiness.ts`). The admin starts seasons here; the setup itself
+ * stays the operator's.
+ */
 export function AdminLeagues({
   allLeagues,
   clubs,
@@ -2423,6 +2442,16 @@ export function AdminLeagues({
   onEdit,
   onDeleteLeague,
   toast,
+  structures = [],
+  calendars = [],
+  seasonRuns = [],
+  allSeries = [],
+  seasonSetupLoading = false,
+  seasonSetupFailed = false,
+  onCreateSeasonRun,
+  onRefreshSeasonSetup,
+  onOpenSeason,
+  onOpenClub,
 }: {
   allLeagues;
   clubs;
@@ -2430,12 +2459,46 @@ export function AdminLeagues({
   onEdit;
   onDeleteLeague;
   toast;
+  /** The LIVE structures (authenticated tenant config) a league's setup points at. */
+  structures?: CompetitionStructure[];
+  /** The operator's season calendars (public tenant config). */
+  calendars?: SeasonCalendar[];
+  seasonRuns?: SeasonRun[];
+  /** For a running season's release progress. */
+  allSeries?: Series[];
+  /** Structures or season runs still loading: statuses wait rather than guess. */
+  seasonSetupLoading?: boolean;
+  /** Structures or season runs failed to load: say so rather than show false statuses. */
+  seasonSetupFailed?: boolean;
+  /** POST /season-runs. Absent ⇒ no Start buttons on this page. */
+  onCreateSeasonRun?: (run: StartSeasonRunRequest) => Promise<SeasonRun | void>;
+  /** Refetch leagues, calendars, structures and runs — the Start modal calls it on open. */
+  onRefreshSeasonSetup?: () => Promise<unknown> | void;
+  /** Go to the season on Fixtures & Venues → Seasons & series. */
+  onOpenSeason?: (runId: string) => void;
+  onOpenClub?: (clubId: string) => void;
 }) {
   const vt = useVertical().terms;
   const copy = useCopy();
   const [confirm, setConfirm] = useStateA<ConfirmDialogState | null>(null);
+  // null = closed; '' = opened from the header (no league preselected); a key = that row.
+  const [startFor, setStartFor] = useStateA<string | null>(null);
   const countFor = (key) =>
     clubs.filter((c) => Array.isArray(c.leagues) && c.leagues.includes(key)).length;
+  const setupKnown = !seasonSetupLoading && !seasonSetupFailed;
+  const readiness = useMemoA(
+    () =>
+      leaguesReadiness(allLeagues, {
+        clubs,
+        structures,
+        calendars,
+        runs: seasonRuns,
+        series: allSeries,
+        isAffiliated: affiliationSubmitted,
+      }),
+    [allLeagues, clubs, structures, calendars, seasonRuns, allSeries],
+  );
+  const canStart = !!onCreateSeasonRun && setupKnown;
 
   function askDelete(L) {
     const n = countFor(L.key);
@@ -2463,15 +2526,34 @@ export function AdminLeagues({
           </h1>
           <p className="ph-desc">
             Create the leagues &amp; divisions clubs opt into during affiliation — fixtures are then
-            generated per league. Set these up before inviting clubs so they can register.
+            generated per league. Set these up before inviting clubs so they can register. Each
+            league&apos;s season setup (its structure and calendar) comes from your platform
+            operator; once a league is ready, start its season here.
           </p>
         </div>
         <div className="ph-actions">
+          {canStart && allLeagues.length > 0 && (
+            <Btn tone="outline" icon={Icon.Plus} size="sm" onClick={() => setStartFor('')}>
+              Start a season
+            </Btn>
+          )}
           <Btn tone="teal" icon={Icon.Plus} size="sm" onClick={onCreate}>
             Create league
           </Btn>
         </div>
       </div>
+
+      {allLeagues.length > 0 &&
+        (seasonSetupLoading ? (
+          <p className="lr-note">Checking each league&apos;s season setup…</p>
+        ) : seasonSetupFailed ? (
+          <p className="lr-note">
+            Couldn&apos;t load the season setup, so season statuses are hidden. Refresh to try
+            again.
+          </p>
+        ) : (
+          <ReadinessSummary list={readiness} />
+        ))}
 
       {allLeagues.length === 0 ? (
         <EmptyState
@@ -2486,34 +2568,48 @@ export function AdminLeagues({
         />
       ) : (
         <div className="tbl-w">
-          <table className="tbl">
+          <table className="tbl lr-tbl">
             <thead>
               <tr>
                 <th>League</th>
                 <th>District</th>
                 <th>Group</th>
                 <th>{vt.Clubs} registered</th>
+                <th>Season</th>
                 <th style={{ width: 130 }}></th>
               </tr>
             </thead>
             <tbody>
-              {allLeagues.map((L) => (
+              {allLeagues.map((L, i) => (
                 <tr key={L.key}>
-                  <td>
+                  <td className="lr-name">
                     <span style={{ fontWeight: 700 }}>{L.label}</span>
                   </td>
-                  <td>
+                  <td data-label="District">
                     <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>{L.district}</span>
                   </td>
-                  <td>
+                  <td data-label="Group">
                     <Pill tone="muted">{L.group}</Pill>
                   </td>
-                  <td>
+                  <td data-label={`${vt.Clubs} registered`}>
                     <span style={{ fontFamily: "'Montserrat',sans-serif", fontWeight: 700 }}>
                       {countFor(L.key)}
                     </span>
                   </td>
-                  <td>
+                  <td className="lr-season">
+                    {setupKnown ? (
+                      <LeagueSeasonCell
+                        readiness={readiness[i]}
+                        onStart={canStart ? () => setStartFor(L.key) : undefined}
+                        onOpenSeason={onOpenSeason}
+                        onOpenClub={onOpenClub}
+                        toast={toast}
+                      />
+                    ) : (
+                      <span className="lr-muted">—</span>
+                    )}
+                  </td>
+                  <td className="lr-row-actions">
                     <div className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
                       <Btn tone="outline" size="sm" onClick={() => onEdit(L)}>
                         Edit
@@ -2528,6 +2624,21 @@ export function AdminLeagues({
             </tbody>
           </table>
         </div>
+      )}
+
+      {startFor !== null && onCreateSeasonRun && (
+        <StartSeasonModal
+          clubs={clubs}
+          allLeagues={allLeagues}
+          config={{ structures, calendars } as TenantConfig}
+          existingRuns={seasonRuns}
+          allSeries={allSeries}
+          initialLeagueKey={startFor || undefined}
+          onCreateRun={onCreateSeasonRun}
+          onRefreshConfig={onRefreshSeasonSetup}
+          onClose={() => setStartFor(null)}
+          toast={toast}
+        />
       )}
 
       {confirm &&
@@ -2616,7 +2727,7 @@ export function LeagueForm({
     <div style={{ display: 'grid', gap: 14 }}>
       <p style={{ margin: 0, fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
         {editing
-          ? 'Edit this league. Its key is fixed — clubs are matched to it by key.'
+          ? 'Edit this league. Its key is fixed — clubs are matched to it by key. Its season setup (structure and calendar) is managed by your platform operator.'
           : 'Name the league, choose the district it belongs to, and group it for the picker.'}
       </p>
       <div className="field">
