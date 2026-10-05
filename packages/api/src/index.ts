@@ -118,6 +118,19 @@ import {
 } from './umpires.js';
 import { applyScorerInput, findScorerNameClash, parseScorerInput, scorerIdFor } from './scorers.js';
 import {
+  advanceCompetition,
+  competitionSeriesName,
+  parseCompetitionBody,
+  seriesOfCompetition,
+  seriesTable,
+  withResults,
+} from './competitions.js';
+import {
+  planCompetition,
+  type CompetitionMeta,
+  type CompetitionSpec,
+} from '../../engine/src/competition.js';
+import {
   validateCalendars,
   validateStructures,
   validateSetups,
@@ -1906,6 +1919,8 @@ app.use('/venues', authenticate, requireTenantMembership);
 app.use('/umpires/*', authenticate, requireTenantMembership);
 app.use('/umpires', authenticate, requireTenantMembership);
 app.use('/scorers/*', authenticate, requireTenantMembership);
+app.use('/competitions/*', authenticate, requireTenantMembership, requireAdmin);
+app.use('/competitions', authenticate, requireTenantMembership, requireAdmin);
 app.use('/scorers', authenticate, requireTenantMembership);
 app.use('/club/*', authenticate, requireTenantMembership);
 app.use('/captains-reports', authenticate, requireTenantMembership);
@@ -4743,6 +4758,262 @@ app.delete('/series/:id', requireAdmin, async (c) => {
   await repo.deleteFixtureOfficialsForSeries(tenant, c.req.param('id'));
   await repo.deleteSeriesSyncState(tenant, c.req.param('id'));
   return c.json({ ok: true });
+});
+
+/* ─── Leagues & tournaments (ADR 0018) ───
+   A competition is the set of series sharing `competition.id`, generated server-side by the
+   engine's `planCompetition` (circle-method round robin, seeded knockout, groups → knockout)
+   and written through `createSeries` / `applySeriesPatch`, so drafts, approval, release, the
+   clash gates, officials, results and the medicoach sync all behave exactly as for any
+   series. Admin only (the /competitions/* middleware below). */
+
+/** Everything a competition write needs, read once. */
+async function competitionInputs(tenant: string) {
+  const [series, clubs, venues, config] = await Promise.all([
+    repo.listSeries(tenant),
+    repo.listClubs(tenant),
+    repo.listVenues(tenant),
+    repo.getTenantConfig(tenant),
+  ]);
+  return { series, clubs, venues, config, aliases: venueAliasesFor(config) };
+}
+
+/** Plan a spec, or answer 400 with every problem in the office's words. */
+function planOrRefuse(spec: CompetitionSpec) {
+  const plan = planCompetition(spec);
+  if (!plan.ok)
+    throw new HttpError(400, plan.problems[0], {
+      code: 'invalid_competition',
+      problems: plan.problems,
+    });
+  return plan;
+}
+
+/** Ground double-bookings the new series would carry against everything already scheduled. */
+function competitionClashes(
+  plan: ReturnType<typeof planCompetition> & { ok: true },
+  inputs: Awaited<ReturnType<typeof competitionInputs>>,
+  replacing: string[] = [],
+) {
+  const others = inputs.series.filter((s) => !replacing.includes(String(s.id)));
+  const all = [...others, ...(plan.series as unknown as Series[])];
+  return plan.series.flatMap((s) =>
+    findClashes(s as unknown as Series, all, inputs.clubs, inputs.venues, inputs.aliases).map((c) =>
+      formatClashForHumans(c),
+    ),
+  );
+}
+
+/** The plan as the console previews it: no write. Clashes are warnings (release gates them). */
+app.post('/competitions/preview', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const inputs = await competitionInputs(tenant);
+  const spec = parseCompetitionBody(await c.req.json().catch(() => null), inputs.clubs);
+  const plan = planOrRefuse(spec);
+  return c.json({
+    id: spec.id,
+    series: plan.series,
+    summary: plan.summary,
+    warnings: plan.warnings,
+    clashes: competitionClashes(plan, inputs),
+  });
+});
+
+/**
+ * Create a league or tournament as DRAFT series (approve and release as for any series). The
+ * id from the preview is reused so the draw the admin saw is the one stored; a taken id is
+ * 409. If a later series fails to write, the ones already written are removed again.
+ */
+app.post('/competitions', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const inputs = await competitionInputs(tenant);
+  const spec = parseCompetitionBody(await c.req.json().catch(() => null), inputs.clubs);
+  const plan = planOrRefuse(spec);
+  const taken = new Set(inputs.series.map((s) => String(s.id)));
+  if (
+    plan.series.some((s) => taken.has(s.id)) ||
+    seriesOfCompetition(inputs.series, spec.id).length
+  )
+    throw new HttpError(409, 'a competition with this id already exists', {
+      code: 'competition_exists',
+    });
+  const written: string[] = [];
+  try {
+    for (const s of plan.series) {
+      await createSeries(tenant, s as unknown as Series);
+      written.push(s.id);
+    }
+  } catch (err) {
+    await Promise.all(written.map((id) => repo.deleteSeries(tenant, id).catch(() => {})));
+    throw err;
+  }
+  return c.json(
+    {
+      id: spec.id,
+      series: await Promise.all(plan.series.map((s) => repo.getSeries(tenant, s.id))),
+      warnings: plan.warnings,
+      clashes: competitionClashes(plan, inputs),
+    },
+    201,
+  );
+});
+
+const competitionOr404 = (all: Series[], id: string) => {
+  const series = seriesOfCompetition(all, id);
+  if (!series.length) throw new HttpError(404, 'competition not found');
+  return series;
+};
+
+/** Rename, or change the points: every series of the competition, version-checked. */
+app.patch('/competitions/:id', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const body = (await c.req.json().catch(() => null)) as {
+    name?: unknown;
+    points?: unknown;
+  } | null;
+  if (!body || (body.name === undefined && body.points === undefined))
+    throw new HttpError(400, 'send a name and/or points');
+  const series = competitionOr404(await repo.listSeries(ra.tenant), c.req.param('id'));
+  const meta0 = series[0].competition!;
+  // Validate through the engine with the current spec and the new values.
+  const probe = planCompetition({
+    id: meta0.id,
+    type: meta0.type,
+    name: typeof body.name === 'string' ? body.name : meta0.name,
+    overs: Number(series[0].maxOvers ?? 20),
+    teams: [
+      { teamId: 'a', clubId: 'a', name: 'A' },
+      { teamId: 'b', clubId: 'b', name: 'B' },
+    ],
+    format: { kind: 'round-robin', legs: 1 },
+    schedule: meta0.schedule,
+    points: (body.points as CompetitionMeta['points']) ?? meta0.points,
+  });
+  if (!probe.ok)
+    throw new HttpError(400, probe.problems[0], {
+      code: 'invalid_competition',
+      problems: probe.problems,
+    });
+  const name = typeof body.name === 'string' ? body.name.trim() : meta0.name;
+  const out = [];
+  for (const s of series) {
+    const meta = {
+      ...s.competition!,
+      name,
+      ...(body.points !== undefined ? { points: body.points as CompetitionMeta['points'] } : {}),
+    };
+    out.push(
+      await applySeriesPatch(
+        ra.tenant,
+        String(s.id),
+        { competition: meta, name: competitionSeriesName(name, meta), version: s.version } as never,
+        ra.email ?? 'unknown',
+      ),
+    );
+  }
+  return c.json({ id: meta0.id, series: out });
+});
+
+/**
+ * Regenerate a competition's draw (new teams, format, dates or seed). Drafts only: a released
+ * competition is refused (409 `competition_released` — recall it first), and so is one with
+ * results in (409 `has_results`). The old series are replaced whole.
+ */
+app.post('/competitions/:id/regenerate', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const inputs = await competitionInputs(tenant);
+  const current = competitionOr404(inputs.series, id);
+  if (current.some((s) => s.released))
+    throw new HttpError(409, 'this competition is released — recall it before regenerating', {
+      code: 'competition_released',
+    });
+  const results = hasFeature(inputs.config, 'medicoachSync')
+    ? await repo.listFixtureResults(tenant)
+    : [];
+  if (current.some((s) => withResults(s, results).some((f) => f.result)))
+    throw new HttpError(
+      409,
+      'results are already in for this competition — it can’t be regenerated',
+      {
+        code: 'has_results',
+      },
+    );
+  const raw = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  const spec = parseCompetitionBody({ ...(raw ?? {}), id }, inputs.clubs);
+  const plan = planOrRefuse(spec);
+  const oldIds = current.map((s) => String(s.id));
+  for (const sid of oldIds) {
+    await repo.deleteSeries(tenant, sid);
+    await repo.deleteFixtureOfficialsForSeries(tenant, sid);
+    await repo.deleteSeriesSyncState(tenant, sid);
+  }
+  for (const s of plan.series) await createSeries(tenant, s as unknown as Series);
+  return c.json({
+    id,
+    series: await Promise.all(plan.series.map((s) => repo.getSeries(tenant, s.id))),
+    warnings: plan.warnings,
+    clashes: competitionClashes(plan, inputs, oldIds),
+  });
+});
+
+/** Delete a competition and everything hanging off its series. Released ⇒ recall first. */
+app.delete('/competitions/:id', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const series = competitionOr404(await repo.listSeries(tenant), c.req.param('id'));
+  if (series.some((s) => s.released))
+    throw new HttpError(409, 'this competition is released — recall it before deleting it', {
+      code: 'competition_released',
+    });
+  for (const s of series) {
+    await repo.deleteSeries(tenant, String(s.id));
+    await repo.deleteFixtureOfficialsForSeries(tenant, String(s.id));
+    await repo.deleteSeriesSyncState(tenant, String(s.id));
+  }
+  return c.json({ ok: true, deleted: series.map((s) => s.id) });
+});
+
+/** The league table(s): one per league/group series, from the medicoach results. */
+app.get('/competitions/:id/standings', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const [all, config] = await Promise.all([repo.listSeries(tenant), repo.getTenantConfig(tenant)]);
+  const series = competitionOr404(all, c.req.param('id'));
+  const results = hasFeature(config, 'medicoachSync') ? await repo.listFixtureResults(tenant) : [];
+  return c.json({
+    id: c.req.param('id'),
+    tables: series
+      .filter((s) => s.competition?.role !== 'knockout')
+      .map((s) => seriesTable(s, results)),
+  });
+});
+
+/**
+ * Fill the knockout: group places from finished group tables (`allowIncomplete` to fill from
+ * the tables as they stand), and later rounds from knockout results. Written as an admin edit
+ * of the knockout series (version-checked; the in-season clash gate applies when released).
+ */
+app.post('/competitions/:id/advance', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const body = (await c.req.json().catch(() => ({}))) as { allowIncomplete?: unknown };
+  const [all, config] = await Promise.all([
+    repo.listSeries(ra.tenant),
+    repo.getTenantConfig(ra.tenant),
+  ]);
+  const series = competitionOr404(all, c.req.param('id'));
+  const results = hasFeature(config, 'medicoachSync')
+    ? await repo.listFixtureResults(ra.tenant)
+    : [];
+  const { ko, fixtures, filled, waiting } = advanceCompetition(series, results, {
+    allowIncomplete: body?.allowIncomplete === true,
+  });
+  if (!filled) return c.json({ filled: 0, waiting });
+  const written = await applySeriesPatch(
+    ra.tenant,
+    String(ko.id),
+    { fixtures: fixtures.map(({ result: _r, ...f }) => f), version: ko.version } as never,
+    ra.email ?? 'unknown',
+  );
+  return c.json({ filled, waiting, series: written });
 });
 
 /* ─── Umpire allocation ───

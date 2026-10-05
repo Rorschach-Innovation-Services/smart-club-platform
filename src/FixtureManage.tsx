@@ -61,11 +61,19 @@ export function explainWriteError(err: unknown): {
     if (clashes?.length)
       return {
         text: 'This would double-book a ground. Pick another ground or time.',
-        clashes: clashes.map((c) =>
-          [c.venue ?? c.venueName ?? 'Ground', c.date, c.message ?? c.reason]
+        // The server's Clash: { ground, date, time?, home?, away?, with: { seriesName?, home?, away? } }.
+        clashes: clashes.map((c) => {
+          const w = (c.with ?? {}) as Record<string, unknown>;
+          return [
+            c.ground ?? 'Ground',
+            [c.date, c.time].filter(Boolean).join(' '),
+            w.home && w.away
+              ? `already booked for ${w.home} v ${w.away}${w.seriesName ? ` (${w.seriesName})` : ''}`
+              : null,
+          ]
             .filter(Boolean)
-            .join(' · '),
-        ),
+            .join(' · ');
+        }),
       };
     if (err.status === 409 && /series changed/i.test(err.message))
       return {

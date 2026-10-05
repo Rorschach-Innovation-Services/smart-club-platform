@@ -257,7 +257,21 @@ describe('This week', () => {
     renderHub([series()], {
       onUpdateSeries: vi.fn().mockRejectedValue(
         new ApiError(409, 'Change blocked', 'venue_clash', {
-          clashes: [{ venue: 'Kingsmead', date: '2026-10-03', message: 'already hosts Club X' }],
+          clashes: [
+            {
+              fixtureId: 'f2',
+              ground: 'Kingsmead',
+              date: '2026-10-03',
+              time: '13:00',
+              with: {
+                seriesId: 's9',
+                seriesName: 'Premier',
+                fixtureId: 'f4',
+                home: 'Club X',
+                away: 'Club Y',
+              },
+            },
+          ],
         }),
       ),
     });
@@ -266,7 +280,7 @@ describe('This week', () => {
     const dlg = screen.getByRole('dialog', { name: /edit fixture/i });
     await user.click(within(dlg).getByRole('button', { name: /save fixture/i }));
     expect(within(dlg).getByRole('alert').textContent).toMatch(
-      /double-book a ground.*Kingsmead · 2026-10-03/s,
+      /double-book a ground.*Kingsmead · 2026-10-03 13:00 · already booked for Club X v Club Y \(Premier\)/s,
     );
     expect(within(dlg).getByRole('button', { name: /save fixture/i })).toBeEnabled();
   });
