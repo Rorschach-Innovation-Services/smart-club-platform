@@ -266,20 +266,41 @@ describe('match monitor tab', () => {
 
   beforeEach(() => localStorage.removeItem('smartclub.medicoachSync.tab'));
 
-  it('opens on the monitor, lists the day and flags a start with no live scoring', async () => {
+  it('opens on the action board; Every game lists the day on the same data', async () => {
     vi.mocked(api.getMatchMonitor).mockResolvedValue(monitor());
     renderPage(baseStatus());
     expect(
-      await screen.findByRole('tab', { name: 'Match monitor', selected: true }),
+      await screen.findByRole('tab', { name: /^Action board/, selected: true }),
     ).toBeInTheDocument();
+    expect(await screen.findByTestId('mm-board')).toBeInTheDocument();
+    expect(screen.queryByRole('table', { name: 'Games' })).toBeNull();
+
+    await userEvent.click(screen.getByRole('tab', { name: /^Every game/ }));
     const table = await screen.findByRole('table', { name: 'Games' });
+    expect(screen.queryByTestId('mm-board')).toBeNull();
     expect(within(table).getByText('UKZN CC v Crusaders CC')).toBeInTheDocument();
+    // One monitor for both tabs: switching keeps the day and doesn't fetch again.
+    expect(vi.mocked(api.getMatchMonitor)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(api.getMatchMonitor)).toHaveBeenCalledWith(today);
+    expect(screen.getByRole('tab', { name: /^Every game 1$/ })).toBeInTheDocument();
+    expect(localStorage.getItem('smartclub.medicoachSync.tab')).toBe('games');
     // The demo fixture "started" at 00:00 SAST today: past the 15-minute grace unless it is
     // just after midnight, when it is still awaiting its start.
     const flag = within(table).queryByText(/No live scoring/);
     if (Date.now() + 2 * 3_600_000 - Date.parse(`${today}T00:15:00Z`) >= 0)
       expect(flag).toBeInTheDocument();
+  });
+
+  it('goes from the board to every game, and an old saved "monitor" tab opens the board', async () => {
+    localStorage.setItem('smartclub.medicoachSync.tab', 'monitor');
+    vi.mocked(api.getMatchMonitor).mockResolvedValue(monitor());
+    renderPage(baseStatus());
+    expect(
+      await screen.findByRole('tab', { name: /^Action board/, selected: true }),
+    ).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole('button', { name: /see every game \(1\)/i }));
+    expect(screen.getByRole('tab', { name: /^Every game/, selected: true })).toBeInTheDocument();
+    expect(await screen.findByRole('table', { name: 'Games' })).toBeInTheDocument();
   });
 
   it('says plainly when medicoach is unreachable, and keeps the fixtures', async () => {
@@ -290,6 +311,7 @@ describe('match monitor tab', () => {
         technical: 'medicoach unreachable: TimeoutError',
       }),
     );
+    localStorage.setItem('smartclub.medicoachSync.tab', 'games');
     renderPage(baseStatus());
     expect(await screen.findByText(/Live scoring unavailable/)).toBeInTheDocument();
     expect(screen.getByText(/timed out/)).toBeInTheDocument();

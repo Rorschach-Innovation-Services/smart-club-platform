@@ -12,17 +12,20 @@
  *     failed 5+ times is "stuck" (still retried) and offers Retry now / Drop;
  *   - changes held until a draft or withheld series is released/revealed, each linked to it;
  *   - recent activity, and "Sync now": flush the outbox, then pull, right away.
- * A second tab, "Match monitor" (MatchMonitor.tsx), follows every game of a day live from
- * medicoach's scoring: start times, score now, last input, innings change, finish, delays.
+ * The match monitor (MatchMonitor.tsx) follows every game of a day live from medicoach's
+ * scoring, as two tabs on the same day: "Action board" (the flags to act on) and "Every game"
+ * (start times, score now, last input, innings change, finish, delays).
  */
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState, type ReactNode } from 'react';
 import * as api from './api';
 import { ApiError } from './api';
 import { Btn, Modal, Pill } from './atoms';
-import { MatchMonitor } from './MatchMonitor';
+import { MatchMonitor, type MonitorCounts } from './MatchMonitor';
 import { qk } from './query';
 import type { Series } from './types';
+
+type MonitorTab = 'board' | 'games' | 'sync';
 
 const fmtWhen = (iso?: string | null) =>
   iso
@@ -322,14 +325,17 @@ export function AdminMedicoachSyncView({
   const status = useQuery({ queryKey: qk.medicoachSync(), queryFn: api.getMedicoachSyncStatus });
   const [busy, setBusy] = useState<string | null>(null);
   const [dropping, setDropping] = useState<Failure | null>(null);
-  const [tab, setTab] = useState<'monitor' | 'sync'>(() => {
+  // Three tabs: the flags to act on, every game of the day, and the sync's health. The two
+  // monitor tabs share one MatchMonitor (same day, same data), so switching keeps the day.
+  const [tab, setTab] = useState<MonitorTab>(() => {
     try {
-      return localStorage.getItem('smartclub.medicoachSync.tab') === 'sync' ? 'sync' : 'monitor';
+      const saved = localStorage.getItem('smartclub.medicoachSync.tab');
+      return saved === 'sync' || saved === 'games' ? saved : 'board';
     } catch {
-      return 'monitor';
+      return 'board';
     }
   });
-  const pickTab = (next: 'monitor' | 'sync') => {
+  const pickTab = (next: MonitorTab) => {
     setTab(next);
     try {
       localStorage.setItem('smartclub.medicoachSync.tab', next);
@@ -337,6 +343,7 @@ export function AdminMedicoachSyncView({
       /* per-browser convenience only */
     }
   };
+  const [counts, setCounts] = useState<MonitorCounts | null>(null);
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: qk.medicoachSync() });
     queryClient.invalidateQueries({ queryKey: qk.series() });
@@ -381,11 +388,15 @@ export function AdminMedicoachSyncView({
             Medicoach <em>sync</em>
           </h1>
           <p className="ph-desc">
-            {tab === 'monitor' ? (
+            {tab === 'board' ? (
+              <>
+                What needs you now across the day&apos;s games: unregistered players, scorers gone
+                quiet, late starts, delays between balls and heavy use of undo.
+              </>
+            ) : tab === 'games' ? (
               <>
                 Every game of the day as medicoach&apos;s live scoring sees it: start time, score
-                now, the scorer&apos;s last input, innings change and finish, with late starts and
-                delays between balls flagged.
+                now, the scorer&apos;s last input, innings change and finish.
               </>
             ) : (
               <>
@@ -423,7 +434,8 @@ export function AdminMedicoachSyncView({
       <div className="mm-tabs" role="tablist" aria-label="Medicoach sync">
         {(
           [
-            ['monitor', 'Match monitor'],
+            ['board', 'Action board'],
+            ['games', 'Every game'],
             ['sync', 'Sync health'],
           ] as const
         ).map(([k, label]) => (
@@ -435,6 +447,19 @@ export function AdminMedicoachSyncView({
             onClick={() => pickTab(k)}
           >
             {label}
+            {k === 'board' && counts && counts.flags > 0 && (
+              <span
+                className={`mm-chip-n${counts.alerts ? ' alert' : ''}`}
+                title={`${counts.alerts} need you now · ${counts.flags - counts.alerts} to keep an eye on`}
+              >
+                {counts.flags}
+              </span>
+            )}
+            {k === 'games' && counts && counts.games > 0 && (
+              <span className="mm-chip-n" title={`${counts.live} live`}>
+                {counts.games}
+              </span>
+            )}
             {k === 'sync' && (status.data?.conflicts?.length ?? 0) > 0 && (
               <span className="mm-chip-n">{status.data!.conflicts!.length}</span>
             )}
@@ -442,14 +467,14 @@ export function AdminMedicoachSyncView({
         ))}
       </div>
 
-      {tab === 'monitor' ? (
+      {tab !== 'sync' ? (
         status.data && !status.data.enabled ? (
           <div className="mcs-empty">
             The medicoach sync isn&apos;t switched on for this union. Your platform operator turns
             it on.
           </div>
         ) : (
-          <MatchMonitor />
+          <MatchMonitor view={tab} onCounts={setCounts} onShowGames={() => pickTab('games')} />
         )
       ) : status.isLoading ? (
         <div className="mcs-empty" role="status">

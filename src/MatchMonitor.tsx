@@ -110,7 +110,25 @@ const sinceText = (min: number | null) =>
 
 const seenKeyOf = (b: BoardFlag) => `${b.id}#${b.flag.signature}`;
 
-export function MatchMonitor() {
+/** What the page's tabs show as badges: open flags (alerts among them), games, live games. */
+export interface MonitorCounts {
+  flags: number;
+  alerts: number;
+  games: number;
+  live: number;
+}
+
+export function MatchMonitor({
+  view = 'board',
+  onCounts,
+  onShowGames,
+}: {
+  /** "board": the flags to act on. "games": every game of the day as a table. */
+  view?: 'board' | 'games';
+  onCounts?: (c: MonitorCounts) => void;
+  /** The board's "See every game" link (switches the page's tab). */
+  onShowGames?: () => void;
+}) {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const today = sastToday(nowMs);
   const [date, setDate] = useState(today);
@@ -185,6 +203,13 @@ export function MatchMonitor() {
   const alerts = active.filter((b) => b.flag.tone === 'alert').length;
   const shown = rows.filter((r) => inFilter(r, filter));
   const openRow = rows.find((r) => r.match.ref === open) ?? null;
+  // The tab badges: open flags, and every fixture of the day (as "All games" counts them).
+  const countsKey = q.data ? `${active.length}|${alerts}|${rows.length}|${sum.live}` : '';
+  useEffect(() => {
+    if (countsKey && onCounts)
+      onCounts({ flags: active.length, alerts, games: rows.length, live: sum.live });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [countsKey]);
   const updated = q.dataUpdatedAt
     ? Math.max(0, Math.round((nowMs - q.dataUpdatedAt) / 1000))
     : null;
@@ -275,217 +300,230 @@ export function MatchMonitor() {
       ) : (
         <>
           {/* ── Action board ── */}
-          <section className="mm-board" aria-labelledby="mm-board-h" data-testid="mm-board">
-            <div className="mm-board-head">
-              <div>
-                <h2 id="mm-board-h" className="mm-board-title">
-                  Action board
-                </h2>
-                <div className="mm-board-sum">
-                  {active.length === 0 ? (
-                    'Nothing needs you right now.'
-                  ) : (
-                    <>
-                      <strong className={alerts ? 'mm-alert-text' : ''}>
-                        {alerts} need{alerts === 1 ? 's' : ''} you now
-                      </strong>
-                      {' · '}
-                      {active.length - alerts} to keep an eye on
-                    </>
-                  )}
+          {view === 'board' && (
+            <section className="mm-board" aria-labelledby="mm-board-h" data-testid="mm-board">
+              <div className="mm-board-head">
+                <div>
+                  <h2 id="mm-board-h" className="mm-board-title">
+                    Action board
+                  </h2>
+                  <div className="mm-board-sum">
+                    {active.length === 0 ? (
+                      'Nothing needs you right now.'
+                    ) : (
+                      <>
+                        <strong className={alerts ? 'mm-alert-text' : ''}>
+                          {alerts} need{alerts === 1 ? 's' : ''} you now
+                        </strong>
+                        {' · '}
+                        {active.length - alerts} to keep an eye on
+                      </>
+                    )}
+                  </div>
                 </div>
+                <details className="mm-thresholds">
+                  <summary>Flag thresholds</summary>
+                  <div className="mm-th-grid">
+                    <Threshold
+                      label="Late start after"
+                      unit="min"
+                      value={t.lateStartMin}
+                      options={[5, 10, 15, 20, 30]}
+                      onChange={(v) => setThreshold('lateStartMin', v)}
+                    />
+                    <Threshold
+                      label="Gap between balls over"
+                      unit="min"
+                      value={t.ballGapMin}
+                      options={[2, 3, 4, 5, 6, 8, 10]}
+                      onChange={(v) => setThreshold('ballGapMin', v)}
+                    />
+                    <Threshold
+                      label="No scorer input for"
+                      unit="min"
+                      value={t.quietMin}
+                      options={[5, 10, 15, 20]}
+                      onChange={(v) => setThreshold('quietMin', v)}
+                    />
+                    <Threshold
+                      label="Innings break over"
+                      unit="min"
+                      value={t.breakMin}
+                      options={[20, 25, 30, 40, 45]}
+                      onChange={(v) => setThreshold('breakMin', v)}
+                    />
+                    <Threshold
+                      label="Undo used"
+                      unit="times"
+                      value={t.undoMax}
+                      options={[3, 5, 8, 10, 15]}
+                      onChange={(v) => setThreshold('undoMax', v)}
+                    />
+                  </div>
+                </details>
               </div>
-              <details className="mm-thresholds">
-                <summary>Flag thresholds</summary>
-                <div className="mm-th-grid">
-                  <Threshold
-                    label="Late start after"
-                    unit="min"
-                    value={t.lateStartMin}
-                    options={[5, 10, 15, 20, 30]}
-                    onChange={(v) => setThreshold('lateStartMin', v)}
-                  />
-                  <Threshold
-                    label="Gap between balls over"
-                    unit="min"
-                    value={t.ballGapMin}
-                    options={[2, 3, 4, 5, 6, 8, 10]}
-                    onChange={(v) => setThreshold('ballGapMin', v)}
-                  />
-                  <Threshold
-                    label="No scorer input for"
-                    unit="min"
-                    value={t.quietMin}
-                    options={[5, 10, 15, 20]}
-                    onChange={(v) => setThreshold('quietMin', v)}
-                  />
-                  <Threshold
-                    label="Innings break over"
-                    unit="min"
-                    value={t.breakMin}
-                    options={[20, 25, 30, 40, 45]}
-                    onChange={(v) => setThreshold('breakMin', v)}
-                  />
-                  <Threshold
-                    label="Undo used"
-                    unit="times"
-                    value={t.undoMax}
-                    options={[3, 5, 8, 10, 15]}
-                    onChange={(v) => setThreshold('undoMax', v)}
-                  />
-                </div>
-              </details>
-            </div>
 
-            {active.length > 0 && (
-              <div className="mm-filters" role="tablist" aria-label="Flag type">
-                <button
-                  role="tab"
-                  aria-selected={flagType === 'all'}
-                  className={`mm-chip${flagType === 'all' ? ' on' : ''}`}
-                  onClick={() => setFlagType('all')}
-                >
-                  All flags <span className="mm-chip-n">{active.length}</span>
-                </button>
-                {FLAG_TYPES.map(({ key, name }) => {
-                  const n = active.filter((b) => b.flag.key === key).length;
-                  if (!n) return null;
-                  const alert = active.some((b) => b.flag.key === key && b.flag.tone === 'alert');
-                  return (
-                    <button
-                      key={key}
-                      role="tab"
-                      aria-selected={flagType === key}
-                      className={`mm-chip${flagType === key ? ' on' : ''}${alert ? ' alert' : ''}`}
-                      onClick={() => setFlagType(key)}
-                    >
-                      {name} <span className="mm-chip-n">{n}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-
-            {active.length === 0 ? (
-              <div className="mm-allclear">
-                <span aria-hidden="true">✓</span>
-                {rows.length
-                  ? 'Every game is on track — no flags.'
-                  : 'No fixtures in a released series on this day.'}
-              </div>
-            ) : (
-              <ul className="mm-flagcards" aria-label="Flags">
-                {(shownFlags.length ? shownFlags : active).map((b) => (
-                  <FlagCard
-                    key={b.id}
-                    b={b}
-                    nowMs={nowMs}
-                    isNew={isNew(b)}
-                    onOpen={() => setOpen(b.row.match.ref)}
-                    onSeen={() => markSeen(b, true)}
-                  />
-                ))}
-              </ul>
-            )}
-
-            {done.length > 0 && (
-              <details className="mm-seen">
-                <summary>Seen ({done.length})</summary>
-                <ul className="mcs-list">
-                  {done.map((b) => (
-                    <li key={b.id}>
-                      <div>
-                        <span className={`mm-flag ${b.flag.tone}`}>{b.flag.label}</span>
-                        <div className="ump-sub">
-                          {b.row.match.home} v {b.row.match.away}
-                        </div>
-                      </div>
-                      <Btn tone="outline" size="sm" onClick={() => markSeen(b, false)}>
-                        Put back
-                      </Btn>
-                    </li>
-                  ))}
-                </ul>
-              </details>
-            )}
-          </section>
-
-          {/* ── The day in one line ── */}
-          <div className="mm-daystats" data-testid="mm-kpis">
-            <span>
-              <strong>{sum.matches}</strong> games
-            </span>
-            <span>
-              <strong>{sum.live}</strong> live
-            </span>
-            <span>
-              <strong>{sum.done}</strong> finished
-            </span>
-            <span className={sum.unregistered ? 'bad' : ''}>
-              <strong>{sum.unregistered}</strong> unregistered player
-              {sum.unregistered === 1 ? '' : 's'}
-            </span>
-            <span>
-              <strong>{rows.reduce((n, r) => n + r.playersAdded, 0)}</strong> added during play
-            </span>
-            <span>
-              <strong>{rows.reduce((n, r) => n + (r.undoCount ?? 0), 0)}</strong> undos
-            </span>
-            {rows.length - sum.matches > 0 && (
-              <span>
-                <strong>{rows.length - sum.matches}</strong> postponed
-              </span>
-            )}
-          </div>
-
-          {/* ── Every game ── */}
-          {rows.length > 0 && (
-            <>
-              <div className="mm-tools">
-                <h2 className="mcs-heading" style={{ margin: 0 }}>
-                  Every game
-                </h2>
-                <div className="mm-filters" role="tablist" aria-label="Show">
-                  {FILTERS.map(([k, label]) => {
-                    const n = rows.filter((r) => inFilter(r, k)).length;
+              {active.length > 0 && (
+                <div className="mm-filters" role="tablist" aria-label="Flag type">
+                  <button
+                    role="tab"
+                    aria-selected={flagType === 'all'}
+                    className={`mm-chip${flagType === 'all' ? ' on' : ''}`}
+                    onClick={() => setFlagType('all')}
+                  >
+                    All flags <span className="mm-chip-n">{active.length}</span>
+                  </button>
+                  {FLAG_TYPES.map(({ key, name }) => {
+                    const n = active.filter((b) => b.flag.key === key).length;
+                    if (!n) return null;
+                    const alert = active.some((b) => b.flag.key === key && b.flag.tone === 'alert');
                     return (
                       <button
-                        key={k}
+                        key={key}
                         role="tab"
-                        aria-selected={filter === k}
-                        className={`mm-chip${filter === k ? ' on' : ''}`}
-                        onClick={() => setFilter(k)}
+                        aria-selected={flagType === key}
+                        className={`mm-chip${flagType === key ? ' on' : ''}${alert ? ' alert' : ''}`}
+                        onClick={() => setFlagType(key)}
                       >
-                        {label} <span className="mm-chip-n">{n}</span>
+                        {name} <span className="mm-chip-n">{n}</span>
                       </button>
                     );
                   })}
                 </div>
-              </div>
-              {!shown.length ? (
-                <div className="mcs-empty">No games match this filter.</div>
-              ) : (
-                <div className="tbl-w">
-                  <table className="tbl mm-tbl" aria-label="Games">
-                    <thead>
-                      <tr>
-                        <th>Game</th>
-                        <th>Start</th>
-                        <th>Score now</th>
-                        <th>Last input</th>
-                        <th>Innings change</th>
-                        <th>Finished</th>
-                        <th>Scorer</th>
-                        <th>Flags</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {shown.map((r) => (
-                        <GameRow key={r.match.ref} r={r} onOpen={() => setOpen(r.match.ref)} />
-                      ))}
-                    </tbody>
-                  </table>
+              )}
+
+              {active.length === 0 ? (
+                <div className="mm-allclear">
+                  <span aria-hidden="true">✓</span>
+                  {rows.length
+                    ? 'Every game is on track — no flags.'
+                    : 'No fixtures in a released series on this day.'}
                 </div>
+              ) : (
+                <ul className="mm-flagcards" aria-label="Flags">
+                  {(shownFlags.length ? shownFlags : active).map((b) => (
+                    <FlagCard
+                      key={b.id}
+                      b={b}
+                      nowMs={nowMs}
+                      isNew={isNew(b)}
+                      onOpen={() => setOpen(b.row.match.ref)}
+                      onSeen={() => markSeen(b, true)}
+                    />
+                  ))}
+                </ul>
+              )}
+
+              {done.length > 0 && (
+                <details className="mm-seen">
+                  <summary>Seen ({done.length})</summary>
+                  <ul className="mcs-list">
+                    {done.map((b) => (
+                      <li key={b.id}>
+                        <div>
+                          <span className={`mm-flag ${b.flag.tone}`}>{b.flag.label}</span>
+                          <div className="ump-sub">
+                            {b.row.match.home} v {b.row.match.away}
+                          </div>
+                        </div>
+                        <Btn tone="outline" size="sm" onClick={() => markSeen(b, false)}>
+                          Put back
+                        </Btn>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+              {onShowGames && rows.length > 0 && (
+                <div className="mm-board-foot">
+                  <button className="mm-link" onClick={onShowGames}>
+                    See every game ({rows.length}) →
+                  </button>
+                </div>
+              )}
+            </section>
+          )}
+
+          {view === 'games' && (
+            <>
+              {/* ── The day in one line ── */}
+              <div className="mm-daystats" data-testid="mm-kpis">
+                <span>
+                  <strong>{sum.matches}</strong> games
+                </span>
+                <span>
+                  <strong>{sum.live}</strong> live
+                </span>
+                <span>
+                  <strong>{sum.done}</strong> finished
+                </span>
+                <span className={sum.unregistered ? 'bad' : ''}>
+                  <strong>{sum.unregistered}</strong> unregistered player
+                  {sum.unregistered === 1 ? '' : 's'}
+                </span>
+                <span>
+                  <strong>{rows.reduce((n, r) => n + r.playersAdded, 0)}</strong> added during play
+                </span>
+                <span>
+                  <strong>{rows.reduce((n, r) => n + (r.undoCount ?? 0), 0)}</strong> undos
+                </span>
+                {rows.length - sum.matches > 0 && (
+                  <span>
+                    <strong>{rows.length - sum.matches}</strong> postponed
+                  </span>
+                )}
+              </div>
+
+              {/* ── Every game ── */}
+              {rows.length > 0 && (
+                <>
+                  <div className="mm-tools">
+                    <div className="mm-filters" role="tablist" aria-label="Show">
+                      {FILTERS.map(([k, label]) => {
+                        const n = rows.filter((r) => inFilter(r, k)).length;
+                        return (
+                          <button
+                            key={k}
+                            role="tab"
+                            aria-selected={filter === k}
+                            className={`mm-chip${filter === k ? ' on' : ''}`}
+                            onClick={() => setFilter(k)}
+                          >
+                            {label} <span className="mm-chip-n">{n}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  {!shown.length ? (
+                    <div className="mcs-empty">No games match this filter.</div>
+                  ) : (
+                    <div className="tbl-w">
+                      <table className="tbl mm-tbl" aria-label="Games">
+                        <thead>
+                          <tr>
+                            <th>Game</th>
+                            <th>Start</th>
+                            <th>Score now</th>
+                            <th>Last input</th>
+                            <th>Innings change</th>
+                            <th>Finished</th>
+                            <th>Scorer</th>
+                            <th>Flags</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {shown.map((r) => (
+                            <GameRow key={r.match.ref} r={r} onOpen={() => setOpen(r.match.ref)} />
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
+              )}
+              {rows.length === 0 && (
+                <div className="mcs-empty">No fixtures in a released series on this day.</div>
               )}
             </>
           )}
