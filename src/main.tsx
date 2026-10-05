@@ -2610,6 +2610,32 @@ function Shell({
   const orgName = branding?.name ?? 'Smart Club';
   const orgFooter = branding?.copy?.footer ?? 'Powered by Medicoach';
 
+  // The league catalogue: its own page (Leagues) and embedded in Fixtures & Venues →
+  // Leagues & tournaments, beside the competitions built on it.
+  const leaguesCatalogue = (embedded: boolean) => (
+    <AdminLeagues
+      embedded={embedded}
+      allLeagues={allLeagues}
+      clubs={clubs}
+      onCreate={() => setShowLeagueForm({})}
+      onEdit={(L) => setShowLeagueForm(L)}
+      onDeleteLeague={deleteLeague}
+      toast={toastShow}
+      structures={allStructures}
+      calendars={allCalendars}
+      seasonRuns={allSeasonRuns}
+      allSeries={allSeries}
+      seasonSetupLoading={seasonSetupLoading}
+      seasonSetupFailed={structuresFailed || seasonRunsFailed}
+      onCreateSeasonRun={createSeasonRun}
+      onRefreshSeasonSetup={refetchSeasonSetup}
+      onOpenSeason={(runId) =>
+        navigate(`/admin/fixtures?tab=series&run=${encodeURIComponent(runId)}`)
+      }
+      onOpenClub={setActiveClub}
+    />
+  );
+
   function renderMain() {
     if (role === 'admin') {
       const gotoList = () => gotoAdminView('clubs_list');
@@ -2741,29 +2767,7 @@ function Shell({
             toast={toastShow}
           />
         );
-      if (view === 'leagues')
-        return (
-          <AdminLeagues
-            allLeagues={allLeagues}
-            clubs={clubs}
-            onCreate={() => setShowLeagueForm({})}
-            onEdit={(L) => setShowLeagueForm(L)}
-            onDeleteLeague={deleteLeague}
-            toast={toastShow}
-            structures={allStructures}
-            calendars={allCalendars}
-            seasonRuns={allSeasonRuns}
-            allSeries={allSeries}
-            seasonSetupLoading={seasonSetupLoading}
-            seasonSetupFailed={structuresFailed || seasonRunsFailed}
-            onCreateSeasonRun={createSeasonRun}
-            onRefreshSeasonSetup={refetchSeasonSetup}
-            onOpenSeason={(runId) =>
-              navigate(`/admin/fixtures?tab=series&run=${encodeURIComponent(runId)}`)
-            }
-            onOpenClub={setActiveClub}
-          />
-        );
+      if (view === 'leagues') return leaguesCatalogue(false);
       if (view === 'insights')
         return (
           <AdminInsightsPage
@@ -2795,6 +2799,8 @@ function Shell({
         return (
           <AdminFixtures
             defaultTab="week"
+            leaguesCatalogue={leaguesCatalogue(true)}
+            onCompetitionsChanged={() => invalidate(qk.series())}
             clubs={clubs}
             allSeries={allSeries}
             onUpdateSeries={updateSeries}

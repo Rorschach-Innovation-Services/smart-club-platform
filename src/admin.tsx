@@ -25,6 +25,7 @@ import { filterClearances } from './clearanceFilters';
 import { GUIDE_URL } from './help/HelpDrawer';
 import { AllFixturesView, GroundsWeek, ResultsView, WeekView, type HubManage } from './FixturesHub';
 import { buildFixtureIndex } from './fixture-index';
+import { CompetitionsPanel } from './CompetitionsPanel';
 import {
   DISTRICTS,
   DEFAULT_REQUIRED_DOCS,
@@ -102,19 +103,12 @@ import type {
   Venue,
   WithheldField,
 } from './types';
-import {
-  SeasonRunsPanel,
-  StartSeasonModal,
-  SeriesOriginPill,
-  seriesOrigin,
-  type StartSeasonRunRequest,
-} from './season-run';
+import { SeasonRunsPanel, StartSeasonModal, type StartSeasonRunRequest } from './season-run';
 import { leaguesReadiness } from './league-readiness';
 import { LeagueSeasonCell, ReadinessSummary } from './LeagueReadiness';
 import { VenuesCard } from './venues-card';
 import { cqiBandTone, cqiBandRows, docComplianceRows, docTone } from './insights';
 import {
-  formatDay,
   formatDayYear,
   formatStamp,
   formatStampDay,
@@ -301,12 +295,16 @@ const FIXTURES_TABS: Array<[FixturesTab, string]> = [
   ['fixtures', 'All fixtures'],
   ['results', 'Results'],
   ['venues', 'Venues'],
-  ['series', 'Seasons & series'],
+  ['series', 'Leagues & tournaments'],
 ];
 
 interface AdminFixturesProps {
+  /** The league catalogue (AdminLeagues, embedded) shown beside the competitions. */
+  leaguesCatalogue?: ReactNode;
+  /** A league or tournament was created, changed or deleted: refetch the series. */
+  onCompetitionsChanged?: () => void;
   /** Opening tab when the URL names none (`?tab=` / `?series=` win). The console opens on
-   *  This week; the default stays Seasons & series for callers that render the editor. */
+   *  This week; the default stays Leagues & tournaments for callers that render the editor. */
   defaultTab?: FixturesTab;
   clubs: Club[];
   // `Series.fixtures` is `unknown[]` (frontend strict ratchet, deferred) and this
@@ -505,6 +503,8 @@ function SeriesStatusPills({ series: s }: { series: Series }) {
 }
 
 export function AdminFixtures({
+  leaguesCatalogue,
+  onCompetitionsChanged,
   defaultTab = 'series',
   clubs,
   allSeries,
@@ -546,8 +546,6 @@ export function AdminFixtures({
 }: AdminFixturesProps) {
   const vt = useVertical().terms;
   const copy = useCopy();
-  // Overs are cricket label metadata — other sports never show them.
-  const showOvers = useVertical().sport === 'cricket';
   // The Start a season modal — only a league that is ready can start; the rest are listed
   // with their reason. Owned here, not in SeasonRunsPanel, so the header button and the
   // panel's empty-state CTA share it.
@@ -561,7 +559,7 @@ export function AdminFixtures({
         : null) ?? allSeries[0]?.id,
   );
   const active = allSeries.find((s) => s.id === activeId) || allSeries[0];
-  // `?series=` (a deep link to one series) opens Seasons & series; `?tab=` names a tab.
+  // `?series=` (a deep link to one series) opens Leagues & tournaments on it; `?tab=` names a tab.
   const [tab, setTabState] = useStateA<FixturesTab>(() => {
     const q = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
     const named = q?.get('tab') as FixturesTab | null;
@@ -584,7 +582,13 @@ export function AdminFixtures({
   const openSeries = (seriesId: string) => {
     setActiveId(seriesId);
     setTab('series');
-    if (typeof window !== 'undefined') window.scrollTo({ top: 0 });
+    if (typeof window !== 'undefined') {
+      // Leagues & tournaments opens straight on this series' competition.
+      const url = new URL(window.location.href);
+      url.searchParams.set('series', seriesId);
+      window.history.replaceState(window.history.state, '', url);
+      window.scrollTo({ top: 0 });
+    }
   };
   // Today as a South African calendar day (UTC+2, no daylight saving).
   const today = new Date(Date.now() + 2 * 3_600_000).toISOString().slice(0, 10);
@@ -634,26 +638,8 @@ export function AdminFixtures({
   );
   const [confirm, setConfirm] = useStateA<ConfirmDialogState | null>(null); // shared confirmation modal state (recall/reveal)
   const [releaseFor, setReleaseFor] = useStateA<ReleaseSeriesState | null>(null); // series whose ReleaseDialog is open
-  const clubBy = (id) => clubs.find((c) => c.id === id);
-  // Resolve a fixture id → team (series participant). A single-team club resolves to
-  // itself; a multi-team club's `tm_…` id resolves via the series snapshot.
-  const teamBy = (s, id) => resolveTeam(s, id, clubBy);
   // The tenant's travel-cost defaults (ADR 0014); a series' own values win.
   const travel = resolveCompetitionDefaults(tenantConfig).travel;
-
-  // Aggregate distance per series
-  const seriesAgg = (s) => {
-    let totalKm = 0;
-    s.fixtures.forEach((f) => {
-      const home = teamBy(s, f.home),
-        away = teamBy(s, f.away);
-      if (!home.clubId || !away.clubId) return;
-      const t = seriesTravel(s, travel);
-      const c = fixtureCost(home, away, t.costPerKm, t.carsPerAwayTrip, fixtureVenue(f));
-      totalKm += c.roundTripKm;
-    });
-    return { totalKm };
-  };
 
   function exportSchedule(s: Series) {
     if (!s) return toast?.('No series to export');
@@ -751,6 +737,28 @@ export function AdminFixtures({
     onSetApproved?.(s.id, false)?.then?.(() => toast?.(s.name + ' · approval withdrawn'));
   }
 
+  // The operator's structured seasons (stage by stage) sit under the competitions table.
+  const seasonsPanel =
+    tenantConfig && onCreateSeasonRun ? (
+      <div style={{ marginBottom: 18 }}>
+        <SeasonRunsPanel
+          configFailed={structuresFailed || seasonRunsFailed}
+          clubs={clubs}
+          allLeagues={allLeagues}
+          allSeries={allSeries}
+          runs={allSeasonRuns}
+          onOpenLauncher={openLauncher}
+          initialRunId={initialRunId}
+          onPatchRun={onPatchSeasonRun}
+          onGenerate={onGenerateStageSeries}
+          onDeleteRun={onDeleteSeasonRun}
+          structures={tenantConfig?.structures ?? []}
+          onRebaseRun={onRebaseSeasonRun}
+          onFetchRun={onFetchSeasonRun}
+        />
+      </div>
+    ) : undefined;
+
   return (
     <div>
       <div className="page-head">
@@ -760,10 +768,10 @@ export function AdminFixtures({
             Fixtures &amp; <em>Venues</em>
           </h1>
           <p className="ph-desc">
-            Every league runs a season, stage by stage, on the setup your platform operator created
-            for it. A one-off cup or festival is a season too: your operator can add a One-off
-            tournament structure for it. Home venues flow from the affiliation form. Travel distance
-            is calculated for every away fixture.{' '}
+            Find the week&apos;s games, results and grounds. Create a league or tournament under
+            Leagues &amp; tournaments and its fixtures are drawn for you; seasons your platform
+            operator set up run stage by stage. Home venues flow from the affiliation form. Travel
+            distance is calculated for every away fixture.{' '}
             <a className="help-link" href={GUIDE_URL} target="_blank" rel="noopener noreferrer">
               Open the full guide
             </a>
@@ -772,8 +780,9 @@ export function AdminFixtures({
         <div className="ph-actions">
           <InfoDot title="Fixture actions" align="end">
             <p>
-              The pills show the selected series&apos; status. Approve, release, reveal and recall
-              are in the release bar under its fixtures.
+              <strong>Leagues &amp; tournaments</strong> — create a league or tournament and its
+              fixtures are drawn for you. Open one to edit fixtures, see the table and results, and
+              approve or release it from the bar under its fixtures.
             </p>
             <p>
               <strong>Start a season</strong> — build a season’s schedule stage by stage on a league
@@ -803,14 +812,6 @@ export function AdminFixtures({
           <Btn tone="teal" icon={Icon.Plus} size="sm" onClick={openLauncher}>
             Start a season
           </Btn>
-          {/* Status only. Approve, release, reveal and recall live in ONE place — the
-              release bar under the active series' fixtures — so the page never offers the
-              same action twice. */}
-          {active && showTab('series') && (
-            <span className="fix-head-status" title={`Status of ${active.name}`}>
-              <SeriesStatusPills series={active} />
-            </span>
-          )}
         </div>
       </div>
 
@@ -869,120 +870,49 @@ export function AdminFixtures({
               />
             </div>
           )}
-          {/* Structured competitions run stage by stage here; the flat series strip below
-              still covers ad-hoc series and everything a season has generated. */}
-          {tenantConfig && onCreateSeasonRun && showTab('series') && (
-            <div style={{ marginBottom: 18 }}>
-              <SeasonRunsPanel
-                configFailed={structuresFailed || seasonRunsFailed}
-                clubs={clubs}
-                allLeagues={allLeagues}
-                allSeries={allSeries}
-                runs={allSeasonRuns}
-                onOpenLauncher={openLauncher}
-                initialRunId={initialRunId}
-                onPatchRun={onPatchSeasonRun}
-                onGenerate={onGenerateStageSeries}
-                onDeleteRun={onDeleteSeasonRun}
-                structures={tenantConfig?.structures ?? []}
-                onRebaseRun={onRebaseSeasonRun}
-                onFetchRun={onFetchSeasonRun}
-              />
-            </div>
-          )}
         </>
       )}
 
-      {!showTab('series') ? null : allSeries.length === 0 ? (
-        // The empty state's copy points "above" at the season setup panel — while that
-        // panel is still loading, there's nothing there yet to point at, so render nothing.
-        seasonSetupLoading ? null : (
-          // No Start button of its own: the page header and the Seasons card above both
-          // open the same modal, and a third copy only made the page harder to read.
-          <EmptyState
-            icon={Icon.Field}
-            title="No series yet"
-            sub="Start a season on a league your platform operator has set up and work through it stage by stage. For a one-off cup or festival, your operator can add a One-off tournament structure."
-          />
-        )
-      ) : (
-        <>
-          {/* Series cards strip — status only; actions live in the release bar below */}
-          <div className="series-strip">
-            {allSeries.map((s) => {
-              const agg = seriesAgg(s);
-              return (
-                <div
-                  key={s.id}
-                  className={`series-card ${s.id === activeId ? 'active' : ''}`}
-                  onClick={() => setActiveId(s.id)}
-                  role="button"
-                  tabIndex={0}
-                >
-                  <div className="series-card-head">
-                    <div className="series-card-name">{s.name}</div>
-                    <SeriesStatusPills series={s} />
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: 'var(--muted)',
-                      fontWeight: 500,
-                      fontFamily: "'Montserrat',sans-serif",
-                    }}
-                  >
-                    {s.teams.length} teams · {s.fixtures.length} fixtures ·{' '}
-                    {showOvers ? `${s.maxOvers} ov · ` : ''}
-                    {s.endDate ? '' : 'start '}
-                    {formatDay(s.startDate)}
-                    {s.endDate ? ` – ${formatDay(s.endDate)}` : ''}
-                  </div>
-                  <div className="series-card-meta">
-                    <div className="series-card-stat">
-                      <div className="series-card-stat-l">Total km</div>
-                      <div className="series-card-stat-n">
-                        {Math.round(agg.totalKm).toLocaleString()}
-                      </div>
-                    </div>
-                  </div>
-                  {seriesOrigin(s) && (
-                    // Its own click target: opening the explainer must not also switch
-                    // the active series underneath it.
-                    <div className="series-card-origin" onClick={(e) => e.stopPropagation()}>
-                      <SeriesOriginPill series={s} />
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Active series drill-down */}
-          {active && (
-            <FixtureTable
-              series={active}
-              clubs={clubs}
-              travel={travel}
-              onUpdateSeries={onUpdateSeries}
-              onDeleteSeries={onDeleteSeries}
-              onDuplicateSeries={onDuplicateSeries}
-              onAskRelease={askRelease}
-              onAskRecall={askRecall}
-              onAskReveal={onReveal ? reveal : undefined}
-              onApprove={approve}
-              onUnapprove={unapprove}
-              toast={toast}
-              allCalendars={allCalendars}
-              allSeasonRuns={allSeasonRuns}
-              onAllocateVenues={onAllocateVenues}
-              onCheckClashes={onCheckClashes}
-              allSeries={allSeries}
-              umpires={umpires}
-              onSaveOfficials={onSaveOfficials}
-              onCreateUmpire={onCreateUmpire}
-            />
-          )}
-        </>
+      {showTab('series') && !seasonSetupLoading && (
+        <CompetitionsPanel
+          allSeries={allSeries}
+          clubs={clubs}
+          leagues={allLeagues}
+          runs={allSeasonRuns}
+          activeId={active?.id}
+          onSelectSeries={setActiveId}
+          onChanged={() => onCompetitionsChanged?.()}
+          toast={toast}
+          catalogue={leaguesCatalogue}
+          seasons={seasonsPanel}
+          renderStatus={() => active && <SeriesStatusPills series={active} />}
+          renderFixtures={() =>
+            active ? (
+              <FixtureTable
+                series={active}
+                clubs={clubs}
+                travel={travel}
+                onUpdateSeries={onUpdateSeries}
+                onDeleteSeries={onDeleteSeries}
+                onDuplicateSeries={onDuplicateSeries}
+                onAskRelease={askRelease}
+                onAskRecall={askRecall}
+                onAskReveal={onReveal ? reveal : undefined}
+                onApprove={approve}
+                onUnapprove={unapprove}
+                toast={toast}
+                allCalendars={allCalendars}
+                allSeasonRuns={allSeasonRuns}
+                onAllocateVenues={onAllocateVenues}
+                onCheckClashes={onCheckClashes}
+                allSeries={allSeries}
+                umpires={umpires}
+                onSaveOfficials={onSaveOfficials}
+                onCreateUmpire={onCreateUmpire}
+              />
+            ) : null
+          }
+        />
       )}
 
       {/* Shared confirmation modal — portaled to document.body so it escapes the
@@ -2483,6 +2413,7 @@ export function AdminLeagues({
   onRefreshSeasonSetup,
   onOpenSeason,
   onOpenClub,
+  embedded = false,
 }: {
   allLeagues;
   clubs;
@@ -2505,9 +2436,11 @@ export function AdminLeagues({
   onCreateSeasonRun?: (run: StartSeasonRunRequest) => Promise<SeasonRun | void>;
   /** Refetch leagues, calendars, structures and runs — the Start modal calls it on open. */
   onRefreshSeasonSetup?: () => Promise<unknown> | void;
-  /** Go to the season on Fixtures & Venues → Seasons & series. */
+  /** Go to the season on Fixtures & Venues → Leagues & tournaments. */
   onOpenSeason?: (runId: string) => void;
   onOpenClub?: (clubId: string) => void;
+  /** Shown inside Fixtures & Venues → Leagues & tournaments: no page head, just the actions. */
+  embedded?: boolean;
 }) {
   const vt = useVertical().terms;
   const copy = useCopy();
@@ -2549,30 +2482,49 @@ export function AdminLeagues({
 
   return (
     <div>
-      <div className="page-head">
-        <div className="ph-left">
-          <div className="ph-crumb">{copy.crumbRoot} · Admin Console / Leagues</div>
-          <h1 className="ph-title">
-            League <em>catalogue</em>
-          </h1>
-          <p className="ph-desc">
-            Create the leagues &amp; divisions clubs opt into during affiliation — fixtures are then
-            generated per league. Set these up before inviting clubs so they can register. Each
-            league&apos;s season setup (its structure and calendar) comes from your platform
-            operator; once a league is ready, start its season here.
+      {embedded ? (
+        <div className="cmp-cat-head">
+          <p className="ump-sub">
+            The leagues &amp; divisions {vt.clubs} opt into during affiliation. A league&apos;s
+            season setup comes from your platform operator.
           </p>
-        </div>
-        <div className="ph-actions">
-          {canStart && allLeagues.length > 0 && (
-            <Btn tone="outline" icon={Icon.Plus} size="sm" onClick={() => setStartFor('')}>
-              Start a season
+          <div className="fh-toolbar-right">
+            {canStart && allLeagues.length > 0 && (
+              <Btn tone="outline" icon={Icon.Plus} size="sm" onClick={() => setStartFor('')}>
+                Start a season
+              </Btn>
+            )}
+            <Btn tone="teal" icon={Icon.Plus} size="sm" onClick={onCreate}>
+              Create league
             </Btn>
-          )}
-          <Btn tone="teal" icon={Icon.Plus} size="sm" onClick={onCreate}>
-            Create league
-          </Btn>
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="page-head">
+          <div className="ph-left">
+            <div className="ph-crumb">{copy.crumbRoot} · Admin Console / Leagues</div>
+            <h1 className="ph-title">
+              League <em>catalogue</em>
+            </h1>
+            <p className="ph-desc">
+              Create the leagues &amp; divisions clubs opt into during affiliation — fixtures are
+              then generated per league. Set these up before inviting clubs so they can register.
+              Each league&apos;s season setup (its structure and calendar) comes from your platform
+              operator; once a league is ready, start its season here.
+            </p>
+          </div>
+          <div className="ph-actions">
+            {canStart && allLeagues.length > 0 && (
+              <Btn tone="outline" icon={Icon.Plus} size="sm" onClick={() => setStartFor('')}>
+                Start a season
+              </Btn>
+            )}
+            <Btn tone="teal" icon={Icon.Plus} size="sm" onClick={onCreate}>
+              Create league
+            </Btn>
+          </div>
+        </div>
+      )}
 
       {allLeagues.length > 0 &&
         (seasonSetupLoading ? (

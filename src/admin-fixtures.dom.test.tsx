@@ -111,7 +111,14 @@ const openEditor = async (user: ReturnType<typeof userEvent.setup>, rowText: Reg
   await user.click(within(row).getByTitle('Edit fixture'));
 };
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  window.history.replaceState(null, '', '/admin/fixtures');
+});
+// Leagues & tournaments opens on its table; `?series=` lands on one series' page (its
+// fixtures, release bar and status), as a link from elsewhere does.
+const openOn = (seriesId: string) =>
+  window.history.replaceState(null, '', `/admin/fixtures?series=${seriesId}`);
 
 describe('the venue picker', () => {
   const allocated = () =>
@@ -595,14 +602,15 @@ describe('a tenant with no series still gets the season machinery', () => {
       />,
     );
 
-  it('renders the venues registry, the Start-a-season flow and the scoped series empty state', () => {
+  it('renders the venues registry, the Start-a-season flow and the empty competitions table', () => {
     renderPage();
     expect(screen.getByRole('heading', { name: /venues/i })).toBeTruthy();
     expect(screen.getByText(/no season running/i)).toBeTruthy();
-    // The header action and the Seasons card's CTA. The series empty state no longer
-    // carries a third copy of the same button.
+    // The header action and the Seasons card's CTA. The empty table offers Create instead.
     expect(screen.getAllByRole('button', { name: /^start a season$/i })).toHaveLength(2);
-    expect(screen.getByText(/no series yet/i)).toBeTruthy();
+    expect(screen.getByText(/no leagues or tournaments yet/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: '+ Create league' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '+ Create tournament' })).toBeTruthy();
   });
 
   // The page header's button is always there; what must not appear is the Seasons card's
@@ -633,18 +641,15 @@ describe('a tenant with no series still gets the season machinery', () => {
     expect(screen.queryByText(/one-off series/i)).toBeNull();
   });
 
-  // Quick start is gone: seasons run on the operator's setup, and a one-off cup is an
-  // operator-created structure — the page says so rather than pointing at a template.
-  it('hands one-off cups to the operator and never mentions quick start', () => {
+  // ADR 0018: the union creates its own leagues and tournaments here; operator seasons still
+  // run stage by stage. Quick start stays gone.
+  it('says where leagues and tournaments are made and never mentions quick start', () => {
     renderPage();
-    expect(screen.getByText(/on the setup your platform operator created for it/i)).toBeTruthy();
     expect(
-      screen.getByText(/your operator can add a One-off tournament structure for it/i),
+      screen.getByText(/create a league or tournament under leagues & tournaments/i),
     ).toBeTruthy();
     expect(
-      screen.getByText(
-        /For a one-off cup or festival, your operator can add a One-off tournament structure\./,
-      ),
+      screen.getByText(/seasons your platform operator set up run stage by stage/i),
     ).toBeTruthy();
     expect(screen.queryByText(/quick-start|quick start/i)).toBeNull();
   });
@@ -955,6 +960,7 @@ describe('progressive release — withhold at release, reveal later (ADR 0011)',
   ) => {
     const onSetReleased = spies.onSetReleased ?? vi.fn();
     const onReveal = spies.onReveal ?? vi.fn();
+    openOn(s.id);
     renderWithProviders(
       <AdminFixtures
         clubs={clubs}
@@ -1022,8 +1028,9 @@ describe('progressive release — withhold at release, reveal later (ADR 0011)',
   });
 });
 
-describe('one release bar — the header and the cards show status only', () => {
-  const renderPage = (all: Series[]) =>
+describe('one release bar — the series page shows status only above it', () => {
+  const renderPage = (all: Series[]) => (
+    openOn(all[0].id),
     renderWithProviders(
       <AdminFixtures
         clubs={clubs}
@@ -1047,12 +1054,14 @@ describe('one release bar — the header and the cards show status only', () => 
         onDeleteSeasonRun={vi.fn()}
         onGenerateStageSeries={vi.fn()}
       />,
-    );
+    )
+  );
 
-  const header = () => document.querySelector('.page-head') as HTMLElement;
+  // The status pills sit beside the series' name, above its fixtures and release bar.
+  const header = () => document.querySelector('.cmp-title-row') as HTMLElement;
   const bar = () => document.querySelector('.fix-release-bar') as HTMLElement;
 
-  it('offers Approve once, in the release bar, with the header showing a Draft pill', () => {
+  it('offers Approve once, in the release bar, with the title showing a Draft pill', () => {
     renderPage([series(), series({ id: 's2', name: 'EMCU Premier · 2026/27' })]);
 
     expect(screen.getAllByRole('button', { name: /approve fixtures/i })).toHaveLength(1);
@@ -1079,8 +1088,8 @@ describe('one release bar — the header and the cards show status only', () => 
     expect(within(header()).getByText('Released')).toBeTruthy();
     expect(within(header()).getByText('Withheld venues')).toBeTruthy();
     expect(within(header()).getByText('Withheld times')).toBeTruthy();
-    // The cards carry no action buttons of their own any more.
-    expect(document.querySelector('.series-card-cta')).toBeNull();
+    // The competitions table carries no release actions of its own.
+    expect(document.querySelector('.cmp-tbl')).toBeNull();
     // Released has no next lifecycle step, so no button on the bar is filled: the reveals
     // are outline actions, like Recall.
     expect(bar().querySelectorAll('.btn:not(.btn-outline)')).toHaveLength(0);
@@ -1117,10 +1126,11 @@ describe('series outside every season stage are labelled for what they are', () 
         allLeagues={[]}
       />,
     );
+  // One row per series in the Leagues & tournaments table.
   const cardNamed = (name: string) =>
     screen
       .getAllByText(name)
-      .map((el) => el.closest('.series-card'))
+      .map((el) => el.closest('tr.cmp-row'))
       .find(Boolean) as HTMLElement;
 
   it('marks an imported schedule, a stand-alone series, and nothing on a season-stage series', () => {
@@ -1137,6 +1147,7 @@ describe('series outside every season stage are labelled for what they are', () 
     expect(
       within(cardNamed('Season stage')).queryByText(/imported schedule|stand-alone/i),
     ).toBeNull();
+    expect(within(cardNamed('Season stage')).getByText('Season')).toBeTruthy();
 
     const pill = within(cardNamed('Hand-made cup')).getByText('Stand-alone series');
     expect(pill.closest('[title]')).toHaveAttribute(
@@ -1154,6 +1165,7 @@ describe('release fires exactly one success toast', () => {
   const renderPage = (s: Series) => {
     const toast = vi.fn();
     const onSetReleased = vi.fn().mockResolvedValue(undefined);
+    openOn(s.id);
     renderWithProviders(
       <AdminFixtures
         clubs={clubs}
@@ -1203,6 +1215,7 @@ describe('recall fires no false success toast when the recall fails', () => {
   const renderPage = (s: Series) => {
     const toast = vi.fn();
     const onSetReleased = vi.fn().mockRejectedValue(new Error('series changed; refetch'));
+    openOn(s.id);
     renderWithProviders(
       <AdminFixtures
         clubs={clubs}

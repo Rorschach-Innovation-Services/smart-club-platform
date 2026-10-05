@@ -9,7 +9,7 @@
  *   weekend  — games and results as they come in.
  * The office manages a fixture where it finds it — add, edit, remove, appoint umpires and
  * scorers, confirm the result — through the same server paths as the series editor
- * (FixtureManage.tsx). Seasons, stages, allocation and release stay in Seasons & series.
+ * (FixtureManage.tsx). Seasons, stages, allocation and release stay in Leagues & tournaments.
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ApiError } from './api';
@@ -91,7 +91,7 @@ export interface HubManage {
 export interface HubProps {
   rows: FixtureRow[];
   today: string;
-  /** Opens a series in Seasons & series (the editor). */
+  /** Opens a series in Leagues & tournaments (its editor). */
   onOpenSeries: (seriesId: string) => void;
   series: Array<{ id: string; name: string }>;
   clubs: Array<{ id: string; name: string }>;
@@ -144,7 +144,8 @@ export function Teams({ r, compact }: { r: FixtureRow; compact?: boolean }) {
               rel="noopener noreferrer"
               aria-label={`Scorecard: ${r.home} v ${r.away} (opens medicoach)`}
             >
-              Scorecard ↗
+              Scorecard
+              <ExternalIcon />
             </a>
           )}
         </span>
@@ -281,6 +282,46 @@ function ConfirmControl({ r, manage }: { r: FixtureRow; manage?: HubManage }) {
   );
 }
 
+/* Drawn icons (not text glyphs), so they sit centred on the buttons beside them. */
+const MoreIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="currentColor">
+    <circle cx="3" cy="8" r="1.5" />
+    <circle cx="8" cy="8" r="1.5" />
+    <circle cx="13" cy="8" r="1.5" />
+  </svg>
+);
+const ChevronIcon = ({ dir }: { dir: 'left' | 'right' }) => (
+  <svg
+    width="14"
+    height="14"
+    viewBox="0 0 14 14"
+    aria-hidden="true"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.8"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    style={{ display: 'block' }}
+  >
+    <path d={dir === 'left' ? 'M8.5 3 4.5 7l4 4' : 'M5.5 3l4 4-4 4'} />
+  </svg>
+);
+const ExternalIcon = () => (
+  <svg
+    width="12"
+    height="12"
+    viewBox="0 0 12 12"
+    aria-hidden="true"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.6"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M4.5 2.5h5v5M9.5 2.5 3 9" />
+  </svg>
+);
+
 /** "⋯" — the rarely used row actions, out of the way of the officials and the result. */
 function MoreMenu({
   items,
@@ -315,7 +356,7 @@ function MoreMenu({
         aria-label={label}
         onClick={() => setOpen(!open)}
       >
-        ⋯
+        <MoreIcon />
       </button>
       {open && (
         <span className="fh-menu" role="menu">
@@ -391,10 +432,13 @@ function OfficialsRow({
   r,
   manage,
   onDialog,
+  compact = false,
 }: {
   r: FixtureRow;
   manage?: HubManage;
   onDialog: (d: Dialog) => void;
+  /** In a table cell: no top margin, short labels. */
+  compact?: boolean;
 }) {
   const label = `${r.home} v ${r.away}`;
   const off = r.state === 'postponed' || r.state === 'cancelled';
@@ -412,39 +456,41 @@ function OfficialsRow({
       aria-label={kind === 'umpires' ? 'Umpires' : 'Scorers'}
     >
       <span className="fh-off-l">{kind === 'umpires' ? 'Umpires' : 'Scorers'}</span>
-      {names.map((n) =>
-        canEdit ? (
+      <span className="fh-off-people">
+        {names.map((n) =>
+          canEdit ? (
+            <button
+              key={n}
+              className="fh-person"
+              onClick={() => onDialog({ kind, row: r })}
+              aria-label={`Change ${kind} for ${label} (${n})`}
+            >
+              {n}
+            </button>
+          ) : (
+            <span key={n} className="fh-person ro">
+              {n}
+            </span>
+          ),
+        )}
+        {canEdit && names.length < max && !off && (
           <button
-            key={n}
-            className="fh-person"
+            className={`fh-add${needed ? ' needed' : ''}`}
             onClick={() => onDialog({ kind, row: r })}
-            aria-label={`Change ${kind} for ${label} (${n})`}
+            aria-label={`Add ${noun} to ${label}`}
           >
-            {n}
+            + Add {noun}
           </button>
-        ) : (
-          <span key={n} className="fh-person ro">
-            {n}
-          </span>
-        ),
-      )}
-      {canEdit && names.length < max && !off && (
-        <button
-          className={`fh-add${needed ? ' needed' : ''}`}
-          onClick={() => onDialog({ kind, row: r })}
-          aria-label={`Add ${noun} to ${label}`}
-        >
-          + Add {noun}
-        </button>
-      )}
-      {!canEdit && !names.length && <span className="ump-sub">None</span>}
+        )}
+        {!canEdit && !names.length && <span className="ump-sub">None</span>}
+      </span>
     </span>
   );
-  // Before the game both are jobs (highlighted when short); after it, umpires can still be
-  // recorded (who stood), scorers only show if someone was named.
+  // Umpires and scorers always sit together, one line each. Before the game they are jobs
+  // (highlighted when short); after it, the office can still record who stood and who scored.
   const toCome = r.state === 'upcoming' || r.state === 'today';
   return (
-    <div className="fh-officials">
+    <div className={`fh-officials${compact ? ' compact' : ''}`}>
       {group(
         'umpires',
         r.umpires,
@@ -453,15 +499,14 @@ function OfficialsRow({
         !!manage?.onSaveUmpires,
         toCome && r.umpires.length < 2,
       )}
-      {(r.scorers.length > 0 || toCome) &&
-        group(
-          'scorers',
-          r.scorers,
-          2,
-          r.scorers.length ? 'backup scorer' : 'scorer',
-          !!manage?.onSaveScorers,
-          toCome && !r.scorers.length,
-        )}
+      {group(
+        'scorers',
+        r.scorers,
+        2,
+        r.scorers.length ? 'backup scorer' : 'scorer',
+        !!manage?.onSaveScorers,
+        toCome && !r.scorers.length,
+      )}
     </div>
   );
 }
@@ -532,7 +577,7 @@ function WeekNav({
         aria-label="Previous week"
         onClick={() => onChange(addDays(monday, -7))}
       >
-        ‹
+        <ChevronIcon dir="left" />
       </Btn>
       <div className="fh-weeklabel">
         <strong>
@@ -552,7 +597,7 @@ function WeekNav({
         aria-label="Next week"
         onClick={() => onChange(addDays(monday, 7))}
       >
-        ›
+        <ChevronIcon dir="right" />
       </Btn>
       {monday !== thisWeek && (
         <Btn tone="outline" size="sm" onClick={() => onChange(thisWeek)}>
@@ -913,16 +958,7 @@ export function AllFixturesView({ rows, today, onOpenSeries, series, clubs, mana
                       {r.round !== undefined && <div className="ump-sub">Round {r.round}</div>}
                     </td>
                     <td data-label="Officials">
-                      <div>
-                        {r.umpires.length ? (
-                          r.umpires.join(', ')
-                        ) : (
-                          <span className="ump-sub">No umpires</span>
-                        )}
-                      </div>
-                      <div className="ump-sub">
-                        {r.scorers.length ? `Scorer: ${r.scorers.join(', ')}` : 'No scorer'}
-                      </div>
+                      <OfficialsRow r={r} manage={manage} onDialog={dialogs.open} compact />
                     </td>
                     <td data-label="Status">
                       <span className={`fh-state state-${r.state}`}>{STATE_LABEL[r.state]}</span>

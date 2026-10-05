@@ -203,15 +203,15 @@ export async function repGetSeries(
 
 // ── Browser helpers ────────────────────────────────────────────────────────
 
-/** Open /admin/fixtures on Seasons & series and select the series card with the given
- * (unique) name. Returns the card locator. Assumes an admin is already signed in on `page`. */
+/** Open /admin/fixtures on Leagues & tournaments and open the series with the given
+ * (unique) name from the table. Returns its page (title, fixtures and release bar). Assumes
+ * an admin is already signed in on `page`. */
 export async function openAdminSeries(page: Page, name: string) {
   await page.goto('/admin/fixtures?tab=series');
-  const card = page.locator('.series-card', { hasText: name });
-  await expect(card).toBeVisible();
-  await card.click();
-  await expect(card).toHaveClass(/active/);
-  return card;
+  const table = page.getByRole('table', { name: 'Leagues and tournaments' });
+  await table.getByRole('button', { name, exact: true }).click();
+  await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
+  return page.locator('.cmp-detail');
 }
 
 /**

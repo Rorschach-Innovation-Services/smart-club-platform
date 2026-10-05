@@ -173,7 +173,7 @@ test('operator sets a league up; admin starts, the calendar follows live until g
 
   // ── Admin: one Start a season modal; only ready leagues can be picked ──
   await signInAsAdmin(page);
-  // Seasons & series: the seasons panel the rest of this test works in.
+  // Leagues & tournaments: the operator's seasons panel the rest of this test works in.
   await page.goto('/admin/fixtures?tab=series');
   await page.getByRole('button', { name: 'Start a season' }).first().click();
   const launcher = page.getByRole('dialog', { name: 'Start a season' });

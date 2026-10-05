@@ -29,7 +29,8 @@ needed.
 into one list with names, ground and **checks**: result missing, result to confirm, result
 changed since confirmed, ground double-booked, no/one umpire, no scorer (upcoming games only),
 no ground, start time TBC, not released. Fixtures & Venues has tabs **This week · All fixtures
-· Results · Venues · Seasons & series**; the last is the unchanged editor.
+· Results · Venues · Seasons & series**; the last is the unchanged editor. (ADR 0018 renames
+it **Leagues & tournaments** and turns it into a table of competitions.)
 
 Managing a fixture from those views (`src/FixtureManage.tsx`) goes through **the same writes
 the editor uses** — nothing new on the server for add/edit/remove:

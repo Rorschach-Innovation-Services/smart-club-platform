@@ -1,6 +1,6 @@
 /**
  * Fixtures & Venues hub — finding and managing the week's fixtures (This week, All fixtures,
- * Results, Venues) in front of the unchanged Seasons & series editor. Results come in on the
+ * Results, Venues) in front of Leagues & tournaments (the unchanged series editor inside). Results come in on the
  * fixtures (GET /series joins them). Every write goes through the same handlers the editor
  * uses; the failure paths — a ground clash, a stale page, a fixture medicoach already holds, a
  * result medicoach changed — keep the dialog open with the reason.
@@ -341,10 +341,16 @@ describe('This week', () => {
     expect(
       within(day).getByRole('button', { name: /add umpire to spartan sporting cc v tongaat cc/i }),
     ).toBeTruthy();
-    // A played game doesn't ask for a scorer after the fact.
+    // Scorers sit right under the umpires on every game — recordable after it too, but only
+    // highlighted as a job while the game is still to come.
+    const addScorer = within(day).getByRole('button', {
+      name: /add scorer to spartan sporting cc v tongaat cc/i,
+    });
+    expect(addScorer.classList.contains('needed')).toBe(false);
+    const officials = addScorer.closest('.fh-officials')!;
     expect(
-      within(day).queryByRole('button', { name: /add scorer to spartan sporting cc/i }),
-    ).toBeNull();
+      [...officials.querySelectorAll('[role=group]')].map((g) => g.getAttribute('aria-label')),
+    ).toEqual(['Umpires', 'Scorers']);
   });
 
   it('appoints umpires and scorers (adding a new scorer on the way)', async () => {
@@ -498,22 +504,23 @@ describe('All fixtures, Venues and the editor', () => {
     const day = screen.getByRole('region', { name: 'Saturday 3 October' });
     await user.click(within(day).getAllByRole('button', { name: /more for/i })[0]);
     await user.click(screen.getByRole('menuitem', { name: /open emcu division 2/i }));
-    expect(screen.getByRole('tab', { name: 'Seasons & series', selected: true })).toBeTruthy();
-    expect(document.querySelector('.series-card.active')?.textContent).toMatch(/EMCU Division 2/);
+    expect(screen.getByRole('tab', { name: 'Leagues & tournaments', selected: true })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'EMCU Division 2' })).toBeTruthy();
     expect(document.querySelector('.fix-release-bar')).toBeTruthy();
-    expect(window.location.search).toBe('?tab=series');
+    expect(window.location.search).toBe('?tab=series&series=s1');
   });
 
   it('?series= still deep-links straight to that series', () => {
     window.history.replaceState(null, '', '/admin/fixtures?series=s1');
     renderHub([series({ id: 's0', name: 'Other series', fixtures: [] }), series()]);
-    expect(screen.getByRole('tab', { name: 'Seasons & series', selected: true })).toBeTruthy();
-    expect(document.querySelector('.series-card.active')?.textContent).toMatch(/EMCU Division 2/);
+    expect(screen.getByRole('tab', { name: 'Leagues & tournaments', selected: true })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'EMCU Division 2' })).toBeTruthy();
   });
 
   it('with no series yet it stays one setup page, without tabs', () => {
     renderHub([]);
     expect(screen.queryByRole('tablist', { name: 'Fixtures and venues' })).toBeNull();
-    expect(screen.getByText('No series yet')).toBeTruthy();
+    expect(screen.getByText(/No leagues or tournaments yet/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: '+ Create league' })).toBeTruthy();
   });
 });
