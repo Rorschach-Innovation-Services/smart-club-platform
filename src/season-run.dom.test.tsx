@@ -15,11 +15,12 @@
  * and audited, but never executed. That is the honest design, and these assert it holds.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { currentSeasonLabel } from './data';
 import { ApiError } from './api';
-import { GenerateFixturesLauncher, SeasonRunsPanel } from './season-run';
+import { SeasonRunsPanel, StartSeasonModal } from './season-run';
+import { networkErrorMessage } from './error-copy';
 import { materialiseRun } from '../packages/engine/src/run';
 import { leagueParticipants } from '../packages/engine/src/leagues';
 import { addDays, formatIsoDate, todayIso } from '../packages/engine/src/calendar';
@@ -1110,9 +1111,35 @@ describe('stage cards say where each stage is, where it plays and what it needs'
     expect(currentStep()).toHaveTextContent(/^Released$/);
   });
 
-  it('keeps Start a season to an outline button once a season is on screen', () => {
+  // The page header owns Start a season; with a season on screen the panel's own copy of
+  // it was a fourth entry point competing with the stage cards' buttons.
+  it('leaves Start a season to the page header once a season is on screen', () => {
     setup(SPLIT_LEAGUE, [run(SPLIT_LEAGUE)]);
-    expect(screen.getByRole('button', { name: /start a season/i })).not.toHaveClass('btn-teal');
+    expect(screen.queryByRole('button', { name: /start a season/i })).toBeNull();
+  });
+
+  it('keeps the empty-state Start a season while no season exists', async () => {
+    const { user, onOpenLauncher } = setup(SPLIT_LEAGUE, []);
+    await user.click(screen.getByRole('button', { name: /^start a season$/i }));
+    expect(onOpenLauncher).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens on the season it was asked for ("Open season" on the Leagues page)', () => {
+    const other = run(POOLS_THEN_CROSS, { id: 'run-2', seasonLabel: '2027/28' });
+    render(
+      <SeasonRunsPanel
+        clubs={clubs}
+        allLeagues={[league(SPLIT_LEAGUE.id)]}
+        allSeries={[]}
+        runs={[run(SPLIT_LEAGUE), other]}
+        initialRunId="run-2"
+        onOpenLauncher={vi.fn()}
+        onPatchRun={vi.fn()}
+        onGenerate={vi.fn()}
+        onDeleteRun={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/Seeded groups → cross-group semis → final/)).toBeVisible();
   });
 });
 
@@ -2073,196 +2100,6 @@ describe('two groups may share a name', () => {
 });
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   GenerateFixturesLauncher — only a league its operator set up can start a season.
-
-   Once routed past the league picker there used to be no way back to it short of
-   closing the whole modal — which threw away the league choice too, not just the
-   in-progress form. Back returns to the picker without calling `onClose`.
-   ───────────────────────────────────────────────────────────────────────────── */
-
-const launcherProps = (over: Partial<Parameters<typeof GenerateFixturesLauncher>[0]> = {}) => ({
-  clubs,
-  allLeagues: [league(SPLIT_LEAGUE.id)],
-  config: { structures: [SPLIT_LEAGUE], calendars: [calendar] } as unknown as TenantConfig,
-  existingRuns: [] as SeasonRun[],
-  onCreateRun: vi.fn().mockResolvedValue(undefined),
-  onClose: vi.fn(),
-  toast: vi.fn(),
-  ...over,
-});
-
-/** A league in the catalogue the operator has not set up. */
-const unsetLeague = {
-  key: 'friendlies',
-  label: 'Friendlies',
-  group: 'Senior',
-  district: 'All districts',
-} as unknown as League;
-
-describe('GenerateFixturesLauncher — Back out of "Start a season"', () => {
-  it('returns to the league picker rather than closing the launcher', async () => {
-    const onClose = vi.fn();
-    const user = userEvent.setup();
-
-    render(<GenerateFixturesLauncher {...launcherProps({ onClose })} />);
-
-    // The one set-up league routes straight into StartSeasonForm.
-    await user.click(screen.getByRole('button', { name: /^continue$/i }));
-    expect(screen.getByRole('button', { name: /^start season$/i })).toBeInTheDocument();
-    // Under the primary button: what the admin will do after starting, in order.
-    expect(screen.getByText('What happens next').nextElementSibling).toHaveTextContent(
-      /Confirm entrants.*finishing order.*Generate fixtures.*Approve.*Release/,
-    );
-
-    await user.click(screen.getByRole('button', { name: /^back$/i }));
-
-    // Back at the league picker — Continue is there again, and the launcher itself
-    // was never told to close.
-    expect(screen.getByRole('button', { name: /^continue$/i })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /^start season$/i })).toBeNull();
-    expect(onClose).not.toHaveBeenCalled();
-  });
-
-  it('says plainly which setup the league runs on', () => {
-    const overs = { ...SPLIT_LEAGUE, overs: 50 } as CompetitionStructure;
-    render(
-      <GenerateFixturesLauncher
-        {...launcherProps({
-          config: { structures: [overs], calendars: [calendar] } as unknown as TenantConfig,
-        })}
-      />,
-    );
-
-    expect(screen.getByRole('dialog', { name: /^start a season$/i })).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        'This league is set up by your operator: Split league with mid-season swap · 50 overs on 2026/27.',
-      ),
-    ).toBeInTheDocument();
-    // Outside a HelpProvider the help link falls back to the guide page.
-    expect(screen.getByRole('link', { name: /how does this work/i })).toHaveAttribute(
-      'href',
-      expect.stringContaining('league-structures-tutorial'),
-    );
-    // No quick start: no starter shapes, no format picker.
-    expect(screen.queryByRole('radiogroup', { name: /how the season is played/i })).toBeNull();
-    expect(screen.queryByLabelText('Match format')).toBeNull();
-  });
-
-  it('falls back to the league picker if the chosen league vanishes mid-flow', async () => {
-    const onClose = vi.fn();
-    const { rerender } = render(<GenerateFixturesLauncher {...launcherProps({ onClose })} />);
-    expect(screen.getByRole('button', { name: /^continue$/i })).toBeEnabled();
-
-    // The league lost its setup — changed in another tab, picked up by this console's
-    // own refetch — while the admin is looking at it.
-    rerender(
-      <GenerateFixturesLauncher {...launcherProps({ allLeagues: [unsetLeague], onClose })} />,
-    );
-
-    expect(screen.getByRole('combobox', { name: 'League' })).toHaveValue('');
-    expect(screen.getByRole('button', { name: /^continue$/i })).toBeDisabled();
-    expect(onClose).not.toHaveBeenCalled();
-  });
-
-  // A one-off event is an operator-created structure, not a third, league-less option.
-  it('offers only leagues — no one-off series option', () => {
-    render(<GenerateFixturesLauncher {...launcherProps()} />);
-    const options = within(screen.getByRole('combobox', { name: 'League' }))
-      .getAllByRole('option')
-      .map((o) => o.textContent);
-    expect(options).toEqual(['Premier League']);
-    expect(screen.queryByRole('option', { name: /one-off/i })).toBeNull();
-  });
-
-  it('counts the registered sides and says how many are not yet affiliated', () => {
-    const mixed = clubs.map((c, i) =>
-      i < 2 ? { ...c, affiliation: 'in_progress' } : c,
-    ) as unknown as Club[];
-    render(<GenerateFixturesLauncher {...launcherProps({ clubs: mixed })} />);
-    expect(
-      screen.getByText(/12 sides \(2 not yet affiliated\) registered for Premier League/),
-    ).toBeVisible();
-  });
-});
-
-describe('GenerateFixturesLauncher — leagues the operator has not set up', () => {
-  it('lists them disabled, with the hand-off to the operator', () => {
-    render(
-      <GenerateFixturesLauncher
-        {...launcherProps({ allLeagues: [league(SPLIT_LEAGUE.id), unsetLeague] })}
-      />,
-    );
-
-    const picker = screen.getByRole('combobox', { name: 'League' });
-    expect(within(picker).getByRole('option', { name: 'Premier League' })).toBeEnabled();
-    expect(within(picker).getByRole('option', { name: 'Friendlies' })).toBeDisabled();
-    expect(within(picker).getByRole('group', { name: /not set up yet/i })).toBeInTheDocument();
-    expect(
-      screen.getByText('Friendlies has no season setup. Ask your operator to set this league up.'),
-    ).toBeVisible();
-    // The set-up league is preselected and can continue.
-    expect(picker).toHaveValue('premier');
-    expect(screen.getByRole('button', { name: /^continue$/i })).toBeEnabled();
-  });
-
-  it('cannot continue when no league is set up', () => {
-    render(<GenerateFixturesLauncher {...launcherProps({ allLeagues: [unsetLeague] })} />);
-
-    expect(
-      within(screen.getByRole('combobox', { name: 'League' })).getByRole('option', {
-        name: 'Friendlies',
-      }),
-    ).toBeDisabled();
-    expect(screen.getByText(/No league has been set up for a season yet/)).toBeVisible();
-    expect(screen.getByRole('button', { name: /^continue$/i })).toBeDisabled();
-    expect(screen.queryByRole('radiogroup', { name: /how the season is played/i })).toBeNull();
-  });
-
-  describe('a set-up league whose season dates have ended', () => {
-    const endingOn = (end: string): SeasonCalendar => ({
-      id: 'cal-old',
-      label: '2025/26',
-      blocks: [{ id: 'b1', label: 'Block 1', start: addDays(end, -60), end }],
-    });
-    const endedProps = (cal: SeasonCalendar) =>
-      launcherProps({
-        allLeagues: [
-          {
-            ...league(SPLIT_LEAGUE.id),
-            setup: { structureId: SPLIT_LEAGUE.id, calendarId: cal.id },
-          },
-        ],
-        config: {
-          structures: [SPLIT_LEAGUE],
-          calendars: [cal, calendar],
-        } as unknown as TenantConfig,
-      });
-
-    it('stays selectable but asks the operator to renew the dates, with Continue disabled', () => {
-      const yesterday = addDays(todayIso(), -1);
-      render(<GenerateFixturesLauncher {...endedProps(endingOn(yesterday))} />);
-
-      expect(screen.getByRole('combobox', { name: 'League' })).toHaveValue('premier');
-      expect(
-        screen.getByText(
-          `This league's season dates have ended — ask your operator to renew them. (2025/26, ended ${formatIsoDate(yesterday)}.)`,
-        ),
-      ).toBeVisible();
-      expect(screen.getByRole('button', { name: /^continue$/i })).toBeDisabled();
-      expect(screen.queryByRole('radiogroup', { name: /how the season is played/i })).toBeNull();
-    });
-
-    it('continues to the season form while the calendar is still running', () => {
-      render(<GenerateFixturesLauncher {...endedProps(endingOn(addDays(todayIso(), 1)))} />);
-
-      expect(screen.queryByText(/season dates have ended/)).toBeNull();
-      expect(screen.getByRole('button', { name: /^continue$/i })).toBeEnabled();
-    });
-  });
-});
-
-/* ─────────────────────────────────────────────────────────────────────────────
    Dropping a side from an all-registered stage — what the retired create-series form's
    team opt-out chips did, re-homed as Edit entrants (ADR 0014).
    ───────────────────────────────────────────────────────────────────────────── */
@@ -2395,163 +2232,408 @@ describe('the affiliation gate on Confirm entrants', () => {
 });
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   StartSeasonForm — league → season label → start. The league's setup decides the
-   structure and calendar; the form only summarises them.
+   StartSeasonModal — one step: league → season label → summary → Start season.
+
+   It replaced a two-modal flow (a league picker, then a form that asked for the league
+   again). Only a league that can start is selectable; the rest are listed disabled with
+   the reason and who has to act. The league's setup decides the structure and calendar;
+   the modal only summarises them, and the POST body is unchanged.
    ───────────────────────────────────────────────────────────────────────────── */
 
-describe('StartSeasonForm — a season on the league’s setup', () => {
-  const open = async (over: Partial<Parameters<typeof GenerateFixturesLauncher>[0]> = {}) => {
-    const props = launcherProps(over);
-    const user = userEvent.setup();
-    render(<GenerateFixturesLauncher {...props} />);
-    await user.click(screen.getByRole('button', { name: /^continue$/i }));
-    return { user, onCreateRun: props.onCreateRun, toast: props.toast, onClose: props.onClose };
-  };
-  const startBtn = () => screen.getByRole('button', { name: /^start season$/i });
+const modalProps = (over: Partial<Parameters<typeof StartSeasonModal>[0]> = {}) => ({
+  clubs,
+  allLeagues: [league(SPLIT_LEAGUE.id)],
+  config: { structures: [SPLIT_LEAGUE], calendars: [calendar] } as unknown as TenantConfig,
+  existingRuns: [] as SeasonRun[],
+  onCreateRun: vi.fn().mockResolvedValue(undefined),
+  onClose: vi.fn(),
+  toast: vi.fn(),
+  ...over,
+});
 
-  it('asks for no competition — only the league and the season label', async () => {
-    await open();
+/** A league in the catalogue the operator has not set up. */
+const unsetLeague = {
+  key: 'friendlies',
+  label: 'Friendlies',
+  group: 'Senior',
+  district: 'All districts',
+} as unknown as League;
 
+const openModal = (over: Partial<Parameters<typeof StartSeasonModal>[0]> = {}) => {
+  const props = modalProps(over);
+  const user = userEvent.setup();
+  const view = render(<StartSeasonModal {...props} />);
+  return { user, props, ...view };
+};
+const leaguePicker = () => screen.getByRole('combobox', { name: 'League' });
+const startBtn = () => screen.getByRole('button', { name: /^start season$/i });
+
+describe('StartSeasonModal — one step: league, season, summary, start', () => {
+  it('asks for the league and the season in the same modal, with no Continue step', () => {
+    openModal();
+
+    expect(screen.getByRole('dialog', { name: /^start a season$/i })).toBeInTheDocument();
+    expect(leaguePicker()).toHaveValue('premier');
+    expect(screen.getByRole('textbox', { name: 'Season' })).toHaveValue(currentSeasonLabel());
+    expect(startBtn()).toBeEnabled();
+    expect(screen.queryByRole('button', { name: /^continue$/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^back$/i })).toBeNull();
+    // No competition picker and no quick start: the league's setup decides both.
     expect(screen.queryByRole('combobox', { name: 'Competition' })).toBeNull();
-    expect(screen.queryByText(/show past seasons/i)).toBeNull();
-    expect(screen.getByLabelText('Season')).toHaveValue(currentSeasonLabel());
+    expect(screen.queryByRole('radiogroup', { name: /how the season is played/i })).toBeNull();
+    // Under the primary button: what the admin will do after starting, in order.
+    expect(screen.getByText('What happens next').nextElementSibling).toHaveTextContent(
+      /Confirm entrants.*finishing order.*Generate fixtures.*Approve.*Release/,
+    );
   });
 
-  it('summarises the setup: structure, overs, calendar and its span', async () => {
-    await open({
+  it('summarises the setup: structure, overs, calendar, its span, the sides and the stages', () => {
+    openModal({
       config: {
         structures: [{ ...SPLIT_LEAGUE, overs: 50 }],
         calendars: [calendar],
       } as unknown as TenantConfig,
     });
 
-    const summary = screen.getByText('Split league with mid-season swap · 50 overs').parentElement!;
-    expect(summary).toHaveTextContent(
+    const line = screen.getByText('Split league with mid-season swap · 50 overs').parentElement!;
+    expect(line).toHaveTextContent(
       `Split league with mid-season swap · 50 overs (v1) · 2026/27 · ${formatIsoDate('2026-09-12')} → ${formatIsoDate('2027-03-27')}`,
     );
+    const summary = line.closest('.sr-callout')!;
     expect(summary).toHaveTextContent(/12 sides registered for Premier League/);
     expect(summary).toHaveTextContent(/Double round · 2 groups of 6, 6/);
+    // Outside a HelpProvider the help link falls back to the guide page.
+    expect(
+      within(summary as HTMLElement).getByRole('link', { name: /how does this work/i }),
+    ).toHaveAttribute('href', expect.stringContaining('league-structures-tutorial'));
   });
 
-  it('leaves overs out of the summary when the structure sets none', async () => {
-    await open();
+  it('leaves overs out of the summary when the structure sets none', () => {
+    openModal();
     expect(screen.getByText('Split league with mid-season swap')).toBeVisible();
     expect(screen.queryByText(/overs/)).toBeNull();
   });
 
-  it('sends only the league and label — the server resolves the setup and snapshots', async () => {
-    const { user, onCreateRun, toast } = await open();
-    await user.click(startBtn());
-
-    expect(onCreateRun).toHaveBeenCalledTimes(1);
-    const body = vi.mocked(onCreateRun).mock.calls[0]![0] as Record<string, unknown>;
-    expect(Object.keys(body).sort()).toEqual(['id', 'leagueKey', 'seasonLabel', 'version']);
-    expect(body).toMatchObject({
-      leagueKey: 'premier',
-      seasonLabel: currentSeasonLabel(),
-      version: 1,
-    });
-    expect(toast).toHaveBeenCalledWith(`Premier League · ${currentSeasonLabel()} started`);
+  it('counts the registered sides and says how many are not yet affiliated', () => {
+    const mixed = clubs.map((c, i) =>
+      i < 2 ? { ...c, affiliation: 'in_progress' } : c,
+    ) as unknown as Club[];
+    openModal({ clubs: mixed });
+    expect(
+      screen.getByText(/12 sides \(2 not yet affiliated\) registered for Premier League/),
+    ).toBeVisible();
   });
 
-  it('refuses a label this league is already running, before asking the server', async () => {
-    const { onCreateRun } = await open({
+  it('preselects the league it was opened from', () => {
+    const second = { ...league(SPLIT_LEAGUE.id), key: 'second', label: 'Second League' };
+    const both = clubs.map((c) => ({ ...c, leagues: ['premier', 'second'] })) as unknown as Club[];
+    openModal({
+      clubs: both,
+      allLeagues: [league(SPLIT_LEAGUE.id), second as League],
+      initialLeagueKey: 'second',
+    });
+    expect(leaguePicker()).toHaveValue('second');
+    expect(screen.getByText(/registered for Second League/)).toBeVisible();
+  });
+
+  // A one-off event is an operator-created structure, not a third, league-less option.
+  it('offers only leagues — no one-off series option', () => {
+    openModal();
+    const options = within(leaguePicker())
+      .getAllByRole('option')
+      .map((o) => o.textContent);
+    expect(options).toEqual(['Premier League']);
+    expect(screen.queryByRole('option', { name: /one-off/i })).toBeNull();
+  });
+
+  it('falls back to "Pick a league" if the chosen league vanishes mid-flow', () => {
+    const props = modalProps();
+    const { rerender } = render(<StartSeasonModal {...props} />);
+    expect(startBtn()).toBeEnabled();
+
+    // The league lost its setup — changed in another tab, picked up by this console's
+    // own refetch — while the admin is looking at it.
+    rerender(<StartSeasonModal {...props} allLeagues={[unsetLeague]} />);
+
+    expect(leaguePicker()).toHaveValue('');
+    expect(screen.getByText('Pick a league.')).toBeVisible();
+    expect(startBtn()).toBeDisabled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+});
+
+describe('StartSeasonModal — leagues that cannot start are listed with their reason', () => {
+  it('lists a league with no setup disabled, with the hand-off to the operator', () => {
+    openModal({ allLeagues: [league(SPLIT_LEAGUE.id), unsetLeague] });
+
+    expect(within(leaguePicker()).getByRole('option', { name: 'Premier League' })).toBeEnabled();
+    expect(
+      within(leaguePicker()).getByRole('option', {
+        name: 'Friendlies — not set up by your operator',
+      }),
+    ).toBeDisabled();
+    expect(
+      within(leaguePicker()).getByRole('group', { name: 'Needs operator setup' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('Friendlies has no season setup. Ask your operator to set this league up.'),
+    ).toBeVisible();
+    // The ready league is preselected and can start.
+    expect(leaguePicker()).toHaveValue('premier');
+    expect(startBtn()).toBeEnabled();
+  });
+
+  it('cannot start when no league is set up', () => {
+    openModal({ allLeagues: [unsetLeague] });
+
+    expect(within(leaguePicker()).getByRole('option', { name: /^Friendlies/ })).toBeDisabled();
+    expect(leaguePicker()).toHaveValue('');
+    expect(screen.getByText(/No league has been set up for a season yet/)).toBeVisible();
+    expect(startBtn()).toBeDisabled();
+  });
+
+  it('lists a league with fewer than two affiliated sides under Needs sides, with the counts', () => {
+    const mostlyUnaffiliated = clubs.map((c, i) =>
+      i > 0 ? { ...c, affiliation: 'in_progress' } : c,
+    ) as unknown as Club[];
+    openModal({ clubs: mostlyUnaffiliated });
+
+    const option = within(leaguePicker()).getByRole('option', {
+      name: 'Premier League — needs sides — 12 registered, 1 affiliated',
+    });
+    expect(option).toBeDisabled();
+    expect(within(leaguePicker()).getByRole('group', { name: 'Needs sides' })).toBeInTheDocument();
+  });
+
+  it('shows the blocking problem inline when opened on a league that cannot start', () => {
+    openModal({ clubs: [], initialLeagueKey: 'premier' });
+    expect(leaguePicker()).toHaveValue('premier');
+    expect(
+      screen.getByText(
+        'At least two affiliated sides must be registered for this league (0 registered, 0 affiliated).',
+      ),
+    ).toBeVisible();
+    expect(startBtn()).toBeDisabled();
+  });
+
+  it('names a missing structure or calendar as the operator’s to fix', () => {
+    openModal({
+      allLeagues: [
+        { ...league('gone'), setup: { structureId: 'gone', calendarId: 'gone-too' } } as League,
+      ],
+      initialLeagueKey: 'premier',
+    });
+    expect(
+      within(leaguePicker()).getByRole('option', {
+        name: 'Premier League — structure and season calendar missing — ask your operator',
+      }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText(
+        "This league's setup points at a structure that no longer exists — ask your operator.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        "This league's setup points at a calendar that no longer exists — ask your operator.",
+      ),
+    ).toBeVisible();
+    expect(startBtn()).toBeDisabled();
+  });
+
+  describe('a set-up league whose season dates have ended', () => {
+    const endingOn = (end: string): SeasonCalendar => ({
+      id: 'cal-old',
+      label: '2025/26',
+      blocks: [{ id: 'b1', label: 'Block 1', start: addDays(end, -60), end }],
+    });
+    const endedProps = (cal: SeasonCalendar) => ({
+      allLeagues: [
+        { ...league(SPLIT_LEAGUE.id), setup: { structureId: SPLIT_LEAGUE.id, calendarId: cal.id } },
+      ],
+      config: {
+        structures: [SPLIT_LEAGUE],
+        calendars: [cal, calendar],
+      } as unknown as TenantConfig,
+    });
+
+    it('is listed as needing the operator to renew the dates, and cannot start', () => {
+      const yesterday = addDays(todayIso(), -1);
+      openModal({ ...endedProps(endingOn(yesterday)), initialLeagueKey: 'premier' });
+
+      expect(
+        within(leaguePicker()).getByRole('option', {
+          name: 'Premier League — season dates have ended — ask your operator',
+        }),
+      ).toBeDisabled();
+      expect(
+        screen.getByText(
+          `This league's season dates have ended — ask your operator to renew them. (2025/26, ended ${formatIsoDate(yesterday)}.)`,
+        ),
+      ).toBeVisible();
+      expect(startBtn()).toBeDisabled();
+    });
+
+    it('can start while the calendar is still running', () => {
+      openModal(endedProps(endingOn(addDays(todayIso(), 1))));
+
+      expect(screen.queryByText(/season dates have ended/)).toBeNull();
+      expect(startBtn()).toBeEnabled();
+    });
+  });
+
+  it('keeps a league with a season running selectable, and says the label is taken', async () => {
+    const { user } = openModal({
       existingRuns: [run(SPLIT_LEAGUE, { seasonLabel: currentSeasonLabel() })],
     });
 
+    expect(
+      within(leaguePicker()).getByRole('group', { name: 'Season running — start another season' }),
+    ).toBeInTheDocument();
+    expect(leaguePicker()).toHaveValue('premier');
     expect(
       screen.getByText(
         'That season label is already running for this league — pick a different label or continue the existing season.',
       ),
     ).toBeVisible();
     expect(startBtn()).toBeDisabled();
-    expect(onCreateRun).not.toHaveBeenCalled();
-  });
 
-  it('says to ask the operator when the server finds no setup', async () => {
-    const { user } = await open({
-      onCreateRun: vi
-        .fn()
-        .mockRejectedValue(
-          new ApiError(
-            400,
-            'this league has no season setup yet — ask your operator',
-            'setup_missing',
-          ),
-        ),
-    });
-    await user.click(startBtn());
-
-    expect(
-      await screen.findByText(
-        'This league has no season setup yet — ask your operator to set it up in the operator console.',
-      ),
-    ).toBeVisible();
-    expect(screen.queryByText(/setup_missing/)).toBeNull();
-  });
-
-  it('says to pick another label when the server finds the season already running', async () => {
-    const { user, onClose } = await open({
-      onCreateRun: vi
-        .fn()
-        .mockRejectedValue(
-          new ApiError(409, '"2026/27" is already running for "Premier League"', 'season_exists'),
-        ),
-    });
-    await user.click(startBtn());
-
-    expect(
-      await screen.findByText(
-        'That season label is already running for this league — pick a different label or continue the existing season.',
-      ),
-    ).toBeVisible();
-    expect(onClose).not.toHaveBeenCalled();
-  });
-
-  it('refuses to start with fewer than two registered sides', async () => {
-    await open({ clubs: [] });
-    expect(screen.getByText(/at least two affiliated sides must be registered/i)).toBeVisible();
-    expect(startBtn()).toBeDisabled();
+    const season = screen.getByRole('textbox', { name: 'Season' });
+    await user.clear(season);
+    await user.type(season, 'Winter league');
+    expect(startBtn()).toBeEnabled();
   });
 });
 
-describe('GenerateFixturesLauncher — refetches tenant config on open', () => {
-  it('asks the host to refresh config once when it opens, not on every render', async () => {
+describe('StartSeasonModal — starting the season', () => {
+  it('sends only the league and label — the server resolves the setup and snapshots', async () => {
+    const { user, props } = openModal();
+    await user.click(startBtn());
+
+    expect(props.onCreateRun).toHaveBeenCalledTimes(1);
+    const body = vi.mocked(props.onCreateRun).mock.calls[0]![0] as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(['id', 'leagueKey', 'seasonLabel', 'version']);
+    expect(body).toMatchObject({
+      leagueKey: 'premier',
+      seasonLabel: currentSeasonLabel(),
+      version: 1,
+    });
+    expect(props.toast).toHaveBeenCalledWith(`Premier League · ${currentSeasonLabel()} started`);
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a label this league is already running, before asking the server', () => {
+    const { props } = openModal({
+      existingRuns: [run(SPLIT_LEAGUE, { seasonLabel: currentSeasonLabel() })],
+    });
+    expect(startBtn()).toBeDisabled();
+    expect(props.onCreateRun).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      400,
+      'setup_missing',
+      'This league has no season setup yet — ask your operator to set it up in the operator console.',
+      true,
+    ],
+    [
+      400,
+      'structure_missing',
+      "This league's season setup points at a structure that no longer exists — ask your operator to choose a structure for it.",
+      true,
+    ],
+    [
+      400,
+      'calendar_missing',
+      "This league's season setup points at a season calendar that no longer exists — ask your operator to choose a calendar for it.",
+      true,
+    ],
+    [
+      409,
+      'season_exists',
+      'That season label is already running for this league — pick a different label or continue the existing season.',
+      false,
+    ],
+  ])(
+    'a %i %s refusal shows what to do and keeps the modal open',
+    async (status, code, message, refetches) => {
+      const onRefreshConfig = vi.fn().mockResolvedValue(undefined);
+      const { user, props } = openModal({
+        onRefreshConfig,
+        onCreateRun: vi.fn().mockRejectedValue(new ApiError(status, 'server words', code)),
+      });
+      await user.click(startBtn());
+
+      expect(await screen.findByText(message)).toBeVisible();
+      expect(screen.queryByText(code)).toBeNull();
+      expect(screen.getByRole('dialog', { name: /^start a season$/i })).toBeInTheDocument();
+      expect(props.onClose).not.toHaveBeenCalled();
+      expect(props.toast).not.toHaveBeenCalled();
+      // A setup the server could not resolve means this tab's copy is stale: refetch it.
+      expect(onRefreshConfig).toHaveBeenCalledTimes(refetches ? 2 : 1);
+    },
+  );
+
+  it('keeps the modal open and says so when the network fails', async () => {
+    const { user, props } = openModal({
+      onCreateRun: vi.fn().mockRejectedValue(new TypeError('Failed to fetch')),
+    });
+    await user.click(startBtn());
+
+    expect(await screen.findByText(networkErrorMessage())).toBeVisible();
+    expect(props.onClose).not.toHaveBeenCalled();
+    // The admin can try again once it failed.
+    expect(startBtn()).toBeEnabled();
+  });
+
+  it('sends one request for a double click', async () => {
+    let finish: (v?: unknown) => void = () => {};
+    const onCreateRun = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve as (v?: unknown) => void;
+        }),
+    );
+    openModal({ onCreateRun });
+    const btn = startBtn();
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    expect(onCreateRun).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: /starting/i })).toBeDisabled();
+    await act(async () => finish());
+  });
+});
+
+describe('StartSeasonModal — refetches the season setup on open', () => {
+  it('asks the host to refresh once when it opens, not on every render', async () => {
     const onRefreshConfig = vi.fn().mockResolvedValue(undefined);
-    const props = {
-      clubs,
-      allLeagues: [league(SPLIT_LEAGUE.id)],
-      config: { structures: [SPLIT_LEAGUE], calendars: [calendar] } as unknown as TenantConfig,
-      existingRuns: [],
-      onCreateRun: vi.fn(),
-      onRefreshConfig,
-      onClose: vi.fn(),
-      toast: vi.fn(),
-    };
-    const { rerender } = render(<GenerateFixturesLauncher {...props} />);
+    const props = modalProps({ onRefreshConfig });
+    const { rerender } = render(<StartSeasonModal {...props} />);
     expect(onRefreshConfig).toHaveBeenCalledTimes(1);
 
-    // The refetched config arriving re-renders the launcher — that must not refetch again.
-    rerender(<GenerateFixturesLauncher {...props} config={{ ...props.config }} />);
-    await userEvent.setup().click(screen.getByRole('button', { name: /^continue$/i }));
+    // The refetched config arriving re-renders the modal — that must not refetch again.
+    rerender(<StartSeasonModal {...props} config={{ ...props.config }} />);
+    await userEvent.setup().type(screen.getByRole('textbox', { name: 'Season' }), 'x');
     expect(onRefreshConfig).toHaveBeenCalledTimes(1);
   });
 
-  it('a failed refresh leaves the launcher usable', async () => {
+  // The stale-setup bug: the operator set the league up after this tab loaded. Once the
+  // refetch lands, the league is offered and picked without closing the modal.
+  it('picks up a setup the refetch brings in while the modal is open', () => {
+    const props = modalProps({ allLeagues: [{ ...league(SPLIT_LEAGUE.id), setup: undefined }] });
+    const { rerender } = render(<StartSeasonModal {...props} />);
+    expect(leaguePicker()).toHaveValue('');
+    expect(startBtn()).toBeDisabled();
+
+    rerender(<StartSeasonModal {...props} allLeagues={[league(SPLIT_LEAGUE.id)]} />);
+    expect(leaguePicker()).toHaveValue('premier');
+    expect(startBtn()).toBeEnabled();
+  });
+
+  it('a failed refresh leaves the modal usable', () => {
     const onRefreshConfig = vi.fn().mockRejectedValue(new Error('offline'));
-    render(
-      <GenerateFixturesLauncher
-        clubs={clubs}
-        allLeagues={[league(SPLIT_LEAGUE.id)]}
-        config={{ structures: [SPLIT_LEAGUE], calendars: [calendar] } as unknown as TenantConfig}
-        existingRuns={[]}
-        onCreateRun={vi.fn()}
-        onRefreshConfig={onRefreshConfig}
-        onClose={vi.fn()}
-        toast={vi.fn()}
-      />,
-    );
-    await userEvent.setup().click(screen.getByRole('button', { name: /^continue$/i }));
-    expect(screen.getByRole('button', { name: /^start season$/i })).toBeVisible();
+    openModal({ onRefreshConfig });
+    expect(startBtn()).toBeEnabled();
   });
 });
