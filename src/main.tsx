@@ -2746,6 +2746,7 @@ function Shell({
       if (view === 'fixtures')
         return (
           <AdminFixtures
+            defaultTab="week"
             clubs={clubs}
             allSeries={allSeries}
             onUpdateSeries={updateSeries}

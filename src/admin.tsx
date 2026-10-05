@@ -23,6 +23,8 @@ import {
 } from './playerFilters';
 import { filterClearances } from './clearanceFilters';
 import { GUIDE_URL } from './help/HelpDrawer';
+import { AllFixturesView, GroundsWeek, ResultsView, WeekView } from './FixturesHub';
+import { buildFixtureIndex } from './fixture-index';
 import {
   DISTRICTS,
   DEFAULT_REQUIRED_DOCS,
@@ -286,7 +288,20 @@ export type CheckClashes = (
 ) => Promise<{ results: ClashResult[] }>;
 
 /* ─── AdminFixtures — series cards + drilldown fixture table with travel distance ─── */
+/** The Fixtures & Venues tabs: the finding-things views, then the existing tools. */
+export type FixturesTab = 'week' | 'fixtures' | 'results' | 'venues' | 'series';
+const FIXTURES_TABS: Array<[FixturesTab, string]> = [
+  ['week', 'This week'],
+  ['fixtures', 'All fixtures'],
+  ['results', 'Results'],
+  ['venues', 'Venues'],
+  ['series', 'Seasons & series'],
+];
+
 interface AdminFixturesProps {
+  /** Opening tab when the URL names none (`?tab=` / `?series=` win). The console opens on
+   *  This week; the default stays Seasons & series for callers that render the editor. */
+  defaultTab?: FixturesTab;
   clubs: Club[];
   // `Series.fixtures` is `unknown[]` (frontend strict ratchet, deferred) and this
   // long-standing function accesses fixture fields freely with no casts — typing this
@@ -400,7 +415,18 @@ export function seriesScheduleRows(
       Suburb: home?.ground?.suburb || '',
       Away: away?.name || 'TBD',
       'Distance (km)': hasGeo && cost ? Number(cost.distanceKm.toFixed(1)) : '—',
-      Status: f.status || 'scheduled',
+      // A medicoach result makes the game completed, as in the fixture table.
+      Status: fixtureStatus(f),
+      Result: f.result
+        ? [
+            f.result.homeScore || f.result.awayScore
+              ? `${f.result.homeScore ?? '–'} v ${f.result.awayScore ?? '–'}`
+              : '',
+            f.result.summary ?? (f.result.noResult ? 'No result' : ''),
+          ]
+            .filter(Boolean)
+            .join(' · ')
+        : '',
     };
   });
 }
@@ -416,6 +442,7 @@ export const SCHEDULE_COLS = [
   'Away',
   'Distance (km)',
   'Status',
+  'Result',
 ] as const;
 
 // Whole-season summary: one row per competition — the cover sheet of the season export
@@ -465,6 +492,7 @@ function SeriesStatusPills({ series: s }: { series: Series }) {
 }
 
 export function AdminFixtures({
+  defaultTab = 'series',
   clubs,
   allSeries,
   onUpdateSeries,
@@ -515,6 +543,50 @@ export function AdminFixtures({
         : null) ?? allSeries[0]?.id,
   );
   const active = allSeries.find((s) => s.id === activeId) || allSeries[0];
+  // `?series=` (a deep link to one series) opens Seasons & series; `?tab=` names a tab.
+  const [tab, setTabState] = useStateA<FixturesTab>(() => {
+    const q = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+    const named = q?.get('tab') as FixturesTab | null;
+    if (named && FIXTURES_TABS.some(([k]) => k === named)) return named;
+    return q?.get('series') ? 'series' : defaultTab;
+  });
+  const setTab = (next: FixturesTab) => {
+    setTabState(next);
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      url.searchParams.set('tab', next);
+      if (next !== 'series') url.searchParams.delete('series');
+      window.history.replaceState(window.history.state, '', url);
+    }
+  };
+  /** From any finding view: open that fixture's series in the editor. */
+  const openSeries = (seriesId: string) => {
+    setActiveId(seriesId);
+    setTab('series');
+    if (typeof window !== 'undefined') window.scrollTo({ top: 0 });
+  };
+  // Today as a South African calendar day (UTC+2, no daylight saving).
+  const today = new Date(Date.now() + 2 * 3_600_000).toISOString().slice(0, 10);
+  const fixtureRows = useMemoA(
+    () => buildFixtureIndex(allSeries, clubs, allVenues, today),
+    [allSeries, clubs, allVenues, today],
+  );
+  const hub = {
+    rows: fixtureRows,
+    today,
+    onOpenSeries: openSeries,
+    series: allSeries.map((s) => ({ id: s.id, name: s.name })),
+    clubs: [...clubs].sort((a, b) => a.name.localeCompare(b.name)),
+  };
+  const awaiting = fixtureRows.filter((r) => r.state === 'awaiting-result').length;
+  // No series yet: one setup page (venues, then seasons, then the empty state) — there is
+  // nothing to find, so no tabs.
+  const tabbed = allSeries.length > 0;
+  const showTab = (t: FixturesTab) => !tabbed || tab === t;
+  const openLauncher = () => {
+    if (tabbed) setTab('series');
+    setLauncherOpen(true);
+  };
   const [confirm, setConfirm] = useStateA<ConfirmDialogState | null>(null); // shared confirmation modal state (recall/reveal)
   const [releaseFor, setReleaseFor] = useStateA<ReleaseSeriesState | null>(null); // series whose ReleaseDialog is open
   const clubBy = (id) => clubs.find((c) => c.id === id);
@@ -683,13 +755,13 @@ export function AdminFixtures({
           <Btn tone="outline" icon={Icon.Eye} size="sm" onClick={() => setViewerOpen(true)}>
             View season
           </Btn>
-          <Btn tone="outline" icon={Icon.Plus} size="sm" onClick={() => setLauncherOpen(true)}>
+          <Btn tone="outline" icon={Icon.Plus} size="sm" onClick={openLauncher}>
             Start a season
           </Btn>
           {/* Status only. Approve, release, reveal and recall live in ONE place — the
               release bar under the active series' fixtures — so the page never offers the
               same action twice. */}
-          {active && (
+          {active && showTab('series') && (
             <span className="fix-head-status" title={`Status of ${active.name}`}>
               <SeriesStatusPills series={active} />
             </span>
@@ -697,12 +769,36 @@ export function AdminFixtures({
         </div>
       </div>
 
+      {tabbed && (
+        <div className="fh-tabs" role="tablist" aria-label="Fixtures and venues">
+          {FIXTURES_TABS.map(([k, label]) => (
+            <button
+              key={k}
+              role="tab"
+              aria-selected={tab === k}
+              className={`fh-tab${tab === k ? ' on' : ''}`}
+              onClick={() => setTab(k)}
+            >
+              {label}
+              {k === 'results' && awaiting > 0 && (
+                <span className="fh-tab-n" title={`${awaiting} played games without a result`}>
+                  {awaiting}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+      {tabbed && tab === 'week' && <WeekView {...hub} />}
+      {tabbed && tab === 'fixtures' && <AllFixturesView {...hub} />}
+      {tabbed && tab === 'results' && <ResultsView {...hub} />}
+
       {/* Venues + seasons render regardless of series count: generating a season stage is
           what CREATES the first series, so a zero-series tenant needs the Start-a-season
           flow most of all. While the season-setup queries are in flight, hold the space
           with a plain card — an unloaded runs list rendered as "No season running" offers
           a Start CTA whose duplicate guard is checking a list that never arrived. */}
-      {seasonSetupLoading ? (
+      {!showTab('venues') && !showTab('series') ? null : seasonSetupLoading ? (
         <div style={{ marginBottom: 18 }}>
           <Card
             title="Seasons"
@@ -711,7 +807,12 @@ export function AdminFixtures({
         </div>
       ) : (
         <>
-          {onSaveVenue && (
+          {tabbed && tab === 'venues' && (
+            <div style={{ marginBottom: 18 }}>
+              <GroundsWeek {...hub} />
+            </div>
+          )}
+          {onSaveVenue && showTab('venues') && (
             <div style={{ marginBottom: 18 }}>
               <VenuesCard
                 clubs={clubs}
@@ -725,7 +826,7 @@ export function AdminFixtures({
           )}
           {/* Structured competitions run stage by stage here; the flat series strip below
               still covers ad-hoc series and everything a season has generated. */}
-          {tenantConfig && onCreateSeasonRun && (
+          {tenantConfig && onCreateSeasonRun && showTab('series') && (
             <div style={{ marginBottom: 18 }}>
               <SeasonRunsPanel
                 configFailed={structuresFailed || seasonRunsFailed}
@@ -733,7 +834,7 @@ export function AdminFixtures({
                 allLeagues={allLeagues}
                 allSeries={allSeries}
                 runs={allSeasonRuns}
-                onOpenLauncher={() => setLauncherOpen(true)}
+                onOpenLauncher={openLauncher}
                 onPatchRun={onPatchSeasonRun}
                 onGenerate={onGenerateStageSeries}
                 onDeleteRun={onDeleteSeasonRun}
@@ -746,7 +847,7 @@ export function AdminFixtures({
         </>
       )}
 
-      {allSeries.length === 0 ? (
+      {!showTab('series') ? null : allSeries.length === 0 ? (
         // The empty state's copy points "above" at the season setup panel — while that
         // panel is still loading, there's nothing there yet to point at, so render nothing.
         seasonSetupLoading ? null : (
@@ -755,7 +856,7 @@ export function AdminFixtures({
             title="No series yet"
             sub="Start a season on a league your platform operator has set up and work through it stage by stage. For a one-off cup or festival, your operator can add a One-off tournament structure."
             action={
-              <Btn tone="teal" icon={Icon.Plus} onClick={() => setLauncherOpen(true)}>
+              <Btn tone="teal" icon={Icon.Plus} onClick={openLauncher}>
                 Start a season
               </Btn>
             }
@@ -1406,7 +1507,11 @@ export function FixtureTable({
                   body: series.released
                     ? `This series is RELEASED. Reallocating rewrites the ground for all ${series.fixtures.length} fixtures — ${vt.clubs} and players have already been sent the current ones, and there is no undo.`
                     : `Assigns a ground to all ${series.fixtures.length} fixtures, replacing any already set. Hand-picked venues are kept only where the fixture is locked.`,
-                  onYes: () => onAllocateVenues(series),
+                  // Close the confirm first: the allocation reports back by toast.
+                  onYes: () => {
+                    setConfirm(null);
+                    onAllocateVenues(series);
+                  },
                   danger: series.released,
                 })
               }

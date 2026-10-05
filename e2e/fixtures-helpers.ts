@@ -203,10 +203,10 @@ export async function repGetSeries(
 
 // ── Browser helpers ────────────────────────────────────────────────────────
 
-/** Open /admin/fixtures and select the series card with the given (unique) name. Returns
- * the card locator. Assumes an admin is already signed in on `page`. */
+/** Open /admin/fixtures on Seasons & series and select the series card with the given
+ * (unique) name. Returns the card locator. Assumes an admin is already signed in on `page`. */
 export async function openAdminSeries(page: Page, name: string) {
-  await page.goto('/admin/fixtures');
+  await page.goto('/admin/fixtures?tab=series');
   const card = page.locator('.series-card', { hasText: name });
   await expect(card).toBeVisible();
   await card.click();

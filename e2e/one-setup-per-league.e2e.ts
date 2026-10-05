@@ -173,7 +173,8 @@ test('operator sets a league up; admin starts, the calendar follows live until g
 
   // ── Admin: launcher offers only set-up leagues ──
   await signInAsAdmin(page);
-  await page.goto('/admin/fixtures');
+  // Seasons & series: the seasons panel the rest of this test works in.
+  await page.goto('/admin/fixtures?tab=series');
   await page.getByRole('button', { name: 'Start a season' }).first().click();
   const launcher = page.getByRole('dialog', { name: 'Start a season' });
   const leagueSelect = launcher.getByRole('combobox', { name: 'League' });
