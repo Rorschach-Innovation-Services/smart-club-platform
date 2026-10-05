@@ -31,6 +31,7 @@ import type {
   SeasonRun,
   Venue,
   Umpire,
+  Scorer,
   FixtureOfficials,
   CaptainsReport,
   CaptainsReportFields,
@@ -697,6 +698,40 @@ export const putFixtureOfficials = (seriesId: string, fixtureId: string, umpireI
   request<FixtureOfficials & { seriesId: string; fixtureId: string }>(
     `/series/${encodeURIComponent(seriesId)}/fixtures/${encodeURIComponent(fixtureId)}/officials`,
     { method: 'PUT', body: { umpires: umpireIds.map((umpireId) => ({ umpireId })) } },
+  );
+
+// A fixture's scorers (scorer + backup, max two). Same officials item as the umpires, but
+// only the `scorers` part is sent, so the umpires (and any referee) are kept as stored.
+export const putFixtureScorers = (seriesId: string, fixtureId: string, scorerIds: string[]) =>
+  request<FixtureOfficials & { seriesId: string; fixtureId: string }>(
+    `/series/${encodeURIComponent(seriesId)}/fixtures/${encodeURIComponent(fixtureId)}/officials`,
+    { method: 'PUT', body: { scorers: scorerIds.map((scorerId) => ({ scorerId })) } },
+  );
+
+// ── Scorer register (admin) ──
+export const getScorers = () => request<Scorer[]>('/scorers');
+export const createScorer = (body: Partial<Scorer>) =>
+  request<Scorer>('/scorers', { method: 'POST', body });
+export const patchScorer = (id: string, body: Partial<Scorer>) =>
+  request<Scorer>(`/scorers/${encodeURIComponent(id)}`, { method: 'PATCH', body });
+
+// ── Result confirmation (the office's "checked and validated") ──
+// `recordedAt` is the result the admin looked at: a newer one from medicoach answers 409
+// `result_changed` (with the current result in the error details).
+export const confirmResult = (
+  seriesId: string,
+  fixtureId: string,
+  recordedAt: string,
+  note?: string,
+) =>
+  request<{ confirmedAt: string; confirmedBy: string }>(
+    `/series/${encodeURIComponent(seriesId)}/fixtures/${encodeURIComponent(fixtureId)}/result/confirm`,
+    { method: 'POST', body: { recordedAt, ...(note ? { note } : {}) } },
+  );
+export const unconfirmResult = (seriesId: string, fixtureId: string) =>
+  request<{ ok: true }>(
+    `/series/${encodeURIComponent(seriesId)}/fixtures/${encodeURIComponent(fixtureId)}/result/confirm`,
+    { method: 'DELETE' },
   );
 
 // ── Medicoach sync (ADR 0016) ── admin only; visible when `features.medicoachSync` is on.

@@ -149,7 +149,14 @@ async function seed() {
     });
     await api(`/series/${s.id}`, {
       method: 'PATCH',
-      body: JSON.stringify({ fixtures, approved: true, released: true, version: s.version }),
+      // A league, so the sync treats these as medicoach fixtures (as a real league series is).
+      body: JSON.stringify({
+        fixtures,
+        leagueKey: s.id.includes('-d1-') ? 'premier' : 'promotion',
+        approved: true,
+        released: true,
+        version: s.version,
+      }),
     });
   }
 
@@ -184,6 +191,31 @@ async function seed() {
       await api(`/series/${s.id}/fixtures/${f.id}/officials`, {
         method: 'PUT',
         body: JSON.stringify({ umpires: two.map((u) => ({ umpireId: u.id })) }),
+      });
+    }
+
+  // Scorers: a fictional register; most games of this weekend get a scorer (some a backup),
+  // a few are left without one to find.
+  const scorerNames = ['Lindiwe Khoza', 'Pravesh Ramlall', 'Megan Fourie', 'Sizwe Nkosi'];
+  const scorerReg = [...(await api<Array<{ id: string; displayName: string }>>('/scorers'))];
+  for (const n of scorerNames)
+    if (!scorerReg.some((x) => x.displayName === n))
+      scorerReg.push(
+        await api('/scorers', { method: 'POST', body: JSON.stringify({ displayName: n }) }),
+      );
+  let j = 0;
+  for (const s of series.filter((x) => x.id.startsWith('s-emcu-')))
+    for (const f of s.fixtures) {
+      if ((f.round ?? 1) < 3 || (f.round ?? 1) > 4) continue;
+      j++;
+      if (j % 3 === 0) continue; // no scorer yet
+      const ids =
+        j % 2
+          ? [scorerReg[j % scorerReg.length].id, scorerReg[(j + 1) % scorerReg.length].id]
+          : [scorerReg[j % scorerReg.length].id];
+      await api(`/series/${s.id}/fixtures/${f.id}/officials`, {
+        method: 'PUT',
+        body: JSON.stringify({ scorers: ids.map((scorerId) => ({ scorerId })) }),
       });
     }
 
@@ -256,6 +288,24 @@ async function seed() {
         scoringSide: 'home',
         captainRef: null,
         medicoachMatchUrl: `https://live.medicoach.co.za/match/demo-${f.id}`,
+        // Ground time and balls from the scorecard (one game came without them).
+        ...(i === 5
+          ? {}
+          : (() => {
+              const start =
+                Date.parse(`${f.date}T${f.time}:00+02:00`) + Math.round(r() * 20) * 60_000;
+              const legal = overs * 6 * 2 - Math.floor(r() * 50);
+              return {
+                play: {
+                  startedAt: new Date(start).toISOString(),
+                  endedAt: new Date(
+                    start + (overs >= 40 ? 400 : 190) * 60_000 + r() * 60 * 60_000,
+                  ).toISOString(),
+                  legalBalls: legal,
+                  deliveries: legal + 8 + Math.floor(r() * 20),
+                },
+              };
+            })()),
       },
     });
   });
@@ -309,6 +359,25 @@ server.listen(PORT, async () => {
       { method: 'POST' },
     );
     console.log(`· sync: ${run.status} · ${JSON.stringify(run.counts ?? {})}`);
+    // The office has already checked and confirmed the older weekend's results (bar one).
+    const withResults = await api<
+      Array<
+        Series & {
+          fixtures: Array<Fixture & { result?: { recordedAt: string; confirmation?: unknown } }>;
+        }
+      >
+    >('/series');
+    let confirmed = 0;
+    for (const s of withResults)
+      for (const f of s.fixtures)
+        if (f.result && !f.result.confirmation && (f.round ?? 1) === 1 && confirmed < 4) {
+          await api(`/series/${s.id}/fixtures/${f.id}/result/confirm`, {
+            method: 'POST',
+            body: JSON.stringify({ recordedAt: f.result.recordedAt }),
+          });
+          confirmed++;
+        }
+    console.log(`· ${confirmed} results confirmed by the office`);
   } catch (err) {
     console.error(err);
     process.exitCode = 1;

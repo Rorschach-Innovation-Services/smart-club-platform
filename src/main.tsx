@@ -2,7 +2,7 @@ import { resolveCompetitionDefaults } from '../packages/engine/src/defaults';
 import { Sentry } from './sentry'; // first — installs global error handlers before render
 import { useState as useStateApp, useMemo as useMemoApp, useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
-import type { Umpire } from './types';
+import type { Scorer, Umpire } from './types';
 import { ErrorBoundary } from 'react-error-boundary';
 import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
@@ -1411,6 +1411,39 @@ function Shell({
     enabled: role === 'admin' && vertical.sport === 'cricket',
   });
   const allCaptainsReports = captainsReportsQuery.data ?? [];
+  // ── Scorer allocation (admin) ── the union's register; appointments ride on GET /series
+  // as each fixture's `officials.scorers`, like umpires.
+  const scorersQuery = useQuery({
+    queryKey: qk.scorers(),
+    queryFn: api.getScorers,
+    enabled: role === 'admin' && vertical.sport === 'cricket',
+  });
+  const allScorers = scorersQuery.data ?? [];
+  function saveScorers(seriesId: string, fixtureId: string, scorerIds: string[]) {
+    return withToast(
+      () => api.putFixtureScorers(seriesId, fixtureId, scorerIds),
+      'Could not save the scorers',
+    ).then(() => invalidate(qk.series()));
+  }
+  function createScorer(body: Partial<Scorer>): Promise<Scorer> {
+    return withToast(() => api.createScorer(body), 'Could not add the scorer').then((x) => {
+      invalidate(qk.scorers());
+      return x;
+    });
+  }
+  // Result confirmation: errors are the caller's (a 409 result_changed is shown in place,
+  // with the newer result, not as a generic toast).
+  function confirmResult(seriesId: string, fixtureId: string, recordedAt: string) {
+    return api
+      .confirmResult(seriesId, fixtureId, recordedAt)
+      .finally(() => invalidate(qk.series()));
+  }
+  function unconfirmResult(seriesId: string, fixtureId: string) {
+    return withToast(
+      () => api.unconfirmResult(seriesId, fixtureId),
+      'Could not withdraw the confirmation',
+    ).then(() => invalidate(qk.series()));
+  }
   function saveOfficials(seriesId: string, fixtureId: string, umpireIds: string[]) {
     return withToast(
       () => api.putFixtureOfficials(seriesId, fixtureId, umpireIds),
@@ -2784,6 +2817,11 @@ function Shell({
             umpires={allUmpires}
             onSaveOfficials={saveOfficials}
             onCreateUmpire={(displayName) => createUmpire({ displayName })}
+            scorers={allScorers}
+            onSaveScorers={saveScorers}
+            onCreateScorer={(displayName) => createScorer({ displayName })}
+            onConfirmResult={confirmResult}
+            onUnconfirmResult={unconfirmResult}
           />
         );
       if (view === 'umpires' && vertical.sport === 'cricket')

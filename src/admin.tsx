@@ -23,7 +23,7 @@ import {
 } from './playerFilters';
 import { filterClearances } from './clearanceFilters';
 import { GUIDE_URL } from './help/HelpDrawer';
-import { AllFixturesView, GroundsWeek, ResultsView, WeekView } from './FixturesHub';
+import { AllFixturesView, GroundsWeek, ResultsView, WeekView, type HubManage } from './FixturesHub';
 import { buildFixtureIndex } from './fixture-index';
 import {
   DISTRICTS,
@@ -96,6 +96,7 @@ import type {
   Series,
   Clash,
   Umpire,
+  Scorer,
   Venue,
   WithheldField,
 } from './types';
@@ -350,6 +351,13 @@ interface AdminFixturesProps {
   onSaveOfficials?: (seriesId: string, fixtureId: string, umpireIds: string[]) => Promise<unknown>;
   /** Add an umpire from the picker's "add umpire" option. */
   onCreateUmpire?: (displayName: string) => Promise<Umpire>;
+  /** The scorer register; appointments ride on each fixture's `officials.scorers`. */
+  scorers?: Scorer[];
+  onSaveScorers?: (seriesId: string, fixtureId: string, scorerIds: string[]) => Promise<unknown>;
+  onCreateScorer?: (displayName: string) => Promise<Scorer>;
+  /** Confirm a fixture's result as checked; rejects 409 `result_changed` on a stale page. */
+  onConfirmResult?: (seriesId: string, fixtureId: string, recordedAt: string) => Promise<unknown>;
+  onUnconfirmResult?: (seriesId: string, fixtureId: string) => Promise<unknown>;
 }
 
 // Export row shape shared by the per-series and whole-season exports — the same
@@ -525,6 +533,11 @@ export function AdminFixtures({
   umpires = [],
   onSaveOfficials,
   onCreateUmpire,
+  scorers = [],
+  onSaveScorers,
+  onCreateScorer,
+  onConfirmResult,
+  onUnconfirmResult,
 }: AdminFixturesProps) {
   const vt = useVertical().terms;
   const copy = useCopy();
@@ -577,6 +590,24 @@ export function AdminFixtures({
     onOpenSeries: openSeries,
     series: allSeries.map((s) => ({ id: s.id, name: s.name })),
     clubs: [...clubs].sort((a, b) => a.name.localeCompare(b.name)),
+    // Managing a fixture from the finding views: the same writes the series editor uses.
+    manage: {
+      series: allSeries,
+      clubs,
+      venues: allVenues,
+      umpires,
+      scorers,
+      // The hub's updaters spread the current series and change only `fixtures` (plus the
+      // confirmRemoveSynced action key), so every Series field the editor relies on survives.
+      onUpdateSeries: onUpdateSeries as unknown as HubManage['onUpdateSeries'],
+      onSaveUmpires: onSaveOfficials,
+      onSaveScorers,
+      onCreateUmpire,
+      onCreateScorer,
+      onConfirmResult,
+      onUnconfirmResult,
+      toast,
+    },
   };
   const awaiting = fixtureRows.filter((r) => r.state === 'awaiting-result').length;
   // No series yet: one setup page (venues, then seasons, then the empty state) — there is

@@ -3,6 +3,7 @@ import {
   addDays,
   buildFixtureIndex,
   filterRows,
+  groundUsage,
   inWeek,
   resultLines,
   toCsv,
@@ -111,15 +112,16 @@ describe('fixture index', () => {
   });
 
   it('reads where each fixture stands and what the weekly checks flag', () => {
-    expect(row('s1:f1')).toMatchObject({ state: 'result', issues: [] });
+    // Played with a result the office hasn't confirmed yet.
+    expect(row('s1:f1')).toMatchObject({ state: 'result', issues: ['unconfirmed'] });
     expect(row('s1:f2')).toMatchObject({
       state: 'awaiting-result',
       issues: ['awaiting-result', 'one-umpire'],
     });
-    expect(row('s1:f3').issues).toEqual(['venue-clash', 'no-umpires']);
-    expect(row('s1:f4').issues).toEqual(['venue-clash', 'time-tbc']);
+    expect(row('s1:f3').issues).toEqual(['venue-clash', 'no-umpires', 'no-scorer']);
+    expect(row('s1:f4').issues).toEqual(['venue-clash', 'no-scorer', 'time-tbc']);
     expect(row('s1:f5')).toMatchObject({ state: 'postponed', issues: [] });
-    expect(row('s2:w1').issues).toEqual(['no-umpires', 'draft']);
+    expect(row('s2:w1').issues).toEqual(['no-umpires', 'no-scorer', 'draft']);
     expect(resultLines(row('s1:f1'))).toEqual({
       home: '186/7 (49.1)',
       away: '181/5 (50)',
@@ -174,10 +176,155 @@ describe('fixture index', () => {
   it('exports the list as CSV, quoting where needed', () => {
     const csv = toCsv([row('s1:f1')]).split('\n');
     expect(csv[0]).toBe(
-      'Date,Time,Series,Round,Home,Away,Ground,Umpires,Status,Home score,Away score,Result',
+      'Date,Time,Series,Round,Home,Away,Ground,Umpires,Scorers,Status,Home score,Away score,Result,Confirmed by',
     );
     expect(csv[1]).toBe(
-      '2026-10-03,10:00,Division 1,1,UKZN CC,Clares CC,Howard College Oval,A Ump / B Ump,result,186/7 (49.1),181/5 (50),UKZN CC won by 3 wickets',
+      '2026-10-03,10:00,Division 1,1,UKZN CC,Clares CC,Howard College Oval,A Ump / B Ump,,result,186/7 (49.1),181/5 (50),UKZN CC won by 3 wickets,',
     );
+  });
+
+  it('tracks scorers, and whether each result is confirmed — and still the one confirmed', () => {
+    const withState = buildFixtureIndex(
+      [
+        {
+          id: 's9',
+          name: 'Div 9',
+          released: true,
+          fixtures: [
+            {
+              id: 'a',
+              date: '2026-10-03',
+              time: '10:00',
+              home: 'ukzn',
+              away: 'clares',
+              officials: {
+                umpires: [
+                  { umpireId: 'u1', name: 'A Ump' },
+                  { umpireId: 'u2', name: 'B Ump' },
+                ],
+                scorers: [{ scorerId: 's1', name: 'Futhi D' }],
+              },
+              result: {
+                homeScore: '1',
+                awayScore: '0',
+                confirmation: { confirmedAt: '2026-10-04T08:00:00Z', confirmedBy: 'office@x' },
+                changedSinceConfirmed: false,
+              },
+            },
+            {
+              id: 'b',
+              date: '2026-10-03',
+              time: '13:00',
+              home: 'umlazi',
+              away: 'ukzn',
+              officials: {
+                umpires: [
+                  { umpireId: 'u1', name: 'A Ump' },
+                  { umpireId: 'u2', name: 'B Ump' },
+                ],
+              },
+              result: {
+                homeScore: '2',
+                awayScore: '1',
+                confirmation: null,
+                changedSinceConfirmed: true,
+              },
+            },
+            {
+              id: 'c',
+              date: '2026-10-10',
+              time: '10:00',
+              home: 'clares',
+              away: 'umlazi',
+              officials: { umpires: [], scorers: [{ scorerId: 's1', name: 'Futhi D' }] },
+            },
+          ],
+        },
+      ],
+      clubs,
+      venues,
+      TODAY,
+    );
+    const by = (id: string) => withState.find((r) => r.fixtureId === id)!;
+    expect(by('a')).toMatchObject({
+      issues: [],
+      scorers: ['Futhi D'],
+      scorerIds: ['s1'],
+      umpireIds: ['u1', 'u2'],
+    });
+    expect(by('b').issues).toEqual(['result-changed']);
+    expect(by('c').issues).toEqual(['no-umpires']);
+    expect(weekChecks(withState.filter((r) => inWeek(r, '2026-09-28')))).toMatchObject({
+      played: 2,
+      resultsIn: 2,
+      confirmed: 1,
+      toConfirm: 1,
+      scorersShort: 0,
+    });
+    expect(filterRows(withState, { q: 'futhi' }).map((r) => r.fixtureId)).toEqual(['a', 'c']);
+    expect(filterRows(withState, { issue: 'result-changed' }).map((r) => r.fixtureId)).toEqual([
+      'b',
+    ]);
+  });
+});
+
+describe('ground usage', () => {
+  const play = (start: string, mins: number, legalBalls: number) => ({
+    startedAt: `${start}T08:00:00.000Z`,
+    endedAt: new Date(Date.parse(`${start}T08:00:00.000Z`) + mins * 60_000).toISOString(),
+    legalBalls,
+    deliveries: legalBalls + 10,
+  });
+  const g = (
+    id: string,
+    date: string,
+    venue: string,
+    p?: ReturnType<typeof play> | null,
+    status?: string,
+  ) => ({
+    id,
+    date,
+    time: '10:00',
+    home: 'ukzn',
+    away: 'clares',
+    venueOverride: venue,
+    ...(status ? { status } : {}),
+    ...(p !== undefined ? { result: { homeScore: '1', awayScore: '0', play: p } } : {}),
+  });
+  const rowsOf = (fixtures: unknown[]) =>
+    buildFixtureIndex([{ id: 'u', name: 'U', released: true, fixtures }], clubs, venues, TODAY);
+
+  it('sums time on the ground and balls bowled, and reads the week’s load', () => {
+    const usage = groundUsage(
+      rowsOf([
+        g('a', '2026-09-30', 'Busy Oval', play('2026-09-30', 200, 240)),
+        g('b', '2026-10-01', 'Busy Oval', play('2026-10-01', 210, 240)),
+        g('c', '2026-10-03', 'Busy Oval', play('2026-10-03', 400, 300)),
+        g('d', '2026-10-03', 'Quiet Park', null), // result without scorecard timings
+        g('e', '2026-09-01', 'Old Field', play('2026-09-01', 180, 230)),
+        g('f', '2026-10-10', 'Quiet Park'), // upcoming
+        g('x', '2026-10-03', 'Gone Ground', play('2026-10-03', 180, 230), 'cancelled'),
+      ]),
+      TODAY,
+      2,
+    );
+    expect(usage.map((u) => [u.venue, u.load])).toEqual([
+      ['Busy Oval', 'heavy'],
+      ['Quiet Park', 'normal'],
+      ['Old Field', 'rested'],
+    ]);
+    const busy = usage[0];
+    expect(busy).toMatchObject({
+      played: 3,
+      withPlay: 3,
+      minutes: 810,
+      legalBalls: 780,
+      weekGames: 3,
+    });
+    expect(busy.weekly).toEqual([
+      { monday: '2026-09-28', games: 3, balls: 780 },
+      { monday: '2026-10-05', games: 0, balls: 0 },
+    ]);
+    expect(usage[1]).toMatchObject({ played: 1, withPlay: 0, legalBalls: 0, upcoming: 1 });
   });
 });

@@ -1,21 +1,36 @@
-/* ─── Fixtures & Venues hub: This week · All fixtures · Results · grounds' schedule ───
+/* ─── Fixtures & Venues hub: This week · All fixtures · Results · Venues ───
  *
- * The finding-things half of Fixtures & Venues. Every series' fixtures are one list here
- * (fixture-index.ts), with the medicoach result on each played game, the umpires, the
- * ground, and the checks of the union's weekly cycle (Dolphins match-week SOP):
+ * Every series' fixtures as one list (fixture-index.ts), with the medicoach result on each
+ * played game, the umpires and scorers, the ground, and the checks of the union's weekly
+ * cycle (Dolphins match-week SOP):
  *   Monday   — results confirmed, the week's fixtures complete (time, ground), no ground
  *              double-booked, postponements known;
- *   Thursday — umpires appointed to every game;
+ *   Thursday — umpires and scorers appointed to every game;
  *   weekend  — games and results as they come in.
- * Nothing here edits a fixture: "Edit" opens the series in Seasons & series, where the
- * existing editor, release bar and allocation tools live unchanged.
+ * The office manages a fixture where it finds it — add, edit, remove, appoint umpires and
+ * scorers, confirm the result — through the same server paths as the series editor
+ * (FixtureManage.tsx). Seasons, stages, allocation and release stay in Seasons & series.
  */
 import { useMemo, useState, type ReactNode } from 'react';
+import { ApiError } from './api';
 import { Btn } from './atoms';
 import {
+  FixtureEditDialog,
+  OfficialsDialog,
+  RemoveFixtureDialog,
+  type ManageClub,
+  type ManageSeries,
+  type ManageVenue,
+  type Person,
+} from './FixtureManage';
+import {
+  HEAVY_WEEK_BALLS,
+  HEAVY_WEEK_GAMES,
   ISSUES,
+  RESTED_DAYS,
   addDays,
   filterRows,
+  groundUsage,
   inWeek,
   resultLines,
   toCsv,
@@ -35,6 +50,16 @@ const weekLabel = (monday: string) => {
   const sun = addDays(monday, 6);
   return `${fmtDay(monday, { day: 'numeric', month: 'short' })} – ${fmtDay(sun, { day: 'numeric', month: 'short', year: 'numeric' })}`;
 };
+const stamp = (iso: string) =>
+  new Date(iso).toLocaleString('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'Africa/Johannesburg',
+  });
+const hours = (mins: number) =>
+  mins < 60 ? `${mins} min` : `${Math.floor(mins / 60)} h ${String(mins % 60).padStart(2, '0')}`;
 
 const STATE_LABEL: Record<FixtureRow['state'], string> = {
   upcoming: 'Upcoming',
@@ -46,6 +71,23 @@ const STATE_LABEL: Record<FixtureRow['state'], string> = {
   cancelled: 'Cancelled',
 };
 
+/** Everything the hub needs to manage fixtures; absent ⇒ read-only (finding only). */
+export interface HubManage {
+  series: ManageSeries[];
+  clubs: ManageClub[];
+  venues: ManageVenue[];
+  umpires: Person[];
+  scorers: Person[];
+  onUpdateSeries: (id: string, updater: (s: ManageSeries) => ManageSeries) => Promise<unknown>;
+  onSaveUmpires?: (seriesId: string, fixtureId: string, ids: string[]) => Promise<unknown>;
+  onSaveScorers?: (seriesId: string, fixtureId: string, ids: string[]) => Promise<unknown>;
+  onCreateUmpire?: (displayName: string) => Promise<Person>;
+  onCreateScorer?: (displayName: string) => Promise<Person>;
+  onConfirmResult?: (seriesId: string, fixtureId: string, recordedAt: string) => Promise<unknown>;
+  onUnconfirmResult?: (seriesId: string, fixtureId: string) => Promise<unknown>;
+  toast?: (message: string, tone?: string) => void;
+}
+
 export interface HubProps {
   rows: FixtureRow[];
   today: string;
@@ -53,16 +95,16 @@ export interface HubProps {
   onOpenSeries: (seriesId: string) => void;
   series: Array<{ id: string; name: string }>;
   clubs: Array<{ id: string; name: string }>;
+  manage?: HubManage;
 }
 
 /* ─── Shared pieces ─── */
 
-function IssueChips({ issues, hideDraft }: { issues: IssueKey[]; hideDraft?: boolean }) {
-  const shown = issues.filter((i) => !(hideDraft && i === 'draft'));
-  if (!shown.length) return null;
+function IssueChips({ issues }: { issues: IssueKey[] }) {
+  if (!issues.length) return null;
   return (
     <span className="fh-chips">
-      {shown.map((i) => (
+      {issues.map((i) => (
         <span key={i} className={`fh-chip ${ISSUES[i].tone}`}>
           {ISSUES[i].label}
         </span>
@@ -96,7 +138,146 @@ export function Teams({ r, compact }: { r: FixtureRow; compact?: boolean }) {
   );
 }
 
-function RowActions({ r, onOpenSeries }: { r: FixtureRow; onOpenSeries: (id: string) => void }) {
+type Dialog =
+  | { kind: 'add'; seriesId?: string }
+  | { kind: 'edit'; row: FixtureRow }
+  | { kind: 'remove'; row: FixtureRow }
+  | { kind: 'umpires' | 'scorers'; row: FixtureRow };
+
+/** The dialogs a hub view opens, and the one that's open. */
+function useDialogs(rows: FixtureRow[], manage?: HubManage) {
+  const [open, setOpen] = useState<Dialog | null>(null);
+  const close = () => setOpen(null);
+  const saved = (m: string) => manage?.toast?.(m);
+  let node: ReactNode = null;
+  if (open && manage) {
+    if (open.kind === 'add' || open.kind === 'edit')
+      node = (
+        <FixtureEditDialog
+          mode={open.kind}
+          series={manage.series}
+          initialSeriesId={open.kind === 'edit' ? open.row.seriesId : open.seriesId}
+          fixtureId={open.kind === 'edit' ? open.row.fixtureId : undefined}
+          clubs={manage.clubs}
+          venues={manage.venues}
+          onUpdateSeries={manage.onUpdateSeries}
+          onClose={close}
+          onSaved={saved}
+        />
+      );
+    else if (open.kind === 'remove')
+      node = (
+        <RemoveFixtureDialog
+          row={open.row}
+          onUpdateSeries={manage.onUpdateSeries}
+          onClose={close}
+          onSaved={saved}
+        />
+      );
+    else {
+      const r = open.row;
+      const isUmp = open.kind === 'umpires';
+      const sameDay = rows.filter((x) => x.date === r.date && x.key !== r.key);
+      node = (
+        <OfficialsDialog
+          kind={open.kind}
+          row={r}
+          people={isUmp ? manage.umpires : manage.scorers}
+          current={isUmp ? r.umpireIds : r.scorerIds}
+          others={sameDay.map((x) => ({
+            label: `${x.home} v ${x.away}`,
+            time: x.time,
+            ids: isUmp ? x.umpireIds : x.scorerIds,
+          }))}
+          onSave={(ids) =>
+            (isUmp ? manage.onSaveUmpires : manage.onSaveScorers)!(r.seriesId, r.fixtureId, ids)
+          }
+          onCreate={isUmp ? manage.onCreateUmpire : manage.onCreateScorer}
+          onClose={close}
+          onSaved={saved}
+        />
+      );
+    }
+  }
+  return { open: setOpen, node };
+}
+
+/** Confirm a result (or show who did). A newer result from medicoach is caught here. */
+function ConfirmControl({ r, manage }: { r: FixtureRow; manage?: HubManage }) {
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const res = r.result;
+  if (!res || !manage?.onConfirmResult) return null;
+  const conf = res.confirmation;
+  if (conf)
+    return (
+      <span className="fh-confirmed" title={conf.note ?? undefined}>
+        ✓ Confirmed by {conf.confirmedBy.split('@')[0]} · {stamp(conf.confirmedAt)}
+        {manage.onUnconfirmResult && (
+          <button
+            className="fh-link"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              await manage.onUnconfirmResult!(r.seriesId, r.fixtureId).catch(() => {});
+              setBusy(false);
+            }}
+            aria-label={`Withdraw confirmation of ${r.home} v ${r.away}`}
+          >
+            Undo
+          </button>
+        )}
+      </span>
+    );
+  return (
+    <span className="fh-confirm-wrap">
+      <Btn
+        tone="ink"
+        size="sm"
+        disabled={busy || !res.recordedAt}
+        aria-label={`Confirm the result of ${r.home} v ${r.away}`}
+        onClick={async () => {
+          setBusy(true);
+          setNote(null);
+          try {
+            await manage.onConfirmResult!(r.seriesId, r.fixtureId, res.recordedAt!);
+            manage.toast?.('Result confirmed');
+          } catch (err) {
+            setNote(
+              err instanceof ApiError && err.code === 'result_changed'
+                ? 'Medicoach sent a newer result — it is shown now. Check it, then confirm.'
+                : err instanceof ApiError
+                  ? err.message
+                  : 'Could not confirm — check your connection.',
+            );
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        {busy ? 'Confirming…' : res.changedSinceConfirmed ? 'Confirm again' : 'Confirm result'}
+      </Btn>
+      {note && (
+        <span className="fh-confirm-note" role="alert">
+          {note}
+        </span>
+      )}
+    </span>
+  );
+}
+
+function RowActions({
+  r,
+  onOpenSeries,
+  manage,
+  onDialog,
+}: {
+  r: FixtureRow;
+  onOpenSeries: (id: string) => void;
+  manage?: HubManage;
+  onDialog: (d: Dialog) => void;
+}) {
+  const label = `${r.home} v ${r.away}`;
   return (
     <span className="fh-actions">
       {r.result?.medicoachMatchUrl && (
@@ -109,26 +290,74 @@ function RowActions({ r, onOpenSeries }: { r: FixtureRow; onOpenSeries: (id: str
           Scorecard ↗
         </a>
       )}
+      {manage ? (
+        <>
+          <button
+            className="fh-link"
+            onClick={() => onDialog({ kind: 'edit', row: r })}
+            aria-label={`Edit ${label} in ${r.seriesName}`}
+          >
+            Edit
+          </button>
+          {manage.onSaveUmpires && (
+            <button
+              className="fh-link"
+              onClick={() => onDialog({ kind: 'umpires', row: r })}
+              aria-label={`Umpires for ${label}`}
+            >
+              Umpires
+            </button>
+          )}
+          {manage.onSaveScorers && (
+            <button
+              className="fh-link"
+              onClick={() => onDialog({ kind: 'scorers', row: r })}
+              aria-label={`Scorers for ${label}`}
+            >
+              Scorers
+            </button>
+          )}
+          <button
+            className="fh-link danger"
+            onClick={() => onDialog({ kind: 'remove', row: r })}
+            aria-label={`Remove ${label}`}
+          >
+            Remove
+          </button>
+        </>
+      ) : (
+        <button
+          className="fh-link"
+          onClick={() => onOpenSeries(r.seriesId)}
+          aria-label={`Edit ${label} in ${r.seriesName}`}
+        >
+          Edit
+        </button>
+      )}
       <button
-        className="fh-link"
+        className="fh-link subtle"
         onClick={() => onOpenSeries(r.seriesId)}
-        aria-label={`Edit ${r.home} v ${r.away} in ${r.seriesName}`}
+        aria-label={`Open ${r.seriesName}`}
       >
-        Edit
+        Series ↗
       </button>
     </span>
   );
 }
 
-/** One fixture as a line: time · teams/result · ground · series/round · umpires · checks. */
+/** One fixture as a line: time · teams/result · ground · series/round · officials · checks. */
 function FixtureLine({
   r,
   onOpenSeries,
   showDate,
+  manage,
+  onDialog,
 }: {
   r: FixtureRow;
   onOpenSeries: (id: string) => void;
   showDate?: boolean;
+  manage?: HubManage;
+  onDialog: (d: Dialog) => void;
 }) {
   return (
     <li className={`fh-line state-${r.state}`}>
@@ -145,13 +374,17 @@ function FixtureLine({
             {r.round !== undefined ? ` · R${r.round}` : ''}
           </span>
           <span>{r.umpires.length ? `Umpires: ${r.umpires.join(', ')}` : 'No umpires'}</span>
+          {(r.scorers.length > 0 || r.state === 'upcoming' || r.state === 'today') && (
+            <span>{r.scorers.length ? `Scorers: ${r.scorers.join(', ')}` : 'No scorer'}</span>
+          )}
         </div>
+        <RowActions r={r} onOpenSeries={onOpenSeries} manage={manage} onDialog={onDialog} />
       </div>
       <div className="fh-side-col">
         <span className={`fh-state state-${r.state}`}>{STATE_LABEL[r.state]}</span>
         {/* The state already says "Result missing". */}
         <IssueChips issues={r.issues.filter((i) => i !== 'awaiting-result')} />
-        <RowActions r={r} onOpenSeries={onOpenSeries} />
+        <ConfirmControl r={r} manage={manage} />
       </div>
     </li>
   );
@@ -208,17 +441,21 @@ function WeekNav({
 
 /* ─── This week ─── */
 
-type CheckKey = 'results' | 'complete' | 'grounds' | 'umpires' | 'postponed' | 'drafts';
+type CheckKey = 'results' | 'complete' | 'grounds' | 'umpires' | 'scorers' | 'postponed' | 'drafts';
 const CHECK_ISSUES: Record<CheckKey, (r: FixtureRow) => boolean> = {
-  results: (r) => r.issues.includes('awaiting-result'),
+  results: (r) =>
+    r.issues.includes('awaiting-result') ||
+    r.issues.includes('unconfirmed') ||
+    r.issues.includes('result-changed'),
   complete: (r) => r.issues.includes('venue-tbc') || r.issues.includes('time-tbc'),
   grounds: (r) => r.issues.includes('venue-clash'),
   umpires: (r) => r.issues.includes('no-umpires') || r.issues.includes('one-umpire'),
+  scorers: (r) => r.issues.includes('no-scorer'),
   postponed: (r) => r.state === 'postponed',
   drafts: (r) => r.issues.includes('draft'),
 };
 
-export function WeekView({ rows, today, onOpenSeries }: HubProps) {
+export function WeekView({ rows, today, onOpenSeries, manage }: HubProps) {
   const [monday, setMonday] = useState(() => {
     // Monday and Tuesday are for confirming the weekend just played; from Wednesday the
     // week ahead is what needs work. Either way the default week holds a weekend.
@@ -226,6 +463,7 @@ export function WeekView({ rows, today, onOpenSeries }: HubProps) {
     return dow === 1 || dow === 2 ? addDays(weekStart(today), -7) : weekStart(today);
   });
   const [check, setCheck] = useState<CheckKey | null>(null);
+  const dialogs = useDialogs(rows, manage);
   const week = rows.filter((r) => inWeek(r, monday));
   const c = weekChecks(week);
   const shown = check ? week.filter(CHECK_ISSUES[check]) : week;
@@ -256,9 +494,16 @@ export function WeekView({ rows, today, onOpenSeries }: HubProps) {
     <div>
       <div className="fh-toolbar">
         <WeekNav monday={monday} today={today} onChange={(m) => (setMonday(m), setCheck(null))} />
-        <div className="fh-count">
-          {c.games} game{c.games === 1 ? '' : 's'}
-          {c.postponed ? ` · ${c.postponed} postponed` : ''}
+        <div className="fh-toolbar-right">
+          <span className="fh-count">
+            {c.games} game{c.games === 1 ? '' : 's'}
+            {c.postponed ? ` · ${c.postponed} postponed` : ''}
+          </span>
+          {manage && (
+            <Btn tone="ink" size="sm" onClick={() => dialogs.open({ kind: 'add' })}>
+              + Add fixture
+            </Btn>
+          )}
         </div>
       </div>
 
@@ -267,13 +512,15 @@ export function WeekView({ rows, today, onOpenSeries }: HubProps) {
           'results',
           'Monday',
           'Results confirmed',
-          c.played ? `${c.resultsIn}/${c.played}` : '—',
+          c.played ? `${c.confirmed}/${c.played}` : '—',
           c.awaitingResult
-            ? `${c.awaitingResult} played game${c.awaitingResult === 1 ? '' : 's'} without a result`
-            : c.played
-              ? 'every played game has a result'
-              : 'nothing played yet this week',
-          c.awaitingResult ? 'alert' : c.played ? 'ok' : 'muted',
+            ? `${c.awaitingResult} without a result${c.toConfirm ? ` · ${c.toConfirm} to confirm` : ''}`
+            : c.toConfirm
+              ? `${c.toConfirm} result${c.toConfirm === 1 ? '' : 's'} to check and confirm`
+              : c.played
+                ? 'every result checked and confirmed'
+                : 'nothing played yet this week',
+          c.awaitingResult ? 'alert' : c.toConfirm ? 'warn' : c.played ? 'ok' : 'muted',
         )}
         {tile(
           'complete',
@@ -298,6 +545,16 @@ export function WeekView({ rows, today, onOpenSeries }: HubProps) {
           `${c.games - c.umpiresShort}/${c.games}`,
           c.umpiresShort ? `${c.umpiresShort} short of two umpires` : 'two umpires on every game',
           c.umpiresShort ? 'warn' : 'ok',
+        )}
+        {tile(
+          'scorers',
+          'Thursday',
+          'Scorers appointed',
+          c.scorersShort ? `${c.scorersShort} missing` : '✓',
+          c.scorersShort
+            ? `${c.scorersShort} game${c.scorersShort === 1 ? '' : 's'} to come without a scorer`
+            : 'a scorer on every game to come',
+          c.scorersShort ? 'warn' : 'ok',
         )}
         {c.postponed > 0 &&
           tile('postponed', 'Any day', 'Postponed', c.postponed, 'to re-date', 'warn')}
@@ -337,13 +594,20 @@ export function WeekView({ rows, today, onOpenSeries }: HubProps) {
               </h3>
               <ul className="fh-lines">
                 {dayRows.map((r) => (
-                  <FixtureLine key={r.key} r={r} onOpenSeries={onOpenSeries} />
+                  <FixtureLine
+                    key={r.key}
+                    r={r}
+                    onOpenSeries={onOpenSeries}
+                    manage={manage}
+                    onDialog={dialogs.open}
+                  />
                 ))}
               </ul>
             </section>
           );
         })
       )}
+      {dialogs.node}
     </div>
   );
 }
@@ -352,9 +616,10 @@ export function WeekView({ rows, today, onOpenSeries }: HubProps) {
 
 const PAGE = 100;
 
-export function AllFixturesView({ rows, today, onOpenSeries, series, clubs }: HubProps) {
+export function AllFixturesView({ rows, today, onOpenSeries, series, clubs, manage }: HubProps) {
   const [f, setF] = useState<FixtureFilter>({ state: 'all' });
   const [limit, setLimit] = useState(PAGE);
+  const dialogs = useDialogs(rows, manage);
   const venues = useMemo(
     () => [...new Set(rows.map((r) => r.venue).filter((v): v is string => !!v))].sort(),
     [rows],
@@ -378,7 +643,7 @@ export function AllFixturesView({ rows, today, onOpenSeries, series, clubs }: Hu
           <span className="sr-only">Search fixtures</span>
           <input
             type="search"
-            placeholder="Search a team, ground, series, umpire or “round 3”"
+            placeholder="Search a team, ground, series, umpire, scorer or “round 3”"
             value={f.q ?? ''}
             onChange={(e) => set({ q: e.target.value })}
           />
@@ -474,9 +739,20 @@ export function AllFixturesView({ rows, today, onOpenSeries, series, clubs }: Hu
             </>
           )}
         </div>
-        <Btn tone="outline" size="sm" onClick={download} disabled={!shown.length}>
-          Download CSV
-        </Btn>
+        <div className="fh-toolbar-right">
+          <Btn tone="outline" size="sm" onClick={download} disabled={!shown.length}>
+            Download CSV
+          </Btn>
+          {manage && (
+            <Btn
+              tone="ink"
+              size="sm"
+              onClick={() => dialogs.open({ kind: 'add', seriesId: f.seriesId })}
+            >
+              + Add fixture
+            </Btn>
+          )}
+        </div>
       </div>
       {!shown.length ? (
         <div className="fh-empty">No fixtures match.</div>
@@ -490,7 +766,7 @@ export function AllFixturesView({ rows, today, onOpenSeries, series, clubs }: Hu
                   <th>Match and result</th>
                   <th>Ground</th>
                   <th>Series</th>
-                  <th>Umpires</th>
+                  <th>Officials</th>
                   <th>Status</th>
                   <th aria-label="Actions" />
                 </tr>
@@ -512,15 +788,29 @@ export function AllFixturesView({ rows, today, onOpenSeries, series, clubs }: Hu
                       {r.seriesName}
                       {r.round !== undefined && <div className="ump-sub">Round {r.round}</div>}
                     </td>
-                    <td data-label="Umpires">
-                      {r.umpires.length ? r.umpires.join(', ') : <span className="ump-sub">—</span>}
+                    <td data-label="Officials">
+                      <div>
+                        {r.umpires.length ? (
+                          r.umpires.join(', ')
+                        ) : (
+                          <span className="ump-sub">No umpires</span>
+                        )}
+                      </div>
+                      <div className="ump-sub">
+                        {r.scorers.length ? `Scorer: ${r.scorers.join(', ')}` : 'No scorer'}
+                      </div>
                     </td>
                     <td data-label="Status">
                       <span className={`fh-state state-${r.state}`}>{STATE_LABEL[r.state]}</span>
                       <IssueChips issues={r.issues.filter((i) => i !== 'awaiting-result')} />
                     </td>
                     <td data-label="">
-                      <RowActions r={r} onOpenSeries={onOpenSeries} />
+                      <RowActions
+                        r={r}
+                        onOpenSeries={onOpenSeries}
+                        manage={manage}
+                        onDialog={dialogs.open}
+                      />
                     </td>
                   </tr>
                 ))}
@@ -536,6 +826,7 @@ export function AllFixturesView({ rows, today, onOpenSeries, series, clubs }: Hu
           )}
         </>
       )}
+      {dialogs.node}
     </div>
   );
 }
@@ -548,18 +839,69 @@ const SOURCE: Record<string, string> = {
   import: 'Imported',
 };
 
-export function ResultsView({ rows, onOpenSeries, series }: HubProps) {
+function ResultCard({
+  r,
+  onOpenSeries,
+  manage,
+  onDialog,
+}: {
+  r: FixtureRow;
+  onOpenSeries: (id: string) => void;
+  manage?: HubManage;
+  onDialog: (d: Dialog) => void;
+}) {
+  const p = r.result?.play;
+  const mins =
+    p?.startedAt && p.endedAt
+      ? Math.round((Date.parse(p.endedAt) - Date.parse(p.startedAt)) / 60_000)
+      : null;
+  return (
+    <li className={`fh-result${r.result?.changedSinceConfirmed ? ' changed' : ''}`}>
+      <div className="fh-result-main">
+        <Teams r={r} />
+        <div className="fh-meta">
+          <span>
+            {shortDay(r.date)} · {r.seriesName}
+            {r.round !== undefined ? ` · R${r.round}` : ''}
+          </span>
+          <span>{r.venue ?? 'No ground'}</span>
+          {r.result?.source && <span>{SOURCE[r.result.source] ?? r.result.source}</span>}
+          {mins !== null && (
+            <span>
+              {hours(mins)} on the ground
+              {p?.legalBalls != null ? ` · ${p.legalBalls} balls` : ''}
+            </span>
+          )}
+        </div>
+        {r.result?.changedSinceConfirmed && (
+          <div className="fh-changed" role="note">
+            Medicoach changed this result after it was confirmed — check it again.
+          </div>
+        )}
+        <RowActions r={r} onOpenSeries={onOpenSeries} manage={manage} onDialog={onDialog} />
+      </div>
+      <div className="fh-result-side">
+        <ConfirmControl r={r} manage={manage} />
+      </div>
+    </li>
+  );
+}
+
+export function ResultsView({ rows, onOpenSeries, series, manage }: HubProps) {
   const [seriesId, setSeriesId] = useState('');
   const [q, setQ] = useState('');
+  const [showConfirmed, setShowConfirmed] = useState(false);
+  const dialogs = useDialogs(rows, manage);
   const scoped = filterRows(rows, { seriesId: seriesId || undefined, q });
   const missing = scoped.filter((r) => r.state === 'awaiting-result').reverse();
-  const done = scoped
+  const byNewest = (a: FixtureRow, b: FixtureRow) =>
+    (b.date ?? '').localeCompare(a.date ?? '') || (a.time ?? '').localeCompare(b.time ?? '');
+  const played = scoped
     .filter((r) => r.state === 'result' || r.state === 'no-result')
-    .sort(
-      (a, b) =>
-        (b.date ?? '').localeCompare(a.date ?? '') || (a.time ?? '').localeCompare(b.time ?? ''),
-    );
-  const days = [...new Set(done.map((r) => r.date!))];
+    .sort(byNewest);
+  const toConfirm = played.filter((r) => !r.result?.confirmation);
+  const confirmed = played.filter((r) => r.result?.confirmation);
+  const days = [...new Set(confirmed.map((r) => r.date!))];
 
   return (
     <div>
@@ -591,11 +933,18 @@ export function ResultsView({ rows, onOpenSeries, series }: HubProps) {
           <>
             <p className="fh-note">
               Played but no result has come from medicoach. Confirm each one with the scorer, then
-              record it in medicoach or enter it on the series.
+              have it recorded in medicoach — it arrives here on the next sync.
             </p>
             <ul className="fh-lines">
               {missing.map((r) => (
-                <FixtureLine key={r.key} r={r} onOpenSeries={onOpenSeries} showDate />
+                <FixtureLine
+                  key={r.key}
+                  r={r}
+                  onOpenSeries={onOpenSeries}
+                  showDate
+                  manage={manage}
+                  onDialog={dialogs.open}
+                />
               ))}
             </ul>
           </>
@@ -604,48 +953,177 @@ export function ResultsView({ rows, onOpenSeries, series }: HubProps) {
         )}
       </section>
 
-      {days.map((d) => (
-        <section key={d} className="fh-day" aria-label={dayHeading(d)}>
-          <h3 className="fh-day-h">
-            {dayHeading(d)}
-            <span className="fh-day-n">{done.filter((r) => r.date === d).length}</span>
-          </h3>
-          <ul className="fh-results">
-            {done
-              .filter((r) => r.date === d)
-              .map((r) => (
-                <li key={r.key} className="fh-result">
-                  <Teams r={r} />
-                  <div className="fh-meta">
-                    <span>
-                      {r.seriesName}
-                      {r.round !== undefined ? ` · R${r.round}` : ''}
-                    </span>
-                    <span>{r.venue ?? 'No ground'}</span>
-                    {r.result?.source && <span>{SOURCE[r.result.source] ?? r.result.source}</span>}
-                  </div>
-                  <RowActions r={r} onOpenSeries={onOpenSeries} />
-                </li>
+      <section className="fh-missing" aria-label="Results to confirm">
+        <h3 className="fh-day-h">
+          To check and confirm <span className="fh-day-n">{toConfirm.length}</span>
+        </h3>
+        {toConfirm.length ? (
+          <>
+            <p className="fh-note">
+              Check each score against the scorer&apos;s card (or the umpires&apos;), then confirm
+              it. If medicoach later changes a confirmed result it comes back here.
+            </p>
+            <ul className="fh-results">
+              {toConfirm.map((r) => (
+                <ResultCard
+                  key={r.key}
+                  r={r}
+                  onOpenSeries={onOpenSeries}
+                  manage={manage}
+                  onDialog={dialogs.open}
+                />
               ))}
-          </ul>
-        </section>
-      ))}
-      {!done.length && !missing.length && <div className="fh-empty">No results yet.</div>}
+            </ul>
+          </>
+        ) : (
+          <div className="fh-empty ok">✓ Every result is checked and confirmed.</div>
+        )}
+      </section>
+
+      <section aria-label="Confirmed results">
+        <h3 className="fh-day-h">
+          Confirmed <span className="fh-day-n">{confirmed.length}</span>
+          {confirmed.length > 0 && (
+            <button className="fh-link" onClick={() => setShowConfirmed(!showConfirmed)}>
+              {showConfirmed ? 'Hide' : 'Show'}
+            </button>
+          )}
+        </h3>
+        {showConfirmed &&
+          days.map((d) => (
+            <div key={d} className="fh-day">
+              <div className="fh-day-sub">{dayHeading(d)}</div>
+              <ul className="fh-results">
+                {confirmed
+                  .filter((r) => r.date === d)
+                  .map((r) => (
+                    <ResultCard
+                      key={r.key}
+                      r={r}
+                      onOpenSeries={onOpenSeries}
+                      manage={manage}
+                      onDialog={dialogs.open}
+                    />
+                  ))}
+              </ul>
+            </div>
+          ))}
+      </section>
+      {dialogs.node}
     </div>
   );
 }
 
-/* ─── Grounds: what's on where, one week at a time ─── */
+/* ─── Grounds: the week at each ground, and how hard each ground is worked ─── */
 
-export function GroundsWeek({ rows, today, onOpenSeries }: HubProps) {
+export function GroundsWeek({ rows, today, onOpenSeries, manage }: HubProps) {
   const [monday, setMonday] = useState(() => weekStart(today));
+  const dialogs = useDialogs(rows, manage);
   const week = rows.filter((r) => inWeek(r, monday) && r.state !== 'cancelled');
   const grounds = [...new Set(week.map((r) => r.venue ?? 'No ground'))].sort((a, b) =>
     a === 'No ground' ? 1 : b === 'No ground' ? -1 : a.localeCompare(b),
   );
+  const usage = useMemo(() => groundUsage(rows, today), [rows, today]);
+  const maxWeek = Math.max(1, ...usage.flatMap((u) => u.weekly.map((w) => w.balls)));
+  const played = usage.reduce((n, u) => n + u.played, 0);
+  const withPlay = usage.reduce((n, u) => n + u.withPlay, 0);
+
   return (
     <div className="fh-grounds">
-      <div className="fh-toolbar">
+      <section aria-labelledby="fh-usage-h" className="fh-usage">
+        <div className="fh-toolbar">
+          <div>
+            <h2 id="fh-usage-h" className="fh-h2">
+              Ground use
+            </h2>
+            <div className="ump-sub">
+              Time on the ground and balls bowled, from the scorecards — a guide to how hard each
+              pitch is being worked. Heavy: {HEAVY_WEEK_GAMES}+ games or {HEAVY_WEEK_BALLS}+ balls
+              in the last 7 days. Rested: no game for {RESTED_DAYS} days.
+            </div>
+          </div>
+        </div>
+        {played > 0 && withPlay < played && (
+          <p className="fh-note">
+            {withPlay} of {played} played games came with ground time and balls from the scorecard;
+            the rest count as games only.
+          </p>
+        )}
+        {!usage.length ? (
+          <div className="fh-empty">No games on any ground yet.</div>
+        ) : (
+          <div className="tbl-w">
+            <table className="tbl fh-tbl fh-usage-tbl" aria-label="Ground use">
+              <thead>
+                <tr>
+                  <th>Ground</th>
+                  <th>Load</th>
+                  <th>Games played</th>
+                  <th>On the ground</th>
+                  <th>Balls bowled</th>
+                  <th>Last 7 days</th>
+                  <th>Last 6 weeks</th>
+                  <th>Last used</th>
+                </tr>
+              </thead>
+              <tbody>
+                {usage.map((u) => (
+                  <tr key={u.venue}>
+                    <td data-label="Ground">
+                      <strong>{u.venue}</strong>
+                      {u.upcoming > 0 && <div className="ump-sub">{u.upcoming} to come</div>}
+                    </td>
+                    <td data-label="Load">
+                      <span className={`fh-load ${u.load}`}>
+                        {
+                          { heavy: 'Heavy', normal: 'Normal', rested: 'Rested', unused: 'Unused' }[
+                            u.load
+                          ]
+                        }
+                      </span>
+                    </td>
+                    <td data-label="Games played">
+                      {u.played}
+                      {u.played > u.withPlay && (
+                        <span className="ump-sub"> ({u.withPlay} with scorecard)</span>
+                      )}
+                    </td>
+                    <td data-label="On the ground">{u.minutes ? hours(u.minutes) : '—'}</td>
+                    <td data-label="Balls bowled">
+                      {u.legalBalls ? u.legalBalls.toLocaleString('en-GB') : '—'}
+                    </td>
+                    <td data-label="Last 7 days">
+                      {u.weekGames} game{u.weekGames === 1 ? '' : 's'}
+                      {u.weekBalls ? ` · ${u.weekBalls} balls` : ''}
+                    </td>
+                    <td data-label="Last 6 weeks">
+                      <span
+                        className="fh-spark"
+                        role="img"
+                        aria-label={`Balls per week: ${u.weekly.map((w) => w.balls).join(', ')}`}
+                      >
+                        {u.weekly.map((w) => (
+                          <i
+                            key={w.monday}
+                            title={`Week of ${shortDay(w.monday)}: ${w.games} games, ${w.balls} balls`}
+                            style={{
+                              height: `${Math.max(w.games ? 12 : 4, Math.round((w.balls / maxWeek) * 100))}%`,
+                            }}
+                            className={w.games ? 'on' : ''}
+                          />
+                        ))}
+                      </span>
+                    </td>
+                    <td data-label="Last used">{u.lastPlayed ? shortDay(u.lastPlayed) : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <div className="fh-toolbar" style={{ marginTop: 22 }}>
         <div>
           <h2 className="fh-h2">What&apos;s on at each ground</h2>
           <div className="ump-sub">
@@ -679,8 +1157,14 @@ export function GroundsWeek({ rows, today, onOpenSeries }: HubProps) {
                         {r.home} v {r.away}
                         {r.state === 'postponed' ? ' (postponed)' : ''}
                       </span>
-                      <button className="fh-link" onClick={() => onOpenSeries(r.seriesId)}>
-                        Edit
+                      <button
+                        className="fh-link"
+                        onClick={() =>
+                          manage ? dialogs.open({ kind: 'edit', row: r }) : onOpenSeries(r.seriesId)
+                        }
+                        aria-label={`Change the ground or time of ${r.home} v ${r.away}`}
+                      >
+                        Change
                       </button>
                     </li>
                   ))}
@@ -690,6 +1174,7 @@ export function GroundsWeek({ rows, today, onOpenSeries }: HubProps) {
           })}
         </div>
       )}
+      {dialogs.node}
     </div>
   );
 }

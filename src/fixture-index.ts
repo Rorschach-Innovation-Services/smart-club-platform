@@ -21,6 +21,17 @@ export interface FixtureResult {
   source?: 'live' | 'manual' | 'import';
   recordedAt?: string;
   medicoachMatchUrl?: string | null;
+  /** Ground time and balls from the scorecard (contract `play`); null when not sent. */
+  play?: {
+    startedAt: string | null;
+    endedAt: string | null;
+    legalBalls: number | null;
+    deliveries: number | null;
+  } | null;
+  /** The office's confirmation of THIS result (admin only). */
+  confirmation?: { confirmedAt: string; confirmedBy: string; note?: string } | null;
+  /** The office confirmed an earlier version of this result: check it again. */
+  changedSinceConfirmed?: boolean;
 }
 
 interface RawFixture {
@@ -35,7 +46,11 @@ interface RawFixture {
   venueId?: string;
   venueName?: string;
   venueOverride?: string;
-  officials?: { umpires?: Array<{ umpireId?: string; name?: string }> };
+  officials?: {
+    umpires?: Array<{ umpireId?: string; name?: string }>;
+    scorers?: Array<{ scorerId?: string; name?: string }>;
+  };
+  syncMapped?: boolean;
   result?: FixtureResult | null;
 }
 
@@ -62,18 +77,24 @@ export interface IndexVenue {
 
 export type IssueKey =
   | 'awaiting-result'
+  | 'result-changed'
   | 'venue-clash'
+  | 'unconfirmed'
   | 'no-umpires'
   | 'one-umpire'
+  | 'no-scorer'
   | 'venue-tbc'
   | 'time-tbc'
   | 'draft';
 
 export const ISSUES: Record<IssueKey, { label: string; tone: 'alert' | 'warn' | 'info' }> = {
   'awaiting-result': { label: 'Result missing', tone: 'alert' },
+  'result-changed': { label: 'Result changed since confirmed', tone: 'alert' },
   'venue-clash': { label: 'Ground double-booked', tone: 'alert' },
+  unconfirmed: { label: 'Result to confirm', tone: 'warn' },
   'no-umpires': { label: 'No umpires', tone: 'warn' },
   'one-umpire': { label: 'One umpire', tone: 'warn' },
+  'no-scorer': { label: 'No scorer', tone: 'warn' },
   'venue-tbc': { label: 'No ground', tone: 'warn' },
   'time-tbc': { label: 'Start time TBC', tone: 'warn' },
   draft: { label: 'Not released', tone: 'info' },
@@ -111,7 +132,12 @@ export interface FixtureRow {
   status: FixtureStatus;
   state: FixtureState;
   result: FixtureResult | null;
+  /** Medicoach owns this fixture's result (the series is synced). */
+  syncMapped: boolean;
   umpires: string[];
+  umpireIds: string[];
+  scorers: string[];
+  scorerIds: string[];
   issues: IssueKey[];
 }
 
@@ -162,9 +188,10 @@ export function buildFixtureIndex(
         STATUSES.has(raw.status as FixtureStatus) ? raw.status : 'scheduled'
       ) as FixtureStatus;
       const result = raw.result ?? null;
-      const umpires = (raw.officials?.umpires ?? [])
-        .map((u) => u.name ?? u.umpireId ?? '')
-        .filter(Boolean);
+      const umpireRefs = (raw.officials?.umpires ?? []).filter((u) => u.umpireId || u.name);
+      const umpires = umpireRefs.map((u) => u.name ?? u.umpireId ?? '');
+      const scorerRefs = (raw.officials?.scorers ?? []).filter((x) => x.scorerId || x.name);
+      const scorers = scorerRefs.map((x) => x.name ?? x.scorerId ?? '');
       const date = raw.dateTbc ? undefined : raw.date;
       const state: FixtureState =
         status === 'postponed'
@@ -181,10 +208,15 @@ export function buildFixtureIndex(
                   ? 'today'
                   : 'upcoming';
       const off = state === 'postponed' || state === 'cancelled';
+      const played = state === 'result' || state === 'no-result';
       const issues: IssueKey[] = [];
       if (state === 'awaiting-result') issues.push('awaiting-result');
+      if (played && result?.changedSinceConfirmed) issues.push('result-changed');
+      else if (played && !result?.confirmation) issues.push('unconfirmed');
       if (!off && !umpires.length) issues.push('no-umpires');
       else if (!off && umpires.length === 1) issues.push('one-umpire');
+      // Scorers are a pre-match job: flag a missing one only while the game is still to come.
+      if ((state === 'upcoming' || state === 'today') && !scorers.length) issues.push('no-scorer');
       if (!off && !venue) issues.push('venue-tbc');
       if (!off && date && !raw.time && state !== 'result' && state !== 'no-result')
         issues.push('time-tbc');
@@ -211,7 +243,11 @@ export function buildFixtureIndex(
         status,
         state,
         result,
+        syncMapped: raw.syncMapped === true,
         umpires,
+        umpireIds: umpireRefs.map((u) => u.umpireId ?? '').filter(Boolean),
+        scorers,
+        scorerIds: scorerRefs.map((x) => x.scorerId ?? '').filter(Boolean),
         issues,
       });
     }
@@ -287,7 +323,9 @@ export function matchesQuery(r: FixtureRow, q: string): boolean {
   const words = rest.split(' ').filter(Boolean);
   if (!words.length) return true;
   const hay = norm(
-    [r.home, r.away, r.venue, r.seriesName, ...r.umpires, r.result?.summary].join(' '),
+    [r.home, r.away, r.venue, r.seriesName, ...r.umpires, ...r.scorers, r.result?.summary].join(
+      ' ',
+    ),
   );
   return words.every((w) => hay.includes(w));
 }
@@ -323,7 +361,12 @@ export interface WeekChecks {
   games: number;
   played: number;
   resultsIn: number;
+  /** Results the office has confirmed (the current version). */
+  confirmed: number;
+  /** Results in but not (or no longer) confirmed. */
+  toConfirm: number;
   awaitingResult: number;
+  scorersShort: number;
   incomplete: number;
   umpiresShort: number;
   clashes: number;
@@ -338,7 +381,10 @@ export function weekChecks(rows: FixtureRow[]): WeekChecks {
     games: rows.filter((r) => r.state !== 'cancelled').length,
     played: played.length,
     resultsIn: played.filter((r) => r.result).length,
+    confirmed: played.filter((r) => r.result?.confirmation).length,
+    toConfirm: rows.filter((r) => has(r, 'unconfirmed', 'result-changed')).length,
     awaitingResult: rows.filter((r) => r.state === 'awaiting-result').length,
+    scorersShort: rows.filter((r) => has(r, 'no-scorer')).length,
     incomplete: rows.filter((r) => has(r, 'venue-tbc', 'time-tbc')).length,
     umpiresShort: rows.filter((r) => has(r, 'no-umpires', 'one-umpire')).length,
     clashes: rows.filter((r) => has(r, 'venue-clash')).length,
@@ -376,10 +422,12 @@ export function toCsv(rows: FixtureRow[]): string {
     'Away',
     'Ground',
     'Umpires',
+    'Scorers',
     'Status',
     'Home score',
     'Away score',
     'Result',
+    'Confirmed by',
   ];
   const lines = rows.map((r) =>
     [
@@ -391,13 +439,108 @@ export function toCsv(rows: FixtureRow[]): string {
       r.away,
       r.venue ?? '',
       r.umpires.join(' / '),
+      r.scorers.join(' / '),
       r.state,
       r.result?.homeScore ?? '',
       r.result?.awayScore ?? '',
       r.result?.summary ?? '',
+      r.result?.confirmation?.confirmedBy ?? '',
     ]
       .map(esc)
       .join(','),
   );
   return [head.join(','), ...lines].join('\n');
+}
+
+/* ─── Ground usage (pitch-load proxy) ─── */
+
+/**
+ * When a ground counts as heavily used: this many games, or this many legal balls, in the 7
+ * days to today. A starting proxy for pitch health — about three T20s or one and a half
+ * one-day games in a week — to be tuned with the union's groundsmen.
+ */
+export const HEAVY_WEEK_GAMES = 3;
+export const HEAVY_WEEK_BALLS = 720;
+/** No game for this many days ⇒ "rested". */
+export const RESTED_DAYS = 14;
+
+export interface GroundUsage {
+  venue: string;
+  /** Played games (a result is in) on this ground. */
+  played: number;
+  /** Of those, how many came with ground time and balls from the scorecard. */
+  withPlay: number;
+  /** Minutes on the ground, first ball to last, summed. */
+  minutes: number;
+  legalBalls: number;
+  deliveries: number;
+  /** Games still to come on this ground (not postponed/cancelled). */
+  upcoming: number;
+  lastPlayed: string | null;
+  weekGames: number;
+  weekBalls: number;
+  /** Legal balls per week, oldest first, for the last `weeks` Monday-to-Sunday weeks. */
+  weekly: Array<{ monday: string; balls: number; games: number }>;
+  load: 'heavy' | 'normal' | 'rested' | 'unused';
+}
+
+const minutesOf = (p?: FixtureResult['play']) =>
+  p?.startedAt && p.endedAt
+    ? Math.max(0, Math.round((Date.parse(p.endedAt) - Date.parse(p.startedAt)) / 60_000))
+    : 0;
+
+export function groundUsage(rows: FixtureRow[], today: string, weeks = 6): GroundUsage[] {
+  const thisMonday = weekStart(today);
+  const mondays = Array.from({ length: weeks }, (_, i) => addDays(thisMonday, (i - weeks + 1) * 7));
+  const weekFrom = addDays(today, -6);
+  const byVenue = new Map<string, FixtureRow[]>();
+  for (const r of rows) {
+    if (!r.venue || r.state === 'cancelled') continue;
+    const k = norm(r.venue);
+    byVenue.set(k, [...(byVenue.get(k) ?? []), r]);
+  }
+  const out: GroundUsage[] = [];
+  for (const games of byVenue.values()) {
+    const played = games.filter(
+      (r) => (r.state === 'result' || r.state === 'no-result') && r.date && r.date <= today,
+    );
+    const balls = (r: FixtureRow) => r.result?.play?.legalBalls ?? 0;
+    const week = played.filter((r) => r.date! >= weekFrom);
+    const lastPlayed =
+      played
+        .map((r) => r.date!)
+        .sort()
+        .pop() ?? null;
+    const weekBalls = week.reduce((n, r) => n + balls(r), 0);
+    const upcoming = games.filter((r) => r.state === 'upcoming' || r.state === 'today').length;
+    out.push({
+      venue: games[0].venue!,
+      played: played.length,
+      withPlay: played.filter((r) => r.result?.play).length,
+      minutes: played.reduce((n, r) => n + minutesOf(r.result?.play), 0),
+      legalBalls: played.reduce((n, r) => n + balls(r), 0),
+      deliveries: played.reduce((n, r) => n + (r.result?.play?.deliveries ?? 0), 0),
+      upcoming,
+      lastPlayed,
+      weekGames: week.length,
+      weekBalls,
+      weekly: mondays.map((m) => {
+        const inW = played.filter((r) => inWeek(r, m));
+        return { monday: m, games: inW.length, balls: inW.reduce((n, r) => n + balls(r), 0) };
+      }),
+      load:
+        !played.length && !upcoming
+          ? 'unused'
+          : week.length >= HEAVY_WEEK_GAMES || weekBalls >= HEAVY_WEEK_BALLS
+            ? 'heavy'
+            : !lastPlayed || lastPlayed < addDays(today, -RESTED_DAYS)
+              ? 'rested'
+              : 'normal',
+    });
+  }
+  const rank = { heavy: 0, normal: 1, rested: 2, unused: 3 };
+  return out.sort(
+    (a, b) =>
+      rank[a.load] - rank[b.load] || b.legalBalls - a.legalBalls || a.venue.localeCompare(b.venue),
+  );
 }

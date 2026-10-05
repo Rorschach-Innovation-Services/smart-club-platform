@@ -47,8 +47,14 @@ const json = async <X = Record<string, unknown>>(res: Response) => (await res.js
 
 type Fx = Record<string, unknown> & { id: string };
 const getSeriesAs = async (auth = ADMIN) =>
-  json<Array<Series & { fixtures: Fx[] }>>(await call('GET', '/series', undefined, auth));
-const fixtureOf = async (seriesId: string, fixtureId: string, auth = ADMIN) =>
+  json<Array<Omit<Series, 'fixtures'> & { fixtures: Fx[] }>>(
+    await call('GET', '/series', undefined, auth),
+  );
+const fixtureOf = async (
+  seriesId: string,
+  fixtureId: string,
+  auth = ADMIN,
+): Promise<Fx | undefined> =>
   (await getSeriesAs(auth))
     .find((s) => s.id === seriesId)
     ?.fixtures.find((f) => f.id === fixtureId);
