@@ -11,7 +11,7 @@
  * scorers, confirm the result — through the same server paths as the series editor
  * (FixtureManage.tsx). Seasons, stages, allocation and release stay in Seasons & series.
  */
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ApiError } from './api';
 import { Btn } from './atoms';
 import {
@@ -133,7 +133,22 @@ export function Teams({ r, compact }: { r: FixtureRow; compact?: boolean }) {
       <span className={`fh-side${res.winner === 'away' ? ' won' : ''}`}>
         {r.away} <span className="fh-score">{res.away}</span>
       </span>
-      {res.summary && <span className="fh-summary">{res.summary}</span>}
+      {(res.summary || r.result?.medicoachMatchUrl) && (
+        <span className="fh-summary">
+          {res.summary}
+          {r.result?.medicoachMatchUrl && (
+            <a
+              className="fh-scorecard"
+              href={r.result.medicoachMatchUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={`Scorecard: ${r.home} v ${r.away} (opens medicoach)`}
+            >
+              Scorecard ↗
+            </a>
+          )}
+        </span>
+      )}
     </div>
   );
 }
@@ -266,6 +281,64 @@ function ConfirmControl({ r, manage }: { r: FixtureRow; manage?: HubManage }) {
   );
 }
 
+/** "⋯" — the rarely used row actions, out of the way of the officials and the result. */
+function MoreMenu({
+  items,
+  label,
+}: {
+  items: Array<[string, () => void, string?]>;
+  label: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent | KeyboardEvent) => {
+      if (
+        e instanceof KeyboardEvent ? e.key === 'Escape' : !ref.current?.contains(e.target as Node)
+      )
+        setOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', close);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', close);
+    };
+  }, [open]);
+  return (
+    <span className="fh-more-menu" ref={ref}>
+      <button
+        className="fh-icon-btn"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={label}
+        onClick={() => setOpen(!open)}
+      >
+        ⋯
+      </button>
+      {open && (
+        <span className="fh-menu" role="menu">
+          {items.map(([text, run, tone]) => (
+            <button
+              key={text}
+              role="menuitem"
+              className={tone ?? ''}
+              onClick={() => {
+                setOpen(false);
+                run();
+              }}
+            >
+              {text}
+            </button>
+          ))}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** Edit (the common one) as a button, the rest behind "⋯". */
 function RowActions({
   r,
   onOpenSeries,
@@ -278,74 +351,122 @@ function RowActions({
   onDialog: (d: Dialog) => void;
 }) {
   const label = `${r.home} v ${r.away}`;
-  return (
-    <span className="fh-actions">
-      {r.result?.medicoachMatchUrl && (
-        <a
-          className="fh-link"
-          href={r.result.medicoachMatchUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Scorecard ↗
-        </a>
-      )}
-      {manage ? (
-        <>
-          <button
-            className="fh-link"
-            onClick={() => onDialog({ kind: 'edit', row: r })}
-            aria-label={`Edit ${label} in ${r.seriesName}`}
-          >
-            Edit
-          </button>
-          {manage.onSaveUmpires && (
-            <button
-              className="fh-link"
-              onClick={() => onDialog({ kind: 'umpires', row: r })}
-              aria-label={`Umpires for ${label}`}
-            >
-              Umpires
-            </button>
-          )}
-          {manage.onSaveScorers && (
-            <button
-              className="fh-link"
-              onClick={() => onDialog({ kind: 'scorers', row: r })}
-              aria-label={`Scorers for ${label}`}
-            >
-              Scorers
-            </button>
-          )}
-          <button
-            className="fh-link danger"
-            onClick={() => onDialog({ kind: 'remove', row: r })}
-            aria-label={`Remove ${label}`}
-          >
-            Remove
-          </button>
-        </>
-      ) : (
+  if (!manage)
+    return (
+      <span className="fh-actions">
         <button
-          className="fh-link"
+          className="fh-btn-quiet"
           onClick={() => onOpenSeries(r.seriesId)}
           aria-label={`Edit ${label} in ${r.seriesName}`}
         >
           Edit
         </button>
-      )}
+      </span>
+    );
+  return (
+    <span className="fh-actions">
       <button
-        className="fh-link subtle"
-        onClick={() => onOpenSeries(r.seriesId)}
-        aria-label={`Open ${r.seriesName}`}
+        className="fh-btn-quiet"
+        onClick={() => onDialog({ kind: 'edit', row: r })}
+        aria-label={`Edit ${label} in ${r.seriesName}`}
       >
-        Series ↗
+        Edit
       </button>
+      <MoreMenu
+        label={`More for ${label}`}
+        items={[
+          [`Open ${r.seriesName}`, () => onOpenSeries(r.seriesId)],
+          [`Remove ${label}`, () => onDialog({ kind: 'remove', row: r }), 'danger'],
+        ]}
+      />
     </span>
   );
 }
 
-/** One fixture as a line: time · teams/result · ground · series/round · officials · checks. */
+/**
+ * Who's appointed, front and centre: each person as a chip (click to change), and a clear
+ * "+ Add umpire" / "+ Add scorer" while a slot is empty — highlighted when the game needs it.
+ */
+function OfficialsRow({
+  r,
+  manage,
+  onDialog,
+}: {
+  r: FixtureRow;
+  manage?: HubManage;
+  onDialog: (d: Dialog) => void;
+}) {
+  const label = `${r.home} v ${r.away}`;
+  const off = r.state === 'postponed' || r.state === 'cancelled';
+  const group = (
+    kind: 'umpires' | 'scorers',
+    names: string[],
+    max: number,
+    noun: string,
+    canEdit: boolean,
+    needed: boolean,
+  ) => (
+    <span
+      className="fh-off-group"
+      role="group"
+      aria-label={kind === 'umpires' ? 'Umpires' : 'Scorers'}
+    >
+      <span className="fh-off-l">{kind === 'umpires' ? 'Umpires' : 'Scorers'}</span>
+      {names.map((n) =>
+        canEdit ? (
+          <button
+            key={n}
+            className="fh-person"
+            onClick={() => onDialog({ kind, row: r })}
+            aria-label={`Change ${kind} for ${label} (${n})`}
+          >
+            {n}
+          </button>
+        ) : (
+          <span key={n} className="fh-person ro">
+            {n}
+          </span>
+        ),
+      )}
+      {canEdit && names.length < max && !off && (
+        <button
+          className={`fh-add${needed ? ' needed' : ''}`}
+          onClick={() => onDialog({ kind, row: r })}
+          aria-label={`Add ${noun} to ${label}`}
+        >
+          + Add {noun}
+        </button>
+      )}
+      {!canEdit && !names.length && <span className="ump-sub">None</span>}
+    </span>
+  );
+  // Before the game both are jobs (highlighted when short); after it, umpires can still be
+  // recorded (who stood), scorers only show if someone was named.
+  const toCome = r.state === 'upcoming' || r.state === 'today';
+  return (
+    <div className="fh-officials">
+      {group(
+        'umpires',
+        r.umpires,
+        2,
+        'umpire',
+        !!manage?.onSaveUmpires,
+        toCome && r.umpires.length < 2,
+      )}
+      {(r.scorers.length > 0 || toCome) &&
+        group(
+          'scorers',
+          r.scorers,
+          2,
+          r.scorers.length ? 'backup scorer' : 'scorer',
+          !!manage?.onSaveScorers,
+          toCome && !r.scorers.length,
+        )}
+    </div>
+  );
+}
+
+/** One fixture as a line: time · teams/result · ground · officials · checks and actions. */
 function FixtureLine({
   r,
   onOpenSeries,
@@ -373,17 +494,20 @@ function FixtureLine({
             {r.seriesName}
             {r.round !== undefined ? ` · R${r.round}` : ''}
           </span>
-          <span>{r.umpires.length ? `Umpires: ${r.umpires.join(', ')}` : 'No umpires'}</span>
-          {(r.scorers.length > 0 || r.state === 'upcoming' || r.state === 'today') && (
-            <span>{r.scorers.length ? `Scorers: ${r.scorers.join(', ')}` : 'No scorer'}</span>
-          )}
         </div>
-        <RowActions r={r} onOpenSeries={onOpenSeries} manage={manage} onDialog={onDialog} />
+        <OfficialsRow r={r} manage={manage} onDialog={onDialog} />
       </div>
       <div className="fh-side-col">
-        <span className={`fh-state state-${r.state}`}>{STATE_LABEL[r.state]}</span>
+        <div className="fh-side-top">
+          <span className={`fh-state state-${r.state}`}>{STATE_LABEL[r.state]}</span>
+          <RowActions r={r} onOpenSeries={onOpenSeries} manage={manage} onDialog={onDialog} />
+        </div>
         {/* The state already says "Result missing". */}
-        <IssueChips issues={r.issues.filter((i) => i !== 'awaiting-result')} />
+        <IssueChips
+          issues={r.issues.filter(
+            (i) => !['awaiting-result', 'no-umpires', 'one-umpire', 'no-scorer'].includes(i),
+          )}
+        />
         <ConfirmControl r={r} manage={manage} />
       </div>
     </li>

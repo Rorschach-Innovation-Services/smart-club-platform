@@ -285,7 +285,8 @@ describe('This week', () => {
       .mockResolvedValue(undefined);
     renderHub([series()], { onUpdateSeries: update });
     const day = screen.getByRole('region', { name: 'Saturday 3 October' });
-    await user.click(within(day).getByRole('button', { name: /remove ilembe cc v spartan/i }));
+    await user.click(within(day).getByRole('button', { name: /more for ilembe cc v spartan/i }));
+    await user.click(screen.getByRole('menuitem', { name: /remove ilembe cc v spartan/i }));
     const dlg = screen.getByRole('dialog', { name: /remove this fixture/i });
     await user.click(within(dlg).getByRole('button', { name: /^remove fixture$/i }));
     expect(within(dlg).getByRole('alert').textContent).toMatch(/already in medicoach/);
@@ -304,7 +305,8 @@ describe('This week', () => {
       .mockResolvedValue(undefined);
     renderHub([series()], { onUpdateSeries: update });
     const day = screen.getByRole('region', { name: 'Saturday 3 October' });
-    await user.click(within(day).getByRole('button', { name: /remove ilembe cc v spartan/i }));
+    await user.click(within(day).getByRole('button', { name: /more for ilembe cc v spartan/i }));
+    await user.click(screen.getByRole('menuitem', { name: /remove ilembe cc v spartan/i }));
     const dlg = screen.getByRole('dialog', { name: /remove this fixture/i });
     await user.click(within(dlg).getByRole('button', { name: /^remove fixture$/i }));
     await user.click(within(dlg).getByRole('button', { name: /remove here only/i }));
@@ -313,12 +315,30 @@ describe('This week', () => {
     expect(fx(sent, 'f2')).toBeUndefined();
   });
 
+  it('shows who is appointed and offers a clear "+ Add" for each empty slot', () => {
+    renderHub();
+    const day = screen.getByRole('region', { name: 'Saturday 3 October' });
+    // f1 has one umpire: the name as a chip, and room for a second.
+    expect(
+      within(day).getByRole('button', {
+        name: /change umpires for spartan sporting cc v tongaat cc \(sipho mkhize\)/i,
+      }),
+    ).toBeTruthy();
+    expect(
+      within(day).getByRole('button', { name: /add umpire to spartan sporting cc v tongaat cc/i }),
+    ).toBeTruthy();
+    // A played game doesn't ask for a scorer after the fact.
+    expect(
+      within(day).queryByRole('button', { name: /add scorer to spartan sporting cc/i }),
+    ).toBeNull();
+  });
+
   it('appoints umpires and scorers (adding a new scorer on the way)', async () => {
     const user = userEvent.setup();
     const h = renderHub();
     const day = screen.getByRole('region', { name: 'Saturday 3 October' });
     await user.click(
-      within(day).getByRole('button', { name: /umpires for spartan sporting cc v tongaat/i }),
+      within(day).getByRole('button', { name: /add umpire to spartan sporting cc v tongaat/i }),
     );
     let dlg = screen.getByRole('dialog', { name: /appoint umpires/i });
     await user.type(within(dlg).getByRole('combobox', { name: 'Umpire 2' }), 'riaan');
@@ -326,9 +346,12 @@ describe('This week', () => {
     await user.click(within(dlg).getByRole('button', { name: /save umpires/i }));
     expect(h.onSaveOfficials).toHaveBeenCalledWith('s1', 'f1', ['u1', 'u2']);
 
-    await user.click(
-      within(day).getByRole('button', { name: /scorers for spartan sporting cc v tongaat/i }),
-    );
+    // Scorers are a pre-match job: next week's game asks for one, highlighted.
+    await user.click(screen.getByRole('button', { name: 'Next week' }));
+    const next = screen.getByRole('region', { name: 'Saturday 10 October' });
+    const add = within(next).getByRole('button', { name: /add scorer to tongaat cc v ilembe cc/i });
+    expect(add.className).toMatch(/needed/);
+    await user.click(add);
     dlg = screen.getByRole('dialog', { name: /appoint scorers/i });
     await user.type(within(dlg).getByRole('combobox', { name: 'Scorer' }), 'lind');
     await user.click(within(dlg).getByRole('option', { name: /lindiwe khoza/i }));
@@ -338,18 +361,20 @@ describe('This week', () => {
     );
     await user.click(within(dlg).getByRole('button', { name: /save scorers/i }));
     expect(h.onCreateScorer).toHaveBeenCalledWith('Thandeka M');
-    expect(h.onSaveScorers).toHaveBeenCalledWith('s1', 'f1', ['s1', 's-new']);
+    expect(h.onSaveScorers).toHaveBeenCalledWith('s1', 'f3', ['s1', 's-new']);
   });
 
   it('a failed officials save stays open with the reason', async () => {
     const user = userEvent.setup();
     renderHub([series()], {
-      onSaveScorers: vi.fn().mockRejectedValue(new TypeError('Failed to fetch')),
+      onSaveOfficials: vi.fn().mockRejectedValue(new TypeError('Failed to fetch')),
     });
     const day = screen.getByRole('region', { name: 'Saturday 3 October' });
-    await user.click(within(day).getByRole('button', { name: /scorers for ilembe cc v spartan/i }));
-    const dlg = screen.getByRole('dialog', { name: /appoint scorers/i });
-    await user.click(within(dlg).getByRole('button', { name: /save scorers/i }));
+    await user.click(
+      within(day).getByRole('button', { name: /add umpire to ilembe cc v spartan/i }),
+    );
+    const dlg = screen.getByRole('dialog', { name: /appoint umpires/i });
+    await user.click(within(dlg).getByRole('button', { name: /save umpires/i }));
     expect(within(dlg).getByRole('alert').textContent).toMatch(/check your connection/i);
   });
 });
@@ -453,11 +478,12 @@ describe('All fixtures, Venues and the editor', () => {
     expect(screen.getByRole('heading', { name: /venues/i })).toBeTruthy();
   });
 
-  it('"Series ↗" opens the fixture’s series in Seasons & series, where the editor lives', async () => {
+  it('"Open series" (in ⋯) opens the fixture’s series in the editor', async () => {
     const user = userEvent.setup();
     renderHub([series({ id: 's0', name: 'Other series', fixtures: [] }), series()]);
     const day = screen.getByRole('region', { name: 'Saturday 3 October' });
-    await user.click(within(day).getAllByRole('button', { name: /open emcu division 2/i })[0]);
+    await user.click(within(day).getAllByRole('button', { name: /more for/i })[0]);
+    await user.click(screen.getByRole('menuitem', { name: /open emcu division 2/i }));
     expect(screen.getByRole('tab', { name: 'Seasons & series', selected: true })).toBeTruthy();
     expect(document.querySelector('.series-card.active')?.textContent).toMatch(/EMCU Division 2/);
     expect(document.querySelector('.fix-release-bar')).toBeTruthy();
