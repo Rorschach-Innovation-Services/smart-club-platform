@@ -19,6 +19,7 @@
  * deliberately relax it (see their route comments).
  */
 import { randomUUID } from 'node:crypto';
+import { Sentry } from './instrument.js';
 import * as repo from './repo.js';
 import { HttpError } from './auth.js';
 import { hasModule } from './features.js';
@@ -517,7 +518,13 @@ async function materialize(
     // this branch — the cross-club lookup returns roster rows — so fetch it FRESH just for the
     // notice (never from a bulk prefetch: the notice's daily cap counts the club's live comm
     // log). A read fault only costs the notice, never the committed registration.
-    const sourceClub = await repo.getClub(tenant, source.clubId).catch(() => null);
+    const sourceClub = await repo.getClub(tenant, source.clubId).catch((err) => {
+      // On this branch the source IS on-system, so null here is a read fault, not a directory
+      // source — all three notices are being dropped. Surface it; don't fail the registration.
+      Sentry.captureException(err);
+      console.error('clearance notice: source club read failed', err);
+      return null;
+    });
     if (sourceClub) {
       await opts.notifyClearanceOpened(tenant, tenantConfig, sourceClub, clearance, notifyBy);
     }

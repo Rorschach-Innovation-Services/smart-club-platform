@@ -1560,8 +1560,8 @@ async function notifyClearanceOpened(
       // The directory cap could not be checked: fail closed (the clearance itself stands, and
       // the reminder digest still surfaces it to admins).
       capped = true;
-      Sentry.captureException(err);
     }
+    Sentry.captureException(err);
     console.error('clearance destination notice failed', err);
   }
   if (opts.adminBatch) {
