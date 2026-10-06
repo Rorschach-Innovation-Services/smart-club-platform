@@ -29,6 +29,7 @@ packages/api/*-backup-*.json
 # but lives alongside the backups and is equally not repo content.
 titans-import-backup-*.json
 titans-import-created-clubs.json
+titans-import-created-clubs.*.json
 
 # Prod data snapshots (chair/office-bearer name/email/cell) written by
 # import-titans-contacts --confirm — never commit. The revert manifest carries PII
