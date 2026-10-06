@@ -10,6 +10,10 @@
  *      even when the pull failed, since it needs nothing from medicoach;
  *   4. send the one reminder for pending reports whose link expires within 2 days.
  *
+ * After step 3, a run with captain's-report activity (reports opened, notices sent or failed)
+ * sends ONE ops-digest WhatsApp to the union-admin cell (`OpsDigestCell`); a quiet run sends
+ * nothing. The digest is best-effort and outside the report retry: it never fails the run.
+ *
  * Every real (non-dry) run also stamps SYNCHEALTH#: the last successful pull, or the last
  * failure and its technical text — a quiet run writes no SYNCLOG#, so this is how the admin
  * page knows when the sync last worked.
@@ -20,7 +24,12 @@ import {
   type ReminderSummary,
   type ReportRetrySummary,
 } from '../captains-reports.js';
+import { orgCopy } from '../branding.js';
+import { opsDigestCell } from '../env.js';
 import { hasFeature } from '../features.js';
+import { toE164 } from '../notify/e164.js';
+import type { CaptainsReportOpsDigestWhatsAppInput } from '../notify/whatsapp.js';
+import type { TenantConfig } from '../types.js';
 import {
   MedicoachSyncError,
   runMedicoachSync,
@@ -35,10 +44,67 @@ export interface TenantSyncSummary extends SyncRunSummary {
   reminders?: ReminderSummary;
 }
 
+export interface TenantSyncDeps extends PullerDeps {
+  /** Overrides for the ops digest (tests); default to `opsDigestCell()` and the Meta sender. */
+  opsDigestCell?: () => string | null;
+  sendOpsDigest?: (input: CaptainsReportOpsDigestWhatsAppInput) => Promise<unknown>;
+}
+
+interface DigestCounts {
+  resultsPulled: number;
+  opened: number;
+  notified: number;
+  failed: number;
+}
+
+/**
+ * Send the run's ops digest, if the run had report activity and a cell is configured. Never
+ * throws: a template-pending skip is a log line; any other failure is a log line + Sentry.
+ * Logs counts only — never the cell.
+ */
+async function sendOpsDigest(
+  tenant: string,
+  config: TenantConfig,
+  c: DigestCounts,
+  deps: TenantSyncDeps,
+): Promise<void> {
+  if (c.opened + c.notified + c.failed === 0) return; // a quiet run sends nothing
+  let wa: typeof import('../notify/whatsapp.js') | undefined;
+  try {
+    const cell = (deps.opsDigestCell ?? opsDigestCell)();
+    if (!cell) return; // feature off
+    const to = toE164(cell);
+    if (!to) {
+      console.warn(`[ops-digest] ${tenant}: OpsDigestCell is not a valid cell number — skipped`);
+      return;
+    }
+    wa = await import('../notify/whatsapp.js');
+    const summary =
+      `${orgCopy(config).name}: ${c.resultsPulled} new results, ${c.opened} reports opened, ` +
+      `${c.notified} notices sent, ${c.failed} failed`;
+    await (deps.sendOpsDigest ?? wa.sendCaptainsReportOpsDigestWhatsApp)({
+      to,
+      recipientName: 'Union admin',
+      summary,
+    });
+  } catch (err) {
+    if (wa && err instanceof wa.WhatsAppTemplatePendingError) {
+      console.warn(`[ops-digest] ${tenant}: template not approved yet — skipped`);
+      return;
+    }
+    console.warn(
+      `[ops-digest] ${tenant}: send failed — ${err instanceof Error ? err.message : 'error'}`,
+    );
+    await import('../instrument.js')
+      .then(({ Sentry }) => Sentry.captureException(err, { tags: { job: 'ops-digest', tenant } }))
+      .catch(() => {});
+  }
+}
+
 export async function runTenantSync(
   tenant: string,
   trigger: 'cron' | 'manual',
-  deps: PullerDeps,
+  deps: TenantSyncDeps,
 ): Promise<TenantSyncSummary> {
   const { repo } = deps;
   const config = await repo.getTenantConfig(tenant);
@@ -61,11 +127,26 @@ export async function runTenantSync(
       `[medicoach-sync] ${tenant}: outbox flush failed — ${err instanceof Error ? err.message : 'error'}`,
     );
   }
+  // Report activity across the pull's report openings and the retries, for the ops digest.
+  // Keyed by report id: a notice that fails in the pull and is retried in the same run counts
+  // once, by its last outcome.
+  const opened = new Set<string>();
+  const notice = new Map<string, 'sent' | 'failed'>();
+  const captainsReports: NonNullable<PullerDeps['captainsReports']> = {
+    ...(deps.captainsReports ?? {}),
+    onOpenOutcome: (o) => {
+      for (const id of o.opened) opened.add(id);
+      for (const id of o.notified) notice.set(id, 'sent');
+      for (const id of o.failed) notice.set(id, 'failed');
+      deps.captainsReports?.onOpenOutcome?.(o);
+    },
+  };
+  const noticeCount = (v: 'sent' | 'failed') => [...notice.values()].filter((x) => x === v).length;
   const retryReports = () =>
     retryPendingReportOpens(tenant, {
       repo,
       ...(deps.now ? { now: deps.now } : {}),
-      ...(deps.captainsReports ?? {}),
+      ...captainsReports,
     });
   const now = () => (deps.now ?? (() => new Date()))().toISOString();
   // Best-effort: losing the health stamp must never mask the run's own outcome.
@@ -75,7 +156,7 @@ export async function runTenantSync(
       .catch((e) => console.error(`[medicoach-sync] ${tenant}: health stamp failed`, e));
   let summary: SyncRunSummary;
   try {
-    summary = await runMedicoachSync(tenant, trigger, deps);
+    summary = await runMedicoachSync(tenant, trigger, { ...deps, captainsReports });
   } catch (err) {
     const at = now();
     await stamp({
@@ -93,6 +174,17 @@ export async function runTenantSync(
     await stamp({ lastAttemptAt: at, lastSuccessAt: at });
   }
   const reports = await retryReports();
+  await sendOpsDigest(
+    tenant,
+    config,
+    {
+      resultsPulled: summary.counts.resultsStored,
+      opened: opened.size,
+      notified: noticeCount('sent'),
+      failed: noticeCount('failed'),
+    },
+    deps,
+  );
   let reminders: ReminderSummary | undefined;
   try {
     reminders = await sendReportReminders(tenant, {

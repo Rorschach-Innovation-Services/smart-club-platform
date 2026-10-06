@@ -257,6 +257,10 @@ export default $config({
     const candidateHandleSecret = new sst.Secret('CandidateHandleSecret', '');
     const whatsappAccessToken = new sst.Secret('WhatsappAccessToken', '');
     const whatsappPhoneNumberId = new sst.Secret('WhatsappPhoneNumberId', '');
+    // Union-admin cell for the captain's-report ops digest (one WhatsApp status line after a
+    // sync run with report activity). '' ⇒ the digest is off. Never commit the number:
+    //   sst secret set OpsDigestCell <cell> --stage <stage>
+    const opsDigestCell = new sst.Secret('OpsDigestCell', '');
     // ── Medicoach fixture/result sync (ADR 0016) ── Smart club PULLS from medicoach. The URL
     // is the medicoach API base (e.g. https://api.medicoach.co.za); the secret is the shared
     // HMAC key (== medicoach's SmartClubSyncSecret). Both default to '' and an empty value is
@@ -497,6 +501,7 @@ export default $config({
         candidateHandleSecret,
         whatsappAccessToken,
         whatsappPhoneNumberId,
+        opsDigestCell,
         // POST /integrations/medicoach/sync-now runs the puller in the API Lambda.
         medicoachSyncUrl,
         medicoachSyncSecret,
@@ -562,6 +567,8 @@ export default $config({
         CANDIDATE_HANDLE_SECRET: candidateHandleSecret.value,
         WHATSAPP_ACCESS_TOKEN: whatsappAccessToken.value,
         WHATSAPP_PHONE_NUMBER_ID: whatsappPhoneNumberId.value,
+        // Captain's-report ops digest recipient ("Sync now" runs the same sync) — '' ⇒ off.
+        OPS_DIGEST_CELL: opsDigestCell.value,
         // Medicoach sync (ADR 0016) — empty ⇒ the "Sync now" route dry-runs.
         MEDICOACH_SYNC_URL: medicoachSyncUrl.value,
         MEDICOACH_SYNC_SECRET: medicoachSyncSecret.value,
@@ -641,6 +648,7 @@ export default $config({
           fromEmail,
           whatsappAccessToken,
           whatsappPhoneNumberId,
+          opsDigestCell,
           captainsReportLinkSecret,
         ],
         // A stored result opens captain's reports and emails the link (SES, eu-west-1).
@@ -658,6 +666,8 @@ export default $config({
           FROM_EMAIL: fromEmail.value,
           WHATSAPP_ACCESS_TOKEN: whatsappAccessToken.value,
           WHATSAPP_PHONE_NUMBER_ID: whatsappPhoneNumberId.value,
+          // Captain's-report ops digest recipient — '' ⇒ off.
+          OPS_DIGEST_CELL: opsDigestCell.value,
           NOTIFY_DRY_RUN: process.env.NOTIFY_DRY_RUN ?? '',
           CAPTAINS_REPORT_LINK_SECRET: captainsReportLinkSecret.value,
           CAPTAINS_REPORT_LINK_BASE_URL: captainsReportLinkBaseUrl,

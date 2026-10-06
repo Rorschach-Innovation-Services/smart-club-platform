@@ -772,6 +772,86 @@ describe('the reminder', () => {
   });
 });
 
+// ── 5b. The ops digest after a sync run ──
+describe('the ops digest after a sync run', () => {
+  type DigestInput = import('../src/notify/whatsapp.js').CaptainsReportOpsDigestWhatsAppInput;
+  const digests: DigestInput[] = [];
+  const DIGEST_CELL = '0820000000'; // placeholder, never a real number
+  const syncRun = async (over: Record<string, unknown> = {}) => {
+    const { runTenantSync } = await import('../src/medicoach-sync/run.js');
+    return runTenantSync('dolphins', 'cron', {
+      repo,
+      url: stubUrl,
+      secret: SECRET,
+      log: () => {},
+      captainsReports: capture,
+      opsDigestCell: () => DIGEST_CELL,
+      sendOpsDigest: async (input) => {
+        digests.push(input);
+      },
+      ...over,
+    });
+  };
+  beforeEach(() => {
+    digests.length = 0;
+  });
+
+  test('a run that opens reports sends ONE digest with the run counts', async () => {
+    page = liveResultPage('live');
+    const summary = await syncRun();
+    assert.equal(summary.status, 'ok');
+    assert.equal(digests.length, 1);
+    assert.equal(digests[0].to, '27820000000'); // toE164: digits, no '+'
+    assert.equal(digests[0].recipientName, 'Union admin');
+    assert.equal(
+      digests[0].summary,
+      'Dolphins: 1 new results, 2 reports opened, 2 notices sent, 0 failed',
+    );
+  });
+
+  test('a quiet run sends nothing', async () => {
+    page = liveResultPage('live');
+    await syncRun();
+    digests.length = 0;
+    page = { ...(page as object), fixtures: [], hasMore: false };
+    await syncRun();
+    assert.equal(digests.length, 0);
+  });
+
+  test('failed notices are counted once each (the report retry is unchanged)', async () => {
+    respond = (n) => n.channels.map((channel) => ({ channel, status: 'failed', error: 'down' }));
+    page = liveResultPage('live');
+    const summary = await syncRun();
+    assert.equal(digests.length, 1);
+    assert.match(digests[0].summary, /2 reports opened, 0 notices sent, 2 failed$/);
+    assert.equal(summary.reports?.retried, 1, 'the REPORTOPEN# marker is still retried');
+  });
+
+  test('no cell configured: the digest is off', async () => {
+    page = liveResultPage('live');
+    await syncRun({ opsDigestCell: () => null });
+    assert.equal(digests.length, 0);
+  });
+
+  test('a digest failure never fails the sync run', async () => {
+    page = liveResultPage('live');
+    const summary = await syncRun({
+      sendOpsDigest: async () => {
+        throw new Error('meta down');
+      },
+    });
+    assert.equal(summary.status, 'ok');
+    assert.equal((await reportsOf()).length, 2);
+  });
+
+  test('the real sender skips silently while the template is pending', async () => {
+    page = liveResultPage('live');
+    const summary = await syncRun({ sendOpsDigest: undefined });
+    assert.equal(summary.status, 'ok');
+    assert.equal(digests.length, 0);
+  });
+});
+
 // ── 6. A match that isn't in the fixture list ──
 describe('reporting a match that is not listed', () => {
   const body = {

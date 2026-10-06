@@ -78,6 +78,16 @@ export function medicoachSyncSecret(): string {
 }
 
 /**
+ * The union-admin cell that receives the captain's-report ops digest after a sync run with
+ * report activity. Lambda: OPS_DIGEST_CELL from the `OpsDigestCell` secret; CLI under
+ * `sst shell`: the linked secret. Empty/unset ⇒ null ⇒ the digest is off (never throws).
+ */
+export function opsDigestCell(): string | null {
+  const v = (process.env.OPS_DIGEST_CELL ?? fromSstResource('OpsDigestCell', 'value') ?? '').trim();
+  return v || null;
+}
+
+/**
  * The HMAC key for captain's-report submit-once links (ADR 0016, Slice 2). A link token is
  * `payload.HMAC(secret, payload)`, so an empty key would make every link forgeable: FAIL
  * CLOSED exactly like `candidateHandleSecret` — only the offline/local stack (LOCAL_AUTH=1,
