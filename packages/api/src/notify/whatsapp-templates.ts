@@ -104,11 +104,11 @@ export const WHATSAPP_TEMPLATES = {
    * Chair onboarding heads-up sent on affiliation-complete: player-registration
    * link + tutorials URL.
    *
-   * NOT YET CREATED IN META. `bodyText` below is RECONSTRUCTED from the parameter
-   * order (the arity contract), not a transcript. Two URL body variables draw extra
-   * Meta scrutiny — if {{4}} blocks approval, drop it and rely on the email + portal
-   * for tutorials (the email already carries every link), which is a paramCount
-   * change here and in `regLinkParams`. Status flips to "registered" once approved.
+   * Active in Meta (template id 2437210353459453, Utility, last edited 19 Jun 2026;
+   * confirmed in Business Manager 6 Oct 2026 — "Quality pending" is the rating, not
+   * approval state). `bodyText` below is the registered copy, which predates this
+   * registry and differs from the wording the entry originally reconstructed; the
+   * 4-param order is unchanged, so `regLinkParams` is unaffected.
    */
   reglinkReady: {
     name: 'club_reglink_ready',
@@ -116,12 +116,11 @@ export const WHATSAPP_TEMPLATES = {
     paramCount: 4,
     params: ['chair name', 'club name', 'reg link', 'tutorials URL'],
     bodyText:
-      'Hello {{1}},\n\n' +
-      '{{2}} is now set up on the club management portal. Share this ' +
-      'player-registration link with your members so they can register: {{3}}\n\n' +
-      'A short set of how-to videos is here: {{4}}\n\n' +
-      'If you have any questions, please contact your union office.',
-    status: 'pending',
+      "Hi {{1}}, your {{2}} affiliation is approved. Here is your club's " +
+      'player registration link ({{3}}), share it with your players so they ' +
+      'register straight into your club.\n\n' +
+      'New to the app? Visit this link ({{4}}) for quick how-to videos.',
+    status: 'registered',
   },
 
   /**
@@ -155,11 +154,11 @@ export const WHATSAPP_TEMPLATES = {
    * kick-off/ground only when revealed) rides in the email and the portal, never here, so
    * the template can't leak a withheld time or venue.
    *
-   * NOT YET CREATED IN META. `bodyText` is RECONSTRUCTED from the parameter order (the
-   * arity contract). Unlike the other entries, this status IS read at runtime: the cron
-   * skips the WhatsApp channel unless it is "registered" (a daily cron across every tenant
-   * would otherwise fail the same send on every run until approval). Register per
-   * docs/runbooks/whatsapp-templates.md, then flip to "registered".
+   * Submitted to Meta 6 Oct 2026 and IN REVIEW (template id 1536264794855191); the
+   * registered copy matches `bodyText` below. Unlike the other entries, this status IS
+   * read at runtime: the cron skips the WhatsApp channel unless it is "registered" (a
+   * daily cron across every tenant would otherwise fail the same send on every run
+   * until approval). Flip to "registered" once Meta approves it.
    */
   fixtureReminder: {
     name: 'fixture_reminder',
