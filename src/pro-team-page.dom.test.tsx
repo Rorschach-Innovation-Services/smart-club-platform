@@ -82,4 +82,44 @@ describe('Professional team', () => {
     await user.click(within(table).getAllByRole('row')[1]);
     expect(document.querySelector('.pro-scorecards .pro-inn')).toBeTruthy();
   });
+
+  it('finds a player by search and dives into their numbers', async () => {
+    const user = userEvent.setup();
+    renderPage('&ptab=form');
+    const grid = document.querySelector('.pro-grid')!;
+    const name = grid.querySelector('.pro-name')!.textContent!;
+    await user.type(screen.getByRole('searchbox', { name: 'Search a player' }), name.split(' ')[1]);
+    const options = screen.getByRole('listbox', { name: 'Players' });
+    await user.click(within(options).getAllByRole('button')[0]);
+    expect(screen.getByRole('heading', { name })).toBeTruthy();
+    expect(screen.getByText('Every innings')).toBeTruthy();
+    expect(screen.getByRole('table', { name: /Batting by/ })).toBeTruthy();
+    expect(screen.getByRole('table', { name: 'Batting against each opponent' })).toBeTruthy();
+    expect(screen.queryByText('Every spell')).toBeNull();
+    await user.click(screen.getByRole('button', { name: '← All players' }));
+    expect(screen.queryByRole('heading', { name })).toBeNull();
+  });
+
+  it('switches the deep dive between batting, bowling and all-rounder', async () => {
+    const user = userEvent.setup();
+    renderPage('&ptab=form&fmode=ar');
+    expect(screen.getByRole('tab', { name: 'All-rounder', selected: true })).toBeTruthy();
+    const first = document.querySelector('.pro-grid .pro-name') as HTMLButtonElement;
+    expect(first.closest('.card')!.textContent).toMatch(/all-rounder index/);
+    await user.click(first);
+    expect(screen.getByText('Every innings')).toBeTruthy();
+    expect(screen.getByText('Every spell')).toBeTruthy();
+    expect(screen.getByText(/All-rounder index · season/)).toBeTruthy();
+    await user.click(screen.getByRole('tab', { name: 'Bowling' }));
+    expect(screen.queryByText('Every innings')).toBeNull();
+    expect(screen.getByText('Every spell')).toBeTruthy();
+    expect(screen.getByRole('table', { name: 'Bowling against each opponent' })).toBeTruthy();
+  });
+
+  it('says so when a search finds nobody', async () => {
+    const user = userEvent.setup();
+    renderPage('&ptab=form');
+    await user.type(screen.getByRole('searchbox', { name: 'Search a player' }), 'zzzz');
+    expect(screen.getByText(/No players match “zzzz” for batting/)).toBeTruthy();
+  });
 });

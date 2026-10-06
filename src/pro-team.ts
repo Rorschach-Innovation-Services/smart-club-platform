@@ -878,3 +878,98 @@ export function orderContribution(squad: Squad, ms: ProMatch[]) {
       .map(([n, k]) => ({ n, k })),
   }));
 }
+
+/* ─── One player, sliced (the Form deep dive) ─── */
+
+export interface BatSplit {
+  key: string;
+  inns: number;
+  runs: number;
+  balls: number;
+  outs: number;
+  avg: number | null;
+  sr: number | null;
+  hs: string;
+  fifties: number;
+  boundaryPct: number | null;
+}
+
+/** Batting grouped by any key (format, season, opponent, position), in first-seen order. */
+export function batSplits(lines: BatLine[], by: (l: BatLine) => string): BatSplit[] {
+  const groups = new Map<string, BatLine[]>();
+  lines.forEach((l) => groups.set(by(l), [...(groups.get(by(l)) ?? []), l]));
+  return [...groups].map(([key, ls]) => {
+    const runs = sum(ls, (l) => l.r);
+    const balls = sum(ls, (l) => l.b);
+    const outs = ls.filter((l) => l.isOut).length;
+    const top = [...ls].sort((a, b) => b.r - a.r || Number(a.isOut) - Number(b.isOut))[0];
+    const bnd = sum(ls, (l) => l.f4 * 4 + l.f6 * 6);
+    return {
+      key,
+      inns: ls.length,
+      runs,
+      balls,
+      outs,
+      avg: outs ? runs / outs : null,
+      sr: balls ? (runs / balls) * 100 : null,
+      hs: `${top.r}${top.isOut ? '' : '*'}`,
+      fifties: ls.filter((l) => l.r >= 50).length,
+      boundaryPct: runs ? (bnd / runs) * 100 : null,
+    };
+  });
+}
+
+export interface BowlSplit {
+  key: string;
+  spells: number;
+  balls: number;
+  runs: number;
+  wkts: number;
+  econ: number | null;
+  avg: number | null;
+  sr: number | null;
+  dotPct: number | null;
+  best: string;
+}
+
+export function bowlSplits(lines: BowlLine[], by: (l: BowlLine) => string): BowlSplit[] {
+  const groups = new Map<string, BowlLine[]>();
+  lines.forEach((l) => groups.set(by(l), [...(groups.get(by(l)) ?? []), l]));
+  return [...groups].map(([key, ls]) => {
+    const balls = sum(ls, (l) => l.balls);
+    const runs = sum(ls, (l) => l.r);
+    const wkts = sum(ls, (l) => l.w);
+    const best = [...ls].sort((a, b) => b.w - a.w || a.r - b.r)[0];
+    return {
+      key,
+      spells: ls.length,
+      balls,
+      runs,
+      wkts,
+      econ: balls ? (runs / balls) * 6 : null,
+      avg: wkts ? runs / wkts : null,
+      sr: wkts ? balls / wkts : null,
+      dotPct: balls ? (sum(ls, (l) => l.dots) / balls) * 100 : null,
+      best: `${best.w}/${best.r}`,
+    };
+  });
+}
+
+/** How often each size of score comes: ducks, starts, the 30s, fifties, hundreds. */
+export const SCORE_BANDS = [
+  { label: '0', test: (r: number) => r === 0 },
+  { label: '1–9', test: (r: number) => r >= 1 && r <= 9 },
+  { label: '10–29', test: (r: number) => r >= 10 && r <= 29 },
+  { label: '30–49', test: (r: number) => r >= 30 && r <= 49 },
+  { label: '50–99', test: (r: number) => r >= 50 && r <= 99 },
+  { label: '100+', test: (r: number) => r >= 100 },
+];
+export const scoreBands = (lines: BatLine[]) =>
+  SCORE_BANDS.map((b) => ({ label: b.label, n: lines.filter((l) => b.test(l.r)).length }));
+
+/** Spells by wickets taken: 0, 1, 2, 3, 4+. */
+export const wicketBands = (lines: BowlLine[]) =>
+  ['0', '1', '2', '3', '4+'].map((label, i) => ({
+    label,
+    n: lines.filter((l) => (i === 4 ? l.w >= 4 : l.w === i)).length,
+  }));

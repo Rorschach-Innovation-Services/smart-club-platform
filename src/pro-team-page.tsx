@@ -11,6 +11,7 @@ import { PRO_IS_SAMPLE, PRO_MATCHES, SCOUT_POOLS } from './pro-data';
 import {
   PRO_FORMATS,
   oversToBalls,
+  seasonOf,
   shortTeam,
   type ProFormat,
   type ProMatch,
@@ -27,6 +28,11 @@ import {
   teamSummary,
   wicketsByPhase,
   RECENT,
+  batSplits,
+  bowlSplits,
+  scoreBands,
+  wicketBands,
+  type Baseline,
   type ProFilter,
   type ProPlayer,
   type ProRole,
@@ -244,7 +250,7 @@ export function ProTeamPage() {
   const season = params.get('season') || 'all';
   const set = (patch: Record<string, string>) => {
     const next = new URLSearchParams(params);
-    Object.entries(patch).forEach(([k, v]) => next.set(k, v));
+    Object.entries(patch).forEach(([k, v]) => (v ? next.set(k, v) : next.delete(k)));
     setParams(next, { replace: true });
   };
   const filter: ProFilter = { format, season };
@@ -277,7 +283,7 @@ export function ProTeamPage() {
               role="tab"
               aria-selected={s.gender === squad.gender}
               className={s.gender === squad.gender ? 'on' : ''}
-              onClick={() => set({ squad: s.gender })}
+              onClick={() => set({ squad: s.gender, fplayer: '' })}
             >
               {s.name}
               <small>{s.gender === 'men' ? 'Men' : 'Women'}</small>
@@ -353,7 +359,16 @@ export function ProTeamPage() {
           />
         )}
         {tab === 'squad' && <SquadView players={players} format={format} openPlayer={setOpen} />}
-        {tab === 'form' && <FormView players={players} format={format} openPlayer={setOpen} />}
+        {tab === 'form' && (
+          <FormView
+            squad={squad}
+            players={players}
+            format={format}
+            mode={(params.get('fmode') as FormMode) || 'bat'}
+            focus={params.get('fplayer') || null}
+            onChange={set}
+          />
+        )}
         {tab === 'team' && <TeamView squad={squad} ms={ms} format={format} />}
         {tab === 'callups' && (
           <CallupsView
@@ -849,101 +864,639 @@ function SquadView({
 
 /* ── Form ── */
 
+type FormMode = 'bat' | 'bowl' | 'ar';
+const FORM_MODES: [FormMode, string][] = [
+  ['bat', 'Batting'],
+  ['bowl', 'Bowling'],
+  ['ar', 'All-rounder'],
+];
+
+/** Who shows in each mode: enough innings, spells, or both. */
+const inMode = (p: ProPlayer, m: FormMode) =>
+  m === 'bat'
+    ? p.bat.inns >= 3
+    : m === 'bowl'
+      ? p.bowl.inns >= 3
+      : p.bat.inns >= 3 && p.bowl.inns >= 3;
+
+const arIndex = (p: ProPlayer, w: 'idx' | 'recent') => {
+  const s = p[w];
+  return s.bat && s.bowl ? Math.sqrt(s.bat.idx * s.bowl.idx) : null;
+};
+
+function batPoints(p: ProPlayer, bases: Record<ProFormat, Baseline | null>, last?: number) {
+  return (last ? p.bat.lines.slice(-last) : p.bat.lines).map((l, i) => ({
+    key: `${l.matchId}-${l.innsNo}-${i}`,
+    value: l.r,
+    text: `${l.r}${l.isOut ? '' : '*'}`,
+    tip: `${fmtDay(l.date)} ${l.format} v ${l.opp}: ${l.r}${l.isOut ? '' : '*'} off ${l.b} at #${l.pos}${l.cameIn.over ? `, in at ${l.cameIn.score}/${l.cameIn.wkts} (${l.cameIn.over} ov)` : ''}${l.kind ? ` · ${l.kind.toLowerCase()}` : ''}`,
+    faint: !l.isOut,
+    good: l.r >= (bases[l.format]?.rpi ?? 0),
+  }));
+}
+
+function bowlPoints(p: ProPlayer, bases: Record<ProFormat, Baseline | null>, last?: number) {
+  return (last ? p.bowl.lines.slice(-last) : p.bowl.lines).map((l, i) => ({
+    key: `${l.matchId}-${i}`,
+    value: l.w,
+    text: `${l.w}/${l.r}`,
+    tip: `${fmtDay(l.date)} ${l.format} v ${l.opp}: ${l.w}/${l.r} in ${overs(l.balls)} ov · econ ${r1((l.r / l.balls) * 6)} · ${l.dots} dots`,
+    good: (l.r / l.balls) * 6 <= (bases[l.format]?.econ ?? 99) || l.w >= 2,
+  }));
+}
+
 function FormView({
+  squad,
   players,
   format,
-  openPlayer,
+  mode,
+  focus,
+  onChange,
 }: {
+  squad: Squad;
   players: ProPlayer[];
   format: ProFormat | 'all';
-  openPlayer: (n: string) => void;
+  mode: FormMode;
+  focus: string | null;
+  onChange: (patch: Record<string, string>) => void;
 }) {
-  const [disc, setDisc] = useState<'bat' | 'bowl'>('bat');
-  const bases = useMemo(() => baselines(PRO_MATCHES), []);
+  const [q, setQ] = useState('');
+  const [suggest, setSuggest] = useState(false);
+  // Averages from this squad's gender only: a women's T20 is rated against women's T20.
+  const bases = useMemo(
+    () => baselines(PRO_MATCHES.filter((m) => m.gender === squad.gender)),
+    [squad.gender],
+  );
+  const needle = q.trim().toLowerCase();
+  const matches = needle ? players.filter((p) => p.name.toLowerCase().includes(needle)) : [];
+  const pick = (name: string) => {
+    setQ('');
+    setSuggest(false);
+    onChange({ fplayer: name });
+  };
+  const focused = focus ? players.find((p) => p.name === focus) : undefined;
   const list = players
-    .filter((p) => (disc === 'bat' ? p.bat.inns >= 3 : p.bowl.inns >= 3))
-    .sort((a, b) => b.matches - a.matches)
-    .slice(0, 12);
+    .filter((p) => inMode(p, mode) && (!needle || p.name.toLowerCase().includes(needle)))
+    .sort((a, b) =>
+      mode === 'ar' ? (arIndex(b, 'idx') ?? 0) - (arIndex(a, 'idx') ?? 0) : b.matches - a.matches,
+    )
+    .slice(0, needle ? 40 : 12);
+
   return (
     <>
-      <div className="sc-filters">
-        <div className="sc-board-note">
-          Innings by innings, oldest first · navy = above the {format === 'all' ? 'format' : format}{' '}
-          average, grey = below · the line is the 3-innings rolling average
-        </div>
-        <div className="pro-seg small" role="tablist" aria-label="Discipline">
-          <button
-            role="tab"
-            aria-selected={disc === 'bat'}
-            className={disc === 'bat' ? 'on' : ''}
-            onClick={() => setDisc('bat')}
+      <div className="pro-form-bar">
+        <div
+          className="pro-search"
+          role="combobox"
+          aria-expanded={suggest && matches.length > 0}
+          aria-haspopup="listbox"
+        >
+          <svg
+            viewBox="0 0 16 16"
+            width="16"
+            height="16"
+            aria-hidden="true"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
           >
-            Batting
-          </button>
-          <button
-            role="tab"
-            aria-selected={disc === 'bowl'}
-            className={disc === 'bowl' ? 'on' : ''}
-            onClick={() => setDisc('bowl')}
-          >
-            Bowling
-          </button>
-        </div>
-      </div>
-      <div className="pro-grid">
-        {list.map((p) => {
-          const pts =
-            disc === 'bat'
-              ? p.bat.lines.slice(-16).map((l, i) => ({
-                  key: `${l.matchId}-${i}`,
-                  value: l.r,
-                  text: `${l.r}${l.isOut ? '' : '*'}`,
-                  tip: `${fmtDay(l.date)} ${l.format} v ${l.opp}: ${l.r}${l.isOut ? '' : '*'} off ${l.b} (bat ${l.pos})${l.kind ? ` · ${l.kind.toLowerCase()}` : ''}`,
-                  faint: !l.isOut,
-                  good: l.r >= (bases[l.format]?.rpi ?? 0),
-                }))
-              : p.bowl.lines.slice(-16).map((l, i) => ({
-                  key: `${l.matchId}-${i}`,
-                  value: l.w,
-                  text: `${l.w}/${l.r}`,
-                  tip: `${fmtDay(l.date)} ${l.format} v ${l.opp}: ${l.w}/${l.r} in ${overs(l.balls)} ov (econ ${r1((l.r / l.balls) * 6)})`,
-                  good: (l.r / l.balls) * 6 <= (bases[l.format]?.econ ?? 99) || l.w >= 2,
-                }));
-          const avg =
-            format !== 'all' ? (disc === 'bat' ? bases[format]?.rpi : undefined) : undefined;
-          return (
-            <div key={p.name} className="card pro-form-card">
-              <div className="card-head">
-                <div>
+            <circle cx="7" cy="7" r="4.5" />
+            <path d="M10.5 10.5 14 14" />
+          </svg>
+          <input
+            type="search"
+            placeholder="Search a player…"
+            aria-label="Search a player"
+            value={q}
+            onChange={(e) => {
+              setQ(e.target.value);
+              setSuggest(true);
+            }}
+            onFocus={() => setSuggest(true)}
+            onBlur={() => setTimeout(() => setSuggest(false), 150)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && matches[0]) pick(matches[0].name);
+              if (e.key === 'Escape') setSuggest(false);
+            }}
+          />
+          {suggest && matches.length > 0 && (
+            <ul className="pro-suggest" role="listbox" aria-label="Players">
+              {matches.slice(0, 8).map((p) => (
+                <li key={p.name} role="option" aria-selected={false}>
                   <button
                     type="button"
-                    className="card-title pro-name"
-                    onClick={() => openPlayer(p.name)}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => pick(p.name)}
                   >
-                    {p.name}
+                    <strong>{p.name}</strong>
+                    <small>
+                      {p.role} · {p.matches} games
+                    </small>
                   </button>
-                  <div className="card-sub">
-                    {disc === 'bat'
-                      ? `${p.bat.runs} runs · avg ${r1(p.bat.avg)} · SR ${r0(p.bat.sr)}`
-                      : `${p.bowl.wkts} wkts · econ ${r1(p.bowl.econ)} · SR ${r1(p.bowl.sr)}`}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="pro-seg small" role="tablist" aria-label="Discipline">
+          {FORM_MODES.map(([k, l]) => (
+            <button
+              key={k}
+              role="tab"
+              aria-selected={mode === k}
+              className={mode === k ? 'on' : ''}
+              onClick={() => onChange({ fmode: k })}
+            >
+              {l}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {focused ? (
+        <PlayerDeepDive
+          player={focused}
+          squad={squad}
+          mode={mode}
+          format={format}
+          bases={bases}
+          onBack={() => onChange({ fplayer: '' })}
+        />
+      ) : (
+        <>
+          <div className="sc-board-note pro-form-note">
+            {mode === 'ar'
+              ? 'Players who bat and bowl, best all-rounder index first · runs above, wickets below, innings by innings'
+              : `Innings by innings, oldest first · navy = above the ${format === 'all' ? 'format' : format} average, grey = below · the line is the 3-innings rolling average`}
+            {' · '}search or tap a name to dive deeper
+          </div>
+          {list.length === 0 ? (
+            <div className="ss-empty">
+              {needle
+                ? `No players match “${q}” for ${FORM_MODES.find((m) => m[0] === mode)![1].toLowerCase()} in this selection.`
+                : 'Nobody with three innings or spells in this selection.'}
+            </div>
+          ) : (
+            <div className="pro-grid">
+              {list.map((p) => (
+                <div key={p.name} className="card pro-form-card">
+                  <div className="card-head">
+                    <div>
+                      <button
+                        type="button"
+                        className="card-title pro-name"
+                        onClick={() => pick(p.name)}
+                      >
+                        {p.name}
+                      </button>
+                      <div className="card-sub">
+                        {mode === 'bat'
+                          ? `${p.bat.runs} runs · avg ${r1(p.bat.avg)} · SR ${r0(p.bat.sr)}`
+                          : mode === 'bowl'
+                            ? `${p.bowl.wkts} wkts · econ ${r1(p.bowl.econ)} · SR ${r1(p.bowl.sr)}`
+                            : `${p.bat.runs} runs · ${p.bowl.wkts} wkts · all-rounder index ${r0(arIndex(p, 'idx'))}`}
+                      </div>
+                    </div>
+                    <span className={`pro-sig ${p.signal.kind}`}>{p.signal.label}</span>
+                  </div>
+                  <div className="card-body">
+                    {mode !== 'bowl' && (
+                      <FormColumns
+                        points={batPoints(p, bases, 16)}
+                        average={format !== 'all' ? (bases[format]?.rpi ?? undefined) : undefined}
+                        averageLabel={`${format} average`}
+                        valueLabel="Runs"
+                        height={mode === 'ar' ? 100 : 130}
+                      />
+                    )}
+                    {mode !== 'bat' && (
+                      <FormColumns
+                        points={bowlPoints(p, bases, 16)}
+                        valueLabel="Wickets"
+                        height={mode === 'ar' ? 90 : 130}
+                      />
+                    )}
                   </div>
                 </div>
-                <span className={`pro-sig ${p.signal.kind}`}>{p.signal.label}</span>
+              ))}
+            </div>
+          )}
+          {!needle && players.filter((p) => inMode(p, mode)).length > list.length && (
+            <p className="pv-note">Showing the 12 most-used — search to find anyone else.</p>
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
+/* ── The deep dive ── */
+
+function PlayerDeepDive({
+  player: p,
+  squad,
+  mode,
+  format,
+  bases,
+  onBack,
+}: {
+  player: ProPlayer;
+  squad: Squad;
+  mode: FormMode;
+  format: ProFormat | 'all';
+  bases: Record<ProFormat, Baseline | null>;
+  onBack: () => void;
+}) {
+  const showBat = mode !== 'bowl' && p.bat.inns > 0;
+  const showBowl = mode !== 'bat' && p.bowl.inns > 0;
+  // Split by format when every format is in view; otherwise by season.
+  const byFormat = format === 'all' && p.formats.length > 1;
+  const splitKey = byFormat
+    ? (l: { format: string }) => l.format
+    : (l: { date: string }) => seasonOf(l.date);
+  const splitLabel = byFormat ? 'Format' : 'Season';
+  const batBy = showBat ? batSplits(p.bat.lines, splitKey) : [];
+  const batOpp = showBat
+    ? batSplits(p.bat.lines, (l) => l.opp).sort((a, b) => b.runs - a.runs)
+    : [];
+  const bowlBy = showBowl ? bowlSplits(p.bowl.lines, splitKey) : [];
+  const bowlOpp = showBowl
+    ? bowlSplits(p.bowl.lines, (l) => l.opp).sort(
+        (a, b) => b.wkts - a.wkts || (a.econ ?? 99) - (b.econ ?? 99),
+      )
+    : [];
+  const positions = showBat
+    ? batSplits(p.bat.lines, (l) => String(l.pos)).sort((a, b) => Number(a.key) - Number(b.key))
+    : [];
+  const entry = p.bat.lines.filter((l) => l.pos >= 3);
+  const econAvg = format !== 'all' ? bases[format]?.econ : undefined;
+  const nothing =
+    (mode === 'bat' && !p.bat.inns) ||
+    (mode === 'bowl' && !p.bowl.inns) ||
+    (mode === 'ar' && (!p.bat.inns || !p.bowl.inns));
+
+  return (
+    <div className="pro-dive" aria-label={`${p.name} deep dive`}>
+      <button type="button" className="pro-link" onClick={onBack}>
+        ← All players
+      </button>
+      <div className="card pro-dive-head">
+        <div className="card-head">
+          <div>
+            <div className="sc-panel-eyebrow">
+              {squad.name} · {p.role} · {p.formats.join(', ')} · {p.matches} of {p.squadMatches}{' '}
+              games
+            </div>
+            <h2 className="pro-dive-name">{p.name}</h2>
+          </div>
+          <span className={`pro-sig ${p.signal.kind}`}>{p.signal.label}</span>
+        </div>
+        <div className="card-body">
+          <ul className="pro-reasons">
+            {p.signal.reasons.map((r) => (
+              <li key={r}>{r}</li>
+            ))}
+          </ul>
+          <div className="pro-idx-row">
+            {mode !== 'bowl' && p.idx.bat && (
+              <div>
+                <span>Batting index · season / last {RECENT}</span>
+                <span className="pro-peer">
+                  <IndexMeter value={p.idx.bat.idx} />{' '}
+                  <IndexMeter value={p.recent.bat?.idx} small />
+                </span>
+                <small>
+                  runs per innings {r0(p.idx.bat.rpiIdx)} · strike rate {r0(p.idx.bat.srIdx)}
+                </small>
+              </div>
+            )}
+            {mode !== 'bat' && p.idx.bowl && (
+              <div>
+                <span>Bowling index · season / last {RECENT}</span>
+                <span className="pro-peer">
+                  <IndexMeter value={p.idx.bowl.idx} />{' '}
+                  <IndexMeter value={p.recent.bowl?.idx} small />
+                </span>
+                <small>
+                  economy {r0(p.idx.bowl.econIdx)} · wicket rate {r0(p.idx.bowl.wktIdx)}
+                </small>
+              </div>
+            )}
+            {mode === 'ar' && arIndex(p, 'idx') !== null && (
+              <div>
+                <span>All-rounder index · season / last {RECENT}</span>
+                <span className="pro-peer">
+                  <IndexMeter value={arIndex(p, 'idx')} />{' '}
+                  <IndexMeter value={arIndex(p, 'recent')} small />
+                </span>
+                <small>√(batting × bowling) · 100 = average</small>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {nothing && (
+        <div className="ss-empty">
+          {p.name} has no{' '}
+          {mode === 'bat' ? 'batting' : mode === 'bowl' ? 'bowling' : 'batting and bowling both'} in
+          this selection.
+        </div>
+      )}
+
+      <div className="pv-tiles">
+        {showBat && (
+          <>
+            <Tile
+              label="Runs"
+              value={p.bat.runs}
+              sub={`${p.bat.inns} innings · ${p.bat.notOuts} not out`}
+            />
+            <Tile
+              label="Average"
+              value={r1(p.bat.avg)}
+              sub={`HS ${p.bat.hs} · ${p.bat.fifties} × 50 · ${p.bat.hundreds} × 100`}
+            />
+            <Tile
+              label="Strike rate"
+              value={r0(p.bat.sr)}
+              sub={`boundaries ${r0(p.bat.boundaryPct)}% of runs`}
+            />
+            {p.bat.dotPct !== null && (
+              <Tile label="Dot balls" value={`${r0(p.bat.dotPct)}%`} sub="of balls faced" />
+            )}
+          </>
+        )}
+        {showBowl && (
+          <>
+            <Tile
+              label="Wickets"
+              value={p.bowl.wkts}
+              sub={`${overs(p.bowl.balls)} overs · best ${p.bowl.best}`}
+            />
+            <Tile
+              label="Economy"
+              value={r1(p.bowl.econ)}
+              sub={`average ${r1(p.bowl.avg)} · SR ${r1(p.bowl.sr)}`}
+            />
+            <Tile
+              label="Dot balls"
+              value={`${r0(p.bowl.dotPct)}%`}
+              sub={`${p.bowl.wd} wides · ${p.bowl.nb} no-balls`}
+            />
+          </>
+        )}
+        <Tile
+          label="Fielding"
+          value={p.field.ct + p.field.st + p.field.ro}
+          sub={`${p.field.ct} ct · ${p.field.st} st · ${p.field.ro} ro`}
+        />
+      </div>
+
+      {showBat && (
+        <>
+          <div className="card">
+            <div className="card-head">
+              <div>
+                <div className="card-title">Every innings</div>
+                <div className="card-sub">
+                  Oldest first · faded = not out · hover a bar for the match, position and where
+                  they came in
+                </div>
+              </div>
+            </div>
+            <div className="card-body">
+              <FormColumns
+                points={batPoints(p, bases)}
+                average={format !== 'all' ? (bases[format]?.rpi ?? undefined) : undefined}
+                averageLabel={`${format} average`}
+                valueLabel="Runs"
+                height={170}
+              />
+            </div>
+          </div>
+          <div className="sc-two">
+            <div className="card">
+              <div className="card-head">
+                <div>
+                  <div className="card-title">Scores</div>
+                  <div className="card-sub">How often each size of score comes</div>
+                </div>
               </div>
               <div className="card-body">
-                <FormColumns
-                  points={pts}
-                  average={avg}
-                  averageLabel={`${format} average`}
-                  valueLabel={disc === 'bat' ? 'Runs' : 'Wickets'}
-                  height={130}
+                <RankBars
+                  rows={scoreBands(p.bat.lines).map((b) => ({
+                    id: b.label,
+                    label: b.label,
+                    value: b.n,
+                    text: `${b.n}`,
+                  }))}
                 />
               </div>
             </div>
-          );
-        })}
+            <div className="card">
+              <div className="card-head">
+                <div>
+                  <div className="card-title">Where they bat</div>
+                  <div className="card-sub">
+                    Average by position (innings in brackets)
+                    {entry.length >= 3
+                      ? ` · usually in at about ${Math.round(entry.reduce((n, l) => n + l.cameIn.score, 0) / entry.length)} for ${Math.round(entry.reduce((n, l) => n + l.cameIn.wkts, 0) / entry.length)}`
+                      : ''}
+                  </div>
+                </div>
+              </div>
+              <div className="card-body">
+                <RankBars
+                  rows={positions.map((s) => ({
+                    id: s.key,
+                    label: `#${s.key} (${s.inns})`,
+                    value: s.avg ?? s.runs,
+                    text: `${r1(s.avg ?? s.runs)} · SR ${r0(s.sr)}`,
+                  }))}
+                />
+              </div>
+            </div>
+          </div>
+          <div className="sc-two">
+            <div className="card">
+              <div className="card-head">
+                <div>
+                  <div className="card-title">How they use the strike</div>
+                  <div className="card-sub">Every ball faced · and how they get out</div>
+                </div>
+              </div>
+              <div className="card-body">
+                <BallUseBars
+                  rows={[
+                    {
+                      id: p.name,
+                      label: 'Balls faced',
+                      balls: p.bat.balls,
+                      dots: p.bat.dotBalls === p.bat.balls ? p.bat.dots : null,
+                      fours: p.bat.f4,
+                      sixes: p.bat.f6,
+                      runs: p.bat.runs,
+                    },
+                  ]}
+                />
+                <div className="pro-mini-title">How out</div>
+                <ShareRows
+                  keys={DISMISSAL_KINDS.slice()}
+                  rows={[
+                    {
+                      label: `${p.bat.outs} dismissals`,
+                      parts: DISMISSAL_KINDS.map((k) => p.bat.dismissals[k]),
+                    },
+                  ]}
+                />
+              </div>
+            </div>
+            <SplitTable
+              title={`Batting by ${splitLabel.toLowerCase()}`}
+              head={[splitLabel, 'Inns', 'Runs', 'Avg', 'SR', 'HS', '50+']}
+              rows={batBy.map((s) => [s.key, s.inns, s.runs, r1(s.avg), r0(s.sr), s.hs, s.fifties])}
+            />
+          </div>
+          <SplitTable
+            title="Batting against each opponent"
+            head={['Opponent', 'Inns', 'Runs', 'Avg', 'SR', 'HS', 'Boundary %']}
+            rows={batOpp.map((s) => [
+              s.key,
+              s.inns,
+              s.runs,
+              r1(s.avg),
+              r0(s.sr),
+              s.hs,
+              `${r0(s.boundaryPct)}%`,
+            ])}
+          />
+        </>
+      )}
+
+      {showBowl && (
+        <>
+          <div className="card">
+            <div className="card-head">
+              <div>
+                <div className="card-title">Every spell</div>
+                <div className="card-sub">
+                  Wickets per spell, oldest first · navy = cheaper than the format average or 2+
+                  wickets
+                </div>
+              </div>
+            </div>
+            <div className="card-body">
+              <FormColumns points={bowlPoints(p, bases)} valueLabel="Wickets" height={150} />
+              <FormColumns
+                points={p.bowl.lines.map((l, i) => {
+                  const e = (l.r / l.balls) * 6;
+                  return {
+                    key: `e-${l.matchId}-${i}`,
+                    value: Math.round(e * 10) / 10,
+                    text: r1(e),
+                    tip: `${fmtDay(l.date)} v ${l.opp}: ${overs(l.balls)} ov for ${l.r} · econ ${r1(e)}`,
+                    good: e <= (bases[l.format]?.econ ?? 99),
+                  };
+                })}
+                average={econAvg ?? undefined}
+                averageLabel={`${format} average (lower is better)`}
+                valueLabel="Economy"
+                height={130}
+              />
+            </div>
+          </div>
+          <div className="sc-two">
+            <div className="card">
+              <div className="card-head">
+                <div>
+                  <div className="card-title">Wickets per spell</div>
+                  <div className="card-sub">How often they take none, one, two or more</div>
+                </div>
+              </div>
+              <div className="card-body">
+                <RankBars
+                  rows={wicketBands(p.bowl.lines).map((b) => ({
+                    id: b.label,
+                    label: `${b.label} wkt${b.label === '1' ? '' : 's'}`,
+                    value: b.n,
+                    text: `${b.n}`,
+                  }))}
+                />
+              </div>
+            </div>
+            <SplitTable
+              title={`Bowling by ${splitLabel.toLowerCase()}`}
+              head={[splitLabel, 'Spells', 'Overs', 'Wkts', 'Econ', 'Avg', 'Dot %', 'Best']}
+              rows={bowlBy.map((s) => [
+                s.key,
+                s.spells,
+                overs(s.balls),
+                s.wkts,
+                r1(s.econ),
+                r1(s.avg),
+                `${r0(s.dotPct)}%`,
+                s.best,
+              ])}
+            />
+          </div>
+          <SplitTable
+            title="Bowling against each opponent"
+            head={['Opponent', 'Spells', 'Overs', 'Wkts', 'Econ', 'Avg', 'Best']}
+            rows={bowlOpp.map((s) => [
+              s.key,
+              s.spells,
+              overs(s.balls),
+              s.wkts,
+              r1(s.econ),
+              r1(s.avg),
+              s.best,
+            ])}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+function SplitTable({
+  title,
+  head,
+  rows,
+}: {
+  title: string;
+  head: string[];
+  rows: (string | number)[][];
+}) {
+  return (
+    <div className="card">
+      <div className="card-head">
+        <div>
+          <div className="card-title">{title}</div>
+        </div>
       </div>
-    </>
+      <div className="tbl-w">
+        <table className="tbl pro-tbl" aria-label={title}>
+          <thead>
+            <tr>
+              {head.map((h) => (
+                <th key={h}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={String(r[0])}>
+                {r.map((c, i) => (
+                  <td key={i}>{i === 0 ? <strong>{c}</strong> : c}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 

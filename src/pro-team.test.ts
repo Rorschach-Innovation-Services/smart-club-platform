@@ -137,3 +137,34 @@ describe('team level', () => {
     expect(c.partnerships.ours).toHaveLength(10);
   });
 });
+
+describe('one player, sliced', () => {
+  const [men] = detectSquads(ms);
+  const players = squadPlayers(men, { format: 'all', season: 'all' }, ms);
+  const p = players.find((x) => x.bat.inns >= 5 && x.bowl.inns >= 3) ?? players[0];
+
+  it('splits batting by format without losing a run', async () => {
+    const { batSplits } = await import('./pro-team');
+    const s = batSplits(p.bat.lines, (l) => l.format);
+    expect(s.reduce((n, x) => n + x.runs, 0)).toBe(p.bat.runs);
+    expect(s.reduce((n, x) => n + x.inns, 0)).toBe(p.bat.inns);
+    for (const x of s) if (x.outs) expect(x.avg).toBeCloseTo(x.runs / x.outs);
+  });
+
+  it('splits bowling by opponent and keeps the best figures', async () => {
+    const { bowlSplits } = await import('./pro-team');
+    const s = bowlSplits(p.bowl.lines, (l) => l.opp);
+    expect(s.reduce((n, x) => n + x.wkts, 0)).toBe(p.bowl.wkts);
+    expect(s.reduce((n, x) => n + x.balls, 0)).toBe(p.bowl.balls);
+    expect(s.every((x) => /^\d+\/\d+$/.test(x.best))).toBe(true);
+  });
+
+  it('puts every innings in exactly one score band and every spell in one wicket band', async () => {
+    const { scoreBands, wicketBands } = await import('./pro-team');
+    expect(scoreBands(p.bat.lines).reduce((n, b) => n + b.n, 0)).toBe(p.bat.inns);
+    expect(wicketBands(p.bowl.lines).reduce((n, b) => n + b.n, 0)).toBe(p.bowl.inns);
+    expect(
+      scoreBands([{ r: 0 }, { r: 9 }, { r: 50 }, { r: 100 }] as never).map((b) => b.n),
+    ).toEqual([1, 1, 0, 0, 1, 1]);
+  });
+});
