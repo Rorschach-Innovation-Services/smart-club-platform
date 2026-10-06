@@ -6,7 +6,9 @@
  * destination-chair email (comm-log kind `clearance-inbound` on the destination club) and one email
  * per tenant admin (platform operators excluded, not comm-logged). When the source club's daily cap
  * fires, the destination rows are `skipped` and no admin email goes out. Admin reassign (bypassCap)
- * inherits the fan-out.
+ * inherits the fan-out. A DIRECTORY-source creation (public registration naming an off-system
+ * club) skips only the source chair; its cap counts directory-source inbound rows on the
+ * destination. The chair bulk routes send admins ONE summary email per request.
  *
  * Remind: one reminder per clearance per tenant day via the shared INVITE# claim — 409 on a repeat
  * — logged as kind `clearance-reminder`, which never consumes the creation cap. 409 on a resolved
@@ -339,6 +341,188 @@ describe('clearance creation fan-out', () => {
   });
 });
 
+describe('directory-source creation fan-out (public registration naming an off-system club)', () => {
+  let dirSeq = 0;
+  /** A destination club with a reg-link token, plus a fresh directory entry on the tenant. */
+  async function seedDirectoryPair(prefix: string) {
+    const dst = `${prefix}-dst`;
+    const dirId = `${prefix}-dir`;
+    await repo.createClub(TENANT, mkClub(dst, `${prefix} Dest CC`));
+    await repo.putToken(`tok-${dst}`, TENANT, dst, '2026-06-01T00:00:00.000Z');
+    const cfg = await repo.getTenantConfig(TENANT);
+    assert.ok(cfg, 'precondition: tenant config exists');
+    await repo.putTenantConfig({
+      ...cfg,
+      knownClubs: [...(cfg.knownClubs ?? []), { id: dirId, name: `${prefix} Offline CC` }],
+    });
+    return { dst, dirId, teamKey: (cfg.leagues ?? [])[0]?.key ?? '' };
+  }
+  const registerNaming = (dst: string, dirId: string, teamKey: string) => {
+    dirSeq++;
+    return app.request(`/register/${dst}?t=tok-${dst}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        firstName: 'Sipho',
+        lastName: `Offline${dirSeq}`,
+        idType: 'passport',
+        idNumber: `DIR${String(dirSeq).padStart(6, '0')}`,
+        dob: '1997-07-07',
+        nationality: 'Zimbabwean',
+        race: 'African',
+        gender: 'Male',
+        cell: '0821118888',
+        team: teamKey,
+        district: 'Ethekwini',
+        idDocMeta: {
+          objectKey: `local/${TENANT}/${dst}/dir-${dirSeq}.png`,
+          size: 100,
+          contentType: 'image/png',
+        },
+        lastClubId: dirId,
+      }),
+    });
+  };
+  const seedInbound = (dst: string, keySegment: string) =>
+    repo.appendClubCommEvents(
+      TENANT,
+      dst,
+      [1, 2, 3].map((i) => ({
+        id: `seed-${keySegment}-${i}`,
+        channel: 'email' as const,
+        status: 'sent' as const,
+        at: new Date().toISOString(),
+        by: 'seed',
+        idempotencyKey: `clearance-seed-${i}-${keySegment}-email`,
+        kind: 'clearance-inbound' as const,
+      })),
+    );
+
+  test('notifies the destination chair (clearance-inbound) and every admin; no source-chair send', async () => {
+    const { dst, dirId, teamKey } = await seedDirectoryPair('dirfan');
+    const res = await registerNaming(dst, dirId, teamKey);
+    assert.equal(res.status, 201, await res.clone().text());
+    const clearance = (await repo.listClearancesForSource(TENANT, dirId))[0];
+    assert.ok(clearance?.fromClubDirectory, 'precondition: a directory-source clearance opened');
+
+    const dstLog = await commLog(dst);
+    assert.equal(dstLog.length, 1, 'only the destination inbound row — no source-chair row');
+    assert.equal(dstLog[0].kind, 'clearance-inbound');
+    assert.equal(dstLog[0].channel, 'email');
+    assert.equal(dstLog[0].status, 'sent');
+    assert.equal(dstLog[0].to, `chair@${dst}.test`);
+    assert.equal(dstLog[0].idempotencyKey, `clearance-${clearance.id}-inbound-directory-email`);
+    // A directory entry has no club record, so no source-chair notice could exist anywhere.
+    assert.equal(await repo.getClub(TENANT, dirId), null);
+    assert.ok(!logged.some((l) => l.includes('clearance notice') && l.includes('Offline CC')));
+    assert.deepEqual(adminEmailsSent(), ['admin1@union.test', 'admin2@union.test']);
+  });
+
+  test('the directory cap counts directory-source inbound rows on the destination only', async () => {
+    // Three ORDINARY inbound notices today do not consume the directory counter…
+    const busy = await seedDirectoryPair('dirbusy');
+    await seedInbound(busy.dst, 'inbound');
+    assert.equal((await registerNaming(busy.dst, busy.dirId, busy.teamKey)).status, 201);
+    const busyFresh = (await commLog(busy.dst)).filter((e) => !e.id.startsWith('seed-'));
+    assert.deepEqual(
+      busyFresh.map((e) => e.status),
+      ['sent'],
+    );
+    assert.deepEqual(adminEmailsSent(), ['admin1@union.test', 'admin2@union.test']);
+
+    // …three directory-source ones do: the destination row is skipped and admins aren't emailed.
+    logged = [];
+    const capped = await seedDirectoryPair('dircap');
+    await seedInbound(capped.dst, 'inbound-directory');
+    assert.equal((await registerNaming(capped.dst, capped.dirId, capped.teamKey)).status, 201);
+    const fresh = (await commLog(capped.dst)).filter((e) => !e.id.startsWith('seed-'));
+    assert.equal(fresh.length, 1);
+    assert.equal(fresh[0].kind, 'clearance-inbound');
+    assert.equal(fresh[0].status, 'skipped');
+    assert.equal(fresh[0].error, 'daily clearance-notice cap reached');
+    assert.deepEqual(adminEmailsSent(), []);
+  });
+});
+
+describe('chair bulk registration → one admin summary email per request', () => {
+  /** A Luhn-valid 13-digit RSA ID for `dobIso`, distinct per `seq`. */
+  function validSaId(dobIso: string, seq: number): string {
+    const [y, m, d] = dobIso.split('-');
+    const twelve = `${y.slice(2)}${m}${d}${String(seq).padStart(4, '0')}08`;
+    let sum = 0;
+    let alt = true;
+    for (let i = twelve.length - 1; i >= 0; i--) {
+      let digit = twelve.charCodeAt(i) - 48;
+      if (alt) {
+        digit *= 2;
+        if (digit > 9) digit -= 9;
+      }
+      sum += digit;
+      alt = !alt;
+    }
+    return twelve + String((10 - (sum % 10)) % 10);
+  }
+
+  test('a roster commit opening 3 transfers sends each admin ONE summary listing all three', async () => {
+    const { playerNaturalKey } = await import('../src/player-identity.js');
+    await repo.createClub(TENANT, mkClub('bulk-dst', 'Bulk Dest CC'));
+    const dob = '1993-05-05';
+    const items: unknown[] = [];
+    for (let i = 1; i <= 3; i++) {
+      const src = `bulk-src-${i}`;
+      await repo.createClub(TENANT, mkClub(src, `Bulk Source ${i} CC`));
+      const idNumber = validSaId(dob, 900 + i);
+      await repo.createPlayer(TENANT, {
+        ...mkPlayer(src),
+        naturalKey: playerNaturalKey({ idType: 'sa-id', idNumber }),
+        idType: 'sa-id',
+        idNumber,
+        dob,
+      } as PlayerRegistration);
+      items.push({ rowNumber: i + 1, firstName: 'Bulk', lastName: `Mover${i}`, dob, idNumber });
+    }
+
+    const res = await app.request('/clubs/bulk-dst/roster/commit', {
+      method: 'POST',
+      headers: headers(repOf('bulk-dst')),
+      body: JSON.stringify({ items }),
+    });
+    assert.equal(res.status, 200, await res.clone().text());
+    const body = (await res.json()) as { summary: Record<string, number> };
+    assert.equal(body.summary['clearance-opened'], 3);
+
+    // No per-creation admin email; exactly one summary per admin, naming all three.
+    assert.deepEqual(adminEmailsSent(), []);
+    const summaries = logged.filter((l) => l.includes('clearance-opened (admin summary'));
+    assert.deepEqual(summaries.map((l) => l.replace(/^.* to /, '')).sort(), [
+      'admin1@union.test',
+      'admin2@union.test',
+    ]);
+    assert.ok(summaries.every((l) => l.includes('(admin summary, 3)')));
+    // Each source chair is still notified per clearance; the destination gets 3 inbound rows.
+    for (let i = 1; i <= 3; i++) {
+      assert.ok((await commLog(`bulk-src-${i}`)).some((e) => e.kind === 'clearance'));
+    }
+    assert.equal(
+      (await commLog('bulk-dst')).filter((e) => e.kind === 'clearance-inbound').length,
+      3,
+    );
+
+    const { clearanceOpenedAdminSummaryEmailContent } = await import('../src/notify/email.js');
+    const content = clearanceOpenedAdminSummaryEmailContent({
+      toClubName: 'Bulk Dest CC',
+      clearances: [1, 2, 3].map((i) => ({
+        playerName: `Bulk Mover${i}`,
+        fromClubName: `Bulk Source ${i} CC`,
+      })),
+    });
+    assert.equal(content.subject, '3 new clearances — Bulk Dest CC');
+    for (let i = 1; i <= 3; i++) {
+      assert.ok(content.text.includes(`Bulk Mover${i}: Bulk Source ${i} CC → Bulk Dest CC`));
+    }
+  });
+});
+
 describe('POST /admin/clearances/:cid/remind', () => {
   const remind = (cid: string, fromClubId: string, auth = ADMIN) =>
     app.request(`/admin/clearances/${cid}/remind`, {
@@ -471,6 +655,9 @@ describe('POST /admin/clearances/:cid/remind', () => {
     await repo.createPlayerWithSourcelessClearance(TENANT, dirPlayer, dirClearance);
     const res = await remind('clr-dir', 'dir-source');
     assert.equal(res.status, 422);
-    assert.match(((await res.json()) as { error: string }).error, /no chair on file/);
+    assert.match(
+      ((await res.json()) as { error: string }).error,
+      /source club is not on the system/,
+    );
   });
 });

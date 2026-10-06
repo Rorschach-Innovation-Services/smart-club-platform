@@ -366,6 +366,7 @@ export function erasureSummary(counts?: Partial<PlayerErasureCounts> | null): st
     n(counts.documents, 'document', 'documents'),
     n(counts.certificates, 'certificate', 'certificates'),
     n(counts.captainsReportsScrubbed, "captain's report scrubbed", "captain's reports scrubbed"),
+    // reportOpenMarkers is left out on purpose: internal sync bookkeeping, meaningless to an admin.
   ].filter(Boolean);
   return parts.length ? parts.join(', ') : 'nothing left to remove';
 }

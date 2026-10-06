@@ -7773,7 +7773,8 @@ export async function erasePlayerData(
     clearances: clearances.length,
     registrationReviews: reviews.length,
     veteransRequests: vetreqs.length,
-    documents: uniqueObjects.length + rowDocs.length,
+    // Distinct objects across both sets: a snapshot destRow can name the same key as a live row.
+    documents: new Set([...uniqueObjects, ...rowDocs]).size,
     certificates,
     captainsReportsScrubbed,
     reportOpenMarkers,

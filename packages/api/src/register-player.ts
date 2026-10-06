@@ -66,11 +66,15 @@ export interface RegisterPrefetch {
   crossClubIndex?: CrossClubIndex;
 }
 
-/** The chairman heads-up for a newly opened clearance (index.ts's notifyClearanceOpened). */
+/**
+ * The notices for a newly opened clearance (index.ts's notifyClearanceOpened: source chair,
+ * destination chair, tenant admins). `fromClub` is null for a DIRECTORY source — no club record,
+ * so no source chair; the destination chair and admins are still notified. Never throws.
+ */
 export type ClearanceOpenedNotifier = (
   tenant: string,
   tenantConfig: TenantConfig | null,
-  fromClub: Club,
+  fromClub: Club | null,
   clearance: PlayerClearance,
   by: string,
 ) => Promise<void>;
@@ -568,11 +572,10 @@ async function materialize(
     const gated = await gateClosedWindow(tenant, player, clearance, opts);
     if (gated) return gated;
     await repo.createPlayerWithSourcelessClearance(tenant, player, clearance);
-    // Chairman heads-up only for an ON-SYSTEM source: a directory entry has no club
-    // record and no chairman on file — the union office resolves those.
-    if (sourceClub) {
-      await opts.notifyClearanceOpened(tenant, tenantConfig, sourceClub, clearance, notifyBy);
-    }
+    // A directory source (null) has no club record and no chairman on file, so the notifier
+    // skips the source-chair send — but the destination chair and the union office (the only
+    // party that can resolve a directory clearance) are still notified.
+    await opts.notifyClearanceOpened(tenant, tenantConfig, sourceClub, clearance, notifyBy);
     return { kind: 'opened', clearance };
   }
   player.status = 'active';

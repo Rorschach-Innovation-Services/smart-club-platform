@@ -463,6 +463,38 @@ describe('orphaned clearance PII', () => {
     assert.equal(await repo.getClearanceRaw(TENANT, 'old-directory-club', id), null);
     assert.equal(await repo.getInboundClearance(TENANT, 'beta', id), null);
   });
+
+  test('a document named by both a live row and a held record counts once', async () => {
+    const objectKey = `local/${TENANT}/gamma/shared-doc.png`;
+    const idDocMeta = {
+      objectKey,
+      size: 1,
+      contentType: 'image/png',
+      uploadedAt: '2026-05-01T00:00:00.000Z',
+    };
+    const p = mkPlayer('gamma', { idDocMeta });
+    await repo.createPlayer(TENANT, p);
+    await repo.createRegistrationReview(TENANT, {
+      id: 'rv-shared',
+      kind: 'cross-club-hold',
+      playerNaturalKey: p.naturalKey,
+      playerName: `${p.firstName} ${p.lastName}`,
+      destClubId: 'delta',
+      destClubName: 'Delta CC',
+      linkClubId: 'delta',
+      linkClubName: 'Delta CC',
+      pendingPlayer: { ...p, clubId: 'delta', idDocMeta },
+      createdAt: '2026-09-01T00:00:00.000Z',
+      status: 'open',
+    } as import('../src/types.js').RegistrationReview);
+
+    const res = await erase(p.naturalKey);
+    assert.equal(res.status, 200);
+    const { counts } = (await res.json()) as { counts: PlayerErasureCounts };
+    assert.equal(counts.playerRows, 1);
+    assert.equal(counts.registrationReviews, 1);
+    assert.equal(counts.documents, 1, 'one object, not one per record naming it');
+  });
 });
 
 describe('gates', () => {

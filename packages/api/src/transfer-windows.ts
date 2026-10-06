@@ -17,6 +17,8 @@ import type { TenantConfig, TransferWindow, TransferWindowStatus } from './types
 
 export { TRANSFER_WINDOW_REJECTOR } from './types.js';
 
+// KEEP IN SYNC with the operator console's client mirror in src/platform-transfer-windows.tsx
+// (these limits + isCalendarDate + the validation rules in normaliseTransferWindows).
 export const TRANSFER_WINDOWS_MAX = 12;
 export const TRANSFER_WINDOW_LABEL_MAX = 60;
 

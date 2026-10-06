@@ -113,6 +113,7 @@ import { CaptainsReportView, CaptainsReportLinkPage } from './CaptainsReport';
 import { AdminCaptainsReportsView } from './AdminCaptainsReports';
 import { AdminMedicoachSyncView } from './AdminMedicoachSync';
 import { erasureSummary } from './PlayerDetailModal';
+import { clearanceRemindToast } from './clearance-remind-copy';
 import { useFeature, useModule, useSeasonLabel, useVertical } from './branding';
 
 /** The admin cancelled the medicoach-resync confirmation: the request is simply not sent. */
@@ -2092,17 +2093,14 @@ function Shell({
     return withToast(
       () => api.remindClearance(req.id, req.fromClubId),
       'Could not send the reminder',
+      // `invalidate` here is withToast's 409-only refetch list; the success path below refetches
+      // clubs itself (for the new comm-log rows) — the two never both run for one call.
       { rawClientError: true, invalidate: [qk.allClearances(), qk.clubs()] },
     )
       .then((res) => {
         invalidate(qk.clubs());
-        const sent = (res?.results ?? []).some((r) => r.status === 'sent');
-        toastShow(
-          sent
-            ? `Reminder sent to ${req.fromClubName}'s chair`
-            : `No reminder delivered — ${req.fromClubName} has no usable chair contact on file`,
-          sent ? undefined : 'warn',
-        );
+        const { message, tone } = clearanceRemindToast(req.fromClubName, res?.results);
+        toastShow(message, tone);
         return 'ok';
       })
       .catch(() => 'failed')

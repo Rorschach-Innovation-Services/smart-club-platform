@@ -627,6 +627,15 @@ export interface ClearanceOpenedAdminEmailInput {
   fromClubName: string;
   playerName: string;
   toClubName: string;
+  /** The source is a directory entry (not on the system): only the union office can resolve it. */
+  fromClubDirectory?: boolean;
+}
+
+/** Who a newly opened clearance is waiting on — the source club, or the union for a directory source. */
+function clearanceWaitingOn(fromClubName: string, fromClubDirectory?: boolean): string {
+  return fromClubDirectory
+    ? `${fromClubName} is not on the system, so only the union office can resolve it (approve it, or reallocate it once the club registers)`
+    : `It is waiting on ${fromClubName}'s decision`;
 }
 
 /** Union-office (tenant admin) notice that a clearance opened. Pure — exported for tests. */
@@ -637,11 +646,11 @@ export function clearanceOpenedAdminEmailContent(
   text: string;
   html: string;
 } {
-  const { fromClubName, playerName, toClubName } = input;
+  const { fromClubName, playerName, toClubName, fromClubDirectory } = input;
   const subject = `New clearance — ${playerName.replace(/\s+/g, ' ').trim()}`;
   const body =
     `A clearance has opened for ${playerName}: ${fromClubName} → ${toClubName}. ` +
-    `It is waiting on ${fromClubName}'s decision and is listed under Clearances in the admin console.`;
+    `${clearanceWaitingOn(fromClubName, fromClubDirectory)} and is listed under Clearances in the admin console.`;
   const text = `Hello,\n\n${body}\n\nThe union office platform`;
   const html =
     EMAIL_WRAP_OPEN +
@@ -659,6 +668,60 @@ export async function sendClearanceOpenedAdminEmail(
     input.to,
     clearanceOpenedAdminEmailContent(input),
     `clearance-opened (admin) notice for ${input.fromClubName} → ${input.toClubName}`,
+  );
+}
+
+export interface ClearanceOpenedAdminSummaryLine {
+  playerName: string;
+  fromClubName: string;
+  fromClubDirectory?: boolean;
+}
+
+export interface ClearanceOpenedAdminSummaryEmailInput {
+  to: string;
+  /** The club whose chair ran the bulk registration (every clearance opens INTO it). */
+  toClubName: string;
+  clearances: ClearanceOpenedAdminSummaryLine[];
+}
+
+/**
+ * Union-office (tenant admin) SUMMARY of the clearances one chair bulk registration (quick-add
+ * batch or spreadsheet commit chunk) opened — one email per request instead of one per row.
+ * Pure — exported for tests.
+ */
+export function clearanceOpenedAdminSummaryEmailContent(
+  input: Omit<ClearanceOpenedAdminSummaryEmailInput, 'to'>,
+): { subject: string; text: string; html: string } {
+  const { toClubName, clearances } = input;
+  const n = clearances.length;
+  const subject = `${n} new clearance${n === 1 ? '' : 's'} — ${toClubName}`;
+  const intro =
+    `A roster upload by ${toClubName} opened ${n} clearance${n === 1 ? '' : 's'}. ` +
+    `Each is listed under Clearances in the admin console.`;
+  const line = (l: ClearanceOpenedAdminSummaryLine) =>
+    `${l.playerName}: ${l.fromClubName} → ${toClubName}` +
+    (l.fromClubDirectory ? ' (club not on the system — union office to resolve)' : '');
+  const text =
+    `Hello,\n\n${intro}\n\n` +
+    clearances.map((l) => `- ${line(l)}`).join('\n') +
+    `\n\nThe union office platform`;
+  const html =
+    EMAIL_WRAP_OPEN +
+    `<p>Hello,</p>` +
+    `<p>${escapeHtml(intro)}</p>` +
+    `<ul>${clearances.map((l) => `<li>${escapeHtml(line(l))}</li>`).join('')}</ul>` +
+    `<p>The union office platform</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+export async function sendClearanceOpenedAdminSummaryEmail(
+  input: ClearanceOpenedAdminSummaryEmailInput,
+): Promise<{ messageId: string }> {
+  return sendSesEmail(
+    input.to,
+    clearanceOpenedAdminSummaryEmailContent(input),
+    `clearance-opened (admin summary, ${input.clearances.length}) notice for ${input.toClubName}`,
   );
 }
 

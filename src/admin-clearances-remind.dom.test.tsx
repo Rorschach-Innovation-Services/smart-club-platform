@@ -8,6 +8,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AdminClearances } from './admin';
+import { clearanceRemindToast } from './clearance-remind-copy';
 import { renderWithProviders } from './test-utils';
 
 const clubs = [
@@ -92,5 +93,26 @@ describe('Send reminder', () => {
   it('is not offered when no handler is wired', () => {
     setup([request()], { withRemind: false });
     expect(within(card()).queryByRole('button', { name: /send reminder/i })).toBeNull();
+  });
+});
+
+describe('reminder result toast', () => {
+  it('confirms a delivered reminder', () => {
+    expect(clearanceRemindToast('Berea CC', [{ status: 'sent' }, { status: 'skipped' }])).toEqual({
+      message: "Reminder sent to Berea CC's chair",
+    });
+  });
+
+  it('blames the missing contact only when every channel skipped', () => {
+    const t = clearanceRemindToast('Berea CC', [{ status: 'skipped' }, { status: 'skipped' }]);
+    expect(t.tone).toBe('warn');
+    expect(t.message).toMatch(/Berea CC has no usable chair contact on file/);
+  });
+
+  it('says sending failed (retry later) when a channel failed with a good contact', () => {
+    const t = clearanceRemindToast('Berea CC', [{ status: 'failed' }, { status: 'skipped' }]);
+    expect(t.tone).toBe('warn');
+    expect(t.message).toMatch(/sending to Berea CC's chair failed; try again shortly/);
+    expect(t.message).not.toMatch(/no usable chair contact/);
   });
 });

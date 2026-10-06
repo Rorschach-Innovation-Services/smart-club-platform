@@ -209,8 +209,9 @@ retrying the same day works.
 - `400` — `fromClubId required`.
 - `404` — `clearance not found`.
 - `409` — `clearance already resolved` (anything but `pending`); `already reminded today`.
-- `422` — `source club has no chair on file`: the source is an off-system directory entry with
-  no club record. Only the union office can resolve those; the cron lists them in its digest.
+- `422` — `source club is not on the system`: the source is an off-system directory entry with
+  no club record, so there is no chair to remind. Only the union office can resolve those; the
+  cron lists them in its digest.
 - `200` — `{ results: SendResult[], reminded: boolean }`, one result per channel. `reminded` is
   true when at least one channel was `sent`; false means nothing was delivered and the claim
   was released.
@@ -404,37 +405,59 @@ legacy reject (no `rejectOutcome`), showing "Rejected before reopen was supporte
 
 ## Notifications
 
-The daily anti-abuse cap (`CLEARANCE_NOTICES_PER_DAY = 3` per source club, UTC day) counts
-`kind === 'clearance' && channel === 'email'` rows only, so no other notice consumes it.
+The daily anti-abuse cap on creation notices (`CLEARANCE_NOTICES_PER_DAY = 3`, UTC day) has
+two counters. For an **on-system source** it is per source club and counts that club's
+`kind === 'clearance' && channel === 'email'` rows. A **directory source** has no club record
+to count against, so it is per **destination** club and counts only directory-source inbound
+rows: `kind === 'clearance-inbound'`, email, with an idempotency key containing
+`-inbound-directory-`. Ordinary inbound notices never consume the directory counter, so a busy
+day of on-system transfers can't silence the clearances only the union office can resolve. No
+other notice consumes either counter.
 Comm-log kinds: `'clearance'` (open, source club), `'clearance-inbound'` (open, destination
 club), `'clearance-approved'`, `'clearance-rejected'`, `'clearance-reopened'` (both clubs) and
 `'clearance-reminder'` (source club). Admin emails are never comm-logged — no club owns them.
 
 ### Notification matrix
 
-| Event                                                  | Source chair                                                                                                   | Destination chair                                                                                 | Tenant admins                                                 | Comm log                                                                                                                |
-| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| **Created** (every creation site, plus admin reassign) | email + WhatsApp `club_clearance_pending` (WA when `whatsappInvites` is on); capped                            | email only; capped — recorded `skipped` (`daily clearance-notice cap reached`) when the cap fires | email; capped — **not sent** when the cap fires               | source `clearance`, key `clearance-<id>-<channel>`; destination `clearance-inbound`, key `clearance-<id>-inbound-email` |
-| **Issued / overridden**                                | email                                                                                                          | email                                                                                             | —                                                             | `clearance-approved`, both clubs                                                                                        |
-| **Rejected** (admin)                                   | email, worded by `rejectOutcome`                                                                               | email                                                                                             | —                                                             | `clearance-rejected`, both clubs                                                                                        |
-| **Auto-rejected** (window closed)                      | email, `not-registered` copy (on-system source only)                                                           | email                                                                                             | email ("Clearance auto-rejected — {player}", with the reason) | `clearance-rejected`, both clubs, `by: 'system:transfer-window'`                                                        |
-| **Reopened** (incl. an auto-reject)                    | pending email with reopened preamble + pending WhatsApp                                                        | email only; WA recorded `skipped`                                                                 | —                                                             | `clearance-reopened`, both clubs                                                                                        |
-| **Manual remind**                                      | email + WhatsApp (WA when `whatsappInvites` is on); bypasses the cap                                           | —                                                                                                 | —                                                             | `clearance-reminder`, key `clearance-<id>-reminder-<date>-<channel>`                                                    |
-| **Cron remind**                                        | email + WhatsApp (WA only when `whatsappInvites` is on **and** the template's registry status is `registered`) | —                                                                                                 | one digest email per admin per tenant per run                 | `clearance-reminder` + INVITE# marker                                                                                   |
+| Event                                                                    | Source chair                                                                                                   | Destination chair                                                                                 | Tenant admins                                                                                         | Comm log                                                                                                                |
+| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| **Created**, on-system source (every creation site, plus admin reassign) | email + WhatsApp `club_clearance_pending` (WA when `whatsappInvites` is on); capped                            | email only; capped — recorded `skipped` (`daily clearance-notice cap reached`) when the cap fires | email; capped — **not sent** when the cap fires                                                       | source `clearance`, key `clearance-<id>-<channel>`; destination `clearance-inbound`, key `clearance-<id>-inbound-email` |
+| **Created**, directory source (registration naming an off-system club)   | — (no club record, no chair)                                                                                   | email only; capped per destination club — recorded `skipped` when the cap fires                   | email, saying only the union office can resolve it; capped — **not sent** when the cap fires          | destination `clearance-inbound`, key `clearance-<id>-inbound-directory-email`                                           |
+| **Created** via a chair bulk route (`/players/batch`, `/roster/commit`)  | as above, per clearance                                                                                        | as above, per clearance                                                                           | **one summary email per admin per request**, listing every clearance it opened (capped ones included) | as above                                                                                                                |
+| **Issued / overridden**                                                  | email                                                                                                          | email                                                                                             | —                                                                                                     | `clearance-approved`, both clubs                                                                                        |
+| **Rejected** (admin)                                                     | email, worded by `rejectOutcome`                                                                               | email                                                                                             | —                                                                                                     | `clearance-rejected`, both clubs                                                                                        |
+| **Auto-rejected** (window closed)                                        | email, `not-registered` copy (on-system source only)                                                           | email                                                                                             | email ("Clearance auto-rejected — {player}", with the reason)                                         | `clearance-rejected`, both clubs, `by: 'system:transfer-window'`                                                        |
+| **Reopened** (incl. an auto-reject)                                      | pending email with reopened preamble + pending WhatsApp                                                        | email only; WA recorded `skipped`                                                                 | —                                                                                                     | `clearance-reopened`, both clubs                                                                                        |
+| **Manual remind**                                                        | email + WhatsApp (WA when `whatsappInvites` is on); bypasses the cap                                           | —                                                                                                 | —                                                                                                     | `clearance-reminder`, key `clearance-<id>-reminder-<date>-<channel>`                                                    |
+| **Cron remind**                                                          | email + WhatsApp (WA only when `whatsappInvites` is on **and** the template's registry status is `registered`) | —                                                                                                 | one digest email per admin per tenant per run                                                         | `clearance-reminder` + INVITE# marker                                                                                   |
 
 Notes on the matrix:
 
 - **Admins** are resolved by `listTenantAdminEmails` (`notify/admin-emails.ts`): every tenant
   user with an `admin` membership on this tenant, **excluding platform operators** (operator
   auto-admin would otherwise send every tenant's notices to every operator).
-- **Directory / deleted clubs are skipped** on every row — an off-system source has no chair.
-  Admin reassign calls `notifyClearanceOpened` with `bypassCap`, so it always fans out.
+- **Directory / deleted clubs are skipped** as chair recipients on every row — an off-system
+  source has no chair. A directory-source **creation** still notifies the destination chair and
+  the admins (the union office is the only party that can resolve it); the admin email says so.
+  If the destination club can't be read to check the directory cap, the check **fails closed**:
+  no destination or admin notice (reported to Sentry). The clearance itself is still created and
+  the cron digest lists it. Admin reassign calls `notifyClearanceOpened` with `bypassCap`, so it
+  always fans out.
+- **Bulk routes batch the admin email.** The chair quick-add (`POST /clubs/:id/players/batch`)
+  and spreadsheet commit (`POST /clubs/:id/roster/commit`) collect each request's clearances and
+  send each admin one summary ("N new clearances — {club}"), so a 30-transfer chunk is one email
+  per admin, not thirty. Chair notices stay per clearance (each goes to a different club). The
+  summary lists capped clearances too: it is one email per authenticated request, which already
+  bounds it. The admin list is resolved once per request (`adminEmailsProvider`, a per-request
+  memo), with the profile reads run in parallel.
 - **Auto-reject has its own cap.** `notifyClearanceResolved` is normally uncapped (resolutions
   are authenticated admin actions), but the auto-reject fires from the **anonymous** register
   route. The wrapper (`notifyClearanceAutoRejected`) counts today's (UTC) `clearance-rejected`
   email rows by `system:transfer-window` on the **destination** club; at 3 it skips the chair
-  and admin notices entirely (a log line, no comm-log rows). The primary guard is upstream: a
-  resubmission in the same closed stretch never reaches the notifier at all.
+  and admin notices entirely (a log line, no comm-log rows). If the destination club can't be
+  read, the check **fails closed**: no notices, and the error goes to Sentry. The auto-rejected
+  clearance is still recorded. The primary guard is upstream: a resubmission in the same closed
+  stretch never reaches the notifier at all.
 
 ### ClearanceReminders cron
 

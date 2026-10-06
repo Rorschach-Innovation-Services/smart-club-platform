@@ -16,6 +16,7 @@ import {
   sendClearanceReopenedDestEmail,
   sendClearanceOpenedDestEmail,
   sendClearanceOpenedAdminEmail,
+  sendClearanceOpenedAdminSummaryEmail,
   sendClearanceAutoRejectedAdminEmail,
   sendClearanceReminderDigestEmail,
   sendVeteransRequestEmail,
@@ -612,10 +613,25 @@ export async function sendClearanceAdminNotice(args: {
   fromClubName: string;
   playerName: string;
   toClubName: string;
+  fromClubDirectory?: boolean;
 }): Promise<{ results: SendResult[] }> {
-  const { to, fromClubName, playerName, toClubName } = args;
+  const { to, ...copy } = args;
+  return sendAdminEmails(to, (address) => sendClearanceOpenedAdminEmail({ to: address, ...copy }));
+}
+
+/**
+ * Tell each tenant admin, in ONE email, about every clearance a chair bulk registration opened
+ * (the per-creation admin notice is collapsed into this on the bulk routes). Email only; not
+ * comm-logged.
+ */
+export async function sendClearanceAdminSummaryNotice(args: {
+  to: string[];
+  toClubName: string;
+  clearances: Array<{ playerName: string; fromClubName: string; fromClubDirectory?: boolean }>;
+}): Promise<{ results: SendResult[] }> {
+  const { to, ...copy } = args;
   return sendAdminEmails(to, (address) =>
-    sendClearanceOpenedAdminEmail({ to: address, fromClubName, playerName, toClubName }),
+    sendClearanceOpenedAdminSummaryEmail({ to: address, ...copy }),
   );
 }
 

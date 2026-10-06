@@ -10,7 +10,7 @@
  *
  * Kept in its own file, following the FixtureRemindersCard pattern, so platform.tsx does not grow.
  */
-import { useState, type CSSProperties } from 'react';
+import { useRef, useState, type CSSProperties } from 'react';
 import { Btn, Card } from './atoms';
 import { ApiError } from './api';
 import type { TenantConfig, TransferWindow } from './types';
@@ -20,6 +20,10 @@ type Toast = (m: string, t?: string) => void;
 const ERR: CSSProperties = { color: 'var(--coral, #C0392B)', fontSize: 12, marginTop: 6 };
 const HINT: CSSProperties = { fontSize: 11.5, color: 'var(--muted-2)', margin: '8px 0 0' };
 
+// KEEP IN SYNC with packages/api/src/transfer-windows.ts (TRANSFER_WINDOWS_MAX,
+// TRANSFER_WINDOW_LABEL_MAX, isCalendarDate, validateTransferWindows). That module imports the
+// server's auth.js, so the browser bundle can't import it — these are a deliberate mirror, and
+// the server stays authoritative (it re-validates every PUT).
 export const TRANSFER_WINDOWS_MAX = 12;
 export const TRANSFER_WINDOW_LABEL_MAX = 60;
 
@@ -70,6 +74,10 @@ export function TransferWindowCard({
 }) {
   const initial = config.transferWindows ?? [];
   const [rows, setRows] = useState<TransferWindow[]>(initial);
+  // Stable React keys, parallel to `rows` (kept off the rows so the dirty check and the saved
+  // payload stay plain TransferWindow objects).
+  const keySeq = useRef(0);
+  const [keys, setKeys] = useState<number[]>(() => initial.map(() => ++keySeq.current));
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -89,6 +97,7 @@ export function TransferWindowCard({
     try {
       await save({ transferWindows: parsed.windows });
       setRows(parsed.windows);
+      setKeys(parsed.windows.map(() => ++keySeq.current)); // re-sorted: fresh keys
       toast('Transfer windows saved');
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Could not save — try again');
@@ -109,7 +118,7 @@ export function TransferWindowCard({
       )}
       {rows.map((r, i) => (
         <div
-          key={i}
+          key={keys[i] ?? `row-${i}`}
           role="group"
           aria-label={`Window ${i + 1}`}
           style={{
@@ -151,7 +160,10 @@ export function TransferWindowCard({
           <Btn
             tone="outline"
             size="sm"
-            onClick={() => setRows((cur) => cur.filter((_, k) => k !== i))}
+            onClick={() => {
+              setRows((cur) => cur.filter((_, k) => k !== i));
+              setKeys((cur) => cur.filter((_, k) => k !== i));
+            }}
           >
             Remove
           </Btn>
@@ -166,7 +178,11 @@ export function TransferWindowCard({
           tone="outline"
           size="sm"
           disabled={rows.length >= TRANSFER_WINDOWS_MAX}
-          onClick={() => setRows((cur) => [...cur, { label: '', start: '', end: '' }])}
+          onClick={() => {
+            const key = ++keySeq.current;
+            setRows((cur) => [...cur, { label: '', start: '', end: '' }]);
+            setKeys((cur) => [...cur, key]);
+          }}
         >
           Add window
         </Btn>
