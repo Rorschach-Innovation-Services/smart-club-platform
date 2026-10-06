@@ -51,6 +51,7 @@ import {
   type BundleTeam,
   type CricketMatchFormat,
   type MedicoachBundle,
+  isRecipeKnockoutSeries,
 } from './medicoach-bundle.js';
 import type { CompetitionRecipe, RecipeSlot, TenantRecipes } from './medicoach-recipes/types.js';
 import type {
@@ -775,6 +776,9 @@ export function buildBundle(input: BuildInputs): BuildResult {
   /* ── Series → leagues/streams ── */
   const runsById = new Map(input.seasonRuns.map((r) => [r.id, r]));
   for (const s of input.series) {
+    // Recipe knockouts (create-recipe-knockouts.ts) already exist in medicoach — they came
+    // from the recipe's laterFixtures below. Re-exporting them would add a bogus group.
+    if (isRecipeKnockoutSeries(s.id)) continue;
     const fixtures = Array.isArray(s.fixtures) ? s.fixtures : [];
     const run = s.seasonRunId ? runsById.get(s.seasonRunId) : undefined;
     const leagueKey = run?.leagueKey ?? (typeof s.leagueKey === 'string' ? s.leagueKey : undefined);

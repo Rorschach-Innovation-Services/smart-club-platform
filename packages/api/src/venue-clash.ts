@@ -114,6 +114,17 @@ interface StoredFixture {
   status?: string;
   venueOverride?: string;
   venueName?: string;
+  dateTbc?: boolean;
+}
+
+/**
+ * Whether a fixture stays OUT of every ground ledger: no date, cancelled, or its date is
+ * only a placeholder (`dateTbc` — a recipe knockout created before the union set its
+ * date). A TBC fixture holds no real slot, so it can neither clash nor be clashed with
+ * until it gets a date.
+ */
+export function isClashExempt(f: { date?: string; status?: string; dateTbc?: boolean }): boolean {
+  return !f.date || f.status === 'cancelled' || f.dateTbc === true;
 }
 
 /** A fixture's effective ground: explicit venue fields, else the home side's club
@@ -212,7 +223,7 @@ export function findClashes(
   for (const s of allSeries) {
     if (String(s.id) === String(subject.id)) continue;
     for (const f of (s.fixtures as StoredFixture[]) ?? []) {
-      if (!f.date || f.status === 'cancelled') continue;
+      if (!f.date || isClashExempt(f)) continue;
       const ground = effectiveGround(s, f, clubsById);
       if (!ground) continue;
       ledger.book(ground, f.date, f.time, {
@@ -228,7 +239,7 @@ export function findClashes(
   }
   const clashes: Clash[] = [];
   for (const f of (subject.fixtures as StoredFixture[]) ?? []) {
-    if (!f.date || f.status === 'cancelled') continue;
+    if (!f.date || isClashExempt(f)) continue;
     const ground = effectiveGround(subject, f, clubsById);
     if (!ground) continue;
     const hit = ledger.check(ground, f.date, f.time);
@@ -308,4 +319,27 @@ export function findReleaseClashes(
   aliases: Record<string, string> = DEFAULT_VENUE_ALIASES,
 ): string[] {
   return findClashes(subject, allSeries, clubs, venues, aliases).map(formatClash);
+}
+
+/**
+ * The in-season gate's SUBSET rule as data: the clashes `subject` (what a released series
+ * would become) carries whose pair-on-ground identity (`clashKey`) is absent from `current`'s
+ * own clash set. Empty ⇒ the write is allowed. Shared by PATCH /series (`inSeasonClashRefusal`
+ * wraps it into the 409) and the medicoach schedule apply (Slice 3), so the two gates can
+ * never disagree.
+ */
+export function introducedClashes(
+  current: Series,
+  subject: Series,
+  allSeries: Series[],
+  clubs: Club[],
+  venues: Venue[],
+  aliases: Record<string, string> = DEFAULT_VENUE_ALIASES,
+): Clash[] {
+  const before = new Set(
+    findClashes(current, allSeries, clubs, venues, aliases).map((c) => clashKey(c, aliases)),
+  );
+  return findClashes(subject, allSeries, clubs, venues, aliases).filter(
+    (c) => !before.has(clashKey(c, aliases)),
+  );
 }

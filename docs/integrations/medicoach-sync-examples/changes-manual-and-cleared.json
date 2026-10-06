@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "tenant": "dolphins",
+  "nextCursor": "2026-10-05T08:00:00.000Z",
+  "hasMore": true,
+  "fixtures": [
+    {
+      "ref": "smartclub:dolphins:fixture:s-planb-promotion-men-t20-g2:f7",
+      "syncStamp": "2026-10-05T07:59:00.000Z",
+      "schedule": {
+        "scheduledTime": "2026-10-04T13:30:00+02:00",
+        "timeTbc": false,
+        "dateTbc": false,
+        "venue": "Siripat 2",
+        "postponed": false,
+        "cancelled": false,
+        "changedAt": "2026-09-20T10:00:00.000Z"
+      },
+      "teams": { "homeRef": null, "awayRef": null },
+      "result": {
+        "homeScore": "120",
+        "awayScore": "121/4",
+        "summary": null,
+        "winner": "away",
+        "method": "normal",
+        "noResult": false,
+        "source": "manual",
+        "recordedAt": "2026-10-05T07:59:00.000Z",
+        "scoringSide": null,
+        "captainRef": null,
+        "medicoachMatchUrl": null
+      },
+      "resultClearedAt": null
+    },
+    {
+      "ref": "smartclub:dolphins:fixture:s-planb-premier-men-t20-g2:f1",
+      "syncStamp": "2026-10-05T07:58:00.000Z",
+      "schedule": {
+        "scheduledTime": "2026-10-04T09:00:00+02:00",
+        "timeTbc": false,
+        "dateTbc": false,
+        "venue": "Hammond Field",
+        "postponed": false,
+        "cancelled": false,
+        "changedAt": "2026-09-20T10:00:00.000Z"
+      },
+      "teams": { "homeRef": null, "awayRef": null },
+      "result": null,
+      "resultClearedAt": "2026-10-05T07:58:00.000Z"
+    }
+  ]
+}

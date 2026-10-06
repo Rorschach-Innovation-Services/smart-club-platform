@@ -10,8 +10,18 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { staffInviteParams, regLinkParams, fixturesParams, clearanceParams } =
-  await import('../src/notify/whatsapp.js');
+const {
+  staffInviteParams,
+  regLinkParams,
+  fixturesParams,
+  clearanceParams,
+  fixtureReminderParams,
+  captainsReportDueParams,
+  captainsReportOpsDigestParams,
+  sendCaptainsReportOpsDigestWhatsApp,
+  WhatsAppTemplatePendingError,
+  urlButtonComponent,
+} = await import('../src/notify/whatsapp.js');
 const { WHATSAPP_TEMPLATES } = await import('../src/notify/whatsapp-templates.js');
 
 const LINK = 'https://club.example.com/sign-in';
@@ -45,12 +55,36 @@ const BUILDERS = [
     }),
   },
   {
+    key: 'captainsReportDue' as const,
+    params: captainsReportDueParams({
+      recipientName: 'Sanele Mthembu',
+      orgName: 'KZN Dolphins',
+      match: 'Umzinto v African Warriors on Sun 4 Oct 2026',
+    }),
+  },
+  {
+    key: 'captainsReportOpsDigest' as const,
+    params: captainsReportOpsDigestParams({
+      recipientName: 'Union admin',
+      summary: 'Dolphins: 3 new results, 6 reports opened, 6 notices sent, 0 failed',
+    }),
+  },
+  {
     key: 'clearancePending' as const,
     params: clearanceParams({
       chairName: 'Thandi Nkosi',
       fromClubName: 'Adelaar CC',
       playerName: 'A Player',
       toClubName: 'Centurion Kavaliers',
+    }),
+  },
+  {
+    key: 'fixtureReminder' as const,
+    params: fixtureReminderParams({
+      chairName: 'Thandi Nkosi',
+      clubName: 'Adelaar CC',
+      dateLabel: 'Sat 2026-11-07',
+      portalLink: LINK,
     }),
   },
 ];
@@ -79,4 +113,120 @@ describe('whatsapp template arity', () => {
       assert.equal(def.params.length, def.paramCount);
     });
   }
+});
+
+describe('whatsapp URL buttons', () => {
+  test('every template with a URL button registers exactly one {{1}} suffix at the end', () => {
+    for (const def of Object.values(WHATSAPP_TEMPLATES)) {
+      const button = (def as { urlButton?: { urlTemplate: string } }).urlButton;
+      if (!button) continue;
+      assert.match(button.urlTemplate, /^https:\/\/[^{}]+\{\{1\}\}$/);
+    }
+  });
+
+  test('the captains_report_due button carries the token as its single suffix param', () => {
+    assert.ok(WHATSAPP_TEMPLATES.captainsReportDue.urlButton);
+    const c = urlButtonComponent('tok.sig');
+    assert.deepEqual(c, {
+      type: 'button',
+      sub_type: 'url',
+      index: '0',
+      parameters: [{ type: 'text', text: 'tok.sig' }],
+    });
+  });
+
+  test('the report link never rides in the body params', () => {
+    const params = captainsReportDueParams({
+      recipientName: 'A',
+      orgName: 'O',
+      match: 'C',
+    });
+    for (const p of params) assert.doesNotMatch(p.text, /https?:\/\//);
+  });
+});
+
+describe("captain's report template (v2 copy, edited in place in Meta 4 Oct 2026)", () => {
+  const due = WHATSAPP_TEMPLATES.captainsReportDue;
+
+  test('three body params: recipient name, union name, match line + date', () => {
+    assert.equal(due.name, 'captains_report_due');
+    assert.equal(due.status, 'registered');
+    assert.equal(due.paramCount, 3);
+    assert.deepEqual(due.params, ['recipient name', 'org name', 'match line + date']);
+    assert.equal(
+      due.bodyText,
+      'Hello {{1}},\n\n' +
+        "The {{2}} captain's report for {{3}} is open. Please rate the umpires.\n\n" +
+        'Tap the button below to open it. You can submit it once; the link expires on the date shown in the report.',
+    );
+    assert.deepEqual(
+      captainsReportDueParams({
+        recipientName: 'Sanele',
+        orgName: 'KZN Dolphins',
+        match: 'Umzinto v AW on Sun 20 Sep 2026',
+      }).map((p) => p.text),
+      ['Sanele', 'KZN Dolphins', 'Umzinto v AW on Sun 20 Sep 2026'],
+    );
+  });
+
+  test('the copy says "submit it once" and never "works once" or a possessive club name', () => {
+    assert.match(due.bodyText, /You can submit it once; the link expires on the date shown/);
+    assert.doesNotMatch(due.bodyText, /works once/);
+    assert.doesNotMatch(due.bodyText, /'s captain's report/);
+  });
+
+  test("there is exactly one captain's-report LINK template in the registry", () => {
+    // The ops digest (below) is a separate, button-less status template.
+    const names = Object.values(WHATSAPP_TEMPLATES)
+      .map((d) => d.name)
+      .filter((n) => n.startsWith('captains_report'));
+    assert.deepEqual(names, ['captains_report_due', 'captains_report_ops_digest']);
+    const linked = Object.values(WHATSAPP_TEMPLATES).filter(
+      (d) => d.name.startsWith('captains_report') && 'urlButton' in d,
+    );
+    assert.deepEqual(
+      linked.map((d) => d.name),
+      ['captains_report_due'],
+    );
+  });
+});
+
+describe("captain's report ops digest template", () => {
+  const digest = WHATSAPP_TEMPLATES.captainsReportOpsDigest;
+
+  test('two body params, no URL button, pending until Meta approves it', () => {
+    assert.equal(digest.name, 'captains_report_ops_digest');
+    assert.equal(digest.lang, 'en');
+    assert.equal(digest.status, 'pending');
+    assert.equal(digest.paramCount, 2);
+    assert.deepEqual(digest.params, ['recipient name', 'run summary']);
+    assert.ok(!('urlButton' in digest));
+    assert.equal(
+      digest.bodyText,
+      'Hello {{1}},\n\n' +
+        "Captain's report run update: {{2}}.\n\n" +
+        'Automated status message for union administrators.',
+    );
+  });
+
+  test('the summary is bounded at 300 chars and collapsed to one line', () => {
+    const [name, summary] = captainsReportOpsDigestParams({
+      recipientName: '',
+      summary: `Dolphins:\n${'x'.repeat(400)}`,
+    });
+    assert.equal(name.text, 'there');
+    assert.equal(summary.text.length, 300);
+    assert.doesNotMatch(summary.text, /\n/);
+  });
+
+  test('the sender refuses to send while the template is pending', async () => {
+    await assert.rejects(
+      sendCaptainsReportOpsDigestWhatsApp({
+        to: '+27000000000',
+        recipientName: 'Union admin',
+        summary: 'x',
+      }),
+      WhatsAppTemplatePendingError,
+    );
+  });
 });

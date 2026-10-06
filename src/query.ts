@@ -33,6 +33,13 @@ export const qk = {
   series: () => ['series', t()],
   seasonRuns: () => ['season-runs', t()],
   venues: () => ['venues', t()],
+  umpires: () => ['umpires', t()],
+  captainsReports: () => ['captains-reports', t()],
+  captainsReportContactGaps: () => ['captains-report-contact-gaps', t()],
+  medicoachSync: () => ['medicoach-sync', t()],
+  clubCaptainsReports: (clubId: string) => ['club-captains-reports', t(), clubId],
+  // Global: the token names its own tenant.
+  linkedCaptainsReport: (token: string) => ['captains-report-link', token],
   tenantConfig: () => ['tenant-config', t()],
   users: () => ['users', t()],
   players: (clubId: string) => ['players', t(), clubId],
@@ -46,10 +53,21 @@ export const qk = {
   // outbound (it is the veterans club) requests; and the admin cohort-wide list.
   veteransRequests: (clubId: string) => ['veterans-requests', t(), clubId],
   allVeteransRequests: () => ['veterans-requests-all', t()],
-  captainReports: (clubId: string) => ['captain-reports', t(), clubId],
-  allCaptainReports: () => ['captain-reports-all', t()],
   // The finder search is keyed on the (debounced) query so each term caches independently.
   veteransCandidates: (clubId: string, q: string) => ['veterans-candidates', t(), clubId, q],
+  // Fixture postponements (ADR 0015): a club's inbound + outbound requests; the admin list;
+  // and the date picker's clash hints, keyed on the candidate move.
+  postponements: (clubId: string) => ['postponements', t(), clubId],
+  allPostponements: () => ['postponements-all', t()],
+  clashHints: (clubId: string, seriesId: string, fixtureId: string, date: string, time: string) => [
+    'clash-hints',
+    t(),
+    clubId,
+    seriesId,
+    fixtureId,
+    date,
+    time,
+  ],
   signupLink: () => ['signup-link', t()],
   // Operator portal keys are deliberately NOT tenant-scoped: /platform/* is
   // tenant-independent (the slug in the key names the MANAGED tenant, not the host's).

@@ -515,3 +515,82 @@ describe('registration with the clearances module on (cricket) is unchanged', ()
     assert.equal(src?.transferNote, undefined);
   });
 });
+
+describe('POST /clubs/:id/exco — required office bearers + per-role merge', () => {
+  const role = (who: string) => ({ name: `${who} Person`, cell: '0821112222', email: `${who}@x` });
+  const postExco = (tenant: string, auth: string, clubId: string, body: unknown) =>
+    app.request(`/clubs/${clubId}/exco`, {
+      method: 'POST',
+      headers: headers(auth, tenant),
+      body: JSON.stringify(body),
+    });
+
+  test('football: a roster without the Director of Academics is 400 and nothing is written', async () => {
+    await repo.createClub('fc', mkClub('fc-exco-a', 'Exco A High'));
+    const res = await postExco('fc', FC_ADMIN, 'fc-exco-a', {
+      chair: role('Principal'),
+      sec: role('Sport'),
+      tre: role('Football'),
+    });
+    assert.equal(res.status, 400);
+    assert.match(JSON.stringify(await res.json()), /Director of Academics/);
+    assert.equal((await repo.getClub('fc', 'fc-exco-a'))?.exco, undefined);
+  });
+
+  test('football: a full roster saves; a name-only edit keeps the stored chair governance fields', async () => {
+    await repo.createClub('fc', {
+      ...mkClub('fc-exco-b', 'Exco B High'),
+      exco: {
+        chair: {
+          ...role('Principal'),
+          idNumber: '8001015009087',
+          termStart: '2024-01-01',
+          termEnd: '2027-12-31',
+        },
+      },
+    });
+    const res = await postExco('fc', FC_ADMIN, 'fc-exco-b', {
+      chair: { name: 'New Principal', cell: '0821112222', email: 'p@x', gender: '', race: '' },
+      sec: role('Sport'),
+      tre: role('Football'),
+      vc: role('Academics'),
+    });
+    assert.equal(res.status, 200);
+    const chair = (await repo.getClub('fc', 'fc-exco-b'))?.exco?.chair as Record<string, unknown>;
+    assert.equal(chair.name, 'New Principal');
+    assert.equal(chair.idNumber, '8001015009087', 'stored governance field survives the merge');
+    assert.equal(chair.termEnd, '2027-12-31');
+  });
+
+  test('null clears a non-required role entirely; nulling or blanking a required role is 400', async () => {
+    await repo.createClub('dolphins', {
+      ...mkClub('dv-exco', 'Exco CC'),
+      exco: {
+        chair: role('Chair'),
+        sec: role('Sec'),
+        tre: role('Tre'),
+        vc: { ...role('Vice'), gender: 'Female' },
+      },
+    });
+    // Cricket's Vice-Chair stays optional: null removes the whole role (POPIA erasure).
+    const cleared = await postExco('dolphins', DOL_ADMIN, 'dv-exco', { vc: null });
+    assert.equal(cleared.status, 200);
+    const exco = (await repo.getClub('dolphins', 'dv-exco'))?.exco as Record<string, unknown>;
+    assert.equal('vc' in exco, false);
+    assert.equal((exco.chair as { name: string }).name, 'Chair Person', 'absent roles are kept');
+
+    // The combined stored+incoming roster must still carry every required role.
+    assert.equal((await postExco('dolphins', DOL_ADMIN, 'dv-exco', { sec: null })).status, 400);
+    assert.equal(
+      (await postExco('dolphins', DOL_ADMIN, 'dv-exco', { tre: { email: '  ' } })).status,
+      400,
+    );
+    assert.equal((await postExco('dolphins', DOL_ADMIN, 'dv-exco', ['nope'])).status, 400);
+    const after = (await repo.getClub('dolphins', 'dv-exco'))?.exco as Record<string, unknown>;
+    assert.equal(
+      (after.sec as { name: string }).name,
+      'Sec Person',
+      'rejected saves write nothing',
+    );
+  });
+});

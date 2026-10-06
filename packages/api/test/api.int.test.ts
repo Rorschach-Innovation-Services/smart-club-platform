@@ -762,7 +762,7 @@ describe('POST /clubs/:id/send-fixtures', () => {
     // 3 players: one reachable, one minor (skipped — no guardian contact), one with no contact.
     await repo.createPlayer(
       'dolphins',
-      player('testers', 'Reachable', { email: 'reach@testers.co.za', cell: '0768563601' }),
+      player('testers', 'Reachable', { email: 'reach@testers.co.za', cell: '0820000001' }),
     );
     await repo.createPlayer(
       'dolphins',

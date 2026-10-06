@@ -12,6 +12,22 @@
  */
 import * as Sentry from '@sentry/aws-serverless';
 
+/**
+ * A captain's-report link token is a bearer capability (ADR 0016): it must never reach Sentry.
+ * Replaces the token in `/captains-report-link/<token>` and `/r/<token>` paths with
+ * `[token]`. Exported for tests.
+ */
+export function scrubReportTokens(value: string): string {
+  return value.replace(/(\/(?:captains-report-link|r)\/)[^/?#\s"']+/g, '$1[token]');
+}
+
+/** Scrub every place an event carries a URL or message (request, transaction, tags, extra). */
+export function scrubEvent<T extends Record<string, unknown>>(event: T): T {
+  const json = JSON.stringify(event);
+  const scrubbed = scrubReportTokens(json);
+  return scrubbed === json ? event : (JSON.parse(scrubbed) as T);
+}
+
 if (process.env.SENTRY_DSN && process.env.STAGE !== 'local') {
   Sentry.init({
     dsn: process.env.SENTRY_DSN,
@@ -29,7 +45,11 @@ if (process.env.SENTRY_DSN && process.env.STAGE !== 'local') {
         delete headers['x-dev-auth'];
         delete headers['X-Dev-Auth'];
       }
-      return event;
+      return scrubEvent(event as unknown as Record<string, unknown>) as unknown as typeof event;
+    },
+    // Breadcrumbs (outgoing/incoming HTTP) carry URLs — scrub the report token there too.
+    beforeBreadcrumb(crumb) {
+      return scrubEvent(crumb as unknown as Record<string, unknown>) as unknown as typeof crumb;
     },
   });
 }

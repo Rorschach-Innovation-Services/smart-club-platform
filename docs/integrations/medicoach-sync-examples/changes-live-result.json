@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "tenant": "dolphins",
+  "nextCursor": "2026-10-04T14:32:10.123Z",
+  "hasMore": false,
+  "fixtures": [
+    {
+      "ref": "smartclub:dolphins:fixture:s-planb-premier-men-t20-g1:f3",
+      "syncStamp": "2026-10-04T14:32:10.123Z",
+      "schedule": {
+        "scheduledTime": "2026-10-04T09:00:00+02:00",
+        "timeTbc": false,
+        "dateTbc": false,
+        "venue": "Kingsmead Oval",
+        "postponed": false,
+        "cancelled": false,
+        "changedAt": "2026-09-20T10:00:00.000Z"
+      },
+      "teams": {
+        "homeRef": "smartclub:dolphins:team:premier:umzinto",
+        "awayRef": "smartclub:dolphins:team:premier:african-warriors"
+      },
+      "result": {
+        "homeScore": "184/6 (20)",
+        "awayScore": "161/9 (20)",
+        "summary": "Umzinto won by 23 runs",
+        "winner": "home",
+        "method": "normal",
+        "noResult": false,
+        "source": "live",
+        "recordedAt": "2026-10-04T14:31:58.000Z",
+        "scoringSide": "home",
+        "captainRef": "smartclub:dolphins:player:0000000000000000000000000000000000000000000000000000000000000000",
+        "medicoachMatchUrl": "https://live.medicoach.co.za/match/example"
+      },
+      "resultClearedAt": null
+    }
+  ]
+}

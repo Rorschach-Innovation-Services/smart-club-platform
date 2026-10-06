@@ -14,6 +14,7 @@ import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AffiliationForm } from './club';
 import { renderWithProviders } from './test-utils';
+import { qk } from './query';
 
 const ALL_LEAGUES = [
   { key: 'premier', label: 'Premier League', group: 'Seniors', district: 'All districts' },
@@ -162,5 +163,100 @@ describe('AffiliationForm — ground field count (optional)', () => {
     expect(
       screen.getAllByPlaceholderText('e.g. 2').map((el) => (el as HTMLInputElement).value),
     ).toContain('4');
+  });
+});
+
+describe('AffiliationForm — office bearers per vertical', () => {
+  const bearer = (who: string) => ({
+    name: `${who} Person`,
+    cell: '0821112222',
+    email: `${who}@x`,
+  });
+  const school = (exco: Record<string, unknown>) => ({
+    id: 'alpha',
+    name: 'Alpha High',
+    district: 'Ilembe Cricket Union',
+    leagues: [],
+    ground: { venue: 'Alpha Field', address: '1 Field Road' },
+    exco,
+  });
+
+  function renderAs(sport: 'football' | 'cricket', clubProp: Record<string, unknown>) {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const onSaveDraft = vi.fn().mockResolvedValue(undefined);
+    const toast = vi.fn();
+    renderWithProviders(
+      <AffiliationForm
+        club={clubProp}
+        goto={vi.fn()}
+        toast={toast}
+        onSubmit={onSubmit}
+        onSaveDraft={onSaveDraft}
+        allLeagues={ALL_LEAGUES}
+        districts={DISTRICTS}
+      />,
+      { seed: [[qk.tenant(), { sport }]] },
+    );
+    return { onSubmit, onSaveDraft, toast };
+  }
+
+  const chairGov = { idNumber: '8001015009087', termStart: '2024-01-01', termEnd: '2027-12-31' };
+
+  it('football: no Principal ID / term inputs, and stored governance fields still ride through a save', async () => {
+    const user = userEvent.setup();
+    const { onSaveDraft } = renderAs(
+      'football',
+      school({ chair: { ...bearer('Principal'), ...chairGov } }),
+    );
+    await user.click(screen.getByRole('button', { name: /Continue/ })); // 1 → 2
+    expect(screen.getByText('Director of Academics')).toBeTruthy();
+    expect(screen.queryByText('ID Number')).toBeNull();
+    expect(screen.queryByText('Term Start')).toBeNull();
+    expect(screen.queryByText('Term End')).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Save draft' }));
+    expect(onSaveDraft.mock.calls[0][0].exco.chair).toMatchObject(chairGov);
+  });
+
+  it('cricket: the Chairperson ID / term inputs are unchanged', async () => {
+    const user = userEvent.setup();
+    renderAs('cricket', school({ chair: bearer('Chair') }));
+    await user.click(screen.getByRole('button', { name: /Continue/ })); // 1 → 2
+    expect(screen.getByText('ID Number')).toBeTruthy();
+    expect(screen.getByText('Term Start')).toBeTruthy();
+    expect(screen.getByText('Term End')).toBeTruthy();
+  });
+
+  it('football: submit is blocked until the Director of Academics is captured', async () => {
+    const user = userEvent.setup();
+    const { onSubmit, toast } = renderAs(
+      'football',
+      school({ chair: bearer('Principal'), sec: bearer('Sport'), tre: bearer('Football') }),
+    );
+    await user.click(screen.getByRole('button', { name: /Continue/ })); // 1 → 2
+    await user.click(screen.getByRole('button', { name: /Continue/ })); // 2 → 3
+    await user.click(screen.getByRole('button', { name: 'Submit affiliation' }));
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith(expect.stringMatching(/Director of Academics/), 'warn');
+  });
+
+  it('football: a full leadership roster submits', async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = renderAs(
+      'football',
+      school({
+        chair: bearer('Principal'),
+        sec: bearer('Sport'),
+        tre: bearer('Football'),
+        vc: bearer('Academics'),
+      }),
+    );
+    await user.click(screen.getByRole('button', { name: /Continue/ })); // 1 → 2
+    await user.click(screen.getByRole('button', { name: /Continue/ })); // 2 → 3
+    await user.click(screen.getByRole('button', { name: 'Submit affiliation' }));
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0][0].exco.vc).toMatchObject(bearer('Academics'));
   });
 });

@@ -26,6 +26,7 @@ const {
   buildClubIndex,
   parseArgs,
   directiveMatches,
+  diffAdminEdits,
 } = await import('../src/import-planb-fixtures.js');
 
 // Mirrors the module's own (unexported) constants — kept in sync by inspection, not
@@ -784,5 +785,35 @@ describe('directiveMatches — home/away club matchers (union, 31 Aug 2026)', ()
       ),
       false,
     );
+  });
+});
+
+describe('diffAdminEdits — postponed fixtures (ADR 0015)', () => {
+  const mk = (fixtures: unknown[]) =>
+    ({ id: 's-planb-x', name: 'X', startDate: '2026-10-01', teams: [], fixtures }) as never;
+
+  test('a postponed fixture is informational, never a genuine edit; its bookkeeping is ignored', () => {
+    const existing = mk([
+      {
+        id: 'f1',
+        date: '2026-11-14',
+        time: '10:00',
+        status: 'postponed',
+        originalDate: '2026-10-10',
+        postponementId: 'req-1',
+      },
+    ]);
+    const incoming = mk([{ id: 'f1', date: '2026-10-10', time: '10:00' }]);
+    const { genuine, informational } = diffAdminEdits(existing, incoming);
+    assert.deepEqual(genuine, []);
+    assert.ok(informational.some((n) => n.includes('postponed (originally 2026-10-10')));
+  });
+
+  test('other non-scheduled statuses still gate --discard-edits', () => {
+    const existing = mk([{ id: 'f1', date: '2026-10-10', status: 'completed' }]);
+    const incoming = mk([{ id: 'f1', date: '2026-10-10' }]);
+    assert.deepEqual(diffAdminEdits(existing, incoming).genuine, [
+      's-planb-x: fixture f1 has status "completed"',
+    ]);
   });
 });

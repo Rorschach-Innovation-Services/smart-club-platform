@@ -36,6 +36,7 @@ import {
   venueAliasesFor,
 } from './venue-clash.js';
 import type { Series, Venue } from './types.js';
+import { writeSeriesFromSnapshot } from './medicoach-sync/cli-write.js';
 
 const TENANT = 'dolphins';
 
@@ -136,6 +137,9 @@ async function main() {
   ALIASES = venueAliasesFor(await repo.getTenantConfig(TENANT));
 
   const [venues, allSeries] = await Promise.all([repo.listVenues(TENANT), repo.listSeries(TENANT)]);
+  // The series exactly as this run read them: the version every write is conditional on, and
+  // the baseline of the medicoach schedule diff (the working copies below are mutated).
+  const originalById = new Map(allSeries.map((x) => [String(x.id), structuredClone(x)]));
   const counts = fixtureCounts(allSeries);
 
   const hardErrors: string[] = [];
@@ -327,14 +331,28 @@ async function main() {
 
   // Series first, so a survivor/loser write can never race ahead of the fixtures pointing
   // at it. Version bump mirrors import-planb-fixtures' write loop.
+  // A series that drifted since this run read it is skipped (re-run); then no loser/junk row
+  // is deleted, since the unwritten series' fixtures may still point at it.
+  let drifted = 0;
   for (const { series, count } of seriesEdits.values()) {
-    series.version = (Number(series.version) || 1) + 1;
-    await repo.putSeries(TENANT, series);
+    const original = originalById.get(String(series.id));
+    // Version-checked against this run's read; diff original-read → written (ADR 0016).
+    if ((await writeSeriesFromSnapshot(repo, TENANT, original, series)) === 'drifted') {
+      drifted++;
+      continue;
+    }
     console.log(`wrote ${series.id} v${series.version} (${count} fixture(s) repointed)`);
   }
   for (const survivor of survivorWrites.values()) {
     await repo.putVenue(TENANT, survivor);
     console.log(`updated survivor venue ${survivor.id}`);
+  }
+  if (drifted) {
+    process.exitCode = 1;
+    console.error(
+      `\n${drifted} series changed while this ran and were NOT written; no venue row was deleted. Re-run.`,
+    );
+    return;
   }
   for (const loser of loserDeletes) {
     await repo.deleteVenue(TENANT, loser.id);

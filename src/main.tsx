@@ -2,6 +2,7 @@ import { resolveCompetitionDefaults } from '../packages/engine/src/defaults';
 import { Sentry } from './sentry'; // first — installs global error handlers before render
 import { useState as useStateApp, useMemo as useMemoApp, useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
+import type { Umpire } from './types';
 import { ErrorBoundary } from 'react-error-boundary';
 import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
@@ -102,8 +103,8 @@ import {
   ClubClearancesView,
   ClubVeteransSquadView,
 } from './club';
+import { AdminPostponements, postponementAttentionCount } from './club-postponements';
 import { Onboarding } from './onboarding';
-import { CaptainsReportView } from './CaptainsReport';
 import {
   SeasonSwitch,
   AdminSeasonDashboard,
@@ -112,8 +113,22 @@ import {
 } from './season-dashboards';
 import { releasedFixtures, clubFixtures } from './season';
 import { AdminScoutingPage } from './scouting-page';
-import { CaptainReportsBoard } from './captain-reports-board';
-import { useModule, useSeasonLabel, useVertical } from './branding';
+import { AdminUmpiresView, mergeErrorMessage } from './umpires';
+import { UmpireAppointmentsUpload } from './UmpireAppointmentsUpload';
+import { ResyncDialog, isResyncRequired } from './ResyncDialog';
+
+import { CaptainsReportView, CaptainsReportLinkPage } from './CaptainsReport';
+import { AdminCaptainsReportsView } from './AdminCaptainsReports';
+import { AdminMedicoachSyncView } from './AdminMedicoachSync';
+import { useFeature, useModule, useSeasonLabel, useVertical } from './branding';
+
+/** The admin cancelled the medicoach-resync confirmation: the request is simply not sent. */
+class ResyncCancelled extends Error {
+  constructor() {
+    super('cancelled');
+    this.name = 'ResyncCancelled';
+  }
+}
 
 // Resolve the tenant before any query runs so x-tenant is attached to requests.
 const TENANT_SLUG = resolveTenantSlug();
@@ -355,7 +370,10 @@ function AppRoutes() {
   // (which may resolve to no tenant, or the wrong one) and themes itself from the
   // certificate's own tenant. So neither the host's /tenant theme nor its 404 screen applies.
   const { pathname } = useLocation();
-  const onVerify = pathname === '/verify' || pathname.startsWith('/verify/');
+  // The captain's-report link page (/r/<token>) is tenant-independent the same way: the token
+  // names its tenant, and the page themes itself from the report's tenant.
+  const onVerify =
+    pathname === '/verify' || pathname.startsWith('/verify/') || pathname.startsWith('/r/');
 
   // Tenant branding/config (public). Apply theme as soon as it loads.
   // retry the tenant config: it carries the league/district catalogue the authed app
@@ -387,6 +405,8 @@ function AppRoutes() {
       {/* Public transfer-certificate check — the target of the certificate's QR code. */}
       <Route path="/verify" element={<VerifyCertificatePage />} />
       <Route path="/verify/:serial" element={<VerifyCertificatePage />} />
+      {/* Public submit-once captain's report link (the token is the capability). */}
+      <Route path="/r/:token" element={<CaptainsReportLinkPage />} />
       <Route
         path="/*"
         element={
@@ -421,6 +441,20 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   // null = closed; {} = create; a league object = edit
   const [showLeagueForm, setShowLeagueForm] = useStateApp(null);
   const [showHelp, setShowHelp] = useStateApp(false);
+  // Medicoach sync: a regenerate/rebase that would orphan synced fixtures asks first
+  // (ResyncDialog); the pending answer resolves the request that is waiting on it.
+  const [resyncAsk, setResyncAsk] = useStateApp<{
+    error: ApiError;
+    action: 'regenerate' | 'rebase';
+    resolve: (ok: boolean) => void;
+  } | null>(null);
+  function askResync(error: ApiError, action: 'regenerate' | 'rebase') {
+    return new Promise<boolean>((resolve) => setResyncAsk({ error, action, resolve }));
+  }
+  function answerResync(ok: boolean) {
+    resyncAsk?.resolve(ok);
+    setResyncAsk(null);
+  }
 
   const membership = membershipFor(memberships, TENANT_SLUG);
   const role = routingRole(membership);
@@ -632,7 +666,8 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       return await fn();
     } catch (err) {
       const conflict = err instanceof ApiError && err.status === 409;
-      toastShow(toastCopy(err, errMsg, opts), 'warn');
+      // The admin cancelled a confirmation (ResyncCancelled): nothing to tell them.
+      if (!(err instanceof ResyncCancelled)) toastShow(toastCopy(err, errMsg, opts), 'warn');
       if (conflict) {
         (opts.invalidate ?? [qk.clubs(), qk.series(), qk.tenant()]).forEach(invalidate);
       }
@@ -681,6 +716,23 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       .then(() => invalidate(qk.series()))
       .catch(() => {});
   }
+  /**
+   * Run a generate/rebase; when the server refuses because released fixtures are synced with
+   * medicoach (409 `sync_resync_required`), list them in ResyncDialog and, only on confirm,
+   * send it again with `allowResync: true`. Cancel throws ResyncCancelled (never toasted).
+   */
+  async function withResync<T>(
+    action: 'regenerate' | 'rebase',
+    send: (allowResync: { allowResync?: true }) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await send({});
+    } catch (err) {
+      if (!isResyncRequired(err)) throw err;
+      if (!(await askResync(err, action))) throw new ResyncCancelled();
+      return send({ allowResync: true });
+    }
+  }
   /* ─── Season runs (ADR 0008) ─── */
   function createSeasonRun(run) {
     // A league with no setup (400 setup_missing) or a label already running (409
@@ -712,11 +764,16 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   // thing moved — the structure (reopen Review changes) or the run (refreshed) — rather
   // than the generic series-conflict line; any other 409 is shown as the server worded it.
   function rebaseSeasonRun(id, body) {
-    return withToast(() => api.rebaseSeasonRun(id, body), 'Could not apply the structure', {
-      invalidate: [qk.seasonRuns()],
-      rawConflict: true,
-      conflictMessage: seasonRunConflictMessage,
-    }).then((r) => {
+    return withToast(
+      () =>
+        withResync('rebase', (allowResync) => api.rebaseSeasonRun(id, { ...body, ...allowResync })),
+      'Could not apply the structure',
+      {
+        invalidate: [qk.seasonRuns()],
+        rawConflict: true,
+        conflictMessage: seasonRunConflictMessage,
+      },
+    ).then((r) => {
       invalidate(qk.seasonRuns());
       return r;
     });
@@ -736,7 +793,10 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
    */
   async function generateStageSeries(run, stage) {
     return withToast(
-      () => generateStageSeriesInner(run, stage),
+      () =>
+        withResync('regenerate', (allowResync) =>
+          generateStageSeriesInner(run, stage, allowResync),
+        ),
       'Could not generate the fixtures',
       // A structured refusal (clash gate, released overwrite, awaiting entrants, does not
       // fit, missing block) names what to do; any other 409 is a
@@ -752,7 +812,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   }
   // The server materialises the stage itself with the shared engine (ADR 0014); the
   // browser's materialisation only drives the preview.
-  async function generateStageSeriesInner(run, stage) {
+  async function generateStageSeriesInner(run, stage, allowResync: { allowResync?: true } = {}) {
     // The Seasons panel asks "Regenerate a released schedule?" before calling here whenever
     // this cache shows any of the stage's series released — so a released series in the
     // cache means the admin has already confirmed. When the cache is stale (released
@@ -770,6 +830,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
     const { series, warnings = [] } = await api.generateStage(run.id, stage.id, {
       version: run.version,
       ...(confirmed ? { confirmReleasedOverwrite: true as const } : {}),
+      ...allowResync,
     });
     invalidate(qk.series());
     invalidate(qk.seasonRuns());
@@ -1121,6 +1182,14 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       {toastNode}
+      {resyncAsk && (
+        <ResyncDialog
+          error={resyncAsk.error}
+          action={resyncAsk.action}
+          onCancel={() => answerResync(false)}
+          onConfirm={() => answerResync(true)}
+        />
+      )}
       {showHelp && (
         <HelpModal
           onClose={() => setShowHelp(false)}
@@ -1218,6 +1287,8 @@ function Shell({
   const veteransOn = useModule('veterans');
   const cqiOn = useModule('cqi');
   const complianceOn = useModule('compliance');
+  // Medicoach fixture/result sync (ADR 0016): the admin "Medicoach sync" page.
+  const medicoachSyncOn = useFeature('medicoachSync');
   const clearancesOn = useModule('clearances');
 
   // ── Derive clubId from URL ──
@@ -1292,6 +1363,18 @@ function Shell({
     queryFn: () => api.getVeteransRequests(clubId),
     enabled: role === 'club' && !!clubId && veteransOn,
   });
+  // Fixture postponements (ADR 0015): the club's inbound + outbound requests (Fixtures inbox +
+  // nav badge) and the admin's tenant-wide list (nav badge; the view reads the same key).
+  const postponementsQuery = useQuery({
+    queryKey: qk.postponements(clubId),
+    queryFn: () => api.getPostponements(clubId),
+    enabled: role === 'club' && !!clubId,
+  });
+  const allPostponementsQuery = useQuery({
+    queryKey: qk.allPostponements(),
+    queryFn: () => api.getAllPostponements(),
+    enabled: role === 'admin',
+  });
   const allClearancesQuery = useQuery({
     queryKey: qk.allClearances(),
     queryFn: api.getAllClearances,
@@ -1322,20 +1405,15 @@ function Shell({
     queryFn: api.getDemographics,
     enabled: role === 'admin',
   });
-  // Captain's post-match reports (cricket): a rep reads their club's, the admin every club's.
+  // Captain's reports (cricket): the club's season home shows which played fixtures still
+  // need one. Same cache key as the report view, so filing there updates the home.
   const reportsOn = vertical.sport === 'cricket';
   const captainReportsQuery = useQuery({
-    queryKey: qk.captainReports(clubId),
-    queryFn: () => api.getClubCaptainReports(clubId),
+    queryKey: qk.clubCaptainsReports(clubId),
+    queryFn: () => api.getClubCaptainsReports(clubId),
     enabled: role === 'club' && !!clubId && reportsOn,
   });
-  const allCaptainReportsQuery = useQuery({
-    queryKey: qk.allCaptainReports(),
-    queryFn: api.getAllCaptainReports,
-    enabled: role === 'admin' && reportsOn,
-  });
   const captainReports = captainReportsQuery.data ?? [];
-  const allCaptainReports = allCaptainReportsQuery.data ?? [];
   const players = playersQuery.data ?? [];
   const clearances = clearancesQuery.data ?? { incoming: [], outbound: [] };
   const veteransRequests = veteransRequestsQuery.data ?? { inbound: [], outbound: [] };
@@ -1344,6 +1422,55 @@ function Shell({
   const allReviews = allReviewsQuery.data ?? [];
   const allVeteransRequests = allVeteransRequestsQuery.data ?? [];
   const signupLink = signupLinkQuery.data?.clubSignupLink ?? null;
+
+  // ── Umpire allocation (admin) ──
+  // The registry with contacts; appointments ride on GET /series as each fixture's
+  // `officials`, so saving one refetches the series list rather than a separate query.
+  // Admins get the full registry; club members (cricket) the names-only list the captain's
+  // report's "a different umpire stood" picker offers.
+  const umpiresQuery = useQuery({
+    queryKey: qk.umpires(),
+    queryFn: api.getUmpires,
+    enabled: role === 'admin' || vertical.sport === 'cricket',
+  });
+  const allUmpires = umpiresQuery.data ?? [];
+  // Captain's reports (union office view + the Umpires page's rating averages).
+  const captainsReportsQuery = useQuery({
+    queryKey: qk.captainsReports(),
+    queryFn: () => api.getCaptainsReports(),
+    enabled: role === 'admin' && vertical.sport === 'cricket',
+  });
+  const allCaptainsReports = captainsReportsQuery.data ?? [];
+  function saveOfficials(seriesId: string, fixtureId: string, umpireIds: string[]) {
+    return withToast(
+      () => api.putFixtureOfficials(seriesId, fixtureId, umpireIds),
+      'Could not save the umpires',
+    ).then(() => invalidate(qk.series()));
+  }
+  function createUmpire(body: Partial<Umpire>): Promise<Umpire> {
+    return withToast(() => api.createUmpire(body), 'Could not add the umpire').then((u) => {
+      invalidate(qk.umpires());
+      return u;
+    });
+  }
+  function patchUmpire(id: string, body: Partial<Umpire>) {
+    return withToast(() => api.patchUmpire(id, body), 'Could not save the umpire').then(() => {
+      invalidate(qk.umpires());
+      invalidate(qk.series());
+    });
+  }
+  function mergeUmpire(sourceId: string, targetId: string) {
+    // An umpire already merged elsewhere (a stale page) says where it went, and the 409
+    // refreshes the list so its row shows "Merged into …".
+    return withToast(() => api.mergeUmpire(sourceId, targetId), 'Could not merge the umpires', {
+      errorMessage: mergeErrorMessage,
+      invalidate: [qk.umpires(), qk.series()],
+    }).then((res) => {
+      toastShow(`Merged — ${res.repointed} appointment(s) moved to ${res.target.displayName}`);
+      invalidate(qk.umpires());
+      invalidate(qk.series());
+    });
+  }
 
   // ── Derive view from URL ──
   let view;
@@ -1692,8 +1819,8 @@ function Shell({
   }
   // ── Player roster + clearances (club role) ──
   // Players self-register via the shared Registration link (RegLinkModal → public RegisterPage),
-  // which captures the full Union field set + ID document — no in-portal chair form.
-  // Destination club initiates a clearance request for a player at another club.
+  // or the chair registers them from the Players page (single form, quick-add grid, spreadsheet
+  // upload — see club-register.tsx, which owns those calls). Destination club initiates a clearance request for a player at another club.
   // busyClearanceId === 'new' disables the request form's submit so a double-click
   // can't fire two POSTs (which would race the duplicate-pending guard).
   function requestClearance({ fromClubId, idNumber, note }) {
@@ -2289,6 +2416,12 @@ function Shell({
   // Registration-review badge: admin sees every open review (off-system alerts) cohort-wide.
   const adminOpenReviews = allReviews.filter((r) => r.status === 'open').length;
   const adminPendingVetRequests = allVeteransRequests.filter((r) => r.status === 'pending').length;
+  // Postponements: the admin badge counts open negotiations; the club badge counts requests
+  // awaiting this club's answer plus union rulings it hasn't acknowledged.
+  const adminOpenPostponements = (allPostponementsQuery.data ?? []).filter(
+    (r) => r.status === 'open',
+  ).length;
+  const myPostponementAttention = postponementAttentionCount(postponementsQuery.data, clubId);
 
   // Nav items are listed in their natural journey order here, then sorted alphabetically
   // by label for display (see the `.sort` below) — same for clubNav.
@@ -2332,6 +2465,30 @@ function Shell({
     // Talent ID from ball-by-ball league/tournament datasets (cricket only for now).
     ...(vertical.sport === 'cricket' ? [{ v: 'scouting', label: 'Scouting', icon: Icon.Eye }] : []),
     { v: 'fixtures', label: 'Fixtures & Venues', icon: Icon.Field, dot: 'teal' },
+    {
+      v: 'postponements',
+      label: 'Postponements',
+      icon: Icon.Clock,
+      num: adminOpenPostponements || undefined,
+      dot: adminOpenPostponements ? 'gold' : 'teal',
+    },
+    // Umpires and captain's reports are cricket modules (the union's umpire panel).
+    ...(vertical.sport === 'cricket'
+      ? [
+          {
+            v: 'umpires',
+            label: 'Umpires',
+            icon: Icon.Whistle,
+            num: allUmpires.filter((u) => u.active).length || undefined,
+          },
+          {
+            v: 'captains_reports',
+            label: "Captain's reports",
+            icon: Icon.Form,
+            num: allCaptainsReports.filter((r) => r.status === 'pending').length || undefined,
+          },
+        ]
+      : []),
     ...(clearancesOn
       ? [
           {
@@ -2361,6 +2518,7 @@ function Shell({
           },
         ]
       : []),
+    ...(medicoachSyncOn ? [{ v: 'medicoach_sync', label: 'Medicoach sync', icon: Icon.Live }] : []),
     { v: 'team', label: 'Team & Access', icon: Icon.Users, num: users.length || undefined },
   ].sort((a, b) => a.label.localeCompare(b.label));
 
@@ -2443,10 +2601,17 @@ function Shell({
             v: 'fixtures',
             label: 'Fixtures',
             icon: Icon.Field,
-            dot: hasReleased ? 'teal' : affiliationSubmitted(activeClub) ? 'gold' : 'muted',
-            num: hasReleased ? 'NEW' : undefined,
+            // A postponement awaiting this club's answer outranks the "NEW" release badge.
+            dot: myPostponementAttention
+              ? 'gold'
+              : hasReleased
+                ? 'teal'
+                : affiliationSubmitted(activeClub)
+                  ? 'gold'
+                  : 'muted',
+            num: myPostponementAttention || (hasReleased ? 'NEW' : undefined),
           },
-          // Post-match umpire ratings + misconduct under the cricket Code of Behaviour.
+          // Post-match umpire ratings (the union's Captain's Report on Umpires).
           ...(vertical.sport === 'cricket'
             ? [{ v: 'captains-report', label: "Captain's Report", icon: Icon.Whistle }]
             : []),
@@ -2456,7 +2621,8 @@ function Shell({
 
   const nav = role === 'admin' ? adminNav : clubNav;
   // The league drill-down is a sub-view of Insights — keep its nav item lit.
-  const navView = view === 'insights_league' ? 'insights' : view;
+  const navView =
+    view === 'insights_league' ? 'insights' : view === 'umpire_upload' ? 'umpires' : view;
   const orgName = branding?.name ?? 'Smart Club';
   const orgFooter = branding?.copy?.footer ?? 'Powered by Medicoach';
 
@@ -2489,16 +2655,6 @@ function Shell({
                 gotoClub={setActiveClub}
                 gotoAdminView={gotoAdminView}
               />
-            }
-            reports={
-              reportsOn ? (
-                <CaptainReportsBoard
-                  scope="admin"
-                  orgName={orgName}
-                  reports={allCaptainReports}
-                  loading={allCaptainReportsQuery.isLoading}
-                />
-              ) : undefined
             }
             setup={
               <AdminDashboard
@@ -2705,6 +2861,64 @@ function Shell({
             onRebaseSeasonRun={rebaseSeasonRun}
             onFetchSeasonRun={fetchSeasonRun}
             onGenerateStageSeries={generateStageSeries}
+            umpires={allUmpires}
+            onSaveOfficials={saveOfficials}
+            onCreateUmpire={(displayName) => createUmpire({ displayName })}
+          />
+        );
+      if (view === 'umpires' && vertical.sport === 'cricket')
+        return (
+          <AdminUmpiresView
+            umpires={allUmpires}
+            allSeries={allSeries}
+            loading={umpiresQuery.isLoading}
+            onCreate={createUmpire}
+            onPatch={patchUmpire}
+            onMerge={mergeUmpire}
+            onUpload={() => gotoAdminView('umpire_upload')}
+            reports={allCaptainsReports}
+          />
+        );
+      if (view === 'umpire_upload' && vertical.sport === 'cricket')
+        return (
+          <UmpireAppointmentsUpload
+            onBack={() => gotoAdminView('umpires')}
+            onDone={() => {
+              invalidate(qk.umpires());
+              invalidate(qk.series());
+            }}
+          />
+        );
+      if (view === 'medicoach_sync' && medicoachSyncOn)
+        return (
+          <AdminMedicoachSyncView
+            allSeries={allSeries}
+            onEditFixture={(seriesId) =>
+              navigate(`/admin/fixtures?series=${encodeURIComponent(seriesId)}`)
+            }
+            onOpenSeries={(seriesId) =>
+              navigate(`/admin/fixtures?series=${encodeURIComponent(seriesId)}`)
+            }
+            onToast={(message, tone) => toastShow(message, tone)}
+          />
+        );
+      if (view === 'captains_reports' && vertical.sport === 'cricket')
+        return (
+          <AdminCaptainsReportsView
+            reports={allCaptainsReports}
+            loading={captainsReportsQuery.isLoading}
+            umpires={allUmpires}
+            onOpenClub={setActiveClub}
+            onCreateUmpire={(displayName) => createUmpire({ displayName })}
+            onAttribute={(reportId, index, umpireId, action) =>
+              withToast(
+                () => api.attributeCaptainsReportUmpire(reportId, index, { umpireId, action }),
+                'Could not attribute the umpire',
+              ).then((r) => {
+                invalidate(qk.captainsReports());
+                return r;
+              })
+            }
           />
         );
       if (view === 'clearances')
@@ -2742,6 +2956,8 @@ function Shell({
             busyAction={busyVetReqAction}
           />
         );
+      if (view === 'postponements')
+        return <AdminPostponements allSeries={allSeries} clubs={clubs} toast={toastShow} />;
       if (view === 'team')
         return (
           <AdminTeamAccessView
@@ -2785,6 +3001,7 @@ function Shell({
             requiredDocs={requiredDocs}
             onRenameClub={(name) => updateClub({ name })}
             onSaveExco={saveExco}
+            onSetRemindersOptIn={(remindersOptIn) => updateClub({ remindersOptIn })}
           />
         );
         // Affiliation/Documents open as modals over the setup home, so only Home switches.
@@ -2798,16 +3015,6 @@ function Shell({
             started={season.started}
             firstDate={season.firstDate}
             setup={clubHome}
-            reports={
-              reportsOn ? (
-                <CaptainReportsBoard
-                  scope="club"
-                  clubName={activeClub.name}
-                  reports={captainReports}
-                  loading={captainReportsQuery.isLoading}
-                />
-              ) : undefined
-            }
             season={
               <ClubSeasonHome
                 club={activeClub}
@@ -2861,6 +3068,7 @@ function Shell({
             toast={toastShow}
             onSendFixtures={sendFixtures}
             travel={travel}
+            postponements={postponementsQuery.data}
           />
         );
       }
@@ -2878,28 +3086,19 @@ function Shell({
             onAcceptVeteransRequest={acceptVeteransRequest}
             onDeclineVeteransRequest={declineVeteransRequest}
             busyVeteransId={busyVeteransId}
+            districts={allDistricts}
           />
         );
       }
       if (view === 'captains-report' && vertical.sport === 'cricket') {
         return (
           <CaptainsReportView
-            onSubmit={(payload) =>
-              withToast(
-                () => api.submitCaptainReport(activeClub.id, payload),
-                'Could not submit the report',
-              ).then((saved) => {
-                invalidate(qk.captainReports(activeClub.id));
-                invalidate(qk.allCaptainReports());
-                return saved;
-              })
-            }
             club={activeClub}
             allSeries={allSeries}
             clubs={clubs}
             players={players}
             directory={clubDirectory}
-            allLeagues={allLeagues}
+            umpires={allUmpires}
             toast={toastShow}
           />
         );
@@ -3176,7 +3375,8 @@ function Shell({
             setShowOnboarding(false);
             toastShow('Welcome, ' + activeClub.chair.split(' ')[0] + " · let's get started");
             // Persist just the reminders opt-in (a non-affiliation field, so it's never
-            // locked). No scheduled reminders yet — this only stops dropping the choice.
+            // locked). The FixtureReminders cron reads it (only an explicit false opts out);
+            // the club-home toggle edits it afterwards.
             // Best-effort: a stale-version 409 here just means the flag didn't persist, so
             // log it (don't swallow) rather than surfacing an error toast over the welcome.
             if (contact && !!contact.notify !== !!activeClub.remindersOptIn) {

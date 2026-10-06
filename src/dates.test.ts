@@ -191,3 +191,13 @@ describe('todayDate', () => {
     expect(todayDate(new Date(2026, 8, 13, 0, 30))).toBe('2026-09-13');
   });
 });
+
+describe('formatSastWeekdayDay (a link expiry instant as its SAST day)', () => {
+  it('prints the SAST day with the short month "Sep", never "Sept"', async () => {
+    const { formatSastWeekdayDay } = await import('./dates');
+    expect(formatSastWeekdayDay('2026-09-20T21:59:59.000Z')).toBe('Sunday, 20 Sep');
+    // 22:30Z on the 20th is already the 21st in SAST.
+    expect(formatSastWeekdayDay('2026-09-20T22:30:00.000Z')).toBe('Monday, 21 Sep');
+    expect(formatSastWeekdayDay('')).toBe('');
+  });
+});

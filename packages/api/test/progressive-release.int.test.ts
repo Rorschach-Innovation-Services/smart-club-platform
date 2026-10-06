@@ -487,7 +487,7 @@ describe('(c) buildClubSchedule + send-fixtures honour withheld', () => {
       consentAt: '2026-05-01T00:00:00.000Z',
       createdAt: '2026-05-01T00:00:00.000Z',
       email: 'reach@home.co.za',
-      cell: '0768563601',
+      cell: '0820000001',
     } as Parameters<typeof repo.createPlayer>[1]);
 
     const res = await app.request('/clubs/home-club/send-fixtures', {

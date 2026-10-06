@@ -40,7 +40,10 @@
  *   "pending"    — NOT yet created/approved in Meta. The sender exists; a real send
  *      is rejected on the missing template until it is created under this name.
  * `status` is documentation, not a runtime gate — nothing here can verify Meta's
- * state, and the send path fails open (attempts the send) for every entry.
+ * state, and the send path fails open (attempts the send) for every entry. The three
+ * exceptions are `fixtureReminder` (the FixtureReminders cron skips WhatsApp until it is
+ * "registered"), and `captainsReportDue` / `captainsReportOpsDigest` (their senders skip the
+ * channel as template-pending until it is "registered") — see those entries.
  */
 
 export type WhatsAppTemplateDefinition = {
@@ -55,6 +58,12 @@ export type WhatsAppTemplateDefinition = {
   /** The registered body text (or, for pending/unverified, a reconstruction). */
   bodyText: string;
   status: 'registered' | 'unverified' | 'pending';
+  /**
+   * A URL button with a dynamic suffix (Meta "Visit website" button, URL ending in `{{1}}`).
+   * `urlTemplate` is the URL as registered in Meta; the sender supplies the ONE suffix value
+   * (button index 0). Absent ⇒ a body-only template.
+   */
+  urlButton?: { urlTemplate: string; suffix: string };
 };
 
 export const WHATSAPP_TEMPLATES = {
@@ -102,11 +111,11 @@ export const WHATSAPP_TEMPLATES = {
    * Chair onboarding heads-up sent on affiliation-complete: player-registration
    * link + tutorials URL.
    *
-   * NOT YET CREATED IN META. `bodyText` below is RECONSTRUCTED from the parameter
-   * order (the arity contract), not a transcript. Two URL body variables draw extra
-   * Meta scrutiny — if {{4}} blocks approval, drop it and rely on the email + portal
-   * for tutorials (the email already carries every link), which is a paramCount
-   * change here and in `regLinkParams`. Status flips to "registered" once approved.
+   * Active in Meta (template id 2437210353459453, Utility, last edited 19 Jun 2026;
+   * confirmed in Business Manager 6 Oct 2026 — "Quality pending" is the rating, not
+   * approval state). `bodyText` below is the registered copy, which predates this
+   * registry and differs from the wording the entry originally reconstructed; the
+   * 4-param order is unchanged, so `regLinkParams` is unaffected.
    */
   reglinkReady: {
     name: 'club_reglink_ready',
@@ -114,12 +123,11 @@ export const WHATSAPP_TEMPLATES = {
     paramCount: 4,
     params: ['chair name', 'club name', 'reg link', 'tutorials URL'],
     bodyText:
-      'Hello {{1}},\n\n' +
-      '{{2}} is now set up on the club management portal. Share this ' +
-      'player-registration link with your members so they can register: {{3}}\n\n' +
-      'A short set of how-to videos is here: {{4}}\n\n' +
-      'If you have any questions, please contact your union office.',
-    status: 'pending',
+      "Hi {{1}}, your {{2}} affiliation is approved. Here is your club's " +
+      'player registration link ({{3}}), share it with your players so they ' +
+      'register straight into your club.\n\n' +
+      'New to the app? Visit this link ({{4}}) for quick how-to videos.',
+    status: 'registered',
   },
 
   /**
@@ -145,6 +153,89 @@ export const WHATSAPP_TEMPLATES = {
       'Check your email for the full schedule.\n\n' +
       'If you have any questions, please contact your club.',
     status: 'unverified',
+  },
+
+  /**
+   * Scheduled fixture reminder to a club chair (the FixtureReminders cron), sent N days
+   * before a match day. Body-only Utility template; the fixture detail (opponents, and the
+   * kick-off/ground only when revealed) rides in the email and the portal, never here, so
+   * the template can't leak a withheld time or venue.
+   *
+   * Submitted to Meta 6 Oct 2026 and IN REVIEW (template id 1536264794855191); the
+   * registered copy matches `bodyText` below. Unlike the other entries, this status IS
+   * read at runtime: the cron skips the WhatsApp channel unless it is "registered" (a
+   * daily cron across every tenant would otherwise fail the same send on every run
+   * until approval). Flip to "registered" once Meta approves it.
+   */
+  fixtureReminder: {
+    name: 'fixture_reminder',
+    lang: 'en',
+    paramCount: 4,
+    params: ['chair name', 'club name', 'fixture date', 'portal link'],
+    bodyText:
+      'Hello {{1}},\n\n' +
+      'A reminder that {{2}} has fixtures on {{3}}. ' +
+      'See the match details in your club portal: {{4}}\n\n' +
+      'If you have any questions, please contact your union office.',
+    status: 'pending',
+  },
+
+  /**
+   * Captain's report due (ADR 0016, Slice 2): the submit-once report link to the match
+   * captain, or to the club chair when the captain can't be reached. The link is a URL
+   * BUTTON with a dynamic suffix (the signed report token), NOT a URL in the body — Meta
+   * scrutinises body URLs, and the token must not sit in the message text.
+   *
+   * The button URL is fixed per template in Meta, so it points at the PLATFORM host (the
+   * `/r/<token>` page is tenant-independent, like `/verify`): every tenant shares one
+   * template. Non-prod stages send the same button — they normally dry-run anyway.
+   *
+   * Created in Meta 3 Oct 2026; EDITED IN PLACE to the v2 copy on 4 Oct 2026 (Utility,
+   * English, 3 body params, dynamic URL button `https://platform.club.medicoach.co.za/r/{{1}}`).
+   * The v2 copy names the UNION instead of the club (no awkward "Crusaders's") and drops
+   * "works once" (a link can be opened and drafted many times; it is SUBMITTED once).
+   * Meta keeps serving the previously approved body until the edit clears review, so during
+   * that window {{2}} (now the union) renders inside the old club-possessive sentence —
+   * cosmetic only, same arity. `bodyText` is the exact copy submitted; confirm against
+   * Business Manager after the edit is approved.
+   */
+  captainsReportDue: {
+    name: 'captains_report_due',
+    lang: 'en',
+    paramCount: 3,
+    params: ['recipient name', 'org name', 'match line + date'],
+    bodyText:
+      'Hello {{1}},\n\n' +
+      "The {{2}} captain's report for {{3}} is open. Please rate the umpires.\n\n" +
+      'Tap the button below to open it. You can submit it once; the link expires on the date shown in the report.',
+    status: 'registered',
+    urlButton: {
+      urlTemplate: 'https://platform.club.medicoach.co.za/r/{{1}}',
+      suffix: 'signed report token',
+    },
+  },
+
+  /**
+   * Captain's-report ops digest: ONE status line to a union-admin cell (the `OpsDigestCell`
+   * secret) after a medicoach sync run that produced report activity — new results, reports
+   * opened, notices sent or failed. Body-only Utility template (no button); {{2}} is a
+   * one-line count summary ("Dolphins: 3 new results, 6 reports opened, 6 notices sent,
+   * 0 failed") with no player, club-contact or link detail.
+   *
+   * NOT yet created in Meta. Like `captainsReportDue`, this status IS read at runtime: the
+   * sender throws `WhatsAppTemplatePendingError` until it is "registered", and the sync run
+   * skips the digest silently. Create it under this name with the body below, then flip.
+   */
+  captainsReportOpsDigest: {
+    name: 'captains_report_ops_digest',
+    lang: 'en',
+    paramCount: 2,
+    params: ['recipient name', 'run summary'],
+    bodyText:
+      'Hello {{1}},\n\n' +
+      "Captain's report run update: {{2}}.\n\n" +
+      'Automated status message for union administrators.',
+    status: 'pending',
   },
 } as const satisfies Record<string, WhatsAppTemplateDefinition>;
 

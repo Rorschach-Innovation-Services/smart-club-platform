@@ -33,6 +33,7 @@ import { SeasonSetupWizard } from './platform-season-wizard';
 import { HelpLink, HelpProvider } from './help/HelpDrawer';
 import { TutorialsCard } from './platform-tutorials';
 import { RequiredDocsCard } from './platform-required-docs';
+import { FixtureRemindersCard } from './platform-fixture-reminders';
 import { DocIntakeWizard } from './platform-intake';
 import { StructureIntakeWizard } from './platform-structure-intake';
 import { RosterIntakeWizard } from './platform-roster-intake';
@@ -852,6 +853,12 @@ function TenantEditPage({ toast }: { toast: Toast }) {
         </div>
         <ClearanceCertificateCard
           key={`cc-${config.tenant}`}
+          config={config}
+          save={save}
+          toast={toast}
+        />
+        <FixtureRemindersCard
+          key={`fr-${config.tenant}`}
           config={config}
           save={save}
           toast={toast}

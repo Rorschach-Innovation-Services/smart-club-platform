@@ -53,8 +53,34 @@ import {
   resolveTenant,
   HttpError,
   type HonoEnv,
+  type RequestAuth,
 } from './auth.js';
 import * as repo from './repo.js';
+import {
+  joinFixtureResults,
+  seriesIsSyncMapped,
+  stripResponseOnlyFixtureFields,
+} from './medicoach-sync/series-results.js';
+import { MedicoachSyncError } from './medicoach-sync/puller.js';
+import { runTenantSync } from './medicoach-sync/run.js';
+import { explainSyncError } from './medicoach-sync/explain.js';
+import { carrySyncOwnedFields, fixtureSyncRef } from './fixture-identity.js';
+import {
+  buildInboundFixture,
+  describeSchedule,
+  fixtureSchedule,
+  flushScheduleOutbox,
+  scheduleParts,
+  STUCK_ATTEMPTS,
+  fixturesEditRecallsApproval,
+  recordScheduleDiff,
+  requeueRevealedSeries,
+  sameMatch,
+  seriesMappedForSync,
+  seriesHoldsSchedule,
+  type ScheduleFixture,
+} from './medicoach-sync/schedule.js';
+import { captainsReportLinkSecret, medicoachSyncSecret, medicoachSyncUrl } from './env.js';
 import { VersionConflictError, LastAdminError } from './repo.js';
 import { clubIdFromName } from './club-id.js';
 import {
@@ -69,7 +95,9 @@ import {
   clashKey,
   formatClash,
   formatClashForHumans,
+  introducedClashes,
   venueAliasesFor,
+  type Clash,
 } from './venue-clash.js';
 import {
   normaliseWithheld,
@@ -77,6 +105,17 @@ import {
   withLegacyParticipants,
   isWithheld,
 } from './series-projection.js';
+import {
+  applyUmpireInput,
+  findAliasConflict,
+  fixtureClubIds,
+  indexOfficials,
+  joinOfficials,
+  parseOfficialsInput,
+  parseUmpireInput,
+  stripJoinedOfficials,
+  umpireIdFor,
+} from './umpires.js';
 import {
   validateCalendars,
   validateStructures,
@@ -116,6 +155,12 @@ import {
 } from './catalogue.js';
 import ExcelJS from 'exceljs';
 import { parseRosterSheet, findCrossClubDuplicates } from './roster-parse.js';
+import {
+  registerPlayerForClub,
+  resolveDeclaredPreviousClubId,
+  buildCrossClubIndex,
+  type RegisterPlayerOutcome,
+} from './register-player.js';
 import { luhnValid, normalizeGender, normalizeRace } from './roster-normalize.js';
 import { parseStructureWorkbookAllSheets } from './structure-parse.js';
 import { deriveTeamPlanCounts } from './team-plan.js';
@@ -130,9 +175,14 @@ import {
   sendClearanceReopenedNotice,
   sendVeteransRequestNotice,
   sendVeteransRequestResolvedNotice,
+  notifyPostponementOpened,
+  notifyPostponementCountered,
+  notifyPostponementResolved,
   type Channel,
   type SendResult,
 } from './notify/index.js';
+import { findTeamBusy, type TeamBusyHit } from './team-busy.js';
+import { isSlotRef } from '../../engine/src/formats.js';
 import {
   clubFixturedInVeterans,
   veteransLeagueKeysForClub,
@@ -140,6 +190,7 @@ import {
   isVeteransLeagueKey,
 } from './veterans.js';
 import type {
+  CaptainsReport,
   Club,
   ClubCommEvent,
   ClubSpec,
@@ -161,16 +212,43 @@ import type {
   PlayerRegistration,
   VeteransAffiliatePublic,
   VeteransRequest,
-  CaptainReport,
   VeteransRequestPublic,
   VeteransCandidate,
+  PostponementProposal,
+  PostponementRequest,
   PlayerClearance,
   AdminClearanceView,
   CertificateMeta,
   WithheldField,
+  ScheduleChangeOrigin,
+  SyncConflict,
 } from './types.js';
 import { teamIdsForClub, resolveTeam } from './teams.js';
 import { orgCopy } from './branding.js';
+import { chairContactOf } from './club-contacts.js';
+import {
+  captainsReportId,
+  checkUmpireIds,
+  forwardCandidates,
+  forwardReport,
+  hasContact,
+  loadLinkedReport,
+  MAX_FORWARDS,
+  NOTICE_FAILED_ERROR,
+  parseCaptainsReportId,
+  parseReportFields,
+  ReportFlowError,
+  ReportInputError,
+  reportView,
+  UNLISTED_SERIES_ID,
+} from './captains-reports.js';
+import { applyWhatsAppStatuses, parseStatuses } from './notify/whatsapp-status.js';
+import {
+  SYNC_SIGNATURE_HEADER,
+  SYNC_TIMESTAMP_HEADER,
+  verifySignature as verifySyncSignature,
+} from './medicoach-sync-contract.js';
+import { submissionProblems } from '../../engine/src/captainsReport.js';
 import { hasFeature, hasModule } from './features.js';
 import {
   resolveVertical,
@@ -196,6 +274,7 @@ import {
 import { normaliseSerial } from './certificates/serial.js';
 import { activeVerifyKeys, certSigner, type VerifyKey } from './certificates/signer.js';
 import { validateCertTemplate, validateOrgContact } from './certificates/config.js';
+import { validateFixtureReminders } from './fixture-reminders-config.js';
 import { TENANT_UTC_OFFSET_MINUTES } from './tenant-time.js';
 
 // Strict date-only parsing for calendar validation — dayjs's lenient default would roll
@@ -832,19 +911,17 @@ app.post('/register/:clubId', async (c) => {
   // hostile value can't carry payloads or break a WhatsApp template parameter.
   body.firstName = body.firstName!.replace(/\s+/g, ' ').trim().slice(0, 60);
   body.lastName = body.lastName!.replace(/\s+/g, ' ').trim().slice(0, 60);
-  const naturalKey = playerNaturalKey({ ...body, dob });
-  const player: PlayerRegistration = {
-    naturalKey,
-    clubId: destClubId,
+  // The stored row's identity/provenance fields (naturalKey, dob, isMinor, idType, idNumber,
+  // status, registeredVia, version, consentAt, createdAt) are stamped by registerPlayerForClub.
+  const fields: Partial<PlayerRegistration> = {
     firstName: body.firstName,
     lastName: body.lastName,
     dob,
     cell: body.cell,
     email: body.email,
-    isMinor,
     guardianName: body.guardianName,
     idType: body.idType ?? 'sa-id',
-    idNumber: normalizeId(body.idNumber),
+    idNumber: body.idNumber,
     nationality: body.nationality,
     race: body.race,
     gender: body.gender,
@@ -869,34 +946,21 @@ app.post('/register/:clubId', async (c) => {
       contentType: idDocMeta.contentType,
       uploadedAt: now(),
     },
-    status: 'active',
-    registeredVia: 'link',
-    version: 0,
-    consentAt: now(),
-    createdAt: now(),
   };
 
-  let lastClubId = typeof body.lastClubId === 'string' ? body.lastClubId.trim() : '';
-  // An EXACT on-system club name typed into "Other" is the same declaration as picking that
-  // club from the list, and must take the same path — resolved HERE, before anything keys on
-  // lastClubId, so the previous==current guard, the source-club cap, and the clearance
-  // decision all see one flow. Left as free text it would register as a fresh signing with no
-  // clearance AND no off-system alert (exact matches deliberately don't alert), which was the
-  // one way a declared transfer could still slip through silently. Same normalised-name idiom
-  // as the signup collision check; near-name variants stay free text and alert as before.
-  if (!lastClubId && typeof body.lastClub === 'string') {
-    const typed = body.lastClub.trim();
-    if (typed && typed !== '—') {
-      const nameKey = typed.toLowerCase();
-      const match = (await repo.listClubs(resolved.tenant)).find(
-        (cl) => cl.name.trim().toLowerCase() === nameKey,
-      );
-      if (match) lastClubId = match.id;
-    }
-  }
+  // An EXACT on-system club name typed into "Other" is promoted to lastClubId HERE, before
+  // anything keys on it, so the previous==current guard, the source-club cap, and the
+  // clearance decision all see one flow (see resolveDeclaredPreviousClubId). Left as free text
+  // it would register as a fresh signing with no clearance AND no off-system alert, which was
+  // the one way a declared transfer could still slip through silently.
+  const lastClubId = await resolveDeclaredPreviousClubId(
+    resolved.tenant,
+    body.lastClubId,
+    body.lastClub,
+  );
   // The previous club can't be the current club — a transfer to the club you're leaving is
   // meaningless — UNLESS both are the LINK club, which is a legitimate re-registration at the
-  // same club (handled without a clearance in createSelfRegistration). So only reject
+  // same club (handled without a clearance in registerPlayerForClub). So only reject
   // previous == current when the current club isn't the link club.
   if (lastClubId && lastClubId === destClubId && destClubId !== clubId) {
     throw new HttpError(400, 'previous club cannot be your current club');
@@ -953,47 +1017,47 @@ app.post('/register/:clubId', async (c) => {
 
   // ── Register into the chosen club ── (the link club, or a DIFFERENT joining club the player
   // picked on the form). Opens a registration-origin clearance to the previous club when the
-  // player is found there; otherwise a plain active row on the chosen club's roster.
+  // player is found there; otherwise a plain active row on the chosen club's roster (plus a
+  // best-effort off-system review when a free-text "Other" club survived promotion — by
+  // construction NOT an exact on-system match, so it deserves the alert).
+  let result: RegisterPlayerOutcome;
   try {
-    const { clearanceFromName } = await createSelfRegistration(
-      resolved.tenant,
-      player,
-      destClub,
+    result = await registerPlayerForClub(resolved.tenant, destClub, fields, {
+      registeredVia: 'link',
+      tenantConfig: cfg,
       lastClubId,
-      directoryClubs(cfg),
-      cfg,
-    );
-    if (clearanceFromName) {
-      // CHARGE the source club's quota only now, having actually put a clearance in its queue.
-      // Best-effort: the clearance is already committed, so a counter failure must not turn a
-      // successful registration into an error — worst case the cap is briefly under-counted.
-      if (namedSourceOnSystem) {
-        await repo
-          .bumpClubSourceCounter(resolved.tenant, lastClubId, now(), CLUB_SOURCE_PER_HOUR)
-          .catch((err) => console.error('source-club counter bump failed', err));
-      }
-      return c.json({ ok: true, clearance: { fromClubName: clearanceFromName } }, 201);
-    }
+      typedPreviousClub: typeof body.lastClub === 'string' ? body.lastClub : undefined,
+      linkClub: { id: clubId, name: regClub.name },
+      directory: directoryClubs(cfg),
+      notifyClearanceOpened,
+    });
   } catch (err: unknown) {
-    // Deliberately ONE message for every conflict shape: an anonymous caller must not be
-    // able to distinguish "registered at the destination" from "mid-clearance at the
-    // source" and use this endpoint as a status oracle.
-    if (
-      err instanceof repo.PlayerExistsAtDestinationError ||
-      err instanceof repo.DuplicatePendingClearanceError ||
-      (err as { name?: string }).name === 'ConditionalCheckFailedException'
-    ) {
-      throw new HttpError(409, 'already registered or a transfer is already in progress');
-    }
     if (err instanceof repo.DestinationClubGoneError) throw new HttpError(409, err.message);
     throw err;
   }
+  // Deliberately ONE message for every conflict shape: an anonymous caller must not be
+  // able to distinguish "registered at the destination" from "mid-clearance at the
+  // source" and use this endpoint as a status oracle.
+  if (result.outcome === 'duplicate' || result.outcome === 'clearance-already-open') {
+    throw new HttpError(409, 'already registered or a transfer is already in progress');
+  }
+  if (result.outcome === 'clearance-opened') {
+    // CHARGE the source club's quota only now, having actually put a clearance in its queue.
+    // Best-effort: the clearance is already committed, so a counter failure must not turn a
+    // successful registration into an error — worst case the cap is briefly under-counted.
+    if (namedSourceOnSystem) {
+      await repo
+        .bumpClubSourceCounter(resolved.tenant, lastClubId, now(), CLUB_SOURCE_PER_HOUR)
+        .catch((err) => console.error('source-club counter bump failed', err));
+    }
+    return c.json({ ok: true, clearance: { fromClubName: result.clearance.fromClubName } }, 201);
+  }
 
-  // Plain-active outcome (no clearance was opened — createSelfRegistration returned no
-  // clearanceFromName above): the player row is live on the joining club's roster now, so
-  // materialize the veterans affiliation (write-on-activation). Clearance-pending outcomes
-  // returned earlier — their record is written when the clearance resolves (see repo hooks).
-  // Best-effort, exactly like the off-system alert below: the registration already committed.
+  // Plain-active outcome (no clearance was opened): the player row is live on the joining
+  // club's roster now, so materialize the veterans affiliation (write-on-activation).
+  // Clearance-pending outcomes returned above — their record is written when the clearance
+  // resolves (see repo hooks). Best-effort: the registration already committed.
+  const player = result.player;
   if (player.veteransClubId) {
     try {
       await repo.putVeteransAffiliation(resolved.tenant, {
@@ -1007,48 +1071,6 @@ app.post('/register/:clubId', async (c) => {
       });
     } catch (err) {
       console.warn('failed to write veterans affiliation', err);
-    }
-  }
-
-  // Off-system previous club: the player named a club not on the system ("Other" free
-  // text), so no clearance could be opened. The row is already active on the JOINING club's
-  // roster (the link club, or a different club the player picked); flag it (best-effort) so
-  // admins can see which club was typed. Excludes the '—' first-registration sentinel so clean
-  // first registrations never raise an alert.
-  //
-  // No on-system re-check here: an exact on-system name was already promoted to lastClubId
-  // before registration (and took the clearance path above), so surviving free text is by
-  // construction NOT an exact match — a genuinely off-system club, or a near-name variant of
-  // an on-system one, and both deserve the alert.
-  // Registration reviews ride the clearances module: with it off there is no transfer
-  // oversight, so no alert either.
-  const typedOther =
-    clearancesOn &&
-    !lastClubId &&
-    body.lastClub &&
-    body.lastClub.trim() &&
-    body.lastClub.trim() !== '—'
-      ? body.lastClub.trim()
-      : undefined;
-  if (typedOther) {
-    try {
-      await repo.createRegistrationReview(resolved.tenant, {
-        id: randomUUID(),
-        kind: 'off-system-alert',
-        playerNaturalKey: naturalKey,
-        playerName: `${player.firstName} ${player.lastName}`,
-        idNumber: player.idNumber,
-        destClubId,
-        destClubName: destClub.name,
-        linkClubId: clubId,
-        linkClubName: regClub.name,
-        typedPreviousClub: typedOther,
-        createdAt: now(),
-        status: 'open',
-        version: 0,
-      });
-    } catch (err) {
-      console.warn('failed to create off-system registration alert', err);
     }
   }
   return c.json({ ok: true }, 201);
@@ -1348,18 +1370,6 @@ async function findPlayerByIdNumber(
   return roster.find((p) => normalizeId(p.idNumber) === wanted) ?? null;
 }
 
-/**
- * The chair contact for a club's notices: the `exco.chair` sub-record (name/email/cell), falling
- * back to the flat `club.chair` name when exco has no chair name. `exco` is loosely typed here
- * (it also carries governance fields we never notify on) so we read only the three contact fields.
- */
-function chairContactOf(club: Club): { name: string; email?: string; cell?: string } {
-  const chair = (
-    club.exco as Record<string, { email?: string; cell?: string; name?: string }> | undefined
-  )?.chair;
-  return { name: chair?.name || club.chair || '', email: chair?.email, cell: chair?.cell };
-}
-
 const CLEARANCE_NOTICES_PER_DAY = 3;
 /**
  * Best-effort heads-up to the FROM-club chairman that a clearance now awaits the club's
@@ -1566,216 +1576,38 @@ async function notifyClearanceReopened(
   }
 }
 
-/**
- * Materialize a self-registration onto the destination roster (`player.clubId` must already be
- * the destination). Before creating anything it looks up where this exact person is ALREADY
- * registered across the union (by naturalKey), so a transfer routes to their REAL current club —
- * not merely the club they typed — and the same person can never be active at two clubs at once:
- *
- *  - Active elsewhere → create the row 'clearance-pending' + a registration-origin clearance FROM
- *    that club (which — or the union office — must approve before the player goes active). If the
- *    club they NAMED isn't where they're actually registered, the clearance is still routed to the
- *    real club, with a `note` recording the mismatch for whoever reviews it.
- *  - Mid-transfer elsewhere (already 'clearance-pending') → DuplicatePendingClearanceError, so the
- *    caller returns the collapsed 409 rather than opening a competing clearance.
- *  - Not registered anywhere else, named an on-system club → 'clearance-pending' row + a
- *    registration-origin clearance from that club, even though it has no roster record of them:
- *    a club still digitising its squad is indistinguishable from one the player never played for,
- *    and the clearance is what settles fees/misconduct either way. That club approves in its own
- *    portal, or the union office overrides.
- *  - Not registered anywhere else, named a DIRECTORY club (operator-entered `knownClubs`, not on
- *    the system) → the same, additionally flagged fromClubDirectory. The union office
- *    override-approves it or reallocates it to the real club once that club registers.
- *  - Not registered anywhere else, no previous club → a plain active row (first registration).
- *
- * Used by the public register route whether the player registers into the link club or a different
- * joining club. Repo errors (dedup/dest conflicts) propagate to the caller, which maps them.
- * Returns the opened clearance's source-club name, if any.
- */
-async function createSelfRegistration(
-  tenant: string,
-  player: PlayerRegistration,
-  destClub: Club,
-  lastClubId: string,
-  directory: DirectoryClub[],
-  tenantConfig: TenantConfig | null,
-): Promise<{ clearanceFromName?: string }> {
-  // Re-registration at the SAME club (previous == the club being joined): record the history name;
-  // there is nothing to transfer. Falls through to a plain active row (or the guards below).
-  if (lastClubId && lastClubId === player.clubId) {
-    player.lastClub = destClub.name;
+/* ─── WhatsApp delivery statuses (public, sync-signed) ───
+   Smart club sends through medicoach's Meta app, whose ONE webhook callback is medicoach's,
+   so medicoach FORWARDS the raw Meta `statuses[]` for smart club's sending number here,
+   signed with the medicoach sync scheme (X-Sync-Timestamp / X-Sync-Signature, the
+   MedicoachSyncSecret — see medicoach-sync-contract.ts). Registered before the
+   authenticated `/integrations/*` middleware. Fails closed with the secret empty. See
+   notify/whatsapp-status.ts. */
+app.post('/integrations/whatsapp/status', async (c) => {
+  const raw = await c.req.text();
+  const url = new URL(c.req.url);
+  const check = verifySyncSignature({
+    secret: medicoachSyncSecret(),
+    method: 'POST',
+    pathAndQuery: `${url.pathname}${url.search}`,
+    body: raw,
+    timestampHeader: c.req.header(SYNC_TIMESTAMP_HEADER),
+    signatureHeader: c.req.header(SYNC_SIGNATURE_HEADER),
+  });
+  if (!check.ok) return c.json({ error: 'invalid signature' }, 401);
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    return c.json({ error: 'invalid JSON' }, 400);
   }
-
-  // Where is this exact person already registered elsewhere in the union? This — not the
-  // self-typed previous club — decides the transfer, so a wrong/duplicate/deleted pick can't
-  // mis-route the clearance or leave the player active at two clubs.
-  const elsewhere = await repo.findPlayerAcrossClubs(tenant, player.naturalKey, player.clubId);
-  const activeSources = elsewhere.filter((e) => e.status === 'active');
-
-  // Mid-transfer check runs FIRST, before the active-source branch: a person can be BOTH
-  // clearance-pending at one club and active at another (their previous club rosters them
-  // while a transfer is open, which is routine while clubs are still digitising). Letting the
-  // active branch win there opens a SECOND clearance from the same source club, and both can
-  // then resolve — the first deletes the source row, the second finds it already gone and,
-  // being registration-origin, activates its destination anyway. That lands one person active
-  // at two clubs. Refusing the registration outright is what this function already documents.
-  //
-  // With the clearances module OFF there is no transfer to compete with, so the no-touch flow
-  // runs BEFORE that guard: a row left clearance-pending when the module was switched off must
-  // not 409 the player forever — it is just another prior registration (noted, never modified).
-  if (!hasModule(tenantConfig, 'clearances')) {
-    const priorSources = elsewhere.filter(
-      (e) => e.status === 'active' || e.status === 'clearance-pending',
-    );
-    return registerWithoutClearance(tenant, player, lastClubId, directory, priorSources);
-  }
-
-  if (elsewhere.some((e) => e.status === 'clearance-pending')) {
-    // Already mid-transfer under this identity — don't open a competing clearance or a second row.
-    throw new repo.DuplicatePendingClearanceError();
-  }
-
-  if (activeSources.length > 0) {
-    // Route to the club they NAMED only if that's genuinely where they are; otherwise auto-route
-    // to their real current club and flag the mismatch on the clearance note.
-    const named = activeSources.find((s) => s.clubId === lastClubId);
-    const source = named ?? activeSources[0];
-    player.lastClub = source.clubName;
-    let note: string | undefined;
-    if (!named) {
-      const namedClub = lastClubId ? await repo.getClub(tenant, lastClubId) : null;
-      const namedDirectory = namedClub ? undefined : directory.find((e) => e.id === lastClubId);
-      note = lastClubId
-        ? namedClub
-          ? `Auto-routed: player named "${namedClub.name}" as previous club, but is registered at ${source.clubName}.`
-          : namedDirectory
-            ? `Auto-routed: player named "${namedDirectory.name}" (not yet on the system) as previous club, but is registered at ${source.clubName}.`
-            : `Auto-routed: the named previous club is not on the system; player is registered at ${source.clubName}.`
-        : `Auto-routed to ${source.clubName}, where the player is registered (no previous club was named).`;
-    }
-    player.status = 'clearance-pending';
-    const clearance: PlayerClearance = {
-      id: randomUUID(),
-      playerNaturalKey: player.naturalKey,
-      playerName: `${player.firstName} ${player.lastName}`,
-      idNumber: player.idNumber,
-      team: player.team,
-      fromClubId: source.clubId,
-      toClubId: player.clubId,
-      fromClubName: source.clubName,
-      toClubName: destClub.name,
-      // requestedAt feeds the admin-list gsi1 sort key — required even though no rep initiated
-      // this (requestedBy stays absent; origin says who did).
-      requestedAt: now(),
-      origin: 'registration',
-      note,
-      feesCleared: false,
-      misconductCleared: false,
-      status: 'pending',
-      clubApprovedAt: null,
-      adminOverrideAt: null,
-      version: 0,
-    };
-    await repo.createPlayerWithClearance(tenant, player, clearance);
-    // Best-effort chairman heads-up (never throws). The source club record isn't loaded on
-    // this branch — findPlayerAcrossClubs returns roster rows — so fetch it just for the
-    // notice; a read fault only costs the notice, never the committed registration.
-    const sourceClub = await repo.getClub(tenant, source.clubId).catch(() => null);
-    if (sourceClub) {
-      await notifyClearanceOpened(tenant, tenantConfig, sourceClub, clearance, 'registration');
-    }
-    return { clearanceFromName: source.clubName };
-  }
-
-  // Not registered anywhere else, but the player DECLARED a previous club: open a pending
-  // clearance to it regardless of whether that club has them on its roster here. Roster
-  // absence is not evidence the transfer isn't real — a club still digitising its squad
-  // looks identical to one the player never played for, and the fees/misconduct obligation
-  // the clearance exists to settle is owed in the real world either way. Two source shapes,
-  // both sourceless (no player row to flip):
-  //   - a real ON-SYSTEM club → it approves in its own portal, or the Union office overrides;
-  //   - a DIRECTORY club (operator-entered, not on the system) → flagged fromClubDirectory so
-  //     the Union office can approve it or reallocate it once the club registers.
-  // The real-club lookup runs FIRST so a club that claimed a directory slug between the
-  // form's GET and this POST is treated as the on-system club it now is.
-  if (lastClubId && lastClubId !== player.clubId) {
-    const sourceClub = await repo.getClub(tenant, lastClubId);
-    const dirEntry = sourceClub ? undefined : directory.find((e) => e.id === lastClubId);
-    if (!sourceClub && !dirEntry) {
-      // The entry vanished (operator removed/renamed it) between GET and POST. The
-      // player has already uploaded an ID document at this point — guide, don't baffle.
-      throw new HttpError(400, 'that previous club is no longer listed — please re-select it');
-    }
-    const fromClubName = sourceClub ? sourceClub.name : dirEntry!.name;
-    player.status = 'clearance-pending';
-    player.lastClub = fromClubName;
-    const clearance: PlayerClearance = {
-      id: randomUUID(),
-      playerNaturalKey: player.naturalKey,
-      playerName: `${player.firstName} ${player.lastName}`,
-      idNumber: player.idNumber,
-      team: player.team,
-      fromClubId: lastClubId,
-      toClubId: player.clubId,
-      fromClubName,
-      toClubName: destClub.name,
-      requestedAt: now(),
-      origin: 'registration',
-      ...(sourceClub ? {} : { fromClubDirectory: true }),
-      note: sourceClub
-        ? `${fromClubName} has no roster record of this player. If they did play there, ${fromClubName} can approve the clearance as usual. If they did not, the Union office can reallocate it to the club they actually left — declining is deliberately not an option, since it would permanently flag a legitimately registered player.`
-        : `"${fromClubName}" is not yet on the system — the Union office can approve this clearance, or reallocate it once the club registers.`,
-      feesCleared: false,
-      misconductCleared: false,
-      status: 'pending',
-      clubApprovedAt: null,
-      adminOverrideAt: null,
-      version: 0,
-    };
-    await repo.createPlayerWithSourcelessClearance(tenant, player, clearance);
-    // Chairman heads-up only for an ON-SYSTEM source: a directory entry has no club
-    // record and no chairman on file — the union office resolves those.
-    if (sourceClub) {
-      await notifyClearanceOpened(tenant, tenantConfig, sourceClub, clearance, 'registration');
-    }
-    return { clearanceFromName: fromClubName };
-  }
-  player.status = 'active';
-  await repo.createPlayer(tenant, player);
-  return {};
-}
-
-/**
- * createSelfRegistration for a tenant with the clearances module OFF (no transfer tracking):
- * the registration always lands active at the joining club and no clearance, review or
- * clearance notice is ever created.
- *  - Registered at another club (active, or a clearance-pending row left over from when the
- *    module was on) → the new row carries a transferNote "Previously registered at <club>" and
- *    records that club as `lastClub`. The other club's roster is NEVER touched: this route is
- *    unauthenticated, so letting it deactivate a row at a club the caller doesn't control would
- *    turn a leaked link + an ID number into a roster takeover. Admins resolve the duplicate.
- *  - A declared previous club with no roster record → recorded as history (`lastClub`) only.
- */
-async function registerWithoutClearance(
-  tenant: string,
-  player: PlayerRegistration,
-  lastClubId: string,
-  directory: DirectoryClub[],
-  priorSources: Array<{ clubId: string; clubName: string }>,
-): Promise<{ clearanceFromName?: string }> {
-  player.status = 'active';
-  if (priorSources.length > 0) {
-    player.lastClub = priorSources[0].clubName;
-    player.transferNote = `Previously registered at ${priorSources.map((s) => s.clubName).join(', ')}.`;
-  } else if (lastClubId && lastClubId !== player.clubId) {
-    const named =
-      (await repo.getClub(tenant, lastClubId))?.name ??
-      directory.find((e) => e.id === lastClubId)?.name;
-    if (named) player.lastClub = named;
-  }
-  await repo.createPlayer(tenant, player);
-  return {};
-}
+  // Unknown message ids are acknowledged and ignored (no retry storm); a repo failure
+  // answers 500 so the forwarder may retry — applying a status is idempotent.
+  const summary = await applyWhatsAppStatuses(repo, parseStatuses(payload));
+  if (summary.matched)
+    console.log(`[whatsapp-status] matched ${summary.matched}, unknown ${summary.unknown}`);
+  return c.json(summary);
+});
 
 // ───────────────────── Authenticated routes ─────────────────────
 
@@ -1815,9 +1647,15 @@ app.use('/season-runs/*', authenticate, requireTenantMembership);
 app.use('/season-runs', authenticate, requireTenantMembership);
 app.use('/venues/*', authenticate, requireTenantMembership);
 app.use('/venues', authenticate, requireTenantMembership);
+app.use('/umpires/*', authenticate, requireTenantMembership);
+app.use('/umpires', authenticate, requireTenantMembership);
+app.use('/club/*', authenticate, requireTenantMembership);
+app.use('/captains-reports', authenticate, requireTenantMembership);
+app.use('/captains-reports/*', authenticate, requireTenantMembership);
 app.use('/tenant/config', authenticate, requireTenantMembership);
 app.use('/tenant/support', authenticate, requireTenantMembership);
 app.use('/admin/*', authenticate, requireTenantMembership, requireAdmin);
+app.use('/integrations/*', authenticate, requireTenantMembership, requireAdmin);
 // Platform operator portal — tenant-INDEPENDENT (no requireTenantMembership /
 // host resolution): the '*'/operator membership itself is the authorization.
 app.use('/platform/*', authenticate, requirePlatformOperator);
@@ -2305,9 +2143,14 @@ app.get('/clubs/:id/players', async (c) => {
 
 /**
  * Register a player directly from the club portal (chair-filled Union form). Unlike the
- * public token link, this is authenticated + club-scoped. Shares the naturalKey dedup with
- * the public path so a person can't be registered twice. Required fields mirror the Union
- * form; `dob` is derived from the 13-digit RSA ID.
+ * public token link, this is authenticated + club-scoped. Runs through the SAME
+ * clearance-aware core as the public link (registerPlayerForClub, registeredVia 'portal'), so
+ * a player already registered at another club opens a clearance from that club, a declared
+ * previous club (`lastClubId`, or an exact on-system name typed into `lastClub`) opens a
+ * sourceless one, and a free-text off-system club raises a registration review. Required
+ * fields mirror the Union form (this route's contract, unchanged); `dob` is derived from the
+ * 13-digit RSA ID. Responds with the stored row plus `outcome` (and `clearance` when one was
+ * opened). An identity already on this roster → 409; one mid-transfer → 409.
  */
 app.post('/clubs/:id/players', async (c) => {
   const ra = c.get('requestAuth')!;
@@ -2317,7 +2160,7 @@ app.post('/clubs/:id/players', async (c) => {
   const cfg = await repo.getTenantConfig(ra.tenant);
   const club = await repo.getClub(ra.tenant, id);
   if (!club) throw new HttpError(404, 'club not found');
-  const body = await c.req.json<Partial<PlayerRegistration>>();
+  const body = await c.req.json<Partial<PlayerRegistration> & { lastClubId?: string }>();
   const required: Array<keyof PlayerRegistration> = [
     'firstName',
     'lastName',
@@ -2355,19 +2198,15 @@ app.post('/clubs/:id/players', async (c) => {
   const veteransClub = hasModule(cfg, 'veterans')
     ? await resolveVeteransClub(ra.tenant, body.veteransClubId, id)
     : undefined;
-  const naturalKey = playerNaturalKey({ ...body, dob });
-  const player: PlayerRegistration = {
-    naturalKey,
-    clubId: id,
+  const fields: Partial<PlayerRegistration> = {
     firstName: body.firstName!,
     lastName: body.lastName!,
     dob,
     cell: body.cell,
     email: body.email,
-    isMinor,
     guardianName: body.guardianName,
     idType: body.idType ?? 'sa-id',
-    idNumber: normalizeId(body.idNumber),
+    idNumber: body.idNumber,
     nationality: body.nationality,
     race: body.race,
     gender: body.gender,
@@ -2386,27 +2225,37 @@ app.post('/clubs/:id/players', async (c) => {
     isAllRounder: body.isAllRounder ?? false,
     isWk: body.isWk ?? false,
     ...(position ? { position } : {}),
-    status: 'active',
-    registeredBy: ra.email,
-    registeredVia: 'portal',
-    version: 0,
-    consentAt: now(),
-    createdAt: now(),
   };
+  const lastClubId = await resolveDeclaredPreviousClubId(ra.tenant, body.lastClubId, body.lastClub);
+  let result: RegisterPlayerOutcome;
   try {
-    await repo.createPlayer(ra.tenant, player);
+    result = await registerPlayerForClub(ra.tenant, club, fields, {
+      registeredVia: 'portal',
+      registeredBy: ra.email,
+      tenantConfig: cfg,
+      lastClubId,
+      typedPreviousClub: typeof body.lastClub === 'string' ? body.lastClub : undefined,
+      linkClub: { id, name: club.name },
+      directory: directoryClubs(cfg),
+      notifyClearanceOpened,
+    });
   } catch (err: unknown) {
-    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
-      throw new HttpError(409, 'a player with these details is already registered for this club');
-    }
+    if (err instanceof repo.DestinationClubGoneError) throw new HttpError(409, err.message);
     throw err;
   }
-  // Portal-created rows are active immediately, so materialize the affiliation now
-  // (write-on-activation). Best-effort — the registration already committed.
-  if (veteransClub) {
+  if (result.outcome === 'duplicate') {
+    throw new HttpError(409, 'a player with these details is already registered for this club');
+  }
+  if (result.outcome === 'clearance-already-open') {
+    throw new HttpError(409, 'a clearance for this player is already in progress');
+  }
+  const player = result.player;
+  // Only an ACTIVE row materializes the veterans affiliation now (write-on-activation); a
+  // clearance-pending row gets it when the clearance resolves (repo hooks). Best-effort.
+  if (veteransClub && result.outcome !== 'clearance-opened') {
     try {
       await repo.putVeteransAffiliation(ra.tenant, {
-        naturalKey,
+        naturalKey: player.naturalKey,
         playerName: `${player.firstName} ${player.lastName}`,
         veteransClubId: veteransClub.id,
         primaryClubId: id,
@@ -2418,7 +2267,532 @@ app.post('/clubs/:id/players', async (c) => {
       console.warn('failed to write veterans affiliation', err);
     }
   }
-  return c.json(player, 201);
+  return c.json(
+    {
+      ...player,
+      outcome: result.outcome,
+      ...(result.outcome === 'clearance-opened'
+        ? {
+            clearance: {
+              id: result.clearance.id,
+              fromClubId: result.clearance.fromClubId,
+              fromClubName: result.clearance.fromClubName,
+            },
+          }
+        : {}),
+    },
+    201,
+  );
+});
+
+// ───────────────────── Chair bulk registration (quick-add + spreadsheet) ─────────────────────
+//
+// Both bulk routes run every row through registerPlayerForClub, so a bulk-added player who is
+// registered at another club opens a clearance exactly as a single registration would.
+//
+// REQUIRED-FIELD CONTRACT (deliberately relaxed vs. the single form): a bulk row needs only the
+// identity minimum (first + last name, and a Luhn-valid 13-digit RSA ID — or, quick-add only, a
+// passport/visa number + nationality + date of birth). Cell, nationality (for SA IDs),
+// district, race, team and guardian name are NOT required — the same relaxation the operator
+// roster intake applies, because a club's historical register structurally lacks them; the
+// chair completes them per player afterwards. Supplied gender/race/team values are still
+// validated against the canonical sets / tenant leagues.
+//
+// Per-row outcomes, never a whole-request abort for one bad row: created | clearance-opened |
+// clearance-already-open | skipped-duplicate | error. Re-sending rows is idempotent (an
+// identity already on the roster → skipped-duplicate; one whose transfer an earlier request
+// opened → clearance-already-open). The club's playerCount is reconciled ONCE per request.
+
+/** Max rows per quick-add batch request. */
+const CHAIR_BATCH_MAX_ROWS = 25;
+/** Max rows per spreadsheet-commit request. The client drives ≤50-row chunks sequentially: per
+ *  row is a cross-club read + a write + possibly a clearance TransactWrite + a notice, so one
+ *  500-row synchronous call would blow the API Gateway timeout. */
+const CHAIR_ROSTER_COMMIT_MAX_ROWS = 50;
+
+type ChairBulkOutcome =
+  | 'created'
+  | 'clearance-opened'
+  | 'clearance-already-open'
+  | 'skipped-duplicate'
+  | 'error';
+
+interface ChairBulkResult {
+  index: number;
+  rowNumber?: number;
+  sheet?: string;
+  outcome: ChairBulkOutcome;
+  naturalKey?: string;
+  /** The club the opened (or already-open) clearance comes from, when known. */
+  fromClubName?: string;
+  error?: string;
+}
+
+/** A bulk row ready for the core (`fields`) or already rejected by validation (`error`). */
+interface ChairBulkRow {
+  index: number;
+  rowNumber?: number;
+  sheet?: string;
+  fields?: Partial<PlayerRegistration>;
+  error?: string;
+}
+
+/** League keys a player may register into — never a fixtures-only entry (see assertPlayerTeam). */
+function playerLeagueKeys(cfg: TenantConfig | null): Set<string> {
+  return new Set((cfg?.leagues ?? []).filter((l) => !isFixturesOnlyLeague(l)).map((l) => l.key));
+}
+
+/**
+ * Run validated bulk rows through registerPlayerForClub sequentially (deterministic order — an
+ * in-request duplicate resolves to skipped-duplicate on the later row), with one cross-club
+ * index prefetched for the whole request, then reconcile the club's playerCount once.
+ */
+async function registerChairRows(
+  ra: RequestAuth,
+  club: Club,
+  cfg: TenantConfig | null,
+  rows: ChairBulkRow[],
+): Promise<{ results: ChairBulkResult[]; playerCount: number }> {
+  const results: ChairBulkResult[] = [];
+  const toRegister = rows.filter((r) => r.fields);
+  const crossClubIndex = toRegister.length
+    ? await buildCrossClubIndex(ra.tenant, await repo.listClubs(ra.tenant), club.id)
+    : undefined;
+  for (const row of rows) {
+    const base = {
+      index: row.index,
+      ...(row.rowNumber !== undefined ? { rowNumber: row.rowNumber } : {}),
+      ...(row.sheet ? { sheet: row.sheet } : {}),
+    };
+    if (!row.fields) {
+      results.push({ ...base, outcome: 'error', error: row.error ?? 'invalid row' });
+      continue;
+    }
+    try {
+      // eslint-disable-next-line no-await-in-loop -- one row at a time, in submitted order
+      const r = await registerPlayerForClub(ra.tenant, club, row.fields, {
+        registeredVia: 'portal',
+        registeredBy: ra.email,
+        tenantConfig: cfg,
+        notifyClearanceOpened,
+        prefetch: { crossClubIndex },
+      });
+      const naturalKey = r.player.naturalKey;
+      if (r.outcome === 'clearance-opened') {
+        results.push({
+          ...base,
+          outcome: 'clearance-opened',
+          naturalKey,
+          fromClubName: r.clearance.fromClubName,
+        });
+      } else if (r.outcome === 'clearance-already-open') {
+        results.push({ ...base, outcome: 'clearance-already-open', naturalKey });
+      } else if (r.outcome === 'duplicate') {
+        results.push({ ...base, outcome: 'skipped-duplicate', naturalKey });
+      } else {
+        results.push({ ...base, outcome: 'created', naturalKey });
+      }
+    } catch (err) {
+      if (err instanceof HttpError && err.status < 500) {
+        results.push({ ...base, outcome: 'error', error: err.message });
+      } else {
+        console.error(`chair bulk registration: row ${row.index} failed`, err);
+        results.push({ ...base, outcome: 'error', error: 'registration failed — please retry' });
+      }
+    }
+  }
+  const { actual } = await repo.reconcilePlayerCount(ra.tenant, club.id);
+  return { results, playerCount: actual };
+}
+
+function summarizeChairResults(results: ChairBulkResult[]): Record<ChairBulkOutcome, number> {
+  const summary: Record<ChairBulkOutcome, number> = {
+    created: 0,
+    'clearance-opened': 0,
+    'clearance-already-open': 0,
+    'skipped-duplicate': 0,
+    error: 0,
+  };
+  for (const r of results) summary[r.outcome]++;
+  return summary;
+}
+
+interface ChairBatchItem {
+  firstName?: string;
+  lastName?: string;
+  idType?: 'sa-id' | 'passport';
+  idNumber?: string;
+  nationality?: string;
+  dob?: string;
+  gender?: string;
+  race?: string;
+  team?: string;
+}
+
+/** Validate one quick-add row; returns the core's input fields or an error string. */
+function validateChairBatchItem(
+  item: ChairBatchItem,
+  leagueKeys: Set<string>,
+): { fields: Partial<PlayerRegistration> } | { error: string } {
+  if (!item || typeof item !== 'object') return { error: 'row must be an object' };
+  const firstName = typeof item.firstName === 'string' ? collapseName(item.firstName) : '';
+  const lastName = typeof item.lastName === 'string' ? collapseName(item.lastName) : '';
+  if (!firstName || !lastName) return { error: 'firstName and lastName are required' };
+  if (firstName.length > 80 || lastName.length > 80) {
+    return { error: 'names must be 80 characters or fewer' };
+  }
+  const idType = item.idType === 'passport' ? 'passport' : 'sa-id';
+  const idNumber = typeof item.idNumber === 'string' ? normalizeId(item.idNumber) : '';
+  if (!idNumber) return { error: 'an ID number (or passport number) is required' };
+  let dob: string;
+  if (idType === 'sa-id') {
+    const derived = dobFromSaId(idNumber);
+    if (!derived || !luhnValid(idNumber)) return { error: 'ID number is not a valid RSA ID' };
+    dob = derived;
+  } else {
+    const nationality = typeof item.nationality === 'string' ? item.nationality.trim() : '';
+    if (!nationality) return { error: 'nationality is required for a passport player' };
+    const resolvedDob = resolvePlayerDob({ idType, idNumber, dob: item.dob });
+    if (!resolvedDob || !isValidIsoDate(resolvedDob)) {
+      return { error: 'a valid date of birth is required for a passport player' };
+    }
+    dob = resolvedDob;
+  }
+  const gender =
+    item.gender !== undefined && item.gender !== ''
+      ? normalizeGender(item.gender).value
+      : undefined;
+  if (item.gender !== undefined && item.gender !== '' && !gender) {
+    return { error: `unrecognised gender "${item.gender}"` };
+  }
+  const race =
+    item.race !== undefined && item.race !== '' ? normalizeRace(item.race).value : undefined;
+  if (item.race !== undefined && item.race !== '' && !race) {
+    return { error: `unrecognised race "${item.race}"` };
+  }
+  if (item.team !== undefined && item.team !== '' && !leagueKeys.has(item.team)) {
+    return { error: `unknown team/league "${item.team}"` };
+  }
+  return {
+    fields: {
+      firstName,
+      lastName,
+      idType,
+      idNumber,
+      dob,
+      ...(idType === 'passport' ? { nationality: item.nationality!.trim() } : {}),
+      ...(gender ? { gender } : {}),
+      ...(race ? { race } : {}),
+      ...(item.team ? { team: item.team } : {}),
+    },
+  };
+}
+
+/** Collapse whitespace runs in a typed name (same normalisation the public form applies). */
+function collapseName(raw: string): string {
+  return raw.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * POST /clubs/:id/players/batch — the chair's quick-add grid: up to CHAIR_BATCH_MAX_ROWS rows
+ * `{ rows: [{ firstName, lastName, idNumber | (idType:'passport', idNumber, nationality, dob),
+ * gender?, race?, team? }] }`, each through the clearance-aware core. Responds 200 with per-row
+ * `results` (in submitted order, `index` = position), a `summary` by outcome, and the club's
+ * reconciled `playerCount`. See the bulk-contract comment above for the relaxed required set.
+ */
+app.post('/clubs/:id/players/batch', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  assertClubAccess(ra, id);
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  const club = await repo.getClub(ra.tenant, id);
+  if (!club) throw new HttpError(404, 'club not found');
+  const body = await c.req
+    .json<{ rows?: ChairBatchItem[] }>()
+    .catch(() => ({}) as { rows?: ChairBatchItem[] });
+  if (!Array.isArray(body.rows) || body.rows.length === 0) {
+    throw new HttpError(400, 'rows must be a non-empty array');
+  }
+  if (body.rows.length > CHAIR_BATCH_MAX_ROWS) {
+    throw new HttpError(400, `no more than ${CHAIR_BATCH_MAX_ROWS} rows per request`);
+  }
+  const leagueKeys = playerLeagueKeys(cfg);
+  const rows: ChairBulkRow[] = body.rows.map((item, index) => {
+    const v = validateChairBatchItem(item, leagueKeys);
+    return 'error' in v ? { index, error: v.error } : { index, fields: v.fields };
+  });
+  const { results, playerCount } = await registerChairRows(ra, club, cfg, rows);
+  return c.json({ results, summary: summarizeChairResults(results), playerCount }, 200, {
+    'Cache-Control': 'no-store',
+  });
+});
+
+/** Byte cap on a chair-uploaded roster workbook (a 500-row sheet is ~50 KB). */
+const CHAIR_ROSTER_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Read the uploaded workbook from a chair roster-parse request. Primary transport is
+ * multipart/form-data (`file` = the .xlsx, optional `ageGroupMap` = a JSON string); the JSON
+ * `{ dataBase64, ageGroupMap? }` transport the structure-intake route uses is accepted too.
+ */
+async function readChairRosterUpload(
+  c: Context<HonoEnv>,
+): Promise<{ bytes: Buffer; ageGroupMap: Record<string, string> }> {
+  const tooBig = () =>
+    new HttpError(400, `workbook exceeds the ${CHAIR_ROSTER_MAX_BYTES / (1024 * 1024)}MB limit`);
+  const parseMap = (raw: unknown): Record<string, string> => {
+    let value = raw;
+    if (typeof raw === 'string') {
+      try {
+        value = JSON.parse(raw);
+      } catch {
+        throw new HttpError(400, 'ageGroupMap must be a JSON object');
+      }
+    }
+    if (value == null) return {};
+    if (typeof value !== 'object' || Array.isArray(value)) {
+      throw new HttpError(400, 'ageGroupMap must be a JSON object');
+    }
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (typeof v === 'string') out[k] = v;
+    }
+    return out;
+  };
+  const contentType = c.req.header('content-type') ?? '';
+  if (contentType.includes('multipart/form-data')) {
+    const form = await c.req.parseBody().catch(() => {
+      throw new HttpError(400, 'unable to read the upload');
+    });
+    const file = form['file'];
+    if (!file || typeof file === 'string') throw new HttpError(400, 'file is required');
+    if (file.size > CHAIR_ROSTER_MAX_BYTES) throw tooBig();
+    return {
+      bytes: Buffer.from(await file.arrayBuffer()),
+      ageGroupMap: parseMap(form['ageGroupMap']),
+    };
+  }
+  const body = await c.req
+    .json<{ dataBase64?: string; ageGroupMap?: unknown }>()
+    .catch(() => ({}) as { dataBase64?: string; ageGroupMap?: unknown });
+  const dataBase64 = typeof body.dataBase64 === 'string' ? body.dataBase64 : '';
+  if (!dataBase64) throw new HttpError(400, 'file is required');
+  if (dataBase64.length > Math.ceil((CHAIR_ROSTER_MAX_BYTES * 4) / 3)) throw tooBig();
+  return { bytes: Buffer.from(dataBase64, 'base64'), ageGroupMap: parseMap(body.ageGroupMap) };
+}
+
+/** Why a parsed row will not simply be created — drives the review table's conflict column. */
+type ChairRosterConflict =
+  | { type: 'in-club-duplicate' }
+  | {
+      type: 'cross-club';
+      clubId: string;
+      clubName: string;
+      /** 'active' → committing opens a clearance from this club; 'clearance-pending' → a
+       *  transfer is already in flight (commit reports clearance-already-open). */
+      status: PlayerRegistration['status'];
+    };
+
+/**
+ * POST /clubs/:id/roster/parse — the chair's spreadsheet upload, parsed into draft rows for a
+ * review step (nothing is written). Same parser as the operator roster intake
+ * (parseRosterSheet), with the club FORCED to `:id` and junior league keys derived from the
+ * tenant's own leagues; strict on identity (a row with no valid RSA ID is an exception, never
+ * a dob-only row — the registration core's identity minimum) and a BLANK age-group cell on a
+ * sheet with an Age Group column is a senior/team-less row rather than an exception (the
+ * downloadable template carries that column for everyone). Every row is annotated with
+ * `conflict` — already on this roster ("skipped"), or registered at another club ("will open
+ * a clearance from X") — so the chair sees it before committing, unlike the operator flow's
+ * silent skip. Response shape mirrors the operator parse (RosterIntakeParseResponse) plus
+ * `conflict` per row. Carries PII — `Cache-Control: no-store`.
+ */
+app.post('/clubs/:id/roster/parse', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  assertClubAccess(ra, id);
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  const club = await repo.getClub(ra.tenant, id);
+  if (!club) throw new HttpError(404, 'club not found');
+  const { bytes, ageGroupMap: requestedMap } = await readChairRosterUpload(c);
+  if (isLegacyXlsBuffer(bytes)) {
+    throw new HttpError(400, 'legacy .xls workbook — save it as .xlsx and upload it again');
+  }
+  const wb = new ExcelJS.Workbook();
+  try {
+    // See the roster-intake parse route for why this cast is needed.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await wb.xlsx.load(bytes as any);
+  } catch {
+    throw new HttpError(400, 'unable to read the workbook — check the file is a valid .xlsx');
+  }
+
+  const juniorLeagueKeys = juniorLeagueKeysFor(cfg ?? ({} as TenantConfig));
+  const ageGroupMap: Record<string, string> = {};
+  for (const [raw, key] of Object.entries(requestedMap)) {
+    if (juniorLeagueKeys.has(key)) ageGroupMap[raw] = key;
+  }
+  const runNow = now();
+  const ageGroupRawsByRaw = new Map<string, string | null>();
+  const parsed = wb.worksheets.map((ws) => ({
+    ws,
+    result: parseRosterSheet(ws, id, runNow, {
+      allowMissingId: false,
+      allowBlankAgeGroup: true,
+      juniorLeagueKeys,
+      ageGroupMap,
+    }),
+  }));
+
+  // Conflict annotation: this club's own roster (one query) + every other club's roster
+  // indexed once (buildCrossClubIndex) — never a per-row × per-club read.
+  const anyRows = parsed.some((p) => p.result && p.result.rows.length > 0);
+  const ownKeys = anyRows
+    ? new Set((await repo.listPlayers(ra.tenant, id)).map((p) => p.naturalKey))
+    : new Set<string>();
+  const crossClubIndex = anyRows
+    ? await buildCrossClubIndex(ra.tenant, await repo.listClubs(ra.tenant), id)
+    : new Map();
+  const conflictFor = (naturalKey: string): ChairRosterConflict | undefined => {
+    if (ownKeys.has(naturalKey)) return { type: 'in-club-duplicate' };
+    const hits = (crossClubIndex.get(naturalKey) ?? []) as Array<{
+      clubId: string;
+      clubName: string;
+      status: PlayerRegistration['status'];
+    }>;
+    if (!hits.length) return undefined;
+    const hit =
+      hits.find((h) => h.status === 'clearance-pending') ??
+      hits.find((h) => h.status === 'active') ??
+      hits[0];
+    return { type: 'cross-club', clubId: hit.clubId, clubName: hit.clubName, status: hit.status };
+  };
+
+  const sheets = parsed.map(({ ws, result }) => {
+    if (!result) {
+      return {
+        name: ws.name,
+        skipped: true,
+        hasIdColumn: false,
+        totalDataRows: 0,
+        rows: [],
+        exceptions: [],
+        unknownGenderRaw: [],
+        unknownRaceRaw: [],
+      };
+    }
+    for (const { raw, leagueKey } of result.ageGroupRaws) {
+      const existing = ageGroupRawsByRaw.get(raw);
+      if (existing === undefined || (existing === null && leagueKey !== null)) {
+        ageGroupRawsByRaw.set(raw, leagueKey);
+      }
+    }
+    return {
+      name: ws.name,
+      skipped: false,
+      hasIdColumn: result.hasIdColumn,
+      totalDataRows: result.totalDataRows,
+      rows: result.rows.map((r) => {
+        const conflict = conflictFor(r.player.naturalKey);
+        return {
+          rowNumber: r.rowNumber,
+          firstName: r.player.firstName,
+          lastName: r.player.lastName,
+          dob: r.player.dob,
+          ...(r.player.idNumber ? { idNumber: r.player.idNumber } : {}),
+          missingId: r.missingId,
+          ...(r.player.gender ? { gender: r.player.gender } : {}),
+          ...(r.player.race ? { race: r.player.race } : {}),
+          ...(r.player.team ? { team: r.player.team } : {}),
+          ...(conflict ? { conflict } : {}),
+        };
+      }),
+      exceptions: result.exceptions,
+      unknownGenderRaw: [...new Set(result.unknownGenderRaw)],
+      unknownRaceRaw: [...new Set(result.unknownRaceRaw)],
+    };
+  });
+
+  return c.json(
+    {
+      parseable: true,
+      sheets,
+      dobOnlyCount: 0,
+      juniorLeagueKeys: [...juniorLeagueKeys],
+      ageGroupRaws: [...ageGroupRawsByRaw].map(([raw, leagueKey]) => ({ raw, leagueKey })),
+    },
+    200,
+    { 'Cache-Control': 'no-store' },
+  );
+});
+
+interface ChairRosterCommitItem extends RosterIntakeCommitItem {
+  sheet?: string;
+}
+
+/**
+ * POST /clubs/:id/roster/commit — commit ONE chunk (≤ CHAIR_ROSTER_COMMIT_MAX_ROWS) of reviewed
+ * spreadsheet rows `{ items: [{ rowNumber, firstName, lastName, dob, idNumber, gender?, race?,
+ * team?, sheet? }] }` into `:id` (any item clubId is ignored — the club is forced). The client
+ * drives chunks sequentially with a progress bar, so a dropped connection loses at most one
+ * chunk, and a re-commit is idempotent (skipped-duplicate / clearance-already-open, never a
+ * 409). Each row is validated exactly like the operator intake (validateRosterIntakeItem) plus
+ * the identity minimum (an RSA ID is required), then registered through the clearance-aware
+ * core with a prefetched cross-club index — so, unlike the operator intake, a player already
+ * registered at another club DOES open a clearance. Per-row results + summary + the club's
+ * reconciled playerCount (once per chunk). See the bulk-contract comment above for the relaxed
+ * required set. Carries PII — `Cache-Control: no-store`.
+ */
+app.post('/clubs/:id/roster/commit', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  assertClubAccess(ra, id);
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  const club = await repo.getClub(ra.tenant, id);
+  if (!club) throw new HttpError(404, 'club not found');
+  const body = await c.req
+    .json<{ items?: ChairRosterCommitItem[] }>()
+    .catch(() => ({}) as { items?: ChairRosterCommitItem[] });
+  if (!Array.isArray(body.items) || body.items.length === 0) {
+    throw new HttpError(400, 'items must be a non-empty array');
+  }
+  if (body.items.length > CHAIR_ROSTER_COMMIT_MAX_ROWS) {
+    throw new HttpError(
+      400,
+      `no more than ${CHAIR_ROSTER_COMMIT_MAX_ROWS} items per request — send the rows in chunks`,
+    );
+  }
+  const leagueKeys = playerLeagueKeys(cfg);
+  const clubIds = new Set([id]);
+  const rows: ChairBulkRow[] = body.items.map((raw, index) => {
+    const item: ChairRosterCommitItem = raw && typeof raw === 'object' ? raw : {};
+    const base = {
+      index,
+      ...(typeof item.rowNumber === 'number' ? { rowNumber: item.rowNumber } : {}),
+      ...(typeof item.sheet === 'string' && item.sheet ? { sheet: item.sheet } : {}),
+    };
+    const err = validateRosterIntakeItem({ ...item, clubId: id }, clubIds, leagueKeys, index);
+    if (err) return { ...base, error: err };
+    if (!item.idNumber) return { ...base, error: `item ${index}: idNumber is required` };
+    const gender = item.gender !== undefined ? normalizeGender(item.gender).value : undefined;
+    const race = item.race !== undefined ? normalizeRace(item.race).value : undefined;
+    return {
+      ...base,
+      fields: {
+        firstName: item.firstName!.trim(),
+        lastName: item.lastName!.trim(),
+        dob: item.dob!,
+        idType: 'sa-id',
+        idNumber: item.idNumber,
+        ...(gender ? { gender } : {}),
+        ...(race ? { race } : {}),
+        ...(item.team ? { team: item.team } : {}),
+      },
+    };
+  });
+  const { results, playerCount } = await registerChairRows(ra, club, cfg, rows);
+  return c.json({ results, summary: summarizeChairResults(results), playerCount }, 200, {
+    'Cache-Control': 'no-store',
+  });
 });
 
 /** Mint a presigned PUT for a player's ID document (image or PDF). */
@@ -2907,101 +3281,6 @@ app.get('/clubs/:id/veterans-requests', async (c) => {
   });
 });
 
-/* ─── Captain's post-match reports ─── */
-
-const CR_CRITERIA = ['decisions', 'pressure', 'behaviour', 'communication', 'regulations'];
-const CR_CONCERNS = ['lbw', 'wkCatches', 'batPad', 'noBallWide', 'conditions', 'other'];
-
-/** Validate + normalise a submitted report body (throws 400 with a specific message). */
-function parseCaptainReport(body: Record<string, unknown>) {
-  const str = (v: unknown, field: string, max: number, required = false) => {
-    if (v === undefined || v === null || v === '') {
-      if (required) throw new HttpError(400, `${field} is required`);
-      return undefined;
-    }
-    if (typeof v !== 'string' || v.length > max)
-      throw new HttpError(400, `${field} must be a string of at most ${max} characters`);
-    return v.trim();
-  };
-  const date = str(body.date, 'date', 10, true)!;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new HttpError(400, 'date must be YYYY-MM-DD');
-  if (body.side !== 'Home' && body.side !== 'Away')
-    throw new HttpError(400, 'side must be Home or Away');
-  if (!Array.isArray(body.umpires) || body.umpires.length !== 2)
-    throw new HttpError(400, 'umpires must list both on-field umpires');
-  const umpires = body.umpires.map((u: Record<string, unknown>, i: number) => {
-    const ratings: Record<string, number> = {};
-    const r = (u?.ratings ?? {}) as Record<string, unknown>;
-    for (const k of CR_CRITERIA) {
-      const v = r[k];
-      if (!Number.isInteger(v) || (v as number) < 1 || (v as number) > 5)
-        throw new HttpError(400, `umpire ${i + 1}: ${k} must be rated 1–5`);
-      ratings[k] = v as number;
-    }
-    const concerns = Array.isArray(u?.concerns)
-      ? (u.concerns as unknown[]).filter((c): c is string => CR_CONCERNS.includes(c as string))
-      : [];
-    return {
-      name: str(u?.name, `umpire ${i + 1} name`, 120, true)!,
-      ratings,
-      concerns,
-      ...(str(u?.otherConcern, 'otherConcern', 300)
-        ? { otherConcern: str(u?.otherConcern, 'otherConcern', 300) }
-        : {}),
-      ...(str(u?.comments, 'comments', 2000)
-        ? { comments: str(u?.comments, 'comments', 2000) }
-        : {}),
-    };
-  });
-  return {
-    date,
-    side: body.side as 'Home' | 'Away',
-    opponent: str(body.opponent, 'opponent', 120, true)!,
-    captain: str(body.captain, 'captain', 120, true)!,
-    fixtureKey: str(body.fixtureKey, 'fixtureKey', 200),
-    competition: str(body.competition, 'competition', 160),
-    venue: str(body.venue, 'venue', 160),
-    general: str(body.general, 'general', 4000),
-    umpires,
-  };
-}
-
-/** A club submits a captain's report (its own club only). */
-app.post('/clubs/:id/captain-reports', async (c) => {
-  const ra = c.get('requestAuth')!;
-  const clubId = c.req.param('id');
-  assertClubAccess(ra, clubId);
-  const club = await repo.getClub(ra.tenant, clubId);
-  if (!club) throw new HttpError(404, 'club not found');
-  const parsed = parseCaptainReport(await c.req.json<Record<string, unknown>>());
-  const submittedAt = now();
-  const report: CaptainReport = {
-    id: randomUUID(),
-    ref: `CR-${submittedAt.slice(0, 4)}-${randomUUID().slice(0, 6).toUpperCase()}`,
-    clubId,
-    clubName: club.name,
-    ...Object.fromEntries(Object.entries(parsed).filter(([, v]) => v !== undefined)),
-    submittedAt,
-    submittedBy: ra.email,
-  } as CaptainReport;
-  await repo.createCaptainReport(ra.tenant, report);
-  return c.json(report, 201);
-});
-
-/** A club's own captain's reports, newest first. */
-app.get('/clubs/:id/captain-reports', async (c) => {
-  const ra = c.get('requestAuth')!;
-  const clubId = c.req.param('id');
-  assertClubAccess(ra, clubId);
-  return c.json(await repo.listCaptainReportsForClub(ra.tenant, clubId));
-});
-
-/** Every club's captain's reports (union admin), newest first. */
-app.get('/admin/captain-reports', async (c) => {
-  const ra = c.get('requestAuth')!;
-  return c.json(await repo.listAllCaptainReports(ra.tenant));
-});
-
 /** The PRIMARY club accepts a request — writes the affiliation, then flips the request. */
 app.post('/clubs/:id/veterans-requests/:rid/accept', async (c) => {
   const ra = c.get('requestAuth')!;
@@ -3323,15 +3602,57 @@ app.post('/clubs/:id/clearances/:cid/certificate/view-url', async (c) => {
   return c.json(await certificateViewUrl(c, ra.tenant, clearance));
 });
 
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  !!v && typeof v === 'object' && !Array.isArray(v);
+
+/**
+ * Merge an incoming exco roster over the stored one, per role: a role object merges over
+ * the stored role (so fields the client doesn't send — e.g. the chair's idNumber / term
+ * dates — survive); a role sent as `null` is removed entirely (POPIA erasure of a departed
+ * office bearer); anything else (the additionalMembers array) replaces; absent keys keep
+ * the stored value.
+ */
+function mergeExco(
+  stored: Record<string, unknown> | undefined,
+  incoming: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...(stored ?? {}) };
+  for (const [k, v] of Object.entries(incoming)) {
+    if (v === null) delete merged[k];
+    else if (isPlainObject(v)) {
+      const prev = merged[k];
+      merged[k] = { ...(isPlainObject(prev) ? prev : {}), ...v };
+    } else merged[k] = v;
+  }
+  return merged;
+}
+
 /** Save the exec committee; also flips docs.exco true when it is a form-satisfied doc. */
 app.post('/clubs/:id/exco', async (c) => {
   const ra = c.get('requestAuth')!;
   const id = c.req.param('id');
   assertClubAccess(ra, id);
-  const exco = await c.req.json<Record<string, unknown>>();
+  const incoming = await c.req.json<unknown>();
+  if (!isPlainObject(incoming)) throw new HttpError(400, 'exco must be an object');
   const cfg = await repo.getTenantConfig(ra.tenant);
   const current = await repo.getClub(ra.tenant, id);
   if (!current) throw new HttpError(404, 'club not found');
+  const roles = resolveVertical(cfg).leadershipRoles;
+  for (const r of roles) {
+    const v = incoming[r.key];
+    if (v !== undefined && v !== null && !isPlainObject(v)) {
+      throw new HttpError(400, `exco.${r.key} must be an object or null`);
+    }
+  }
+  const exco = mergeExco(current.exco as Record<string, unknown> | undefined, incoming);
+  // Required office bearers are enforced on the COMBINED stored+incoming roster, here only:
+  // the general club PATCH stays only-when-supplied so legacy clubs aren't re-blocked.
+  for (const r of roles.filter((role) => role.required)) {
+    const m = exco[r.key];
+    const ok =
+      isPlainObject(m) && ['name', 'cell', 'email'].every((f) => String(m[f] ?? '').trim() !== '');
+    if (!ok) throw new HttpError(400, `${r.label} name, cell and email are required`);
+  }
   // The docs.exco flip is gated on the catalogue defining exco as a FORM doc — key
   // presence alone is not enough: a tenant whose catalogue has no exco entry (or a
   // file-based committee doc under another key) must not have a form save silently
@@ -3864,13 +4185,59 @@ async function seriesScheduleCalendars(
 
 app.get('/series', async (c) => {
   const ra = c.get('requestAuth')!;
-  const all = await repo.listSeries(ra.tenant);
+  // Medicoach-owned results (ADR 0016) live in their own FIXRESULT# items and are joined
+  // onto each fixture as a response-only `result` (scores + medicoach link, never captain
+  // data); a fixture with a result reads as completed.
+  // Officials live in their own per-fixture items; join them on the way out. One Query for
+  // the registry (so a renamed/merged umpire shows its new name) and — only when the tenant
+  // has umpires at all (they are never deleted, so none ⇒ no appointments) — one for the
+  // appointments. The FIXRESULT# query runs only with the medicoach sync on: a tenant
+  // without it has no results to join.
+  const [all, config, umpires] = await Promise.all([
+    repo.listSeries(ra.tenant),
+    repo.getTenantConfig(ra.tenant),
+    repo.listUmpires(ra.tenant),
+  ]);
+  const [results, officialRows] = await Promise.all([
+    hasFeature(config, 'medicoachSync') ? repo.listFixtureResults(ra.tenant) : [],
+    umpires.length ? repo.listFixtureOfficials(ra.tenant) : [],
+  ]);
   // Admins get the raw list (drafts, unreleased venues/times, approval state). Everyone
   // else sees the club-facing projection: released + activated series only, with any
   // withheld fields stripped (ADR 0011). Release filtering used to be client-only, which
   // leaked every draft and all fields to reps.
-  if (ra.membership.role === 'admin') return c.json(all);
+  const officials = indexOfficials(officialRows);
+  const namesById = new Map(umpires.map((u) => [u.id, u.displayName]));
+  if (ra.membership.role === 'admin') {
+    // `syncMapped` marks the fixtures whose result medicoach owns, so the console locks
+    // the manual "completed" status there (and only there). Resolved exactly as the outbox
+    // and the generate gate resolve it (`seriesMappedForSync`): a season-run series carries
+    // no `leagueKey`, so its run's league decides. Each run is read at most once.
+    const runs = new Map<string, ReturnType<typeof repo.getSeasonRun>>();
+    const runRepo = {
+      getSeasonRun: (t: string, runId: string) => {
+        if (!runs.has(runId)) runs.set(runId, repo.getSeasonRun(t, runId));
+        return runs.get(runId)!;
+      },
+    };
+    const mapped = new Set<string>();
+    await Promise.all(
+      all.map(async (s) => {
+        if (await seriesMappedForSync(runRepo, ra.tenant, s, config)) mapped.add(s.id);
+      }),
+    );
+    return c.json(
+      joinFixtureResults(
+        all.map((s) =>
+          joinOfficials(s, officials, namesById, { include: () => true, audit: true }),
+        ),
+        results,
+        (s) => mapped.has(s.id),
+      ),
+    );
+  }
   const today = tenantToday();
+  const ownClubs = new Set(ra.membership.clubIds ?? []);
   // Legacy series (created before the `participants` snapshot existed) carry no team
   // identity, so a rep's client — which can't call the admin-only GET /clubs — renders
   // opponents as "Removed club". Synthesise participants from the tenant's clubs on the
@@ -3878,10 +4245,23 @@ app.get('/series', async (c) => {
   // has the snapshot and is left untouched. Clubs are loaded once per request.
   const clubsById = new Map((await repo.listClubs(ra.tenant)).map((cl) => [cl.id, cl]));
   return c.json(
-    all
-      .map((s) => projectSeriesForClub(s, today))
-      .filter((s): s is Series => s !== null)
-      .map((s) => withLegacyParticipants(s, clubsById)),
+    joinFixtureResults(
+      all
+        .map((s) => projectSeriesForClub(s, today))
+        .filter((s): s is Series => s !== null)
+        .map((s) => withLegacyParticipants(s, clubsById))
+        // A club sees the umpires for ITS OWN fixtures only, and only once the venue is
+        // visible to it — appointments follow the same reveal rule as the ground (ADR 0011).
+        .map((s) =>
+          isWithheld(s, 'venue')
+            ? s
+            : joinOfficials(s, officials, namesById, {
+                include: (f) => fixtureClubIds(s, f).some((id) => ownClubs.has(id)),
+                audit: false,
+              }),
+        ),
+      results,
+    ),
   );
 });
 
@@ -3912,6 +4292,9 @@ async function createSeries(
   // already written the earlier series.
   if (typeof series?.startDate !== 'string' || !series.startDate.trim())
     throw new HttpError(400, 'a series needs a start date');
+  // GET /series' response-only fixture keys (a joined result, `syncMapped`) never persist.
+  if (series.fixtures !== undefined)
+    series.fixtures = stripResponseOnlyFixtureFields(series.fixtures) as unknown[];
   // A POST must never overwrite an existing series. `putSeries` is an unconditional Put
   // and this body is built fresh with `released: false`, `releasedAt: null`, `version: 1`
   // — so a POST landing on a live id would recall a schedule clubs and players have
@@ -3934,7 +4317,9 @@ async function createSeries(
       series.schedule,
       await seriesScheduleCalendars(tenant, series.seasonRunId, runCalendar),
     );
-  // Fixtures are generated client-side and POSTed whole.
+  // Fixtures are generated client-side and POSTed whole. `officials` is a read-only join
+  // (FIXOFFICIALS# items), never stored on the series.
+  series.fixtures = stripJoinedOfficials(series.fixtures);
   series.version = 1;
   // A brand-new series is a DRAFT (ADR 0011): release and approval are earned via PATCH,
   // never asserted at create. Force the server-owned state regardless of what the client
@@ -3976,9 +4361,18 @@ async function applySeriesPatch(
   patch: SeriesPatch,
   _actor: string,
   runCalendar?: RunCalendarOverride,
+  /** Who is changing the schedule — stamped + queued for medicoach unless `medicoach`. */
+  origin: ScheduleChangeOrigin = 'admin',
 ): Promise<Series> {
   const current = await repo.getSeries(tenant, id);
   if (!current) throw new HttpError(404, 'series not found');
+  // A whole-series PATCH echoes GET /series' response-only fixture keys (the joined
+  // medicoach result, `syncMapped`, the FIXOFFICIALS# `officials` join); they never belong
+  // in the series item (ADR 0016).
+  if (patch.fixtures !== undefined)
+    patch.fixtures = stripJoinedOfficials(
+      stripResponseOnlyFixtureFields(patch.fixtures) as unknown[],
+    );
   // Same gsi1-sort-key guard as POST. `updateSeries` rewrites `gsi1sk` from the patched
   // `startDate` on every write, so a blank one here is the identical DynamoDB failure,
   // with the identical property that dynalite won't catch it.
@@ -4035,8 +4429,17 @@ async function applySeriesPatch(
     // keys riding along on the patch (fixtures, approved, name…) are a client bug, not part
     // of the reveal intent, so they are ignored rather than persisted through this action.
     const revealWithheld = Object.keys(withheld).length ? withheld : undefined;
+    // Medicoach sync (ADR 0016): fixtures of a withheld series were held back from medicoach's
+    // public match centre. Once nothing is withheld any more, every fixture is re-queued with
+    // its real schedule and its EXISTING changedAt (never re-stamped: a medicoach edit made
+    // while it was withheld must still win) once the reveal landed.
+    const requeue = await requeueRevealedSeries(repo, tenant, {
+      ...current,
+      withheld: revealWithheld,
+    });
+    let revealed: Series;
     try {
-      return await repo.updateSeries(tenant, id, {
+      revealed = await repo.updateSeries(tenant, id, {
         withheld: revealWithheld,
         revealedAt,
         version: patch.version,
@@ -4045,6 +4448,8 @@ async function applySeriesPatch(
       if (err instanceof VersionConflictError) throw new HttpError(409, 'series changed; refetch');
       throw err;
     }
+    await requeue.enqueue();
+    return revealed;
   }
 
   // ── Version pre-check before ANY clash gate ──
@@ -4092,7 +4497,7 @@ async function applySeriesPatch(
   // release); a live series keeps its state so in-season edits still reach clubs.
   if (typeof patch.approved === 'boolean') {
     patch.approvedAt = patch.approved ? now() : null;
-  } else if (patch.fixtures !== undefined && !current.released) {
+  } else if (patch.fixtures !== undefined && fixturesEditRecallsApproval(current)) {
     patch.approved = false;
     patch.approvedAt = null;
   }
@@ -4166,12 +4571,41 @@ async function applySeriesPatch(
   if (patch.released === true && !current.released) patch.releasedAt = now();
   else if (patch.released === false) patch.releasedAt = null;
   else delete patch.releasedAt;
+  // Medicoach sync (ADR 0016, Slice 4): a fixture whose schedule this write changes gets
+  // `schedule.changedAt = now` in the same write, and its outbox row once the write landed.
+  let scheduleSync: Awaited<ReturnType<typeof recordScheduleDiff>> | undefined;
+  if (patch.fixtures !== undefined) {
+    const after = { ...current, ...patch, id } as Series;
+    scheduleSync = await recordScheduleDiff(repo, tenant, current, after, origin);
+    patch.fixtures = after.fixtures;
+  }
+  // A draft's schedule was held back from medicoach (ADR 0016); the release of a series that
+  // withholds nothing makes it public, so once this write landed every fixture is queued with
+  // its real schedule and its EXISTING changedAt — never re-stamped, so a medicoach edit made
+  // while it was a draft still wins. A release WITH withholding stays held until the reveal
+  // of the last field (the reveal branch above).
+  if (patch.released === true && !current.released) {
+    const requeue = await requeueRevealedSeries(repo, tenant, {
+      ...current,
+      ...patch,
+      id,
+    } as Series);
+    const edits = scheduleSync;
+    scheduleSync = {
+      refs: edits?.refs ?? [],
+      newRefs: edits?.newRefs ?? [],
+      enqueue: async () => (await edits?.enqueue(), requeue.enqueue()),
+    };
+  }
+  let written: Series;
   try {
-    return await repo.updateSeries(tenant, id, patch);
+    written = await repo.updateSeries(tenant, id, patch);
   } catch (err) {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'series changed; refetch');
     throw err;
   }
+  await scheduleSync?.enqueue();
+  return written;
 }
 
 /**
@@ -4189,11 +4623,7 @@ function inSeasonClashRefusal(
   venues: Venue[],
   aliases: Record<string, string>,
 ): HttpError | undefined {
-  const before = new Set(
-    findClashes(current, allSeries, clubs, venues, aliases).map((c) => clashKey(c, aliases)),
-  );
-  const after = findClashes(subject, allSeries, clubs, venues, aliases);
-  const introduced = after.filter((c) => !before.has(clashKey(c, aliases)));
+  const introduced = introducedClashes(current, subject, allSeries, clubs, venues, aliases);
   if (!introduced.length) return undefined;
   const shown = introduced.slice(0, 3).map(formatClashForHumans).join('; ');
   return new HttpError(
@@ -4220,6 +4650,292 @@ function inSeasonClashRefusal(
  * subject changes each time. That is fine at today's tenant sizes; revisit if a tenant's
  * fixture count makes 20 rebuilds per pre-check felt.
  */
+/**
+ * Admin "Sync now" (ADR 0016): run the medicoach puller for the caller's tenant right away,
+ * instead of waiting for the 15-minute cron. Same code path as the cron; returns the run
+ * summary (counts only — never a pulled payload). 409 when the tenant has no sync; 502 when
+ * medicoach can't be reached or answers outside the contract (`error` in plain language,
+ * `technical` the puller's own text). With the sync secrets unset
+ * the run is a dry run (`status: 'dry-run'`, nothing requested).
+ */
+app.post('/integrations/medicoach/sync-now', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  try {
+    // Outbox first, then the pull, then pending captain's reports — the cron's sequence.
+    const summary = await runTenantSync(tenant, 'manual', {
+      repo,
+      url: medicoachSyncUrl(),
+      secret: medicoachSyncSecret(),
+    });
+    if (summary.status === 'disabled')
+      throw new HttpError(409, 'the medicoach sync is not enabled for this tenant');
+    return c.json(summary);
+  } catch (err) {
+    // The admin reads the plain-language reason; the technical text rides along.
+    if (err instanceof MedicoachSyncError)
+      throw new HttpError(502, explainSyncError(err.message), {
+        code: 'sync_failed',
+        technical: err.message,
+      });
+    throw err;
+  }
+});
+
+/**
+ * Admin "Medicoach sync" page data (ADR 0016): whether the sync is on (and a dry run), the
+ * pull cursor, recent SYNCLOG# rows (pull and push), the PENDINGSYNC# outbox (count + rows
+ * that failed, with their last error) and the SYNCCONFLICT# inbox. Counts, fixture refs and
+ * schedules only — no player data lives in any of these rows.
+ */
+app.get('/integrations/medicoach/status', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const config = await repo.getTenantConfig(tenant);
+  const enabled = hasFeature(config, 'medicoachSync');
+  if (!enabled) return c.json({ enabled: false });
+  const [cursor, logs, pending, conflicts, markers, health] = await Promise.all([
+    repo.getSyncCursorRow(tenant),
+    repo.listSyncLogs(tenant, 20),
+    repo.listPendingSync(tenant),
+    repo.listSyncConflicts(tenant),
+    repo.listReportOpenMarkers(tenant),
+    repo.getSyncHealth(tenant),
+  ]);
+  return c.json({
+    enabled: true,
+    dryRun: !medicoachSyncUrl() || !medicoachSyncSecret(),
+    cursor,
+    // When the sync last worked / last failed; `lastErrorText` is the failure in plain
+    // language (the technical `lastError` stays for the page's "Details").
+    health: health
+      ? {
+          ...health,
+          ...(health.lastError ? { lastErrorText: explainSyncError(health.lastError) } : {}),
+        }
+      : null,
+    // Rows written before SYNCLOG carried `message` are explained here.
+    logs: logs.map((l) =>
+      l.error && !l.message ? { ...l, message: explainSyncError(l.error) } : l,
+    ),
+    outbox: {
+      count: pending.length,
+      // Rows kept back because their series is a draft or still withholds venue/time
+      // (ADR 0011): they go out when the series is released/revealed, never before.
+      held: pending
+        .filter((p) => p.heldUntilReveal)
+        .sort((a, b) => a.enqueuedAt.localeCompare(b.enqueuedAt))
+        .map((p) => ({
+          ref: p.ref,
+          seriesId: p.seriesId,
+          fixtureId: p.fixtureId,
+          enqueuedAt: p.enqueuedAt,
+          proposed: describeSchedule(p.schedule),
+        })),
+      failures: pending
+        .filter((p) => p.attempts > 0 && !p.heldUntilReveal)
+        .sort((a, b) => a.enqueuedAt.localeCompare(b.enqueuedAt))
+        .map((p) => ({
+          ref: p.ref,
+          seriesId: p.seriesId,
+          fixtureId: p.fixtureId,
+          attempts: p.attempts,
+          // Still retried every run; flagged so the page offers Retry and Drop.
+          stuck: p.attempts >= STUCK_ATTEMPTS,
+          lastError: p.lastError ?? null,
+          lastErrorText: explainSyncError(p.lastError),
+          lastAttemptAt: p.lastAttemptAt ?? null,
+          enqueuedAt: p.enqueuedAt,
+          proposed: describeSchedule(p.schedule),
+        })),
+    },
+    conflicts: conflicts
+      .sort((a, b) => b.detectedAt.localeCompare(a.detectedAt))
+      .map((x) => conflictView(x)),
+    pendingReports: markers.length,
+    // Report notices that reached nobody (every channel failed) and are waiting on a retry.
+    noticesFailed: markers.filter((m) => m.lastError?.startsWith(NOTICE_FAILED_ERROR)).length,
+  });
+});
+
+/** A conflict as the inbox shows it: the stored row plus readable proposed text, and the
+ * proposal in the same parts as `current` so the two read side by side. */
+function conflictView(x: SyncConflict) {
+  return {
+    ...x,
+    proposedText: describeSchedule(x.proposed),
+    proposedParts: scheduleParts(x.proposed),
+  };
+}
+
+app.get('/integrations/medicoach/conflicts', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const conflicts = await repo.listSyncConflicts(tenant);
+  return c.json(
+    conflicts.sort((a, b) => b.detectedAt.localeCompare(a.detectedAt)).map(conflictView),
+  );
+});
+
+/** The `ref` of a conflict action body (refs carry `:`, so they ride in the body). */
+async function conflictRefOf(c: Context<HonoEnv>): Promise<string> {
+  const body = await c.req.json<{ ref?: unknown }>().catch(() => ({}) as { ref?: unknown });
+  if (typeof body?.ref !== 'string' || !body.ref) throw new HttpError(400, 'ref is required');
+  return body.ref;
+}
+
+/**
+ * Apply a held medicoach schedule change as an ADMIN EDIT: the proposal is written through
+ * `applySeriesPatch`, so the clash gate runs again (409 `venue_clash` when it still clashes),
+ * a draft's approval is recalled, and the change is stamped + queued back to medicoach like
+ * any admin edit (medicoach answers `unchanged`). A venue that still doesn't resolve is 409
+ * `venue_unresolved`. The conflict row is deleted once applied.
+ */
+app.post('/integrations/medicoach/conflicts/apply', async (c) => {
+  const { tenant, email } = c.get('requestAuth')!;
+  const ref = await conflictRefOf(c);
+  const conflict = await repo.getSyncConflict(tenant, ref);
+  if (!conflict) throw new HttpError(404, 'conflict not found');
+  const [config, venues] = await Promise.all([
+    repo.getTenantConfig(tenant),
+    repo.listVenues(tenant),
+  ]);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const series = await repo.getSeries(tenant, conflict.seriesId);
+    const fixtures = (series?.fixtures as ScheduleFixture[] | undefined) ?? [];
+    const i = fixtures.findIndex((f) => f?.id === conflict.fixtureId);
+    if (!series || i < 0)
+      throw new HttpError(404, 'that fixture no longer exists; discard the conflict');
+    const built = buildInboundFixture(
+      series,
+      fixtures[i],
+      conflict.proposed,
+      venues,
+      venueAliasesFor(config),
+    );
+    if (!built.ok)
+      throw new HttpError(409, built.detail.join('; '), {
+        code: 'venue_unresolved',
+        detail: built.detail,
+      });
+    if (!built.changed.length) {
+      await repo.deleteSyncConflict(tenant, ref);
+      return c.json({ status: 'unchanged' });
+    }
+    const next = fixtures.map((f, j) => (j === i ? built.fixture : f));
+    try {
+      const written = await applySeriesPatch(
+        tenant,
+        series.id,
+        { fixtures: next, version: series.version },
+        email ?? 'unknown',
+      );
+      await repo.deleteSyncConflict(tenant, ref);
+      return c.json({ status: 'applied', series: written });
+    } catch (err) {
+      // A concurrent edit: re-read and rebuild. Anything structured (a clash) is the answer.
+      if (err instanceof HttpError && err.status === 409 && !err.details) continue;
+      throw err;
+    }
+  }
+  throw new HttpError(409, 'series changed; refetch');
+});
+
+/**
+ * Discard a held change: smart club's schedule stands. The fixture's `schedule.changedAt` is
+ * re-stamped and its current schedule queued for medicoach, so medicoach takes smart club's
+ * version on the next push and the discarded proposal (now older) can never be re-applied.
+ */
+app.post('/integrations/medicoach/conflicts/discard', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const ref = await conflictRefOf(c);
+  const conflict = await repo.getSyncConflict(tenant, ref);
+  if (!conflict) throw new HttpError(404, 'conflict not found');
+  const config = await repo.getTenantConfig(tenant);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const series = await repo.getSeries(tenant, conflict.seriesId);
+    const fixtures = (series?.fixtures as ScheduleFixture[] | undefined) ?? [];
+    const i = fixtures.findIndex((f) => f?.id === conflict.fixtureId);
+    if (!series || i < 0) break;
+    const at = now();
+    const stamped: ScheduleFixture = {
+      ...fixtures[i],
+      schedule: { ...(fixtures[i].schedule ?? {}), changedAt: at },
+    };
+    try {
+      await repo.updateSeries(tenant, series.id, {
+        fixtures: fixtures.map((f, j) => (j === i ? stamped : f)),
+        version: series.version,
+      });
+    } catch (err) {
+      if (err instanceof VersionConflictError) continue;
+      throw err;
+    }
+    if (await seriesMappedForSync(repo, tenant, series, config))
+      await repo.putPendingSync(tenant, {
+        ref,
+        seriesId: series.id,
+        fixtureId: conflict.fixtureId,
+        schedule: fixtureSchedule(series, stamped, at),
+        origin: 'admin',
+        enqueuedAt: at,
+        attempts: 0,
+        ...(seriesHoldsSchedule(series) ? { heldUntilReveal: true } : {}),
+      });
+    break;
+  }
+  await repo.deleteSyncConflict(tenant, ref);
+  return c.json({ status: 'discarded' });
+});
+
+/** The `ref` and live row of an outbox action body (404 when nothing is queued for it). */
+async function outboxRowOf(c: Context<HonoEnv>, tenant: string) {
+  const ref = await conflictRefOf(c);
+  const row = (await repo.listPendingSync(tenant)).find((p) => p.ref === ref);
+  if (!row) throw new HttpError(404, 'nothing is waiting to be sent for that fixture');
+  return row;
+}
+
+/**
+ * Retry an outbox row now (the admin page offers it on a stuck row, STUCK_ATTEMPTS+ failed
+ * pushes): its attempt count restarts and the tenant's outbox is flushed right away — the
+ * same flush the cron runs. Answers what became of THIS row: `sent` (medicoach answered a
+ * success status), `failed` (with the new error, technical + plain), `held` (its series is a
+ * draft or withholds venue/time) or `dry-run` (the sync secrets are unset).
+ */
+app.post('/integrations/medicoach/outbox/retry', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const row = await outboxRowOf(c, tenant);
+  await repo.resetPendingSyncAttempts(tenant, row.ref, row.schedule.changedAt);
+  const flushed = await flushScheduleOutbox(tenant, 'manual', {
+    repo,
+    url: medicoachSyncUrl(),
+    secret: medicoachSyncSecret(),
+  });
+  const after = (await repo.listPendingSync(tenant)).find((p) => p.ref === row.ref);
+  if (!after) return c.json({ status: 'sent' });
+  if (after.heldUntilReveal) return c.json({ status: 'held' });
+  if (flushed.status === 'dry-run') return c.json({ status: 'dry-run' });
+  if (after.schedule.changedAt !== row.schedule.changedAt || !after.attempts)
+    return c.json({ status: 'queued' });
+  return c.json({
+    status: 'failed',
+    attempts: after.attempts,
+    lastError: after.lastError ?? null,
+    lastErrorText: explainSyncError(after.lastError),
+  });
+});
+
+/**
+ * Drop an outbox row: this smart-club schedule change is never sent, and medicoach keeps its
+ * own version until the fixture is next edited here. Only the snapshot the admin was shown is
+ * dropped — an edit queued meanwhile replaced the row and still goes out (409).
+ */
+app.post('/integrations/medicoach/outbox/drop', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const row = await outboxRowOf(c, tenant);
+  if (!(await repo.deletePendingSyncIfUnchanged(tenant, row.ref, row.schedule.changedAt)))
+    throw new HttpError(409, 'a newer change for that fixture was queued meanwhile; refresh');
+  return c.json({ status: 'dropped' });
+});
+
 app.post('/series/:id/clash-check', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
   const id = c.req.param('id');
@@ -4281,10 +4997,1756 @@ app.post('/series/:id/clash-check', requireAdmin, async (c) => {
   return c.json({ results });
 });
 
+// ───────────────────────── Fixture postponements (ADR 0015) ─────────────────────────
+//
+// A chair asks to move a released fixture; the clubs negotiate by counter-proposal; the agreed
+// date auto-applies to the fixture through `applySeriesPatch` (the same version + in-season clash
+// gates an admin edit passes). The union admin may override with a final date/time/venue at any
+// point — even after a chair agreement applied — and the chairs acknowledge it.
+
+const POSTPONEMENT_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+const POSTPONEMENT_TEXT_MAX = 500;
+/** Accept re-reads + re-checks + re-patches at most this many times on a series version race. */
+const POSTPONEMENT_APPLY_ATTEMPTS = 3;
+
+/** The embedded fixture fields the postponement flow reads/writes (fixtures are untyped). */
+interface PostponableFixture {
+  id?: string;
+  round?: number;
+  date?: string;
+  time?: string;
+  home?: string;
+  away?: string;
+  status?: string;
+  originalDate?: string;
+  postponementId?: string;
+  [key: string]: unknown;
+}
+
+const fixturesOf = (series: Series): PostponableFixture[] =>
+  (series.fixtures as PostponableFixture[]) ?? [];
+
+/** The club behind a fixture side: the participants snapshot, else (legacy) the id IS a clubId.
+ * A knockout slot reference (`win:f3`) has no club yet. */
+function clubIdForSide(series: Series, teamId: string | undefined): string | undefined {
+  if (!teamId || isSlotRef(teamId)) return undefined;
+  const parts = series.participants;
+  if (Array.isArray(parts) && parts.length) return parts.find((p) => p.teamId === teamId)?.clubId;
+  return teamId;
+}
+
+function postponementHttpError(
+  status: number,
+  code: string,
+  message: string,
+  extra: Record<string, unknown> = {},
+): HttpError {
+  return new HttpError(status, message, { code, ...extra });
+}
+
+/** Map the postponement repo errors to HTTP codes (throws; never returns). */
+function throwPostponementError(err: unknown): never {
+  if (err instanceof VersionConflictError)
+    throw postponementHttpError(409, 'version_conflict', 'postponement request changed; refetch');
+  if (err instanceof repo.PostponementTurnError)
+    throw postponementHttpError(409, 'not_your_turn', err.message);
+  if (err instanceof repo.PostponementClosedError)
+    throw postponementHttpError(409, 'postponement_closed', err.message);
+  if (err instanceof repo.PostponementNotFoundError)
+    throw new HttpError(404, 'postponement request not found');
+  throw err;
+}
+
+/** Optional free text (reason / note / decline reason): a string of at most 500 characters. */
+function optionalPostponementText(value: unknown, field: string): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'string' || value.length > POSTPONEMENT_TEXT_MAX)
+    throw new HttpError(400, `${field} must be a string of at most 500 characters`);
+  return value.trim() || undefined;
+}
+
+/**
+ * Validate a chair's proposed new date (+ optional kick-off). The date must be a real
+ * YYYY-MM-DD strictly after the tenant's today. A time is accepted only while the series reveals
+ * kick-off times to clubs (ADR 0011) — while withheld, chairs negotiate the date alone and the
+ * fixture keeps its (hidden) time.
+ */
+function parsePostponementProposal(
+  body: { proposedDate?: unknown; proposedTime?: unknown },
+  opts: { timeRevealed: boolean; today: string },
+): { date: string; time?: string } {
+  if (!isValidIsoDate(body.proposedDate))
+    throw new HttpError(400, 'proposedDate must be a valid YYYY-MM-DD date');
+  if (body.proposedDate <= opts.today)
+    throw new HttpError(400, 'proposedDate must be in the future');
+  const time = body.proposedTime;
+  if (time === undefined || time === null || time === '') return { date: body.proposedDate };
+  if (typeof time !== 'string' || !POSTPONEMENT_TIME_RE.test(time))
+    throw new HttpError(400, 'proposedTime must be HH:MM');
+  if (!opts.timeRevealed)
+    throw new HttpError(
+      400,
+      'kick-off times for this fixture have not been released yet — propose a date only',
+    );
+  return { date: body.proposedDate, time };
+}
+
+/**
+ * A request as a CLUB may see it: the time snapshot + proposal times are dropped while the series
+ * withholds kick-off times, and admin venue fields while it withholds venues (ADR 0011). A series
+ * the club can no longer see at all (recalled / deleted) strips both.
+ */
+function projectPostponementForClub(
+  r: PostponementRequest,
+  series: Series | null,
+  today: string,
+): PostponementRequest {
+  const visible = series ? projectSeriesForClub(series, today) : null;
+  const hideTime = !visible || isWithheld(visible, 'time');
+  const hideVenue = !visible || isWithheld(visible, 'venue');
+  if (!hideTime && !hideVenue) return r;
+  const out: PostponementRequest = {
+    ...r,
+    proposals: (r.proposals ?? []).map((p) => {
+      const q: PostponementProposal = { ...p };
+      if (hideTime) delete q.time;
+      if (hideVenue) {
+        delete q.venueId;
+        delete q.venueName;
+      }
+      return q;
+    }),
+  };
+  if (hideTime) delete out.originalTime;
+  return out;
+}
+
+/** Project a batch of requests for a club, reading each referenced series once. */
+async function projectPostponementsForClub(
+  tenant: string,
+  requests: PostponementRequest[],
+): Promise<PostponementRequest[]> {
+  const today = tenantToday();
+  const ids = [...new Set(requests.map((r) => r.seriesId))];
+  const seriesById = new Map(
+    await Promise.all(ids.map(async (id) => [id, await repo.getSeries(tenant, id)] as const)),
+  );
+  return requests.map((r) =>
+    projectPostponementForClub(r, seriesById.get(r.seriesId) ?? null, today),
+  );
+}
+
+/**
+ * Resolve a request for the acting club and say which side it is on. The canonical lives under
+ * the OPPOSING club; the requesting club holds the mirror, which names where the canonical is.
+ * The canonical is always returned (it is the source of truth).
+ */
+async function loadPostponementForClub(
+  tenant: string,
+  clubId: string,
+  reqId: string,
+): Promise<{ request: PostponementRequest; side: 'requesting' | 'opposing' }> {
+  const canonical = await repo.getPostponement(tenant, clubId, reqId);
+  if (canonical) return { request: canonical, side: 'opposing' };
+  const mirror = await repo.getOutboundPostponement(tenant, clubId, reqId);
+  if (!mirror) throw new HttpError(404, 'postponement request not found');
+  const request = await repo.getPostponement(tenant, mirror.opposingClubId, reqId);
+  if (!request) throw new HttpError(404, 'postponement request not found');
+  return { request, side: 'requesting' };
+}
+
+type PostponementNoticeKind =
+  | 'postponement-request'
+  | 'postponement-counter'
+  | 'postponement-agreed'
+  | 'postponement-admin-final'
+  | 'postponement-declined'
+  | 'postponement-withdrawn';
+
+/**
+ * Best-effort chair notices for a postponement transition. Email only, never throws — a notify
+ * fault must not fail the write that already committed. Copy only carries a kick-off time / venue
+ * the series reveals to clubs (ADR 0011). Each recipient club's results append to THAT club's comm
+ * log with a version-suffixed idempotency key.
+ */
+async function notifyPostponement(
+  tenant: string,
+  request: PostponementRequest,
+  kind: PostponementNoticeKind,
+  by: string,
+  recipients: Array<'requesting' | 'opposing'>,
+): Promise<void> {
+  try {
+    const [series, requestingClub, opposingClub] = await Promise.all([
+      repo.getSeries(tenant, request.seriesId),
+      repo.getClub(tenant, request.requestingClubId),
+      repo.getClub(tenant, request.opposingClubId),
+    ]);
+    const clubsById = new Map(
+      [requestingClub, opposingClub].filter((cl): cl is Club => !!cl).map((cl) => [cl.id, cl]),
+    );
+    const visible = series ? projectSeriesForClub(series, tenantToday()) : null;
+    const showTime = !!visible && !isWithheld(visible, 'time');
+    const showVenue = !!visible && !isWithheld(visible, 'venue');
+    const fixture = series ? fixturesOf(series).find((f) => f.id === request.fixtureId) : undefined;
+    const fixtureLabel =
+      series && fixture
+        ? `${resolveTeam(series, fixture.home ?? '', clubsById).name} v ${resolveTeam(series, fixture.away ?? '', clubsById).name} · ${series.name}`
+        : 'your fixture';
+    const t = (time: string | undefined) => (showTime ? time : undefined);
+    const current = request.proposals[request.proposals.length - 1];
+    const base = {
+      fixtureLabel,
+      originalDate: request.originalDate,
+      originalTime: t(request.originalTime),
+    };
+    const nameOf = (side: 'requesting' | 'opposing') =>
+      (side === 'requesting' ? requestingClub : opposingClub)?.name ?? 'The other club';
+    for (const side of recipients) {
+      const club = side === 'requesting' ? requestingClub : opposingClub;
+      if (!club) continue;
+      const chair = chairContactOf(club);
+      let results: SendResult[];
+      if (kind === 'postponement-request') {
+        ({ results } = await notifyPostponementOpened({
+          chair,
+          ...base,
+          requestingClubName: nameOf('requesting'),
+          proposedDate: current.date,
+          proposedTime: t(current.time),
+          ...(request.reason ? { reason: request.reason } : {}),
+        }));
+      } else if (kind === 'postponement-counter') {
+        ({ results } = await notifyPostponementCountered({
+          chair,
+          ...base,
+          counteringClubName: nameOf(current.by === 'requesting' ? 'requesting' : 'opposing'),
+          proposedDate: current.date,
+          proposedTime: t(current.time),
+          ...(current.note ? { note: current.note } : {}),
+        }));
+      } else if (kind === 'postponement-agreed' || kind === 'postponement-admin-final') {
+        // The fixture was re-read AFTER the apply, so its time is the one now in force (a
+        // proposal without a time kept the existing kick-off).
+        const newTime = t(fixture?.time ?? current.time);
+        ({ results } =
+          kind === 'postponement-agreed'
+            ? await notifyPostponementResolved({
+                chair,
+                outcome: 'agreed',
+                ...base,
+                newDate: current.date,
+                newTime,
+              })
+            : await notifyPostponementResolved({
+                chair,
+                outcome: 'admin-final',
+                ...base,
+                newDate: current.date,
+                newTime,
+                ...(showVenue && current.venueName ? { venueName: current.venueName } : {}),
+              }));
+      } else {
+        const outcome = kind === 'postponement-declined' ? 'declined' : 'withdrawn';
+        ({ results } = await notifyPostponementResolved({
+          chair,
+          outcome,
+          ...base,
+          actingClubName: nameOf(outcome === 'declined' ? 'opposing' : 'requesting'),
+          ...(request.declineReason ? { reason: request.declineReason } : {}),
+        }));
+      }
+      await repo.appendClubCommEvents(
+        tenant,
+        club.id,
+        results.map((r) => ({
+          id: randomUUID(),
+          channel: r.channel,
+          ...(r.to ? { to: r.to } : {}),
+          status: r.status,
+          ...(r.messageId ? { messageId: r.messageId } : {}),
+          ...(r.error ? { error: r.error } : {}),
+          at: now(),
+          by,
+          idempotencyKey: `postpone-${request.id}-${kind}-v${request.version}-email`,
+          kind,
+        })),
+      );
+    }
+  } catch (err) {
+    console.error(`postponement ${kind} notice failed`, err);
+  }
+}
+
+/**
+ * The fixture as a postponement leaves it: new date (and time, when the proposal names one),
+ * `status: 'postponed'`, the request id, and `originalDate` written ONLY IF ABSENT — a fixture
+ * moved twice keeps pointing at its first schedule. Venue fields only on an admin ruling: a
+ * registry venue sets the allocation (id/name/coords) and clears any free-text override; a
+ * free-text ground clears the allocation and becomes the override — the same projection the
+ * admin fixture editor writes.
+ */
+function postponedFixture(
+  fixture: PostponableFixture,
+  requestId: string,
+  move: { date: string; time?: string; venue?: Venue; venueName?: string },
+): PostponableFixture {
+  const next: PostponableFixture = {
+    ...fixture,
+    date: move.date,
+    ...(move.time ? { time: move.time } : {}),
+    status: 'postponed',
+    originalDate: fixture.originalDate ?? fixture.date,
+    postponementId: requestId,
+  };
+  if (move.venue) {
+    next.venueId = move.venue.id;
+    next.venueName = move.venue.name;
+    next.venueLat = move.venue.lat;
+    next.venueLon = move.venue.lon;
+    next.venueOverride = '';
+  } else if (move.venueName) {
+    next.venueId = undefined;
+    next.venueName = '';
+    next.venueLat = undefined;
+    next.venueLon = undefined;
+    next.venueOverride = move.venueName;
+  }
+  return next;
+}
+
+/** True when the fixture already carries this request's agreed move (a prior accept's patch
+ * landed but its terminalize did not) — accept then skips the patch and just terminalizes. */
+function fixtureCarriesPostponement(
+  fixture: PostponableFixture,
+  requestId: string,
+  proposal: PostponementProposal,
+): boolean {
+  return (
+    fixture.postponementId === requestId &&
+    fixture.status === 'postponed' &&
+    fixture.date === proposal.date &&
+    (proposal.time === undefined || fixture.time === proposal.time)
+  );
+}
+
+/** A team-busy hit as the 409 body reports it: which side, plus the booking it collides with. */
+interface TeamBusyConflict {
+  side: 'home' | 'away';
+  team: string;
+  date: string;
+  /** Absent in a club-facing body when the colliding series is not visible to clubs. */
+  with?: { seriesId: string; seriesName?: string; fixtureId: string };
+}
+
+/**
+ * The accept path's pre-apply checks for one moved fixture: introduced GROUND clashes (the same
+ * subset rule + clash identity as the in-season gate and `clash-check`, restricted to clashes the
+ * moved fixture is party to) and TEAM-BUSY (either side already plays that day/slot in any
+ * released series — something no ground gate catches). Returns the raw findings; the caller
+ * decides how much of them a club may see.
+ */
+async function postponementConflicts(
+  tenant: string,
+  series: Series,
+  moved: PostponableFixture,
+): Promise<{ clashes: Clash[]; teamBusy: TeamBusyConflict[]; allSeries: Series[] }> {
+  const [allSeries, clubs, venues, aliases] = await Promise.all([
+    repo.listSeries(tenant),
+    repo.listClubs(tenant),
+    repo.listVenues(tenant),
+    repo.getTenantConfig(tenant).then(venueAliasesFor),
+  ]);
+  const subject = {
+    ...series,
+    fixtures: fixturesOf(series).map((f) => (f.id === moved.id ? moved : f)),
+  } as Series;
+  const before = new Set(
+    findClashes(series, allSeries, clubs, venues, aliases).map((cl) => clashKey(cl, aliases)),
+  );
+  const clashes = findClashes(subject, allSeries, clubs, venues, aliases)
+    .filter(
+      (cl) =>
+        cl.fixtureId === moved.id ||
+        (cl.with.seriesId === series.id && cl.with.fixtureId === moved.id),
+    )
+    .filter((cl) => !before.has(clashKey(cl, aliases)));
+  const released = allSeries.filter((s) => s.released === true);
+  const busy = findTeamBusy(
+    released,
+    { seriesId: series.id, fixtureId: moved.id ?? '', home: moved.home, away: moved.away },
+    moved.date!,
+    moved.time,
+  );
+  const clubsById = new Map(clubs.map((cl) => [cl.id, cl]));
+  const seriesById = new Map(allSeries.map((s) => [s.id, s]));
+  const teamBusy: TeamBusyConflict[] = (
+    [
+      ['home', busy.home],
+      ['away', busy.away],
+    ] as Array<['home' | 'away', TeamBusyHit | undefined]>
+  )
+    .filter((entry): entry is ['home' | 'away', TeamBusyHit] => !!entry[1])
+    .map(([side, hit]) => ({
+      side,
+      team: resolveTeam(series, hit.teamId, clubsById).name,
+      date: hit.date,
+      with: {
+        seriesId: hit.seriesId,
+        seriesName: seriesById.get(hit.seriesId)?.name,
+        fixtureId: hit.fixtureId,
+      },
+    }));
+  return { clashes, teamBusy, allSeries };
+}
+
+/**
+ * What a CLUB may see of a ground clash: the date, and the other fixture only when its series is
+ * visible to clubs; the ground only when neither side's venue is withheld; the time only when the
+ * moved fixture's series reveals times. A clash against a draft / withheld booking still refuses
+ * the move (the gate must hold) but names nothing the club cannot already see (ADR 0011).
+ */
+function clashesForClub(
+  clashes: Clash[],
+  series: Series,
+  allSeries: Series[],
+): Array<
+  Pick<Clash, 'fixtureId' | 'date'> & {
+    time?: string;
+    ground?: string;
+    with?: Clash['with'];
+  }
+> {
+  const today = tenantToday();
+  const visibleById = new Map(
+    allSeries
+      .map((s) => projectSeriesForClub(s, today))
+      .filter((s): s is Series => s !== null)
+      .map((s) => [s.id, s]),
+  );
+  const ownVenueShown = !isWithheld(series, 'venue');
+  const ownTimeShown = !isWithheld(series, 'time');
+  return clashes.map((cl) => {
+    const other = visibleById.get(cl.with.seriesId);
+    const otherVenueShown = !!other && !isWithheld(other, 'venue');
+    return {
+      fixtureId: cl.fixtureId,
+      date: cl.date,
+      ...(ownTimeShown && cl.time ? { time: cl.time } : {}),
+      ...(ownVenueShown && otherVenueShown ? { ground: cl.ground } : {}),
+      ...(other ? { with: cl.with } : {}),
+    };
+  });
+}
+
+/** Team-busy conflicts as a CLUB may see them: the colliding booking only when its series is
+ * visible to clubs (a released-but-not-yet-active series stays unnamed). */
+function teamBusyForClub(teamBusy: TeamBusyConflict[], allSeries: Series[]): TeamBusyConflict[] {
+  const today = tenantToday();
+  const visible = new Set(
+    allSeries.filter((s) => projectSeriesForClub(s, today) !== null).map((s) => s.id),
+  );
+  return teamBusy.map((t) => {
+    if (t.with && visible.has(t.with.seriesId)) return t;
+    const { with: _hidden, ...rest } = t;
+    return rest;
+  });
+}
+
+/** `applySeriesPatch`'s plain concurrency 409 (as opposed to its structured clash 409). */
+const isSeriesVersionConflict = (err: unknown): boolean =>
+  err instanceof HttpError &&
+  err.status === 409 &&
+  err.details?.code === undefined &&
+  err.message === 'series changed; refetch';
+
+/**
+ * Apply a chair-agreed proposal to its fixture. Every attempt re-reads the series and re-runs
+ * the full check chain before patching — never a stale patch:
+ *  1. series still released + visible, fixture still present;
+ *  2. idempotency: the fixture already carries this move → done (terminalize only);
+ *  3. baseline: the fixture's date (and time, when it was snapshotted) still match the request's
+ *     snapshot — else an admin edit / re-import superseded the request → 409 `fixture_changed`;
+ *  4. introduced ground clash or team-busy → 409 `venue_clash` (the request stays open);
+ *  5. patch via `applySeriesPatch` pinned to the version read in (1). A version 409 loops back to
+ *     (1); a clash 409 from its own gate is re-shaped for the club and thrown.
+ */
+async function applyAgreedPostponement(
+  tenant: string,
+  request: PostponementRequest,
+  proposal: PostponementProposal,
+  actor: string,
+  opts: { forClub: boolean },
+): Promise<void> {
+  for (let attempt = 0; attempt < POSTPONEMENT_APPLY_ATTEMPTS; attempt++) {
+    const series = await repo.getSeries(tenant, request.seriesId);
+    if (!series || !projectSeriesForClub(series, tenantToday()))
+      throw postponementHttpError(
+        409,
+        'fixture_changed',
+        'this fixture is no longer published — withdraw the request or ask the union office',
+      );
+    const fixture = fixturesOf(series).find((f) => f.id === request.fixtureId);
+    if (!fixture)
+      throw postponementHttpError(
+        409,
+        'fixture_changed',
+        'this fixture no longer exists — withdraw the request or ask the union office',
+      );
+    if (fixtureCarriesPostponement(fixture, request.id, proposal)) return;
+    if (
+      fixture.date !== request.originalDate ||
+      (request.originalTime !== undefined && fixture.time !== request.originalTime)
+    )
+      throw postponementHttpError(
+        409,
+        'fixture_changed',
+        'the fixture was rescheduled since this request opened — withdraw it and open a new one',
+      );
+    const moved = postponedFixture(fixture, request.id, {
+      date: proposal.date,
+      ...(proposal.time ? { time: proposal.time } : {}),
+    });
+    const { clashes, teamBusy, allSeries } = await postponementConflicts(tenant, series, moved);
+    if (clashes.length || teamBusy.length)
+      throw postponementHttpError(
+        409,
+        'venue_clash',
+        'that date clashes with another fixture — propose a different date, or ask the union office',
+        opts.forClub
+          ? {
+              clashes: clashesForClub(clashes, series, allSeries),
+              teamBusy: teamBusyForClub(teamBusy, allSeries),
+            }
+          : { clashes, teamBusy },
+      );
+    try {
+      await applySeriesPatch(
+        tenant,
+        series.id,
+        {
+          fixtures: fixturesOf(series).map((f) => (f.id === moved.id ? moved : f)),
+          version: series.version,
+        },
+        actor,
+      );
+      return;
+    } catch (err) {
+      if (isSeriesVersionConflict(err)) continue;
+      if (err instanceof HttpError && err.details?.code === 'venue_clash' && opts.forClub) {
+        throw postponementHttpError(409, 'venue_clash', err.message, {
+          clashes: clashesForClub(
+            (err.details.clashes as Clash[]) ?? [],
+            series,
+            await repo.listSeries(tenant),
+          ),
+          teamBusy: [],
+        });
+      }
+      throw err;
+    }
+  }
+  throw postponementHttpError(
+    409,
+    'version_conflict',
+    'the fixture list kept changing while applying the new date — try again',
+  );
+}
+
+/**
+ * Open a postponement request. The requesting club must play in the fixture; the opposing club
+ * is DERIVED from the fixture (never taken from the body). The series must be released and
+ * active for clubs; the fixture must not be cancelled or already played. One open request per
+ * fixture — checked in both clubs' partitions (409 `postponement_exists`).
+ */
+app.post('/clubs/:id/postponements', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const clubId = c.req.param('id');
+  assertClubAccess(ra, clubId);
+  const body = await c.req.json<{
+    seriesId?: unknown;
+    fixtureId?: unknown;
+    proposedDate?: unknown;
+    proposedTime?: unknown;
+    reason?: unknown;
+  }>();
+  if (typeof body.seriesId !== 'string' || !body.seriesId)
+    throw new HttpError(400, 'seriesId is required');
+  if (typeof body.fixtureId !== 'string' || !body.fixtureId)
+    throw new HttpError(400, 'fixtureId is required');
+  const reason = optionalPostponementText(body.reason, 'reason');
+  const today = tenantToday();
+  const series = await repo.getSeries(ra.tenant, body.seriesId);
+  // Unreleased / not-yet-active series 404 exactly like a missing one — no existence leak.
+  if (!series || !projectSeriesForClub(series, today))
+    throw new HttpError(404, 'fixture not found');
+  const fixture = fixturesOf(series).find((f) => f.id === body.fixtureId);
+  if (!fixture) throw new HttpError(404, 'fixture not found');
+  const homeClubId = clubIdForSide(series, fixture.home);
+  const awayClubId = clubIdForSide(series, fixture.away);
+  if (homeClubId !== clubId && awayClubId !== clubId)
+    throw new HttpError(403, 'your club does not play in this fixture');
+  const opposingClubId = homeClubId === clubId ? awayClubId : homeClubId;
+  if (!opposingClubId || opposingClubId === clubId)
+    throw new HttpError(400, 'this fixture has no opposing club to agree a new date with');
+  if (fixture.status === 'cancelled')
+    throw postponementHttpError(409, 'fixture_cancelled', 'this fixture has been cancelled');
+  if (!fixture.date || fixture.date < today)
+    throw postponementHttpError(409, 'fixture_past', 'only an upcoming fixture can be postponed');
+  const timeRevealed = !isWithheld(series, 'time');
+  const proposed = parsePostponementProposal(body, { timeRevealed, today });
+  if (proposed.date === fixture.date && (proposed.time ?? fixture.time) === fixture.time)
+    throw new HttpError(400, 'the proposed date is the fixture’s current date');
+
+  const [mine, theirs] = await Promise.all([
+    repo.listPostponementsForClub(ra.tenant, clubId),
+    repo.listPostponementsForClub(ra.tenant, opposingClubId),
+  ]);
+  const open = [...mine.inbound, ...mine.outbound, ...theirs.inbound, ...theirs.outbound].some(
+    (r) => r.status === 'open' && r.seriesId === series.id && r.fixtureId === fixture.id,
+  );
+  if (open)
+    throw postponementHttpError(
+      409,
+      'postponement_exists',
+      'a postponement request for this fixture is already open',
+    );
+
+  const at = now();
+  const request: PostponementRequest = {
+    id: randomUUID(),
+    seriesId: series.id,
+    fixtureId: body.fixtureId,
+    requestingClubId: clubId,
+    opposingClubId,
+    originalDate: fixture.date,
+    // Snapshot the kick-off only while it is visible to clubs — the request is club-facing.
+    ...(timeRevealed && fixture.time ? { originalTime: fixture.time } : {}),
+    ...(reason ? { reason } : {}),
+    proposals: [
+      {
+        by: 'requesting',
+        date: proposed.date,
+        ...(proposed.time ? { time: proposed.time } : {}),
+        at,
+        byUser: ra.email,
+      },
+    ],
+    awaiting: 'opposing',
+    status: 'open',
+    requestedAt: at,
+    requestedBy: ra.email,
+    version: 0,
+  };
+  await repo.createPostponementRequest(ra.tenant, request);
+  await notifyPostponement(ra.tenant, request, 'postponement-request', ra.email, ['opposing']);
+  return c.json(projectPostponementForClub(request, series, today), 201);
+});
+
+/** A club's postponement requests: inbound (canonical — it is opposing) + outbound (mirror). */
+app.get('/clubs/:id/postponements', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  assertClubAccess(ra, id);
+  const { inbound, outbound } = await repo.listPostponementsForClub(ra.tenant, id);
+  const [inboundOut, outboundOut] = await Promise.all([
+    projectPostponementsForClub(ra.tenant, inbound),
+    projectPostponementsForClub(ra.tenant, outbound),
+  ]);
+  return c.json({ inbound: inboundOut, outbound: outboundOut });
+});
+
+/** The awaited side proposes a different date (409 `not_your_turn` / `version_conflict`). */
+app.post('/clubs/:id/postponements/:reqId/counter', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const reqId = c.req.param('reqId');
+  assertClubAccess(ra, id);
+  const body = await c.req.json<{
+    proposedDate?: unknown;
+    proposedTime?: unknown;
+    note?: unknown;
+    version?: number;
+  }>();
+  const note = optionalPostponementText(body.note, 'note');
+  const { request, side } = await loadPostponementForClub(ra.tenant, id, reqId);
+  if (request.status !== 'open')
+    throw postponementHttpError(
+      409,
+      'postponement_closed',
+      'postponement request is no longer open',
+    );
+  if (request.awaiting !== side)
+    throw postponementHttpError(409, 'not_your_turn', 'it is not your turn to respond');
+  const today = tenantToday();
+  const series = await repo.getSeries(ra.tenant, request.seriesId);
+  const proposed = parsePostponementProposal(body, {
+    timeRevealed: !!series && !isWithheld(series, 'time'),
+    today,
+  });
+  try {
+    const updated = await repo.counterPostponement(ra.tenant, request.opposingClubId, reqId, {
+      side,
+      proposal: {
+        by: side,
+        date: proposed.date,
+        ...(proposed.time ? { time: proposed.time } : {}),
+        ...(note ? { note } : {}),
+        at: now(),
+        byUser: ra.email,
+      },
+      expectedVersion: body.version,
+    });
+    await notifyPostponement(ra.tenant, updated, 'postponement-counter', ra.email, [
+      side === 'requesting' ? 'opposing' : 'requesting',
+    ]);
+    return c.json(projectPostponementForClub(updated, series, today));
+  } catch (err) {
+    throwPostponementError(err);
+  }
+});
+
+/**
+ * The awaited side accepts the proposal on the table: the new date applies to the fixture
+ * (`applyAgreedPostponement` — baseline, clash and team-busy checks, then `applySeriesPatch`) and
+ * the request becomes `applied`. A clash keeps the request OPEN (409 `venue_clash`).
+ */
+app.post('/clubs/:id/postponements/:reqId/accept', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const reqId = c.req.param('reqId');
+  assertClubAccess(ra, id);
+  const body = await c.req.json<{ version?: number }>().catch(() => ({}) as { version?: number });
+  const { request, side } = await loadPostponementForClub(ra.tenant, id, reqId);
+  if (request.status !== 'open')
+    throw postponementHttpError(
+      409,
+      'postponement_closed',
+      'postponement request is no longer open',
+    );
+  if (request.awaiting !== side)
+    throw postponementHttpError(409, 'not_your_turn', 'it is not your turn to respond');
+  // Pin the caller's view BEFORE touching the fixture: accepting a proposal the caller never saw
+  // (the other side countered meanwhile) must not move the match.
+  if (body.version !== undefined && body.version !== request.version)
+    throw postponementHttpError(409, 'version_conflict', 'postponement request changed; refetch');
+  const proposal = request.proposals[request.proposals.length - 1];
+  await applyAgreedPostponement(ra.tenant, request, proposal, ra.email, { forClub: true });
+  try {
+    const updated = await repo.resolvePostponement(ra.tenant, request.opposingClubId, reqId, {
+      status: 'applied',
+      at: now(),
+      by: ra.email,
+      via: ra.membership.role === 'admin' ? 'admin' : 'portal',
+      expectedVersion: request.version,
+    });
+    await notifyPostponement(ra.tenant, updated, 'postponement-agreed', ra.email, [
+      'requesting',
+      'opposing',
+    ]);
+    return c.json(
+      projectPostponementForClub(
+        updated,
+        await repo.getSeries(ra.tenant, updated.seriesId),
+        tenantToday(),
+      ),
+    );
+  } catch (err) {
+    throwPostponementError(err);
+  }
+});
+
+/** Terminal decline (opposing side) / withdraw (requesting side); notifies the counterpart. */
+async function closePostponement(
+  c: Context<HonoEnv>,
+  outcome: 'declined' | 'withdrawn',
+): Promise<Response> {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id')!;
+  const reqId = c.req.param('reqId')!;
+  assertClubAccess(ra, id);
+  const body = await c.req
+    .json<{ declineReason?: unknown; version?: number }>()
+    .catch(() => ({}) as { declineReason?: unknown; version?: number });
+  const declineReason =
+    outcome === 'declined'
+      ? optionalPostponementText(body.declineReason, 'declineReason')
+      : undefined;
+  const { request, side } = await loadPostponementForClub(ra.tenant, id, reqId);
+  const allowed = outcome === 'declined' ? 'opposing' : 'requesting';
+  if (side !== allowed)
+    throw new HttpError(
+      403,
+      outcome === 'declined'
+        ? 'only the club asked to agree can decline a postponement'
+        : 'only the club that opened a postponement can withdraw it',
+    );
+  if (request.status !== 'open')
+    throw postponementHttpError(
+      409,
+      'postponement_closed',
+      'postponement request is no longer open',
+    );
+  try {
+    const updated = await repo.resolvePostponement(ra.tenant, request.opposingClubId, reqId, {
+      status: outcome,
+      at: now(),
+      by: ra.email,
+      via: ra.membership.role === 'admin' ? 'admin' : 'portal',
+      ...(declineReason ? { declineReason } : {}),
+      expectedVersion: body.version,
+    });
+    await notifyPostponement(
+      ra.tenant,
+      updated,
+      outcome === 'declined' ? 'postponement-declined' : 'postponement-withdrawn',
+      ra.email,
+      [outcome === 'declined' ? 'requesting' : 'opposing'],
+    );
+    return c.json(
+      projectPostponementForClub(
+        updated,
+        await repo.getSeries(ra.tenant, updated.seriesId),
+        tenantToday(),
+      ),
+    );
+  } catch (err) {
+    throwPostponementError(err);
+  }
+}
+
+app.post('/clubs/:id/postponements/:reqId/withdraw', (c) => closePostponement(c, 'withdrawn'));
+app.post('/clubs/:id/postponements/:reqId/decline', (c) => closePostponement(c, 'declined'));
+
+/** Either club records its acknowledgement of an admin-final ruling (idempotent per club). */
+app.post('/clubs/:id/postponements/:reqId/acknowledge', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const reqId = c.req.param('reqId');
+  assertClubAccess(ra, id);
+  const body = await c.req.json<{ version?: number }>().catch(() => ({}) as { version?: number });
+  const { request } = await loadPostponementForClub(ra.tenant, id, reqId);
+  try {
+    const updated = await repo.acknowledgePostponement(ra.tenant, request.opposingClubId, reqId, {
+      clubId: id,
+      at: now(),
+      by: ra.email,
+      expectedVersion: body.version,
+    });
+    return c.json(
+      projectPostponementForClub(
+        updated,
+        await repo.getSeries(ra.tenant, updated.seriesId),
+        tenantToday(),
+      ),
+    );
+  } catch (err) {
+    throwPostponementError(err);
+  }
+});
+
+const POSTPONEMENT_STATUSES: PostponementRequest['status'][] = [
+  'open',
+  'applied',
+  'admin-final',
+  'declined',
+  'withdrawn',
+];
+
+/** Every postponement request in the tenant (newest first), optionally `?status=` filtered. */
+app.get('/admin/postponements', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const status = c.req.query('status');
+  if (
+    status !== undefined &&
+    !POSTPONEMENT_STATUSES.includes(status as PostponementRequest['status'])
+  )
+    throw new HttpError(400, `status must be one of ${POSTPONEMENT_STATUSES.join(', ')}`);
+  const all = await repo.listPostponementsForTenant(tenant);
+  return c.json(
+    all
+      .filter((r) => !status || r.status === status)
+      .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt)),
+  );
+});
+
+/**
+ * The union office sets the final date (+ optional time / venue) for a request's fixture —
+ * whether the request is open, already applied by chair agreement, previously ruled on, or was
+ * declined. Applied through `applySeriesPatch` (the standard version + in-season clash gate; its
+ * 409 with the full `clashes` list surfaces to the admin as-is). The request becomes
+ * `admin-final` with the ruling appended as a `by: 'admin'` proposal; both chairs are notified and
+ * asked to acknowledge. `originalDate` on the fixture is only-if-absent, so it keeps pointing at
+ * the original schedule however many times the match moves.
+ */
+app.post('/admin/postponements/:reqId/override', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const reqId = c.req.param('reqId');
+  const body = await c.req.json<{
+    date?: unknown;
+    time?: unknown;
+    venueId?: unknown;
+    venueName?: unknown;
+    note?: unknown;
+    version?: number;
+  }>();
+  if (!isValidIsoDate(body.date)) throw new HttpError(400, 'date must be a valid YYYY-MM-DD date');
+  const date = body.date;
+  let time: string | undefined;
+  if (body.time !== undefined && body.time !== null && body.time !== '') {
+    if (typeof body.time !== 'string' || !POSTPONEMENT_TIME_RE.test(body.time))
+      throw new HttpError(400, 'time must be HH:MM');
+    time = body.time;
+  }
+  let venue: Venue | undefined;
+  if (body.venueId !== undefined && body.venueId !== null && body.venueId !== '') {
+    if (typeof body.venueId !== 'string') throw new HttpError(400, 'venueId must be a string');
+    venue = (await repo.listVenues(ra.tenant)).find((v) => v.id === body.venueId);
+    if (!venue) throw new HttpError(400, 'venueId does not name a venue in the ground list');
+  }
+  let venueName: string | undefined;
+  if (!venue && body.venueName !== undefined && body.venueName !== null && body.venueName !== '') {
+    if (typeof body.venueName !== 'string' || body.venueName.trim().length > 120)
+      throw new HttpError(400, 'venueName must be a string of at most 120 characters');
+    venueName = body.venueName.trim() || undefined;
+  }
+  const note = optionalPostponementText(body.note, 'note');
+
+  const request = (await repo.listPostponementsForTenant(ra.tenant)).find((r) => r.id === reqId);
+  if (!request) throw new HttpError(404, 'postponement request not found');
+  if (request.status === 'withdrawn')
+    throw postponementHttpError(
+      409,
+      'postponement_closed',
+      'a withdrawn request cannot be ruled on',
+    );
+  if (body.version !== undefined && body.version !== request.version)
+    throw postponementHttpError(409, 'version_conflict', 'postponement request changed; refetch');
+  const series = await repo.getSeries(ra.tenant, request.seriesId);
+  if (!series) throw postponementHttpError(409, 'fixture_changed', 'the series no longer exists');
+  const fixture = fixturesOf(series).find((f) => f.id === request.fixtureId);
+  if (!fixture) throw postponementHttpError(409, 'fixture_changed', 'the fixture no longer exists');
+  const moved = postponedFixture(fixture, request.id, {
+    date,
+    ...(time ? { time } : {}),
+    ...(venue ? { venue } : {}),
+    ...(venueName ? { venueName } : {}),
+  });
+  await applySeriesPatch(
+    ra.tenant,
+    series.id,
+    {
+      fixtures: fixturesOf(series).map((f) => (f.id === moved.id ? moved : f)),
+      version: series.version,
+    },
+    ra.email,
+  );
+  try {
+    const updated = await repo.resolvePostponement(ra.tenant, request.opposingClubId, reqId, {
+      status: 'admin-final',
+      at: now(),
+      by: ra.email,
+      via: 'admin',
+      proposal: {
+        by: 'admin',
+        date,
+        ...(time ? { time } : {}),
+        ...(venue ? { venueId: venue.id, venueName: venue.name } : {}),
+        ...(venueName ? { venueName } : {}),
+        ...(note ? { note } : {}),
+        at: now(),
+        byUser: ra.email,
+      },
+      fromStatuses: ['open', 'applied', 'admin-final', 'declined'],
+      expectedVersion: request.version,
+    });
+    await notifyPostponement(ra.tenant, updated, 'postponement-admin-final', ra.email, [
+      'requesting',
+      'opposing',
+    ]);
+    return c.json(updated);
+  } catch (err) {
+    throwPostponementError(err);
+  }
+});
+
+/**
+ * Rep-safe clash hints for the postponement date picker: per candidate move
+ * `{ seriesId, fixtureId, date, time? }` (1–20, the club's OWN fixtures in series it can see), three
+ * COARSE booleans — never the clashing fixture, ground or time:
+ *  - `groundBusy`: the fixture's ground is already booked at that date/slot. Computed ONLY over
+ *    fixtures whose venue is revealed to clubs: a busy signal derived from a withheld-venue fixture
+ *    would leak pre-reveal occupancy (ADR 0011), so withheld-venue series never book the ledger, and
+ *    a candidate in a withheld-venue series reports `false` (its own ground is not known to the
+ *    club).
+ *  - `homeTeamBusy` / `awayTeamBusy`: that side already plays that day (slot) in any series the club
+ *    can see — dates are never withheld. Withheld kick-off times are stripped first, so such
+ *    bookings own the whole day (conservative, and no hidden time leaks through slot matching).
+ * Everything is computed from the club-facing projection of released + active series only: drafts,
+ * unreleased series and future `activateFrom` series never influence a hint.
+ */
+app.post('/clubs/:id/clash-hints', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const clubId = c.req.param('id');
+  assertClubAccess(ra, clubId);
+  const body = (await c.req.json()) as { candidates?: unknown };
+  const candidates = body.candidates;
+  if (!Array.isArray(candidates) || candidates.length < 1 || candidates.length > 20)
+    throw new HttpError(400, 'candidates must be an array of 1–20 moves');
+  for (const cand of candidates) {
+    const rec = (cand ?? {}) as Record<string, unknown>;
+    if (typeof rec.seriesId !== 'string' || typeof rec.fixtureId !== 'string')
+      throw new HttpError(400, 'each candidate needs a string seriesId and fixtureId');
+    if (!isValidIsoDate(rec.date))
+      throw new HttpError(400, 'each candidate needs a valid YYYY-MM-DD date');
+    if (rec.time != null && (typeof rec.time !== 'string' || !POSTPONEMENT_TIME_RE.test(rec.time)))
+      throw new HttpError(400, 'candidate time must be HH:MM');
+  }
+  const today = tenantToday();
+  const [allSeries, clubs, venues, aliases] = await Promise.all([
+    repo.listSeries(ra.tenant),
+    repo.listClubs(ra.tenant),
+    repo.listVenues(ra.tenant),
+    repo.getTenantConfig(ra.tenant).then(venueAliasesFor),
+  ]);
+  const visible = allSeries
+    .map((s) => projectSeriesForClub(s, today))
+    .filter((s): s is Series => s !== null);
+  const visibleById = new Map(visible.map((s) => [s.id, s]));
+  const venueRevealed = visible.filter((s) => !isWithheld(s, 'venue'));
+  const results = (
+    candidates as Array<{ seriesId: string; fixtureId: string; date: string; time?: string }>
+  ).map((cand) => {
+    const s = visibleById.get(cand.seriesId);
+    const f = s ? fixturesOf(s).find((x) => x.id === cand.fixtureId) : undefined;
+    // Same 404 for missing, unreleased and not-yet-active — no existence leak.
+    if (!s || !f) throw new HttpError(404, 'fixture not found');
+    if (clubIdForSide(s, f.home) !== clubId && clubIdForSide(s, f.away) !== clubId)
+      throw new HttpError(403, 'your club does not play in this fixture');
+    // Same semantics as a proposal: no time keeps the fixture's current kick-off. A withheld time
+    // is never part of the question (the projection already dropped the fixture's own).
+    const time = isWithheld(s, 'time') ? undefined : (cand.time ?? f.time);
+    const moved: PostponableFixture = { ...f, date: cand.date };
+    if (time) moved.time = time;
+    else delete moved.time;
+    let groundBusy = false;
+    if (!isWithheld(s, 'venue')) {
+      const subject = {
+        ...s,
+        fixtures: fixturesOf(s).map((x) => (x.id === f.id ? moved : x)),
+      } as Series;
+      groundBusy = findClashes(subject, venueRevealed, clubs, venues, aliases).some(
+        (cl) => cl.fixtureId === f.id || (cl.with.seriesId === s.id && cl.with.fixtureId === f.id),
+      );
+    }
+    const busy = findTeamBusy(
+      visible,
+      { seriesId: s.id, fixtureId: f.id ?? '', home: f.home, away: f.away },
+      cand.date,
+      time,
+    );
+    return { groundBusy, homeTeamBusy: !!busy.home, awayTeamBusy: !!busy.away };
+  });
+  return c.json({ results });
+});
+
 app.delete('/series/:id', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
   await repo.deleteSeries(tenant, c.req.param('id'));
+  // Its fixtures' umpire appointments go with it, and so does its medicoach-sync state
+  // (results, outbox rows, held conflicts, report markers); pending captain's reports are
+  // voided (ADR 0016).
+  await repo.deleteFixtureOfficialsForSeries(tenant, c.req.param('id'));
+  await repo.deleteSeriesSyncState(tenant, c.req.param('id'));
   return c.json({ ok: true });
+});
+
+/* ─── Umpire allocation ───
+   A tenant umpire registry plus per-fixture appointments. Appointments are their own
+   FIXOFFICIALS# items, so writing them never touches the Series item: no version bump, no
+   approval reset, no clash gate. Contacts (phone/email) are admin-only. */
+
+/**
+ * Appoint a fixture's officials: up to two umpires and an optional referee, by registry
+ * id. An empty body (`{ umpires: [] }`) clears the appointment.
+ */
+app.put('/series/:id/fixtures/:fixtureId/officials', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const seriesId = c.req.param('id');
+  const fixtureId = c.req.param('fixtureId');
+  const input = parseOfficialsInput(await c.req.json().catch(() => null));
+  const series = await repo.getSeries(ra.tenant, seriesId);
+  if (!series) throw new HttpError(404, 'series not found');
+  const fixtures = (series.fixtures ?? []) as Array<{ id?: unknown }>;
+  if (!fixtures.some((f) => f.id === fixtureId)) throw new HttpError(404, 'fixture not found');
+  const registry = new Map((await repo.listUmpires(ra.tenant)).map((u) => [u.id, u]));
+  const ref = (umpireId: string) => {
+    const u = registry.get(umpireId);
+    if (!u) throw new HttpError(400, `unknown umpire ${umpireId}`);
+    if (!u.active) throw new HttpError(400, `${u.displayName} is no longer active`);
+    return { umpireId, name: u.displayName };
+  };
+  const officials = {
+    umpires: input.umpireIds.map(ref),
+    ...(input.refereeId ? { referee: ref(input.refereeId) } : {}),
+    updatedAt: now(),
+    updatedBy: ra.email ?? 'unknown',
+  };
+  await repo.putFixtureOfficials(ra.tenant, seriesId, fixtureId, officials);
+  return c.json({ seriesId, fixtureId, ...officials });
+});
+
+/** The registry. Admins get every entry with contacts; club members get active names only. */
+app.get('/umpires', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const all = (await repo.listUmpires(ra.tenant)).sort((a, b) =>
+    a.displayName.localeCompare(b.displayName),
+  );
+  if (ra.membership.role === 'admin') return c.json(all);
+  return c.json(all.filter((u) => u.active).map((u) => ({ id: u.id, displayName: u.displayName })));
+});
+
+app.post('/umpires', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const input = parseUmpireInput(await c.req.json().catch(() => null), 'create');
+  const existing = await repo.listUmpires(tenant);
+  const at = now();
+  const stem = umpireIdFor(input.displayName!);
+  const taken = new Set(existing.map((u) => u.id));
+  const id = taken.has(stem) ? `${stem}-${randomUUID().slice(0, 6)}` : stem;
+  const umpire = applyUmpireInput(undefined, input, id, at);
+  const clash = findAliasConflict(umpire.aliases, existing);
+  if (clash)
+    throw new HttpError(409, `${clash.displayName} already answers to that name`, {
+      code: 'umpire_alias_taken',
+      umpireId: clash.id,
+    });
+  try {
+    await repo.createUmpire(tenant, umpire);
+  } catch (err) {
+    if (err instanceof repo.UmpireExistsError)
+      throw new HttpError(409, 'an umpire with that id already exists');
+    throw err;
+  }
+  return c.json(umpire, 201);
+});
+
+app.patch('/umpires/:id', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const input = parseUmpireInput(await c.req.json().catch(() => null), 'patch');
+  const current = await repo.getUmpire(tenant, id);
+  if (!current) throw new HttpError(404, 'umpire not found');
+  if (current.mergedInto && input.active === true)
+    throw new HttpError(409, 'a merged umpire cannot be reactivated');
+  const next = applyUmpireInput(current, input, id, now());
+  if (next.active) {
+    const clash = findAliasConflict(next.aliases, await repo.listUmpires(tenant), id);
+    if (clash)
+      throw new HttpError(409, `${clash.displayName} already answers to that name`, {
+        code: 'umpire_alias_taken',
+        umpireId: clash.id,
+      });
+  }
+  await repo.putUmpire(tenant, next);
+  return c.json(next);
+});
+
+/**
+ * Merge a duplicate (`:id`, the source) into `targetId`: every appointment naming the source
+ * now names the target, the target takes over the source's aliases, and the source is
+ * deactivated with `mergedInto` set. A source that is already merged (a stale page, a
+ * double-click) is 409 `umpire_already_merged`, naming the umpire it went into. The source is
+ * retired LAST, so a merge that failed part-way can simply be run again.
+ */
+app.post('/umpires/:id/merge', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const sourceId = c.req.param('id');
+  const body = (await c.req.json().catch(() => null)) as { targetId?: unknown } | null;
+  const targetId = typeof body?.targetId === 'string' ? body.targetId.trim() : '';
+  if (!targetId) throw new HttpError(400, 'targetId is required');
+  if (targetId === sourceId) throw new HttpError(400, 'cannot merge an umpire into itself');
+  const [source, target] = await Promise.all([
+    repo.getUmpire(ra.tenant, sourceId),
+    repo.getUmpire(ra.tenant, targetId),
+  ]);
+  if (!source) throw new HttpError(404, 'umpire not found');
+  if (source.mergedInto) {
+    const into = await repo.getUmpire(ra.tenant, source.mergedInto);
+    const name = into?.displayName ?? source.mergedInto;
+    throw new HttpError(409, `${source.displayName} is already merged into ${name}`, {
+      code: 'umpire_already_merged',
+      mergedInto: source.mergedInto,
+      mergedIntoName: name,
+    });
+  }
+  if (!target) throw new HttpError(404, 'target umpire not found');
+  if (!target.active) throw new HttpError(409, 'cannot merge into an inactive umpire');
+  const at = now();
+  const targetRef = { umpireId: target.id, name: target.displayName };
+  let repointed = 0;
+  for (const row of await repo.listFixtureOfficials(ra.tenant)) {
+    const hasSource =
+      row.umpires.some((u) => u.umpireId === sourceId) || row.referee?.umpireId === sourceId;
+    if (!hasSource) continue;
+    const umpires: typeof row.umpires = [];
+    for (const u of row.umpires) {
+      const next = u.umpireId === sourceId ? targetRef : u;
+      if (!umpires.some((x) => x.umpireId === next.umpireId)) umpires.push(next);
+    }
+    let referee = row.referee?.umpireId === sourceId ? targetRef : row.referee;
+    // A merge can't leave one person as both umpire and referee on a fixture.
+    if (referee && umpires.some((u) => u.umpireId === referee!.umpireId)) referee = undefined;
+    await repo.putFixtureOfficials(ra.tenant, row.seriesId, row.fixtureId, {
+      umpires,
+      ...(referee ? { referee } : {}),
+      updatedAt: at,
+      updatedBy: ra.email ?? 'unknown',
+    });
+    repointed++;
+  }
+  const mergedTarget = {
+    ...target,
+    aliases: [...new Set([...target.aliases, ...(source.aliases ?? [])])],
+    updatedAt: at,
+  };
+  const retiredSource = {
+    ...source,
+    active: false,
+    mergedInto: target.id,
+    // Its aliases now belong to the target; keeping them here would make the source a
+    // second answer to the same name if it were ever looked up.
+    aliases: [],
+    updatedAt: at,
+  };
+  await repo.putUmpire(ra.tenant, mergedTarget);
+  await repo.putUmpire(ra.tenant, retiredSource);
+  return c.json({ target: mergedTarget, source: retiredSource, repointed });
+});
+
+/* ─── Upload appointments (admin) ───
+   The weekly appointments workbook, uploaded from the Umpires page: the CLI's own parser,
+   matcher and write plan (import-umpire-appointments.ts) — no second parser. `preview` writes
+   nothing; `confirm` re-plans from the same file and writes exactly what the CLI's --confirm
+   would, refusing (409 `plan_changed`, with the fresh preview) if the plan moved since the
+   preview the admin saw. Direct JSON/base64 transport like structure intake: xlsx only, 2 MB. */
+
+const APPOINTMENTS_MAX_BYTES = 2 * 1024 * 1024; // 2 MB
+const APPOINTMENTS_MAX_BASE64_LENGTH = Math.ceil((APPOINTMENTS_MAX_BYTES * 4) / 3) + 4;
+
+/** Parse and plan an uploaded appointments workbook for the caller's tenant. */
+async function planAppointmentsUpload(c: Context<HonoEnv>, tenant: string) {
+  const body = (await c.req.json().catch(() => null)) as {
+    filename?: unknown;
+    dataBase64?: unknown;
+    createUmpires?: unknown;
+    planHash?: unknown;
+  } | null;
+  const filename = typeof body?.filename === 'string' ? body.filename : '';
+  const dataBase64 = typeof body?.dataBase64 === 'string' ? body.dataBase64 : '';
+  if (!dataBase64) throw new HttpError(400, 'dataBase64 is required');
+  if (dataBase64.length > APPOINTMENTS_MAX_BASE64_LENGTH)
+    throw new HttpError(413, 'the workbook is larger than 2 MB');
+  if (filename && !/\.xlsx$/i.test(filename))
+    throw new HttpError(400, 'upload the appointments sheet as an Excel .xlsx file');
+  const buffer = Buffer.from(dataBase64, 'base64');
+  // Every .xlsx is a zip: anything else (an old .xls, a CSV renamed) is refused unread.
+  if (buffer.length < 4 || buffer.readUInt32LE(0) !== 0x04034b50)
+    throw new HttpError(400, 'that file is not an Excel .xlsx workbook');
+  const imp = await import('./import-umpire-appointments.js');
+  const wb = new ExcelJS.Workbook();
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await wb.xlsx.load(buffer as any);
+  } catch {
+    throw new HttpError(400, 'unable to read the workbook — check the file is a valid .xlsx');
+  }
+  let parsed: ReturnType<typeof imp.parseAppointmentsWorkbook>;
+  try {
+    parsed = imp.parseAppointmentsWorkbook(wb);
+  } catch (err) {
+    throw new HttpError(400, err instanceof Error ? err.message : 'unreadable appointments sheet');
+  }
+  const sections = imp.unknownSections(parsed.rows);
+  if (sections.length)
+    throw new HttpError(
+      400,
+      `The sheet has section(s) this union isn't set up for: ${sections.map((x) => `"${x}"`).join(', ')}. Ask your operator to add them, or remove those rows.`,
+      { code: 'unknown_sections', sections },
+    );
+  const [series, clubs, registry, officials] = await Promise.all([
+    repo.listSeries(tenant),
+    repo.listClubs(tenant),
+    repo.listUmpires(tenant),
+    repo.listFixtureOfficials(tenant),
+  ]);
+  const existing = new Map(officials.map((o) => [`${o.seriesId}#${o.fixtureId}`, o]));
+  const plan = imp.planAppointmentImport(parsed.rows, {
+    series,
+    clubs,
+    registry,
+    existing,
+    createUmpires: body?.createUmpires === true,
+    at: now(),
+  });
+  return { imp, parsed, plan, planHash: body?.planHash };
+}
+
+app.post('/umpires/appointments/preview', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const { imp, parsed, plan } = await planAppointmentsUpload(c, tenant);
+  return c.json(imp.appointmentPreview(parsed, plan));
+});
+
+app.post('/umpires/appointments/confirm', requireAdmin, async (c) => {
+  const { tenant, email } = c.get('requestAuth')!;
+  const { imp, parsed, plan, planHash } = await planAppointmentsUpload(c, tenant);
+  if (typeof planHash !== 'string' || planHash !== imp.appointmentPlanHash(plan))
+    throw new HttpError(
+      409,
+      'Appointments or umpires changed since your preview. Check the updated preview, then confirm again.',
+      { code: 'plan_changed', preview: imp.appointmentPreview(parsed, plan) },
+    );
+  const out = await imp.writeAppointmentImport(repo, tenant, plan, email ?? 'unknown', now());
+  return c.json(out);
+});
+
+/* ─── Captain's reports (ADR 0016, Slice 2) ───
+   Reports open automatically when medicoach reports a result (medicoach-sync/puller.ts →
+   captains-reports.ts). Clubs read and file their OWN reports here; the recipient may instead
+   use the submit-once link (`/captains-report-link/:token`, public). First submit wins. The
+   union office reads every report through `GET /captains-reports` (admin). */
+
+/** A report's editable fields from a request body, with the umpire ids checked. */
+async function reportFieldsFrom(
+  tenant: string,
+  report: CaptainsReport,
+  raw: unknown,
+): Promise<{ fields: repo.CaptainsReportFields; submit: boolean }> {
+  try {
+    const parsed = parseReportFields(raw);
+    const umpires = await checkUmpireIds(repo, tenant, report, parsed.umpires);
+    const submit = (raw as { submit?: unknown }).submit === true;
+    if (submit) {
+      const problems = submissionProblems({ ...parsed, umpires });
+      if (problems.length) throw new HttpError(400, problems[0], { problems });
+    }
+    return { fields: { ...parsed, umpires }, submit };
+  } catch (err) {
+    if (err instanceof ReportInputError) throw new HttpError(400, err.message);
+    throw err;
+  }
+}
+
+/** Save a draft or submit (first submit wins → 409 for the loser). */
+async function writeReport(
+  tenant: string,
+  report: CaptainsReport,
+  fields: repo.CaptainsReportFields,
+  submit: boolean,
+  meta: { submittedBy: string; via: 'portal' | 'link'; memberId?: string },
+): Promise<CaptainsReport> {
+  try {
+    if (!submit) return await repo.saveCaptainsReportDraft(tenant, report, fields, meta);
+    if (report.status !== 'pending')
+      throw new repo.CaptainsReportStateError("captain's report already submitted");
+    // The CR number is allocated only once the first-submit-wins write landed (repo).
+    return await repo.submitCaptainsReport(tenant, report, fields, meta);
+  } catch (err) {
+    if (err instanceof repo.CaptainsReportStateError)
+      throw new HttpError(409, err.message, { code: 'report_closed' });
+    throw err;
+  }
+}
+
+/** A club-route report by id, after the caller's club access is checked. */
+async function clubReport(ra: RequestAuth, id: string): Promise<CaptainsReport> {
+  const key = parseCaptainsReportId(id);
+  if (!key) throw new HttpError(404, 'report not found');
+  assertClubAccess(ra, key.clubId);
+  const report = await repo.getCaptainsReport(ra.tenant, key.seriesId, key.fixtureId, key.clubId);
+  if (!report) throw new HttpError(404, 'report not found');
+  return report;
+}
+
+/**
+ * Report views with the venue re-read from the LIVE series (ADR 0011): club members and link
+ * holders never see a venue the series withholds, and see it once revealed. Admins see it.
+ */
+async function reportViews(
+  tenant: string,
+  reports: CaptainsReport[],
+  forClub: boolean,
+): Promise<ReturnType<typeof reportView>[]> {
+  const series = new Map<string, Promise<Series | null>>();
+  const seriesOf = (id: string) => {
+    if (!series.has(id)) series.set(id, repo.getSeries(tenant, id));
+    return series.get(id)!;
+  };
+  return Promise.all(
+    reports.map(async (r) =>
+      reportView(r, {
+        series: r.seriesId === UNLISTED_SERIES_ID ? null : await seriesOf(r.seriesId),
+        forClub,
+      }),
+    ),
+  );
+}
+
+const clubView = async (ra: RequestAuth, r: CaptainsReport) =>
+  (await reportViews(ra.tenant, [r], ra.membership.role !== 'admin'))[0];
+
+/** A refused forward / attribution as the HTTP error the client reads. */
+function flowError(err: unknown): never {
+  if (err instanceof ReportFlowError)
+    throw new HttpError(err.status, err.message, err.code ? { code: err.code } : undefined);
+  throw err;
+}
+
+app.get('/club/captains-reports', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const clubId = c.req.query('clubId') ?? ra.membership.clubIds[0];
+  if (!clubId) throw new HttpError(400, 'clubId is required');
+  assertClubAccess(ra, clubId);
+  const reports = (await repo.listCaptainsReports(ra.tenant))
+    .filter((r) => r.clubId === clubId)
+    .sort((a, b) => b.matchDate.localeCompare(a.matchDate));
+  return c.json(await reportViews(ra.tenant, reports, ra.membership.role !== 'admin'));
+});
+
+app.get('/club/captains-reports/:id', async (c) => {
+  const ra = c.get('requestAuth')!;
+  return c.json(await clubView(ra, await clubReport(ra, c.req.param('id'))));
+});
+
+/** "Send to captain" from the portal: the club's eligible players (names + opaque ids). */
+app.get('/club/captains-reports/:id/forward-candidates', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const report = await clubReport(ra, c.req.param('id'));
+  const candidates = await forwardCandidates(repo, ra.tenant, report, captainsReportLinkSecret());
+  return c.json({
+    candidates: candidates.map(({ id, name }) => ({ id, name })),
+    remaining: Math.max(0, MAX_FORWARDS - (report.forwardCount ?? 0)),
+  });
+});
+
+app.post('/club/captains-reports/:id/forward', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const report = await clubReport(ra, c.req.param('id'));
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as { candidateId?: unknown };
+  if (typeof body.candidateId !== 'string' || !body.candidateId)
+    throw new HttpError(400, 'candidateId is required');
+  const updated = await forwardReport(
+    { repo },
+    { tenant: ra.tenant, report, candidateId: body.candidateId, via: 'portal' },
+  ).catch(flowError);
+  return c.json(await clubView(ra, updated));
+});
+
+/**
+ * File a report for a match that is NOT in the fixture list (a friendly, a re-arranged game):
+ * free-text opponent, a date that is not in the future, competition and venue; umpires from
+ * the registry or free text. Created and submitted in one go (`source: 'manual-unlisted'`).
+ */
+app.post('/club/captains-reports/unlisted', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as Record<string, unknown>;
+  const clubId = typeof body.clubId === 'string' ? body.clubId : '';
+  if (!clubId) throw new HttpError(400, 'clubId is required');
+  assertClubAccess(ra, clubId);
+  const text = (v: unknown, max: number, field: string, required = false) => {
+    const t = typeof v === 'string' ? v.trim() : '';
+    if (required && !t) throw new HttpError(400, `${field} is required`);
+    if (t.length > max) throw new HttpError(400, `${field} is too long (max ${max})`);
+    return t;
+  };
+  const opponentName = text(body.opponentName, 120, 'the opponent', true);
+  const competition = text(body.competition, 120, 'the competition');
+  const venue = text(body.venue, 120, 'the venue');
+  const matchDate = typeof body.matchDate === 'string' ? body.matchDate : '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(matchDate) || !dayjs(matchDate).isValid())
+    throw new HttpError(400, 'the match date must be a date (YYYY-MM-DD)');
+  if (matchDate > tenantToday())
+    throw new HttpError(400, 'this match has not been played yet', { code: 'match_in_future' });
+  const club = await repo.getClub(ra.tenant, clubId);
+  if (!club) throw new HttpError(404, 'club not found');
+  const at = now();
+  const fixtureId = randomUUID();
+  const report: CaptainsReport = {
+    id: captainsReportId(UNLISTED_SERIES_ID, fixtureId, clubId),
+    seriesId: UNLISTED_SERIES_ID,
+    fixtureId,
+    clubId,
+    status: 'pending',
+    source: 'manual-unlisted',
+    matchDate,
+    side: 'home',
+    clubName: club.name,
+    opponentName,
+    competition,
+    ...(venue ? { venue } : {}),
+    umpiresSnapshot: [],
+    recipient: { kind: 'portal', memberId: randomUUID(), name: ra.email ?? '' },
+    captainName: '',
+    umpires: [],
+    general: '',
+    createdAt: at,
+    updatedAt: at,
+  };
+  const { fields } = await reportFieldsFrom(ra.tenant, report, { ...body, submit: true });
+  if (!(await repo.createCaptainsReport(ra.tenant, report)))
+    throw new HttpError(409, 'a report already exists for this match', { code: 'report_exists' });
+  const saved = await writeReport(ra.tenant, report, fields, true, {
+    submittedBy: ra.email ?? 'portal',
+    via: 'portal',
+  });
+  return c.json(reportView(saved), 201);
+});
+
+app.put('/club/captains-reports/:id', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const report = await clubReport(ra, c.req.param('id'));
+  const { fields, submit } = await reportFieldsFrom(
+    ra.tenant,
+    report,
+    await c.req.json().catch(() => null),
+  );
+  const saved = await writeReport(ra.tenant, report, fields, submit, {
+    submittedBy: ra.email ?? 'portal',
+    via: 'portal',
+  });
+  return c.json(await clubView(ra, saved));
+});
+
+/**
+ * File a report by hand for one of the club's fixtures that has no report yet (e.g. a match
+ * medicoach didn't score). Creates and submits in one go; 409 when a report already exists
+ * (the portal then opens that one).
+ */
+app.post('/club/captains-reports', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as Record<string, unknown>;
+  const seriesId = typeof body.seriesId === 'string' ? body.seriesId : '';
+  const fixtureId = typeof body.fixtureId === 'string' ? body.fixtureId : '';
+  const clubId = typeof body.clubId === 'string' ? body.clubId : '';
+  if (!seriesId || !fixtureId || !clubId)
+    throw new HttpError(400, 'seriesId, fixtureId and clubId are required');
+  assertClubAccess(ra, clubId);
+  const stored = await repo.getSeries(ra.tenant, seriesId);
+  // Reps see only released series (and released fields); file against what they can see.
+  const series =
+    stored &&
+    (ra.membership.role === 'admin' ? stored : projectSeriesForClub(stored, tenantToday()));
+  const fixture = (series?.fixtures as Array<Record<string, unknown>> | undefined)?.find(
+    (f) => f?.id === fixtureId,
+  );
+  if (!series || !fixture) throw new HttpError(404, 'fixture not found');
+  const clubIds = fixtureClubIds(series, fixture);
+  const sideIndex = clubIds.indexOf(clubId);
+  if (sideIndex < 0) throw new HttpError(403, 'not your fixture');
+  const matchDate = typeof fixture.date === 'string' ? fixture.date : '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(matchDate))
+    throw new HttpError(400, 'the fixture has no date yet');
+  if (matchDate > tenantToday())
+    throw new HttpError(400, 'this match has not been played yet', { code: 'match_in_future' });
+  const existing = await repo.getCaptainsReport(ra.tenant, seriesId, fixtureId, clubId);
+  if (existing)
+    throw new HttpError(409, 'a report already exists for this match', {
+      code: 'report_exists',
+      id: existing.id,
+    });
+  const officials = await repo.getFixtureOfficials(ra.tenant, seriesId, fixtureId);
+  const side = sideIndex === 0 ? 'home' : 'away';
+  const byTeam = new Map((series.participants ?? []).map((p) => [p.teamId, p]));
+  const own = byTeam.get(String(fixture[side]));
+  const opp = byTeam.get(String(fixture[side === 'home' ? 'away' : 'home']));
+  const club = await repo.getClub(ra.tenant, clubId);
+  const at = now();
+  const report: CaptainsReport = {
+    id: captainsReportId(seriesId, fixtureId, clubId),
+    seriesId,
+    fixtureId,
+    clubId,
+    status: 'pending',
+    source: 'manual',
+    matchDate,
+    side,
+    clubName: own?.name ?? club?.name ?? clubId,
+    opponentName: opp?.name ?? clubIds[1 - sideIndex] ?? 'TBC',
+    competition: series.name ?? '',
+    umpiresSnapshot: (officials?.umpires ?? []).map((u) => ({
+      umpireId: u.umpireId,
+      name: u.name,
+    })),
+    recipient: { kind: 'portal', memberId: randomUUID(), name: ra.email ?? '' },
+    captainName: '',
+    umpires: [],
+    general: '',
+    createdAt: at,
+    updatedAt: at,
+  };
+  const { fields } = await reportFieldsFrom(ra.tenant, report, { ...body, submit: true });
+  if (!(await repo.createCaptainsReport(ra.tenant, report)))
+    throw new HttpError(409, 'a report already exists for this match', {
+      code: 'report_exists',
+      id: report.id,
+    });
+  const saved = await writeReport(ra.tenant, report, fields, true, {
+    submittedBy: ra.email ?? 'portal',
+    via: 'portal',
+  });
+  return c.json(await clubView(ra, saved), 201);
+});
+
+/** Admin: every report, filtered by status and match-date range. */
+app.get('/captains-reports', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const status = c.req.query('status');
+  const from = c.req.query('from');
+  const to = c.req.query('to');
+  const reports = (await repo.listCaptainsReports(ra.tenant))
+    .filter((r) => (!from || r.matchDate >= from) && (!to || r.matchDate <= to))
+    .filter((r) => !status || r.status === status)
+    .sort((a, b) => b.matchDate.localeCompare(a.matchDate) || a.id.localeCompare(b.id));
+  return c.json(await reportViews(ra.tenant, reports, false));
+});
+
+/**
+ * Admin: clubs a captain's-report notice cannot reach — no chair email and no usable cell
+ * (sync tenants only; other tenants get an empty list).
+ */
+app.get('/captains-reports/contact-gaps', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  if (!cfg || !hasFeature(cfg, 'medicoachSync')) return c.json({ enabled: false, clubs: [] });
+  const clubs = (await repo.listClubs(ra.tenant))
+    .filter((club) => !hasContact(chairContactOf(club)))
+    .map((club) => ({ id: club.id, name: club.name }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return c.json({ enabled: true, clubs });
+});
+
+/**
+ * Admin: attribute a FREE-TEXT umpire on a submitted report to a registry umpire (one the
+ * admin just added to the registry, `action: 'registered'`, or an existing one, 'linked'), so
+ * its ratings count for that umpire. The entry keeps an `attributed` audit stamp.
+ */
+app.post('/captains-reports/:id/umpires/:index/attribute', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const key = parseCaptainsReportId(c.req.param('id'));
+  const index = Number(c.req.param('index'));
+  if (!key || !Number.isInteger(index) || index < 0 || index > 1)
+    throw new HttpError(404, 'umpire entry not found');
+  const report = await repo.getCaptainsReport(ra.tenant, key.seriesId, key.fixtureId, key.clubId);
+  const entry = report?.umpires[index];
+  if (!report || !entry) throw new HttpError(404, 'umpire entry not found');
+  if (report.status !== 'submitted')
+    throw new HttpError(409, 'only a submitted report can be attributed');
+  if (entry.umpireId) throw new HttpError(409, 'this umpire is already in the registry');
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as Record<string, unknown>;
+  const umpireId = typeof body.umpireId === 'string' ? body.umpireId : '';
+  const action = body.action === 'registered' ? 'registered' : 'linked';
+  const reg = umpireId ? await repo.getUmpire(ra.tenant, umpireId) : null;
+  if (!reg || reg.mergedInto) throw new HttpError(400, 'unknown umpire');
+  try {
+    const saved = await repo.attributeCaptainsReportUmpire(ra.tenant, report, index, entry.name, {
+      ...entry,
+      umpireId: reg.id,
+      name: reg.displayName,
+      attributed: { action, by: ra.email ?? 'admin', at: now(), freeTextName: entry.name },
+    });
+    return c.json(reportView(saved));
+  } catch (err) {
+    if (err instanceof repo.CaptainsReportStateError) throw new HttpError(409, err.message);
+    throw err;
+  }
+});
+
+/**
+ * Public submit-once link. The token is the capability (HMAC over tenant + report + recipient +
+ * expiry); it serves THAT report only and no roster data — the registry umpire names are the
+ * only list it carries (for "a different umpire stood"). Invalid → 404; expired, submitted,
+ * void or re-addressed → 410. The response is never cached and never leaks the URL onward.
+ */
+async function linkedReportOr410(c: Context<HonoEnv>) {
+  c.header('Cache-Control', 'no-store');
+  c.header('Referrer-Policy', 'no-referrer');
+  const found = await loadLinkedReport(
+    repo,
+    c.req.param('token') ?? '',
+    Date.now(),
+    captainsReportLinkSecret(),
+  );
+  if (!found.ok) throw new HttpError(found.status, found.error);
+  return found;
+}
+
+async function linkPayload(tenant: string, report: CaptainsReport, isChairLink: boolean) {
+  const [cfg, umpires, views] = await Promise.all([
+    repo.getTenantConfig(tenant),
+    repo.listUmpires(tenant),
+    reportViews(tenant, [report], true),
+  ]);
+  return {
+    report: views[0],
+    // "Send to captain" is offered to the CHAIR's link only; a captain's link never gets a
+    // roster (the picker route answers 403 for it).
+    canForward: isChairLink,
+    forwardsRemaining: Math.max(0, MAX_FORWARDS - (report.forwardCount ?? 0)),
+    registry: umpires
+      .filter((u) => u.active)
+      .map((u) => ({ id: u.id, displayName: u.displayName }))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName)),
+    tenantBranding: {
+      name: cfg ? orgCopy(cfg).name : tenant,
+      logoUrl: cfg?.branding?.logoUrl ?? '',
+      colors: cfg?.branding?.colors ?? {},
+    },
+  };
+}
+
+app.get('/captains-report-link/:token', async (c) => {
+  const { tenant, report, isChairLink } = await linkedReportOr410(c);
+  return c.json(await linkPayload(tenant, report, isChairLink));
+});
+
+/** The chair's link only: the club's eligible players for "Send to captain" (names only). */
+app.get('/captains-report-link/:token/forward-candidates', async (c) => {
+  const { tenant, report, isChairLink } = await linkedReportOr410(c);
+  if (!isChairLink) throw new HttpError(403, 'only the club chair can send this report on');
+  const candidates = await forwardCandidates(repo, tenant, report, captainsReportLinkSecret());
+  return c.json({
+    candidates: candidates.map(({ id, name }) => ({ id, name })),
+    remaining: Math.max(0, MAX_FORWARDS - (report.forwardCount ?? 0)),
+  });
+});
+
+app.post('/captains-report-link/:token/forward', async (c) => {
+  const { tenant, report, isChairLink } = await linkedReportOr410(c);
+  if (!isChairLink) throw new HttpError(403, 'only the club chair can send this report on');
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as { candidateId?: unknown };
+  if (typeof body.candidateId !== 'string' || !body.candidateId)
+    throw new HttpError(400, 'candidateId is required');
+  const updated = await forwardReport(
+    { repo },
+    { tenant, report, candidateId: body.candidateId, via: 'link' },
+  ).catch(flowError);
+  return c.json(await linkPayload(tenant, updated, true));
+});
+
+app.put('/captains-report-link/:token', async (c) => {
+  const { tenant, report, memberId, isChairLink } = await linkedReportOr410(c);
+  const { fields, submit } = await reportFieldsFrom(
+    tenant,
+    report,
+    await c.req.json().catch(() => null),
+  );
+  const saved = await writeReport(tenant, report, fields, submit, {
+    submittedBy: `link:${report.recipient.kind}`,
+    via: 'link',
+    memberId,
+  });
+  return c.json(await linkPayload(tenant, saved, isChairLink));
 });
 
 /* ─── Season runs (ADR 0008) ───
@@ -4630,6 +7092,77 @@ async function applySeasonRunPatch(
 interface GenerateStageBody {
   version?: unknown;
   confirmReleasedOverwrite?: unknown;
+  /** Medicoach sync: consent to orphan synced refs of released series (see syncResyncGate). */
+  allowResync?: unknown;
+}
+
+/**
+ * Medicoach sync guard for stage generate/rebase (ADR 0016, Slice 4): a fixture's id is half
+ * of its sync ref, and regenerating a RELEASED series that medicoach mirrors re-mints ids and
+ * re-pairs fixtures — every ref whose fixture disappears or now names a different match is
+ * orphaned in medicoach. So on a sync tenant such a write is refused (409
+ * `sync_resync_required`, naming the series and the refs) unless the caller passes
+ * `allowResync: true`; the 200 then lists the orphaned refs. `next` (generate) is what each
+ * series would become; absent (rebase), every ref of the affected series is at stake.
+ */
+function syncResyncGate(
+  tenant: string,
+  config: TenantConfig | null,
+  /** The run's league: season-run series carry no `leagueKey` of their own. */
+  leagueKey: string,
+  stored: Series[],
+  next: Map<string, Series> | null,
+  allowResync: unknown,
+  action: 'regenerate' | 'rebase',
+): string[] | null {
+  const synced = stored.filter(
+    (s) =>
+      s.released &&
+      seriesIsSyncMapped(tenant, { ...s, leagueKey: s.leagueKey ?? leagueKey }, config) &&
+      Array.isArray(s.fixtures) &&
+      s.fixtures.length > 0,
+  );
+  if (!synced.length) return null;
+  const teamName = (s: Series, side: unknown) =>
+    s.participants?.find((p) => p.teamId === side)?.name ?? String(side ?? '?');
+  // Each orphaned fixture as clubs know it (teams + date) — the console's confirmation lists
+  // these, so the admin sees which matches lose their medicoach link.
+  const orphaned = synced.flatMap((s) => {
+    const after = next?.get(s.id);
+    const nextById = new Map(
+      ((after?.fixtures as ScheduleFixture[] | undefined) ?? []).map((f) => [f?.id, f]),
+    );
+    return (s.fixtures as ScheduleFixture[])
+      .filter((f) => f?.id)
+      .filter((f) => {
+        if (!next) return true;
+        const g = nextById.get(f.id);
+        return !g || !sameMatch(f, g);
+      })
+      .map((f) => ({
+        ref: fixtureSyncRef(tenant, s.id, f),
+        seriesId: s.id,
+        seriesName: s.name,
+        fixtureId: String(f.id),
+        home: teamName(s, f.home),
+        away: teamName(s, f.away),
+        ...(f.date ? { date: f.date } : {}),
+        ...(f.time ? { time: f.time } : {}),
+      }));
+  });
+  const orphanedRefs = orphaned.map((o) => o.ref);
+  if (allowResync !== true)
+    throw new HttpError(
+      409,
+      `${synced.length} released series in this stage ${synced.length === 1 ? 'is' : 'are'} synced with medicoach — a ${action} would orphan ${orphanedRefs.length} fixture ref(s) there. Ask your operator; it needs allowResync.`,
+      {
+        code: 'sync_resync_required',
+        seriesIds: synced.map((s) => s.id),
+        orphanedRefs,
+        orphaned,
+      },
+    );
+  return orphanedRefs;
 }
 
 /**
@@ -4688,6 +7221,8 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
     throw new HttpError(400, 'generate needs the season run version you read');
   if (body.confirmReleasedOverwrite !== undefined && body.confirmReleasedOverwrite !== true)
     throw new HttpError(400, 'confirmReleasedOverwrite must be true when present');
+  if (body.allowResync !== undefined && body.allowResync !== true)
+    throw new HttpError(400, 'allowResync must be true when present');
 
   const run = await repo.getSeasonRun(tenant, id);
   if (!run) throw new HttpError(404, 'season run not found');
@@ -4750,12 +7285,38 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
       `${released.length} of this stage's series ${released.length === 1 ? 'has' : 'have'} been released — confirm to replace the published fixtures`,
       { code: 'released_overwrite', seriesIds: released },
     );
+  const orphanedRefs = syncResyncGate(
+    tenant,
+    config,
+    run.leagueKey,
+    existing.filter((s): s is Series => !!s),
+    new Map(result.series.map((s) => [s.id, s])),
+    body.allowResync,
+    'regenerate',
+  );
 
   // What an existing series is PATCHed with: regenerating changes the fixtures, never
   // whether they are published, never a name the admin chose, and never the stored format
   // (seriesType/maxOvers) — except when a rebase marked the stage `formatChanged`, which is
   // the rebase's version-review consent to adopt the new structure's name/overs.
-  const overwriteOf = (series: Series): Partial<Series> => {
+  // A regenerated fixture with the same id AND the same match keeps its sync-owned fields
+  // (`syncRef`, `schedule.changedAt`) from the stored one, exactly as the importers carry them
+  // (ADR 0016) — dropping them would re-point a recipe ref or let an older medicoach change win.
+  const withSyncFields = (series: Series, stored: Series | null | undefined): Series => {
+    if (!stored || !Array.isArray(series.fixtures)) return series;
+    const prior = new Map<string, ScheduleFixture>();
+    for (const f of (stored.fixtures as ScheduleFixture[] | undefined) ?? [])
+      if (f?.id) prior.set(f.id, f);
+    return {
+      ...series,
+      fixtures: (series.fixtures as ScheduleFixture[]).map((f) => {
+        const old = f?.id ? prior.get(f.id) : undefined;
+        return old && sameMatch(old, f) ? carrySyncOwnedFields(old, { ...f }) : f;
+      }),
+    };
+  };
+  const overwriteOf = (generated: Series, stored: Series): Partial<Series> => {
+    const series = withSyncFields(generated, stored);
     const {
       released: _r,
       releasedAt: _ra,
@@ -4783,7 +7344,7 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
     for (const [i, series] of result.series.entries()) {
       const stored = existing[i];
       const subject = stored
-        ? ({ ...stored, ...overwriteOf(series), id: series.id } as Series)
+        ? ({ ...stored, ...overwriteOf(series, stored), id: series.id } as Series)
         : series;
       if (stored?.released) {
         const refusal = inSeasonClashRefusal(stored, subject, ledger, allClubs, venues, aliases);
@@ -4808,9 +7369,10 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
         await applySeriesPatch(
           tenant,
           series.id,
-          { ...overwriteOf(series), version: stored.version },
+          { ...overwriteOf(series, stored), version: stored.version },
           actor,
           runCalendar,
+          'generate',
         ),
       );
       writtenIds.push(series.id);
@@ -4843,6 +7405,7 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
     run: nextRun,
     series: written,
     ...(result.warnings?.length ? { warnings: result.warnings } : {}),
+    ...(orphanedRefs ? { orphanedRefs } : {}),
   });
 });
 
@@ -4905,6 +7468,7 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
     structureId?: unknown;
     structureVersion?: unknown;
     version?: unknown;
+    allowResync?: unknown;
   }>();
   if (typeof body?.structureId !== 'string' || !body.structureId)
     throw new HttpError(400, 'rebase needs the id of the structure you reviewed');
@@ -4912,6 +7476,8 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
     throw new HttpError(400, 'rebase needs the structure version you reviewed');
   if (!Number.isInteger(body?.version))
     throw new HttpError(400, 'rebase needs the season run version you read');
+  if (body.allowResync !== undefined && body.allowResync !== true)
+    throw new HttpError(400, 'allowResync must be true when present');
   const current = await repo.getSeasonRun(tenant, id);
   if (!current) throw new HttpError(404, 'season run not found');
   // Checked up front, not only by the conditional write below: the no-op return further
@@ -4982,6 +7548,46 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
     ? kept.map((run) => ({ ...run, formatChanged: true }))
     : kept;
 
+  // Medicoach sync guard: the stages this rebase resets (spec removed or changed, or the
+  // root format changed) lose their groups/format, so their released synced series will be
+  // regenerated — refused without allowResync (syncResyncGate).
+  let orphanedRefs: string[] | null = null;
+  if (hasFeature(config, 'medicoachSync')) {
+    const affected = new Set(
+      (current.stages ?? [])
+        .filter((run) => {
+          if (!run) return false;
+          const next = live.stages.find((s) => s.id === run.specId);
+          const prev = oldSpecs.get(run.specId);
+          return (
+            !next || rootFormatChanged || !prev || stableStringify(prev) !== stableStringify(next)
+          );
+        })
+        .map((run) => run.specId),
+    );
+    if (affected.size) {
+      const seriesIds = new Set(
+        (current.stages ?? [])
+          .filter((run) => run && affected.has(run.specId))
+          .flatMap((run) => (run.groups ?? []).map((g) => g.seriesId).filter(Boolean)),
+      );
+      const stageSeries = (await repo.listSeries(tenant)).filter(
+        (s) =>
+          seriesIds.has(s.id) ||
+          (s.seasonRunId === current.id && !!s.stageSpecId && affected.has(s.stageSpecId)),
+      );
+      orphanedRefs = syncResyncGate(
+        tenant,
+        config,
+        current.leagueKey,
+        stageSeries,
+        null,
+        body.allowResync,
+        'rebase',
+      );
+    }
+  }
+
   const hasRun = new Set(kept.map((run) => run.specId));
   const added: StageRun[] = live.stages
     .filter((s) => !oldSpecs.has(s.id) && !hasRun.has(s.id))
@@ -5011,7 +7617,11 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
       ...freeze,
     });
     // Same additive shape as PUT /platform/tenants: `warnings` only when non-empty.
-    return c.json(warnings.length > 0 ? { ...next, warnings } : next);
+    return c.json({
+      ...next,
+      ...(warnings.length > 0 ? { warnings } : {}),
+      ...(orphanedRefs ? { orphanedRefs } : {}),
+    });
   } catch (err) {
     if (err instanceof VersionConflictError)
       throw new HttpError(409, 'season run changed; refetch');
@@ -5112,6 +7722,13 @@ app.post('/series/:id/duplicate', requireAdmin, async (c) => {
   // original, not the clone. Reset the sign-off state so the copy can't start approved.
   delete copy.withheld;
   delete copy.revealedAt;
+  // The copy's fixtures are new matches: an explicit sync ref (a recipe knockout) and the
+  // sync's slot bookkeeping belong to the original, or two fixtures would claim one ref.
+  copy.fixtures = ((orig.fixtures as Array<Record<string, unknown>>) ?? []).map((f) => {
+    if (!f || typeof f !== 'object') return f;
+    const { syncRef: _ref, slots: _slots, schedule: _schedule, ...rest } = f;
+    return rest;
+  });
   await repo.putSeries(tenant, copy);
   return c.json(copy, 201);
 });
@@ -5685,7 +8302,13 @@ app.get('/tenant/config', async (c) => {
   const { tenant } = c.get('requestAuth')!;
   const config = await repo.getTenantConfig(tenant);
   if (!config) throw new HttpError(404, 'tenant not found');
-  return c.json({
+  return c.json(tenantConfigView(config));
+});
+
+/** The tenant-member projection of a config row — the allowlist described above. Shared
+ *  by GET and PUT /tenant/config so a save never echoes fields a read holds back. */
+function tenantConfigView(config: TenantConfig) {
+  return {
     tenant: config.tenant,
     branding: config.branding,
     sport: config.sport,
@@ -5703,8 +8326,8 @@ app.get('/tenant/config', async (c) => {
     competitionDefaults: config.competitionDefaults ?? {},
     // The milestone itself is useful on the console; who stamped it is not.
     setupCompletedAt: config.setupCompletedAt,
-  });
-});
+  };
+}
 
 app.put('/tenant/config', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
@@ -5723,10 +8346,12 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   delete (patch as { requiredDocs?: unknown }).requiredDocs;
   delete (patch as { clearanceCertTemplate?: unknown }).clearanceCertTemplate;
   delete (patch as { orgContact?: unknown }).orgContact;
+  delete (patch as { fixtureReminders?: unknown }).fixtureReminders;
   delete (patch as { sport?: unknown }).sport;
   delete (patch as { seasonLabel?: unknown }).seasonLabel;
+  delete (patch as { integrations?: unknown }).integrations;
   const next = await applyTenantConfigPatch(tenant, patch, { preserveOperatorBindings: true });
-  return c.json(next);
+  return c.json(tenantConfigView(next));
 });
 
 /**
@@ -6141,6 +8766,28 @@ function keepStoredCompetitions(incoming: League[], stored: League[]): League[] 
  * below are best-effort, not atomic: a concurrent tenant-admin league write can
  * land between the reads and the final Put (same accepted window as branding).
  */
+/**
+ * `integrations` on PUT /platform/tenants/:slug (operator-only). Only
+ * `medicoach.goLiveDate` exists: YYYY-MM-DD, or ''/null to clear it.
+ */
+function validateIntegrations(value: unknown): TenantConfig['integrations'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new HttpError(400, 'integrations must be an object');
+  const medicoach = (value as { medicoach?: unknown }).medicoach;
+  if (medicoach === undefined || medicoach === null) return {};
+  if (typeof medicoach !== 'object' || Array.isArray(medicoach))
+    throw new HttpError(400, 'integrations.medicoach must be an object');
+  const goLive = (medicoach as { goLiveDate?: unknown }).goLiveDate;
+  if (goLive === undefined || goLive === null || goLive === '') return { medicoach: {} };
+  if (
+    typeof goLive !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(goLive) ||
+    Number.isNaN(Date.parse(`${goLive}T00:00:00Z`))
+  )
+    throw new HttpError(400, 'integrations.medicoach.goLiveDate must be a date (YYYY-MM-DD)');
+  return { medicoach: { goLiveDate: goLive } };
+}
+
 app.put('/platform/tenants/:slug', async (c) => {
   const slug = c.req.param('slug');
   const body = await c.req.json<Partial<TenantConfig>>();
@@ -6287,6 +8934,11 @@ app.put('/platform/tenants/:slug', async (c) => {
     patch.clearanceCertTemplate = validateCertTemplate(body.clearanceCertTemplate);
   }
   if (body.orgContact !== undefined) patch.orgContact = validateOrgContact(body.orgContact);
+  // Whole-key write (the card sends the full object); normalised: leadDays deduped + sorted.
+  if (body.fixtureReminders !== undefined) {
+    patch.fixtureReminders = validateFixtureReminders(body.fixtureReminders);
+  }
+  if (body.integrations !== undefined) patch.integrations = validateIntegrations(body.integrations);
   // Calendars, structures and the league setups binding them go through the shared
   // operator write (validation, version minting, referrer guards, calendar-edit warnings).
   if (body.calendars !== undefined) patch.calendars = body.calendars;

@@ -65,6 +65,16 @@ export const refs = {
     `smartclub:${t}:fixture:recipe:${leagueKey}:${stream}:${slotId}`,
 };
 
+/**
+ * Smart club series holding the recipe knockouts (create-recipe-knockouts.ts). Their
+ * fixtures carry `syncRef` = the recipe fixture ref above, so the exporter must SKIP these
+ * series: medicoach already has those fixtures from the recipe, and a re-export would
+ * otherwise read "<League> · T20 · Knockout" as one more T20 group.
+ */
+export const RECIPE_KNOCKOUT_SERIES_PREFIX = 's-mc-ko-';
+export const isRecipeKnockoutSeries = (id: unknown) =>
+  String(id).startsWith(RECIPE_KNOCKOUT_SERIES_PREFIX);
+
 /* ─────────────────────────── Schemas ─────────────────────────── */
 
 const ref = z.string().min(1);

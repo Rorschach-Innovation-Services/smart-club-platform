@@ -40,8 +40,10 @@ import {
   JUNK_GROUND,
   DEFAULT_VENUE_ALIASES,
   venueAliasesFor,
+  isClashExempt,
 } from './venue-clash.js';
 import type { Club, Series, Venue } from './types.js';
+import { writeSeriesFromSnapshot } from './medicoach-sync/cli-write.js';
 
 const TENANT = 'dolphins';
 
@@ -262,7 +264,7 @@ function scanClashes(
   }> = [];
   for (const s of allSeries) {
     for (const f of (s.fixtures as StoredFixture[]) ?? []) {
-      if (!f.date || f.status === 'cancelled') continue;
+      if (!f.date || isClashExempt(f)) continue;
       const ground = effectiveGround(s, f, clubsById);
       if (!ground) continue;
       bookings.push({
@@ -305,7 +307,7 @@ function implicitHomeCount(clubId: string, allSeries: Series[]): number {
   let n = 0;
   for (const s of allSeries) {
     for (const f of (s.fixtures as StoredFixture[]) ?? []) {
-      if (!f.date || f.status === 'cancelled') continue;
+      if (!f.date || isClashExempt(f)) continue;
       if (f.venueOverride || f.venueName) continue; // explicit venue — doesn't follow the club record
       if (!f.home) continue;
       const homeClubId = s.participants
@@ -327,6 +329,10 @@ async function main() {
     repo.listSeries(TENANT),
     repo.listClubs(TENANT),
   ]);
+
+  // The series exactly as this run read them: the version every write is conditional on, and
+  // the baseline of the medicoach schedule diff (the working copies below are mutated).
+  const originalById = new Map(allSeries.map((x) => [String(x.id), structuredClone(x)]));
 
   const hardErrors: string[] = [];
 
@@ -487,7 +493,7 @@ async function main() {
   const allocLedger = new GroundLedger(registryResolver(buildAllocVenues(), ALIASES));
   for (const s of allSeries) {
     for (const f of (s.fixtures as StoredFixture[]) ?? []) {
-      if (!f.date || f.status === 'cancelled') continue;
+      if (!f.date || isClashExempt(f)) continue;
       if (toMoveGids.has(`${s.id}/${f.id ?? '?'}`)) continue; // moved fixtures are booked below
       const ground = effectiveGround(s, f, allocClubsById);
       if (!ground) continue;
@@ -690,10 +696,17 @@ async function main() {
   );
 
   // Series first (so a venue rename/delete never races ahead of the fixtures pointing at it).
+  // A series that drifted since this run read it is skipped (re-run). Venue updates/creates
+  // still go (the written series may point at them); generic-row DELETES do not, since the
+  // unwritten series' fixtures may still point at a row being deleted.
+  let drifted = 0;
   for (const id of dirtySeriesIds) {
     const s = allSeries.find((x) => String(x.id) === id)!;
-    s.version = (Number(s.version) || 1) + 1;
-    await repo.putSeries(TENANT, s);
+    // Version-checked against this run's read; diff original-read → written (ADR 0016).
+    if ((await writeSeriesFromSnapshot(repo, TENANT, originalById.get(id), s)) === 'drifted') {
+      drifted++;
+      continue;
+    }
     console.log(`wrote series ${s.id} v${s.version}`);
   }
   for (const id of dirtyVenueIds) {
@@ -704,13 +717,21 @@ async function main() {
     await repo.putVenue(TENANT, v);
     console.log(`created venue ${v.id}`);
   }
-  for (const id of genericDeleteIds) {
-    await repo.deleteVenue(TENANT, id);
-    console.log(`deleted generic venue ${id}`);
-  }
+  if (!drifted)
+    for (const id of genericDeleteIds) {
+      await repo.deleteVenue(TENANT, id);
+      console.log(`deleted generic venue ${id}`);
+    }
   for (const c of clubWrites.values()) {
     await repo.putClub(TENANT, c);
     console.log(`updated club ${c.id} v${c.version}`);
+  }
+  if (drifted) {
+    process.exitCode = 1;
+    console.error(
+      `\n${drifted} series changed while this ran and were NOT written; generic venue rows were NOT deleted. Re-run.`,
+    );
+    return;
   }
   console.log('Done.');
 }

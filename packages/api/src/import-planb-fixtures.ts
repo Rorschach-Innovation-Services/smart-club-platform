@@ -12,6 +12,15 @@
  *   … --revert                                                            # dry-run revert (keep-list excluded)
  *   … --revert --confirm                                                  # delete every imported series except the keep-list
  *   … --revert --all --confirm                                            # delete EVERYTHING including the keep-list
+ *   … --allow-sync-break                                                  # let --revert/--prune/--discard-edits run on a medicoach-synced tenant
+ *
+ * STABLE FIXTURE IDS (ADR 0016) — a re-import keeps the ids the stored series already has:
+ * rows match stored fixtures on date + unordered pair (kick-off time breaks ties), new rows
+ * are numbered above the series' highest id, and stored fixtures the sheet no longer has
+ * are listed and kept unless --discard-edits. Ids are half of the medicoach sync ref, so
+ * they must never shift with row order. On a tenant with `features.medicoachSync`, the
+ * destructive modes (--revert, --prune, --discard-edits) refuse to run without
+ * --allow-sync-break, which prints every fixture ref that will orphan.
  *
  * WHY THIS EXISTS — the structured season machinery (ADR 0008) can generate all of
  * these fixtures, but the union supplied a finished schedule before there was time to
@@ -44,7 +53,10 @@
 import ExcelJS from 'exceljs';
 import { writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
-import type { Series, Venue, VenueStatus, Club } from './types.js';
+import type { Series, Venue, VenueStatus, Club, TenantConfig } from './types.js';
+import { hasFeature } from './features.js';
+import { fixtureSyncRef, reconcileFixtureIds } from './fixture-identity.js';
+import { writeSeriesFromSnapshot } from './medicoach-sync/cli-write.js';
 
 type SeriesParticipant = NonNullable<Series['participants']>[number];
 type RepoModule = typeof import('./repo.js');
@@ -188,42 +200,30 @@ export function directiveMatches(
 
 // ───────────────────────── Name resolution ─────────────────────────
 
-/** Sheet names that collapse to different clubs than plain normalisation reaches. */
-const NAME_ALIASES: Record<string, string> = {
-  chatsworthsporting: 'hollywoodbets-chatsworth-sporting',
-  simplex: 'simplex-reservoir-hills-crimson',
-  dut: 'durban-university-of-technology-dut',
-  meadowridge: 'meadowridge-sporting-cricket-club',
-  rhythmdhs: 'rhythm-dhsob-cricket-club',
-  // Prod record "Parkgate Hambanathi CC" normalises to `parkgatehambanathi`; the
-  // sheets' bare "Parkgate" (norm `parkgate`) can't reach it, so map it straight.
-  parkgate: 'parkgate-hambanathi-cc',
-};
-
-/** Sheet TYPOS/variants that collapse to a DIFFERENT normal-form before the
- * byNorm/alias lookup runs. Kept separate from NAME_ALIASES (which maps straight to a
- * prod club id) so this script never hardcodes an unverifiable club id — the redirect
- * just corrects the spelling and lets the normal lookup do the rest. */
-const NAME_REDIRECTS: Record<string, string> = {
-  chatsworthhunited: 'chatsworthunited', // "Chatsworthh United" (double h)
-  umazi: 'umlazi', // "Umazi A" typo for "Umlazi A"
-  ilemebe: 'ilembe', // "ilemebe" typo
-  illembe: 'ilembe', // "Illembe" (REVISED file) — same club as "ilembe"/"iLembe"
-  // REVISED file spells out sponsor/suburb-qualified Premier names the Dolphins file
-  // gives short ("Harlequins", "Crusaders", "Rhythm DHS") — collapse onto the same form
-  // so the Premier T20 pair-map matches across both files.
-  harlequinsdbn: 'harlequins', // "Harlequins CC DBN 1st XI"
-  hollywoodbetscrusaders: 'crusaders', // "Hollywoodbets Crusaders 1st XI"
-  rhythmdhsob: 'rhythmdhs', // "RHYTHM DHSOB 1st XI"
-  // Prod has exactly one saints-like club (Saints Cricket Club); the T20/veterans
-  // sheets call it "Silver Saints". Confirmed against the prod club list on the
-  // 16 Aug 2026 dry run — union to give the final nod before --confirm.
-  silversaints: 'saints',
-  simplexrhcc: 'simplex', // "Simplex RHCC" (REVISED) = Simplex Reservoir Hills CC
-  // The sheets' "FAM" is prod's fam-kwamakhutha (ground "Harlequins", Cato Manor 1) —
-  // surfaced by the 16 Aug venue-registry sync, after an earlier run had already
-  // created a skeletal fam-cricket-club; the bootstrap script erases that duplicate.
-  fam: 'famkwamakhutha',
+/** Club-name resolution (aliases, typo redirects, lettered multi-team sides) lives in
+ * club-name-resolve.ts, shared with the umpire-appointments importer and the medicoach
+ * sync so one sheet name lands on the same teamId everywhere. Re-exported here because
+ * the tests and compare/bootstrap scripts import them from this module. */
+import {
+  normalise,
+  normaliseClubName,
+  redirectedNormalise,
+  buildClubIndex,
+  resolveClub,
+  resolveParticipant,
+  resolveTeamId,
+  reportSuffixMixing,
+  type SuffixUsage,
+  type ResolutionEntry,
+  type ResolutionLog,
+} from './club-name-resolve.js';
+export {
+  normalise,
+  normaliseClubName,
+  redirectedNormalise,
+  buildClubIndex,
+  type SuffixUsage,
+  type ResolutionLog,
 };
 
 /** Ground naming (aliases, normal forms, ledger) is shared with the API's release
@@ -232,145 +232,18 @@ const NAME_REDIRECTS: Record<string, string> = {
  * deliberately a SEPARATE namespace from club resolution: "Ilembe" is both a club
  * and a barred GROUND name, and the two must never be looked up in the same map. */
 import {
-  normaliseName,
   groundKey,
   GroundLedger,
   JUNK_GROUND,
+  isClashExempt,
   registryResolver,
 } from './venue-clash.js';
 export { groundKey, GroundLedger };
-
-/** Lowercase, strip punctuation, drop generic suffix/roster words. Keeps distinguishing
- * words ("sporting", "united") — Chatsworth Sporting must not collide with Chatsworth
- * United, and Spartan Sporting must stay distinct. '1st'/'2nd'/'xi' let the REVISED
- * file's "Amanzimtoti CC 1st XI" collapse onto the Dolphins file's "Amanzimtoti".
- * (The shared implementation — identical rules apply to clubs and grounds.) */
-export const normalise = normaliseName;
 
 /** Ground names don't carry club-only stopwords, so reusing `normalise` verbatim is
  * safe — kept as a separate name so the two namespaces (clubs vs. grounds) are never
  * confused at a call site. */
 const normaliseGround = normalise;
-
-export function redirectedNormalise(name: string): string {
-  const n = normalise(name);
-  return NAME_REDIRECTS[n] ?? n;
-}
-
-export function buildClubIndex(clubs: Club[]): Map<string, Club> {
-  const byNorm = new Map<string, Club>();
-  for (const c of clubs) {
-    byNorm.set(normalise(c.name), c);
-    byNorm.set(normalise(c.id), c);
-  }
-  return byNorm;
-}
-
-function resolveClub(name: string, clubs: Club[], byNorm: Map<string, Club>): Club | undefined {
-  const n = redirectedNormalise(name);
-  const aliased = NAME_ALIASES[n];
-  if (aliased) return clubs.find((c) => c.id === aliased);
-  return byNorm.get(n);
-}
-
-/** Reserved teamId namespace for synthesised multi-team sides — mirrors
- * `clubTeamsForLeague`'s deterministic pattern (src/leagues.ts:93-94) so a club that
- * later gets a real roster in the admin console converges onto the SAME ids. */
-const TEAM_ID_PREFIX = 'tm_';
-
-/** "Simplex A/B/C", "Rhythm DHS B/C", "Meadowridge A/B", "Umlazi A/B" — a trailing
- * A/B/C on a name miss means a multi-team club side, not a fresh club. */
-function stripLetterSuffix(name: string): { base: string; letter: string } | null {
-  const m = name.trim().match(/^(.*\S)\s+([A-C])$/);
-  return m ? { base: m[1], letter: m[2] } : null;
-}
-
-/** Tracks, per league, which clubs appeared as a plain (unsuffixed) team and which
- * appeared as a lettered side — printed as a warning for any club in both sets (the
- * suffixed/unsuffixed mixing check runs per LEAGUE, not per section). */
-export interface SuffixUsage {
-  suffixed: Set<string>;
-  unsuffixed: Set<string>;
-}
-
-/** One row of the name-resolution sign-off table: what the sheet called a team, and
- * what it resolved to. `teamId` is only shown separately from `clubId` when it's a
- * synthesised multi-team id — the operator reviews every alias/redirect outcome here
- * before `--confirm`. Keyed `leagueKey::rawName`, deduplicated across fixtures. */
-interface ResolutionEntry {
-  raw: string;
-  leagueKey: string;
-  clubName: string;
-  clubId: string;
-  teamId: string;
-}
-export type ResolutionLog = Map<string, ResolutionEntry>;
-
-function recordResolution(
-  log: ResolutionLog,
-  leagueKey: string,
-  raw: string,
-  club: Club,
-  teamId: string,
-) {
-  const key = `${leagueKey}::${raw}`;
-  if (log.has(key)) return;
-  log.set(key, { raw, leagueKey, clubName: club.name, clubId: club.id, teamId });
-}
-
-function resolveParticipant(
-  rawName: string,
-  leagueKey: string,
-  clubs: Club[],
-  byNorm: Map<string, Club>,
-  usage: SuffixUsage,
-  resolutions: ResolutionLog,
-): SeriesParticipant | undefined {
-  const direct = resolveClub(rawName, clubs, byNorm);
-  if (direct) {
-    usage.unsuffixed.add(`${leagueKey}::${direct.id}`);
-    recordResolution(resolutions, leagueKey, rawName, direct, direct.id);
-    const g = direct.ground ?? {};
-    return {
-      teamId: direct.id,
-      clubId: direct.id,
-      name: direct.name,
-      ...(g.venue ? { venue: g.venue } : {}),
-      ...(Number.isFinite(g.lat) ? { lat: g.lat as number } : {}),
-      ...(Number.isFinite(g.lon) ? { lon: g.lon as number } : {}),
-    };
-  }
-  const suffix = stripLetterSuffix(rawName);
-  if (!suffix) return undefined;
-  const club = resolveClub(suffix.base, clubs, byNorm);
-  if (!club) return undefined;
-  usage.suffixed.add(`${leagueKey}::${club.id}`);
-  const index = suffix.letter.charCodeAt(0) - 'A'.charCodeAt(0);
-  const teamId = `${TEAM_ID_PREFIX}${club.id}_${leagueKey}_${index}`;
-  recordResolution(resolutions, leagueKey, rawName, club, teamId);
-  const g = club.ground ?? {};
-  return {
-    teamId,
-    clubId: club.id,
-    name: `${club.name} ${suffix.letter}`,
-    ...(g.venue ? { venue: g.venue } : {}),
-    ...(Number.isFinite(g.lat) ? { lat: g.lat as number } : {}),
-    ...(Number.isFinite(g.lon) ? { lon: g.lon as number } : {}),
-  };
-}
-
-function reportSuffixMixing(usage: SuffixUsage): string[] {
-  const notes: string[] = [];
-  for (const key of usage.suffixed) {
-    if (usage.unsuffixed.has(key)) {
-      const [leagueKey, clubId] = key.split('::');
-      notes.push(
-        `${clubId} appears both as a plain team and a lettered side in league "${leagueKey}"`,
-      );
-    }
-  }
-  return notes;
-}
 
 // ───────────────────────── Cell helpers ─────────────────────────
 
@@ -1492,24 +1365,8 @@ export function parseReleaseWorkbook(wb: ExcelJS.Workbook): ReleaseParseResult {
   return { sections, orphans, tbcSkipped, amendmentNotes };
 }
 
-/** A sheet team name → its canonical teamId for a league (mirrors resolveParticipant's
- * id logic without the logging side effects): a direct club resolve, else a lettered
- * multi-team side `tm_<clubId>_<leagueKey>_<idx>`. */
-function releaseTeamId(
-  name: string,
-  leagueKey: string,
-  clubs: Club[],
-  byNorm: Map<string, Club>,
-): string | undefined {
-  const direct = resolveClub(name, clubs, byNorm);
-  if (direct) return direct.id;
-  const suffix = stripLetterSuffix(name);
-  if (!suffix) return undefined;
-  const club = resolveClub(suffix.base, clubs, byNorm);
-  if (!club) return undefined;
-  const index = suffix.letter.charCodeAt(0) - 'A'.charCodeAt(0);
-  return `${TEAM_ID_PREFIX}${club.id}_${leagueKey}_${index}`;
-}
+/** A sheet team name → its canonical teamId for a league (club-name-resolve.ts). */
+const releaseTeamId = resolveTeamId;
 
 /** Cut the combined Promotion Men T20 section into g1..g4 by prod participant membership
  * (the group whose participants contain both teamIds — the reference approach that placed
@@ -1596,7 +1453,7 @@ function runReleaseClashReport(
   const ledger = new GroundLedger(registryResolver(venues));
   for (const s of existingOther) {
     for (const f of (s.fixtures as StoredFixture[]) ?? []) {
-      if (!f.date || f.status === 'cancelled') continue;
+      if (!f.date || isClashExempt(f)) continue;
       const ground = effectiveGroundExisting(s, f, clubsById, emptyReBase);
       if (!ground) continue;
       ledger.book(ground, f.date, f.time, {
@@ -1677,6 +1534,9 @@ export interface WrittenFixture {
   venueOverride?: string;
   venueStatus?: VenueStatus;
   venueReason?: string;
+  /** Sync-owned (fixture-identity.ts): carried from the stored fixture on a re-import. */
+  syncRef?: string;
+  schedule?: { changedAt?: string };
 }
 
 export interface BuiltSeries {
@@ -1717,6 +1577,8 @@ export function buildSeries(
     if (home) add(home);
     if (away) add(away);
     return {
+      // Provisional row-order id. A re-import replaces it with the stored fixture's id
+      // (stabiliseFixtureIds), so only a brand-new series keeps f1..fN as written here.
       id: `f${i + 1}`,
       round: f.round,
       date: f.date,
@@ -1901,11 +1763,18 @@ interface StoredFixture {
   home?: string;
   away?: string;
   status?: string;
+  syncRef?: string;
+  schedule?: { changedAt?: string };
+  dateTbc?: boolean;
   venueOverride?: string;
   venueName?: string;
   venueId?: string;
   venueLocked?: boolean;
   venueReason?: string;
+  /** Postponement bookkeeping (ADR 0015) — read only to describe a postponed fixture; never a
+   * gate on its own (see diffAdminEdits). */
+  originalDate?: string;
+  postponementId?: string;
 }
 
 /** The id every stored series carries a slug from, or undefined for a foreign id
@@ -1977,7 +1846,7 @@ function runClashPass(
     const slug = seriesSlug(s.id);
     if (slug && DELETE_SLUGS.includes(slug)) continue;
     for (const raw of (s.fixtures as StoredFixture[]) ?? []) {
-      if (!raw.date) continue;
+      if (!raw.date || raw.dateTbc) continue;
       const ground = effectiveGroundExisting(s, raw, clubsById, reBaseMap);
       if (!ground) {
         skippedUndeterminable++;
@@ -2428,16 +2297,25 @@ function isImportAuthoredReason(reason: string | undefined): boolean {
 /** Splits the diff between an existing series and its incoming replacement into what
  * actually gates `--discard-edits` (GENUINE admin edits: a fixture no longer
  * 'scheduled', a hand-set venue whose reason isn't one the import itself authors, or a
- * fixture that only exists on prod/hand-added) vs. what's purely INFORMATIONAL.
+ * stored fixture the sheet no longer has) vs. what's purely INFORMATIONAL.
  *
- * Date/time is informational-only, never genuine: this import deliberately amends
- * dates and adds times across the whole sheet, and fixture ids (`f1..fN`) are
- * regenerated from row order every run — an id-based date comparison has no way to
- * distinguish "this import corrected the date" from "an admin corrected the date", so
- * it can't safely gate a write. Surface it for the operator to read, not to block on. */
-function diffAdminEdits(
+ * Fixture ids are stable across re-imports (stabiliseFixtureIds matches rows on date +
+ * unordered pair, then on the pair alone for a moved date), so the comparison is by id.
+ * Date/time is informational-only: a date or time change on a matched row can't be told
+ * apart from an admin (or medicoach) correction, so it is surfaced, never gated.
+ *
+ * A `postponed` fixture (ADR 0015 — moved by chair agreement or an admin ruling) is a date
+ * change, so it follows the same rule: informational, never genuine. Its bookkeeping fields
+ * (`originalDate`, `postponementId`) are not compared at all — the note just names the move so
+ * the operator knows a re-import resets it to the sheet's date.
+ *
+ * `syncOwned` (tenant has `features.medicoachSync`): medicoach owns results, so a
+ * `completed` status is the sync's, not an admin edit, and never gates. Sync-owned
+ * fields (syncRef, schedule.changedAt) are carried over, never compared. */
+export function diffAdminEdits(
   existing: Series,
   incoming: Series,
+  opts: { syncOwned?: boolean } = {},
 ): { genuine: string[]; informational: string[] } {
   const genuine: string[] = [];
   const informational: string[] = [];
@@ -2445,7 +2323,12 @@ function diffAdminEdits(
   const incomingFixtures = (incoming.fixtures as StoredFixture[]) ?? [];
   const incomingById = new Map(incomingFixtures.map((f) => [f.id, f]));
   for (const f of existingFixtures) {
-    if (f.status && f.status !== 'scheduled')
+    const syncCompleted = opts.syncOwned && f.status === 'completed';
+    if (f.status === 'postponed')
+      informational.push(
+        `${existing.id}: fixture ${f.id} is postponed (originally ${f.originalDate ?? 'unknown'}, now ${f.date ?? 'undated'}) — a re-import resets it to the sheet date`,
+      );
+    else if (f.status && f.status !== 'scheduled' && !syncCompleted)
       genuine.push(`${existing.id}: fixture ${f.id} has status "${f.status}"`);
     const handSetVenue = f.venueOverride || f.venueId || f.venueLocked;
     if (handSetVenue && !isImportAuthoredReason(f.venueReason))
@@ -2459,10 +2342,112 @@ function diffAdminEdits(
           `${existing.id}: fixture ${f.id} date/time differs (prod ${f.date} ${f.time ?? ''} vs sheet ${inc.date} ${inc.time ?? ''})`,
         );
     } else {
-      genuine.push(`${existing.id}: fixture ${f.id} exists on prod only (hand-added)`);
+      genuine.push(
+        `${existing.id}: fixture ${f.id} is not in the sheet (removed from the sheet, or hand-added)`,
+      );
     }
   }
   return { genuine, informational };
+}
+
+/** Per-run outcome of stabiliseFixtureIds, for the report and the sync-break gate. */
+export interface IdStabilisation {
+  /** `<seriesId> <fixtureId>  <date> <home> v <away>` lines for existing fixtures the
+   * sheet no longer has. Never deleted silently: they gate --discard-edits. */
+  removed: string[];
+  /** Sync refs of those removed fixtures — what a `--discard-edits` write would orphan. */
+  removedRefs: string[];
+  added: number;
+  matched: number;
+}
+
+/** Give every built series' fixtures the ids they already have on the stored copy
+ * (fixture-identity.ts). Mutates the fixtures in place, so `b.raw` index alignment (venue
+ * assignment) is untouched. Run once, straight after the build, before anything reports
+ * or books a fixture id. */
+export function stabiliseFixtureIds(
+  tenant: string,
+  built: Array<{ series: Series; fixtures: WrittenFixture[] }>,
+  existingSeries: Series[],
+): IdStabilisation {
+  const out: IdStabilisation = { removed: [], removedRefs: [], added: 0, matched: 0 };
+  for (const b of built) {
+    const existing = existingSeries.find((s) => s.id === b.series.id);
+    const stored = ((existing?.fixtures as StoredFixture[]) ?? []).filter(Boolean);
+    const r = reconcileFixtureIds(stored, b.fixtures);
+    out.added += r.added.length;
+    out.matched += r.matched;
+    for (const f of r.removed) {
+      out.removed.push(
+        `${b.series.id} ${f.id}  ${f.date ?? '?'}  ${f.home ?? '?'} v ${f.away ?? '?'}`,
+      );
+      out.removedRefs.push(fixtureSyncRef(tenant, String(b.series.id), f));
+    }
+  }
+  return out;
+}
+
+function printIdStabilisation(r: IdStabilisation) {
+  console.log(
+    `\n── Fixture ids: ${r.matched} kept from the stored series, ${r.added} new (numbered above the series' highest id)`,
+  );
+  if (r.removed.length) {
+    console.log(
+      `  ✗ ${r.removed.length} stored fixture(s) not in the sheet — the import will not write while they exist; --discard-edits writes anyway and DELETES them:`,
+    );
+    for (const line of r.removed) console.log(`     ${line}`);
+  }
+}
+
+/** Whether the tenant has the medicoach fixture sync on (ADR 0016). */
+export function syncEnabled(config: TenantConfig | null | undefined): boolean {
+  return hasFeature(config, 'medicoachSync');
+}
+
+/**
+ * The sync-break gate: a destructive mode (--revert / --prune / --discard-edits) on a
+ * sync-enabled tenant would orphan fixture refs medicoach holds results against. Refused
+ * unless --allow-sync-break, which prints every ref that will orphan. Fixture refs carry
+ * no personal data, so printing them is fine. Returns true when the run must stop.
+ */
+export function refuseSyncBreak(
+  config: TenantConfig | null | undefined,
+  what: string,
+  orphanRefs: string[],
+  allowSyncBreak: boolean,
+): boolean {
+  // Nothing would orphan (e.g. --discard-edits over hand-set venues only): nothing to refuse.
+  if (!syncEnabled(config) || !orphanRefs.length) return false;
+  if (allowSyncBreak) {
+    console.warn(
+      `\n⚠ --allow-sync-break: ${what} on a medicoach-synced tenant orphans ${orphanRefs.length} fixture ref(s):`,
+    );
+    for (const r of orphanRefs) console.warn(`   ${r}`);
+    return false;
+  }
+  console.error(
+    `\n✗ ${what} refused: this tenant has the medicoach fixture sync on (features.medicoachSync). It would orphan ${orphanRefs.length} fixture ref(s):`,
+  );
+  for (const r of orphanRefs) console.error(`   ${r}`);
+  console.error(
+    '   Pass --allow-sync-break to proceed anyway (medicoach keeps the orphaned fixtures).',
+  );
+  return true;
+}
+
+/**
+ * What --discard-edits means on a medicoach-synced tenant, beyond orphaned refs: the sheet's
+ * date/time/venue overwrite whatever the fixture holds now — including a reschedule medicoach
+ * made and the sync applied — and every such difference is then queued as a smart-club edit
+ * and pushed back to medicoach. Null on a tenant without the sync.
+ */
+export function discardEditsSyncWarning(config: TenantConfig | null | undefined): string | null {
+  if (!syncEnabled(config)) return null;
+  return (
+    '\n⚠ --discard-edits on a medicoach-synced tenant: the sheet overwrites every fixture as it ' +
+    'stands now, including reschedules medicoach made (and the sync applied), and those sheet ' +
+    'values are then pushed back to medicoach as smart-club edits.'
+  );
 }
 
 async function backupExistingSeries(repo: RepoModule): Promise<string> {
@@ -2493,6 +2478,8 @@ interface Args {
   only: string[];
   /** Skip the post-import club-league sync (sync-club-leagues-from-series). */
   noClubSync: boolean;
+  /** Let --revert/--prune/--discard-edits run on a medicoach-synced tenant (ADR 0016). */
+  allowSyncBreak: boolean;
 }
 
 export function parseArgs(argv: string[]): Args {
@@ -2509,6 +2496,7 @@ export function parseArgs(argv: string[]): Args {
     all: false,
     only: [],
     noClubSync: false,
+    allowSyncBreak: false,
   };
   let prune = false;
   let revert = false;
@@ -2526,6 +2514,7 @@ export function parseArgs(argv: string[]): Args {
     else if (a === '--revert') revert = true;
     else if (a === '--all') args.all = true;
     else if (a === '--no-club-sync') args.noClubSync = true;
+    else if (a === '--allow-sync-break') args.allowSyncBreak = true;
     else if (a === '--only')
       args.only = (argv[++i] ?? '')
         .split(',')
@@ -2681,7 +2670,25 @@ function printGroundlessClubs(groundless: GroundlessClub[]) {
 
 // ───────────────────────── Modes ─────────────────────────
 
-async function runRevert(repo: RepoModule, all: boolean, confirm: boolean) {
+/** The refs among `refs` that belong to a series still in `built` (after --only). */
+function onlyBuilt(refs: string[], built: BuiltSeries[]): string[] {
+  const ids = new Set(built.map((b) => String(b.series.id)));
+  return refs.filter((r) => ids.has(r.split(':')[3] ?? ''));
+}
+
+/** Every fixture's sync ref across `series` — what deleting them would orphan. */
+function seriesFixtureRefs(series: Series[]): string[] {
+  return series.flatMap((s) =>
+    ((s.fixtures as StoredFixture[]) ?? []).map((f) => fixtureSyncRef(TENANT, String(s.id), f)),
+  );
+}
+
+async function runRevert(
+  repo: RepoModule,
+  all: boolean,
+  confirm: boolean,
+  allowSyncBreak: boolean,
+) {
   const list = await repo.listSeries(TENANT);
   let mine = list.filter((s) => String(s.id).startsWith(ID_PREFIX));
   if (!all) {
@@ -2695,6 +2702,17 @@ async function runRevert(repo: RepoModule, all: boolean, confirm: boolean) {
   }
   if (mine.length === 0) {
     console.log('Nothing to revert.');
+    return;
+  }
+  if (
+    refuseSyncBreak(
+      await repo.getTenantConfig(TENANT),
+      '--revert',
+      seriesFixtureRefs(mine),
+      allowSyncBreak,
+    )
+  ) {
+    process.exitCode = 1;
     return;
   }
   for (const s of mine) {
@@ -2711,7 +2729,7 @@ async function runRevert(repo: RepoModule, all: boolean, confirm: boolean) {
   );
 }
 
-async function runPrune(repo: RepoModule, confirm: boolean) {
+async function runPrune(repo: RepoModule, confirm: boolean, allowSyncBreak: boolean) {
   const all = await repo.listSeries(TENANT);
   const stale = all.filter(
     (s) =>
@@ -2720,6 +2738,17 @@ async function runPrune(repo: RepoModule, confirm: boolean) {
   );
   if (stale.length === 0) {
     console.log('Nothing to prune — none of the superseded series exist.');
+    return;
+  }
+  if (
+    refuseSyncBreak(
+      await repo.getTenantConfig(TENANT),
+      '--prune',
+      seriesFixtureRefs(stale),
+      allowSyncBreak,
+    )
+  ) {
+    process.exitCode = 1;
     return;
   }
   // Same restorability rule as the import write: deletes never run without a fresh
@@ -2826,6 +2855,9 @@ async function runImport(args: Args) {
     repo.listVenues(TENANT),
     repo.listSeries(TENANT),
   ]);
+  // The stored series exactly as this run read them: every write below is conditional on
+  // their version, and the medicoach schedule diff runs from them (ADR 0016).
+  const readById = new Map(existingSeries.map((x) => [String(x.id), structuredClone(x)]));
   const byNorm = buildClubIndex(clubs);
   const clubsById = new Map(clubs.map((c) => [c.id, c]));
   const byNormVenue = buildVenueIndex(venues);
@@ -2936,6 +2968,11 @@ async function runImport(args: Args) {
     });
     built.push(b);
   }
+
+  // ── Stable fixture ids ── Re-use the stored ids (date + unordered pair) before anything
+  // reports or books a fixture id, so an inserted sheet row can't shift synced refs.
+  const idStabilisation = stabiliseFixtureIds(TENANT, built, existingSeries);
+  printIdStabilisation(idStabilisation);
 
   // ── --only: restrict this run to the selected series ── Everything downstream (venue
   // passes, groundless report, clash pass, overlap report, edit gate, write loop) keys
@@ -3209,7 +3246,9 @@ async function runImport(args: Args) {
   for (const b of built) {
     const existing = existingSeries.find((s) => s.id === b.series.id);
     if (existing) {
-      const { genuine, informational } = diffAdminEdits(existing, b.series);
+      const { genuine, informational } = diffAdminEdits(existing, b.series, {
+        syncOwned: syncEnabled(config),
+      });
       editNotes.push(...genuine);
       dateTimeInfoNotes.push(...informational);
     }
@@ -3258,6 +3297,20 @@ async function runImport(args: Args) {
     );
     abort = true;
   }
+  if (args.discardEdits) {
+    const warning = discardEditsSyncWarning(config);
+    if (warning) console.warn(warning);
+  }
+  if (
+    args.discardEdits &&
+    refuseSyncBreak(
+      config,
+      '--discard-edits',
+      onlyBuilt(idStabilisation.removedRefs, built),
+      args.allowSyncBreak,
+    )
+  )
+    abort = true;
   if (abort) {
     process.exitCode = 1;
     return;
@@ -3291,9 +3344,12 @@ async function runImport(args: Args) {
   }
 
   const backupPath = await backupExistingSeries(repo);
+  let drifted = 0;
   for (const b of built) {
     const s = b.series;
-    const existing = await repo.getSeries(TENANT, s.id);
+    // The series as this run read it (not a fresh read): its version guards the write, so a
+    // series edited since (an admin, a medicoach apply) is skipped, never overwritten.
+    const existing = readById.get(String(s.id));
     if (existing) {
       s.approved = existing.approved ?? s.approved;
       s.approvedAt = existing.approvedAt ?? null;
@@ -3303,13 +3359,23 @@ async function runImport(args: Args) {
       // silently un-withhold venues/times a released series is still holding back.
       s.withheld = existing.withheld;
       s.revealedAt = existing.revealedAt;
-      s.version = (Number(existing.version) || 1) + 1;
     }
-    await repo.putSeries(TENANT, s);
+    // Version-checked against this run's read; stamps + queues every mapped fixture whose
+    // schedule this run changed (diff original-read → written, ADR 0016).
+    if ((await writeSeriesFromSnapshot(repo, TENANT, existing, s)) === 'drifted') {
+      drifted++;
+      continue;
+    }
     const withheldNote =
       existing && s.withheld ? ` (withheld: ${Object.keys(s.withheld).join(',')})` : '';
     console.log(
       `wrote ${s.id}  v${s.version}${existing ? ' (overwrote, lifecycle preserved)' : ''}${withheldNote}`,
+    );
+  }
+  if (drifted) {
+    process.exitCode = 1;
+    console.error(
+      `\n✗ ${drifted} series changed since this run read them and were NOT written — re-run the import.`,
     );
   }
   if (!args.noClubSync) {
@@ -3394,6 +3460,9 @@ async function runRelease(args: Args) {
     repo.listVenues(TENANT),
     repo.listSeries(TENANT),
   ]);
+  // The stored series exactly as this run read them: every write below is conditional on
+  // their version, and the medicoach schedule diff runs from them (ADR 0016).
+  const readById = new Map(existingSeries.map((x) => [String(x.id), structuredClone(x)]));
   const byNorm = buildClubIndex(clubs);
   const clubsById = new Map(clubs.map((c) => [c.id, c]));
   const byNormVenue = buildVenueIndex(venues);
@@ -3499,6 +3568,10 @@ async function runRelease(args: Args) {
     built.push(b);
   }
 
+  // ── Stable fixture ids ── (same as the two-workbook path)
+  const idStabilisation = stabiliseFixtureIds(TENANT, built, existingSeries);
+  printIdStabilisation(idStabilisation);
+
   // ── --only: restrict to the selected series (preserves manifest order) ──
   if (args.only.length) {
     const slugOf = (b: BuiltSeries) => seriesSlug(b.series.id) ?? String(b.series.id);
@@ -3567,7 +3640,9 @@ async function runRelease(args: Args) {
   for (const b of built) {
     const existing = existingSeries.find((s) => s.id === b.series.id);
     if (existing) {
-      const { genuine, informational } = diffAdminEdits(existing, b.series);
+      const { genuine, informational } = diffAdminEdits(existing, b.series, {
+        syncOwned: syncEnabled(config),
+      });
       editNotes.push(...genuine);
       dateTimeInfoNotes.push(...informational);
     }
@@ -3610,6 +3685,20 @@ async function runRelease(args: Args) {
     );
     abort = true;
   }
+  if (args.discardEdits) {
+    const warning = discardEditsSyncWarning(config);
+    if (warning) console.warn(warning);
+  }
+  if (
+    args.discardEdits &&
+    refuseSyncBreak(
+      config,
+      '--discard-edits',
+      onlyBuilt(idStabilisation.removedRefs, built),
+      args.allowSyncBreak,
+    )
+  )
+    abort = true;
   if (abort) {
     process.exitCode = 1;
     return;
@@ -3642,9 +3731,12 @@ async function runRelease(args: Args) {
     console.log(`created venue ${collegiansToCreate.id} (${collegiansToCreate.name})`);
   }
   const backupPath = await backupExistingSeries(repo);
+  let drifted = 0;
   for (const b of built) {
     const s = b.series;
-    const existing = await repo.getSeries(TENANT, s.id);
+    // The series as this run read it (not a fresh read): its version guards the write, so a
+    // series edited since (an admin, a medicoach apply) is skipped, never overwritten.
+    const existing = readById.get(String(s.id));
     if (existing) {
       s.approved = existing.approved ?? s.approved;
       s.approvedAt = existing.approvedAt ?? null;
@@ -3652,13 +3744,23 @@ async function runRelease(args: Args) {
       s.releasedAt = existing.releasedAt ?? null;
       s.withheld = existing.withheld;
       s.revealedAt = existing.revealedAt;
-      s.version = (Number(existing.version) || 1) + 1;
     }
-    await repo.putSeries(TENANT, s);
+    // Version-checked against this run's read; stamps + queues every mapped fixture whose
+    // schedule this run changed (diff original-read → written, ADR 0016).
+    if ((await writeSeriesFromSnapshot(repo, TENANT, existing, s)) === 'drifted') {
+      drifted++;
+      continue;
+    }
     const withheldNote =
       existing && s.withheld ? ` (withheld: ${Object.keys(s.withheld).join(',')})` : '';
     console.log(
       `wrote ${s.id}  v${s.version}${existing ? ' (overwrote, lifecycle preserved)' : ''}${withheldNote}`,
+    );
+  }
+  if (drifted) {
+    process.exitCode = 1;
+    console.error(
+      `\n✗ ${drifted} series changed since this run read them and were NOT written — re-run the import.`,
     );
   }
   if (!args.noClubSync) {
@@ -3683,8 +3785,8 @@ async function main() {
   if (args.mode === 'import') return runImport(args);
   if (args.mode === 'release') return runRelease(args);
   const repo = await import('./repo.js');
-  if (args.mode === 'prune') return runPrune(repo, args.confirm);
-  return runRevert(repo, args.all, args.confirm);
+  if (args.mode === 'prune') return runPrune(repo, args.confirm, args.allowSyncBreak);
+  return runRevert(repo, args.all, args.confirm, args.allowSyncBreak);
 }
 
 // Guard the entry point so importing this module (e.g. from a test file, to reach the

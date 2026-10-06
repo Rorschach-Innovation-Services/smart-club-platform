@@ -155,4 +155,27 @@ describe('projectSeriesForClub', () => {
     assert.equal(f.venueName, 'Kingsmead Stadium');
     assert.equal(f.time, '09:00');
   });
+
+  test('postponement fields (status, originalDate, postponementId) survive a fully withheld projection', () => {
+    const base = series();
+    const input = series({
+      withheld: { venue: true, time: true },
+      fixtures: [
+        {
+          ...(base.fixtures[0] as Record<string, unknown>),
+          date: '2026-11-07',
+          status: 'postponed',
+          originalDate: '2026-09-27',
+          postponementId: 'req-1',
+        },
+      ],
+    });
+    const f = (projectSeriesForClub(input, today)!.fixtures as Record<string, unknown>[])[0];
+    assert.equal(f.status, 'postponed');
+    assert.equal(f.date, '2026-11-07');
+    assert.equal(f.originalDate, '2026-09-27');
+    assert.equal(f.postponementId, 'req-1');
+    assert.equal(f.time, undefined);
+    assert.equal(f.venueName, undefined);
+  });
 });

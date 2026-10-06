@@ -27,15 +27,54 @@ import type { FormatSpec } from './types';
 export const WINNER_PREFIX = 'win:';
 /** Reserved prefix for "the loser of fixture X" — third-place playoffs. */
 export const LOSER_PREFIX = 'lose:';
+/**
+ * Reserved prefix for "the team finishing <rank> in group series X" — a knockout seeded
+ * from another series' standings (`pos:<groupSeriesId>:<rank>`, e.g. the medicoach recipe
+ * semis "Group 1 1st v Group 2 2nd"). Unlike `win:`/`lose:` it points at a SERIES, not a
+ * fixture in the same series, so it never takes part in the bracket graph below.
+ */
+export const POSITION_PREFIX = 'pos:';
 
 /** A forward reference to the winner of a fixture. */
 export const winnerOf = (fixtureId: string): string => `${WINNER_PREFIX}${fixtureId}`;
 /** A forward reference to the loser of a fixture. */
 export const loserOf = (fixtureId: string): string => `${LOSER_PREFIX}${fixtureId}`;
 
+/** A forward reference to the team finishing `rank` (1-based) in group series `seriesId`. */
+export const groupPositionOf = (seriesId: string, rank: number): string =>
+  `${POSITION_PREFIX}${seriesId}:${rank}`;
+
 /** True when an entrant id is a forward reference rather than a real team. */
 export function isSlotRef(id: string): boolean {
-  return typeof id === 'string' && (id.startsWith(WINNER_PREFIX) || id.startsWith(LOSER_PREFIX));
+  return (
+    typeof id === 'string' &&
+    (id.startsWith(WINNER_PREFIX) || id.startsWith(LOSER_PREFIX) || id.startsWith(POSITION_PREFIX))
+  );
+}
+
+/** The group series + rank a `pos:` reference points at, or null if it isn't one. */
+export function groupPositionSource(id: string): { seriesId: string; rank: number } | null {
+  if (typeof id !== 'string' || !id.startsWith(POSITION_PREFIX)) return null;
+  const m = /^(.+):(\d+)$/.exec(id.slice(POSITION_PREFIX.length));
+  return m ? { seriesId: m[1], rank: Number(m[2]) } : null;
+}
+
+const ordinal = (n: number): string => {
+  const v = n % 100;
+  if (v >= 11 && v <= 13) return `${n}th`;
+  return `${n}${['th', 'st', 'nd', 'rd'][n % 10] ?? 'th'}`;
+};
+
+/**
+ * "Group 1 – 1st" for `pos:s-planb-premier-men-t20-1:1`. The group number is read off the
+ * series id's trailing group token (`-1`, `-g2`); an id without one is shown as-is.
+ */
+export function groupPositionLabel(id: string): string | null {
+  const src = groupPositionSource(id);
+  if (!src) return null;
+  const m = /-g?(\d+)$/i.exec(src.seriesId);
+  const group = m ? `Group ${Number(m[1])}` : src.seriesId;
+  return `${group} – ${ordinal(src.rank)}`;
 }
 
 /** The fixture id a forward reference points at, or null if it isn't one. */
@@ -143,6 +182,8 @@ function bracketShape(fixtures: SlotFixture[]): {
  * branch is more use than "Unknown team".
  */
 export function slotRefLabel(id: string, fixtures: SlotFixture[] = []): string | null {
+  const position = groupPositionLabel(id);
+  if (position) return position;
   const src = slotSource(id);
   if (!src) return null;
   const verb = src.kind === 'winner' ? 'Winner' : 'Loser';

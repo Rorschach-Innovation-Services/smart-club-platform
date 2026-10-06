@@ -142,7 +142,8 @@ export function buildLedger(
   for (const s of allSeries ?? []) {
     if (exclude.has(s.id)) continue;
     for (const f of s.fixtures ?? []) {
-      if (!f?.date) continue;
+      // A `dateTbc` fixture (a recipe knockout with a placeholder date) holds no real slot.
+      if (!f?.date || (f as { dateTbc?: boolean }).dateTbc) continue;
       if (f.venueId) bumpVenue(f.venueId, f.date, f.time);
       // A knockout placeholder is NOT a side. `win:f1` is series-scoped — every bracket
       // numbers its fixtures from f1 — so two competitions' finals both contain `win:f1`

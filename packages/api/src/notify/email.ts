@@ -778,3 +778,461 @@ export async function sendVeteransRequestResolvedEmail(
   );
   return { messageId: res.MessageId ?? '' };
 }
+
+// ───────────────────────── Fixture postponement negotiation (ADR 0015) ─────────────────────────
+//
+// Email-only, link-free (the chair may hold no portal login), like the veterans notices. Each
+// builder is pure (no SES, no env) and exported so tests can assert the rendered copy. The CALLER
+// decides what may appear: a kick-off time or ground withheld from clubs (ADR 0011) is simply not
+// passed in, so these builders can never leak one.
+
+/** "Sat 2026-11-07" / "Sat 2026-11-07 at 13:00" — weekday + ISO date keeps the copy unambiguous. */
+function postponementWhen(date: string, time?: string): string {
+  const ms = Date.parse(`${date}T00:00:00Z`);
+  const weekday = Number.isNaN(ms)
+    ? ''
+    : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(ms).getUTCDay()] + ' ';
+  return `${weekday}${date}${time ? ` at ${time}` : ''}`;
+}
+
+/** Shared text + html shell for every postponement notice. `lines` are labelled extras. */
+function postponementNotice(
+  chairName: string,
+  body: string,
+  lines: Array<[label: string, value: string | undefined]>,
+  closing?: string,
+): { text: string; html: string } {
+  const greetName = chairName || 'there';
+  const shown = lines.filter((l): l is [string, string] => !!l[1]);
+  const extraText = shown.map(([k, v]) => `\n\n${k}: ${v}`).join('');
+  const closingText = closing ? `\n\n${closing}` : '';
+  const text =
+    `Hello ${greetName},\n\n` +
+    `${body}${extraText}${closingText}\n\n` +
+    `If you have any questions, please contact your union office.\n\n` +
+    `Thank you,\nThe union office`;
+  const extraHtml = shown
+    .map(([k, v]) => `<p><strong>${escapeHtml(k)}:</strong> ${escapeHtml(v)}</p>`)
+    .join('');
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>Hello ${escapeHtml(greetName)},</p>` +
+    `<p>${escapeHtml(body)}</p>` +
+    `${extraHtml}` +
+    (closing ? `<p>${escapeHtml(closing)}</p>` : '') +
+    `<p>If you have any questions, please contact your union office.</p>` +
+    `<p>Thank you,<br/>The union office</p>` +
+    `</div>`;
+  return { text, html };
+}
+
+export interface PostponementOpenedEmailInput {
+  chairName: string;
+  requestingClubName: string;
+  /** "Home v Away · Series name". */
+  fixtureLabel: string;
+  originalDate: string;
+  originalTime?: string;
+  proposedDate: string;
+  proposedTime?: string;
+  reason?: string;
+}
+
+/** To the OPPOSING chair: the other club asks to move the fixture to a new date. */
+export function postponementOpenedEmailContent(input: PostponementOpenedEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const subject = `Postponement request — ${input.fixtureLabel}`;
+  const body =
+    `${input.requestingClubName} has asked to postpone ${input.fixtureLabel}, scheduled for ` +
+    `${postponementWhen(input.originalDate, input.originalTime)}, to ` +
+    `${postponementWhen(input.proposedDate, input.proposedTime)}. Please respond in your club ` +
+    `portal — accept the new date, propose another, or decline.`;
+  return {
+    subject,
+    ...postponementNotice(input.chairName, body, [
+      [`Reason from ${input.requestingClubName}`, input.reason],
+    ]),
+  };
+}
+
+export interface PostponementCounteredEmailInput {
+  chairName: string;
+  counteringClubName: string;
+  fixtureLabel: string;
+  originalDate: string;
+  originalTime?: string;
+  proposedDate: string;
+  proposedTime?: string;
+  note?: string;
+}
+
+/** To the OTHER chair: a side has proposed a different new date. */
+export function postponementCounteredEmailContent(input: PostponementCounteredEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const subject = `New date proposed — ${input.fixtureLabel}`;
+  const body =
+    `${input.counteringClubName} has proposed ${postponementWhen(input.proposedDate, input.proposedTime)} ` +
+    `for ${input.fixtureLabel} (originally ${postponementWhen(input.originalDate, input.originalTime)}). ` +
+    `Please respond in your club portal — accept it, or propose another date.`;
+  return {
+    subject,
+    ...postponementNotice(input.chairName, body, [
+      [`Note from ${input.counteringClubName}`, input.note],
+    ]),
+  };
+}
+
+export interface PostponementAgreedEmailInput {
+  chairName: string;
+  fixtureLabel: string;
+  originalDate: string;
+  originalTime?: string;
+  newDate: string;
+  newTime?: string;
+}
+
+/** To BOTH chairs: the clubs agreed and the fixture has moved. */
+export function postponementAgreedEmailContent(input: PostponementAgreedEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const subject = `Fixture postponed — ${input.fixtureLabel}`;
+  const body =
+    `Both clubs have agreed: ${input.fixtureLabel}, originally ` +
+    `${postponementWhen(input.originalDate, input.originalTime)}, is now on ` +
+    `${postponementWhen(input.newDate, input.newTime)}. The fixture list has been updated.`;
+  return { subject, ...postponementNotice(input.chairName, body, []) };
+}
+
+export interface PostponementAdminFinalEmailInput {
+  chairName: string;
+  fixtureLabel: string;
+  originalDate: string;
+  originalTime?: string;
+  newDate: string;
+  newTime?: string;
+  /** Only when the ground is visible to clubs. */
+  venueName?: string;
+}
+
+/** To BOTH chairs: the union office has set the final date — acknowledge in the portal. */
+export function postponementAdminFinalEmailContent(input: PostponementAdminFinalEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const subject = `Fixture rescheduled by the union office — ${input.fixtureLabel}`;
+  const body =
+    `The union office has set the final date for ${input.fixtureLabel} (originally ` +
+    `${postponementWhen(input.originalDate, input.originalTime)}): it is now on ` +
+    `${postponementWhen(input.newDate, input.newTime)}. The fixture list has been updated.`;
+  return {
+    subject,
+    ...postponementNotice(
+      input.chairName,
+      body,
+      [['Venue', input.venueName]],
+      'Please acknowledge this ruling in your club portal.',
+    ),
+  };
+}
+
+export interface PostponementDeclinedEmailInput {
+  chairName: string;
+  /** The club that declined (opposing) or withdrew (requesting). */
+  actingClubName: string;
+  fixtureLabel: string;
+  originalDate: string;
+  originalTime?: string;
+  outcome: 'declined' | 'withdrawn';
+  reason?: string;
+}
+
+/** To the COUNTERPART chair: the request was declined / withdrawn; the fixture stays as it was. */
+export function postponementDeclinedEmailContent(input: PostponementDeclinedEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const subject = `Postponement ${input.outcome} — ${input.fixtureLabel}`;
+  const verb = input.outcome === 'declined' ? 'declined the request' : 'withdrawn its request';
+  const body =
+    `${input.actingClubName} has ${verb} to postpone ${input.fixtureLabel}. The fixture stays on ` +
+    `${postponementWhen(input.originalDate, input.originalTime)}.`;
+  return { subject, ...postponementNotice(input.chairName, body, [['Reason', input.reason]]) };
+}
+
+// ───────────────────────── Scheduled fixture reminders (FixtureReminders cron) ─────────────────────────
+//
+// Pure builder, same contract as the postponement notices: the CALLER decides what may appear. A
+// kick-off time or ground the series withholds from clubs (ADR 0011) is never passed in — the cron
+// reads fixtures through projectSeriesForClub — so this builder cannot leak one.
+
+/** One match on the reminder's date, from the reminded club's point of view. */
+export interface FixtureReminderLine {
+  seriesName: string;
+  /** The club's own side (a multi-team club fields several). */
+  sideName: string;
+  opponentName: string;
+  isHome: boolean;
+  /** Only when the series reveals kick-off times to clubs. */
+  time?: string;
+  /** Only when the series reveals grounds to clubs. */
+  venue?: string;
+}
+
+export interface FixtureReminderEmailInput {
+  chairName: string;
+  clubName: string;
+  /** "Sat 2026-11-07". */
+  dateLabel: string;
+  fixtures: FixtureReminderLine[];
+  /** The tenant's portal origin; omitted when the tenant has no canonical web origin. */
+  portalLink?: string;
+}
+
+/** Human date label for a reminder: weekday + ISO date ("Sat 2026-11-07"). */
+export function fixtureReminderDateLabel(date: string): string {
+  return postponementWhen(date);
+}
+
+/** The reminder email to a club chair: every match the club plays on one date. */
+export function fixtureReminderEmailContent(input: FixtureReminderEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const greetName = input.chairName || 'there';
+  const n = input.fixtures.length;
+  const subject = `Fixture reminder — ${input.clubName} · ${input.dateLabel}`;
+  const intro = `A reminder that ${input.clubName} has ${n === 1 ? 'a fixture' : `${n} fixtures`} on ${input.dateLabel}:`;
+  const lineText = (f: FixtureReminderLine) =>
+    [
+      f.seriesName,
+      `${f.sideName} vs ${f.opponentName} (${f.isHome ? 'Home' : 'Away'})`,
+      ...(f.time ? [f.time] : []),
+      ...(f.venue ? [f.venue] : []),
+    ].join(' · ');
+  const portalText = input.portalLink
+    ? `See the full fixture details in your club portal: ${input.portalLink}`
+    : 'See the full fixture details in your club portal.';
+  const text =
+    `Hello ${greetName},\n\n` +
+    `${intro}\n\n` +
+    input.fixtures.map((f) => `  • ${lineText(f)}`).join('\n') +
+    `\n\n${portalText}\n\n` +
+    `If you have any questions, please contact your union office.\n\n` +
+    `Thank you,\nThe union office`;
+  const portalHtml = input.portalLink
+    ? `See the full fixture details in your club portal: <a href="${escapeHtml(input.portalLink)}">${escapeHtml(input.portalLink)}</a>`
+    : 'See the full fixture details in your club portal.';
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>Hello ${escapeHtml(greetName)},</p>` +
+    `<p>${escapeHtml(intro)}</p>` +
+    `<ul>${input.fixtures.map((f) => `<li>${escapeHtml(lineText(f))}</li>`).join('')}</ul>` +
+    `<p>${portalHtml}</p>` +
+    `<p>If you have any questions, please contact your union office.</p>` +
+    `<p>Thank you,<br/>The union office</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+/** Send one rendered fixture reminder. Same dry-run gate as the other senders. */
+export function sendFixtureReminderEmail(
+  to: string,
+  content: { subject: string; text: string; html: string },
+): Promise<{ messageId: string }> {
+  return sendPostponementEmail(to, content, 'fixture-reminder');
+}
+
+/** Send one rendered postponement notice. Same dry-run gate as the other senders. */
+export async function sendPostponementEmail(
+  to: string,
+  content: { subject: string; text: string; html: string },
+  label: string,
+): Promise<{ messageId: string }> {
+  if (EMAIL_DRY_RUN) {
+    console.log(`[notify:email dry-run] would send ${label} notice to ${to}: ${content.subject}`);
+    return { messageId: `dry-run-${randomUUID()}` };
+  }
+  const res = await ses!.send(
+    new SendEmailCommand({
+      Source: FROM_EMAIL!,
+      Destination: { ToAddresses: [to] },
+      Message: {
+        Subject: { Data: content.subject, Charset: 'UTF-8' },
+        Body: {
+          Html: { Data: content.html, Charset: 'UTF-8' },
+          Text: { Data: content.text, Charset: 'UTF-8' },
+        },
+      },
+    }),
+  );
+  return { messageId: res.MessageId ?? '' };
+}
+
+// ───────────────────────── Captain's report due ─────────────────────────
+
+export interface CaptainsReportDueEmailInput {
+  to: string;
+  /** Club chair cc'd when the captain is the recipient. */
+  cc?: string;
+  recipientName: string;
+  /** 'captain' → "you captained"; 'chair' → "please complete or send it to the captain". */
+  recipientKind: 'captain' | 'chair';
+  clubName: string;
+  /** "Umzinto v African Warriors" */
+  matchLine: string;
+  /** "Sun 4 Oct 2026" */
+  matchDateText: string;
+  /** When the link stops working, "Sunday, 11 Oct" (23:59 SAST that day). */
+  expiresText: string;
+  /** The submit-once link. NEVER logged. */
+  link: string;
+  orgName: string;
+  /** The one pre-expiry reminder (same link). */
+  reminder?: boolean;
+  /** The chair who sent the report on to this captain. */
+  forwardedBy?: string;
+}
+
+/** Build the captain's-report-due email. Pure — exported so tests can assert the copy. */
+export function captainsReportDueEmailContent(input: CaptainsReportDueEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { recipientName, recipientKind, clubName, matchLine, matchDateText } = input;
+  const greet = recipientName || 'there';
+  const subject = `${input.reminder ? 'Reminder: ' : ''}Captain's report open: ${matchLine} (${matchDateText})`;
+  const ask = input.forwardedBy
+    ? `${input.forwardedBy} asked you to complete ${clubName}'s captain's report for ${matchLine} on ${matchDateText}. Please rate the umpires.`
+    : recipientKind === 'captain'
+      ? `Please rate the umpires from ${clubName}'s match ${matchLine} on ${matchDateText}.`
+      : `${clubName}'s captain's report for ${matchLine} on ${matchDateText} is open. Please complete it, or use "Send to captain" on the report to pass it to the match captain.`;
+  const lead = input.reminder
+    ? `A reminder: the captain's report is still open and the link expires soon. ${ask}`
+    : ask;
+  const terms = `You can save a draft and submit once. Link expires ${input.expiresText}.`;
+  const after = 'After that, your club chair can still file the report from the club portal.';
+  const text =
+    `Hi ${greet},\n\n${lead}\n\n` +
+    `Open the report here (no sign-in needed):\n\n${input.link}\n\n` +
+    `${terms} ${after}\n\n` +
+    `Thank you,\nThe ${input.orgName} office`;
+  const e = escapeHtml;
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>Hi ${e(greet)},</p>` +
+    `<p>${e(lead)}</p>` +
+    `<p><a href="${e(input.link)}" style="color:#1D9E75;font-weight:600">Open the captain's report</a> (no sign-in needed)</p>` +
+    `<p>${e(terms)} ${e(after)}</p>` +
+    `<p>Thank you,<br/>The ${e(input.orgName)} office</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+/** Send the captain's-report-due email (the link rides in the body; never logged). */
+export async function sendCaptainsReportDueEmail(
+  input: CaptainsReportDueEmailInput,
+): Promise<{ messageId: string }> {
+  const { subject, text, html } = captainsReportDueEmailContent(input);
+  if (EMAIL_DRY_RUN) {
+    console.log(
+      `[notify:email dry-run] would send captain's report link to ${input.to}` +
+        `${input.cc ? ` (cc ${input.cc})` : ''} for ${input.clubName}`,
+    );
+    return { messageId: `dry-run-${randomUUID()}` };
+  }
+  const res = await ses!.send(
+    new SendEmailCommand({
+      Source: FROM_EMAIL!,
+      Destination: { ToAddresses: [input.to], ...(input.cc ? { CcAddresses: [input.cc] } : {}) },
+      Message: {
+        Subject: { Data: subject, Charset: 'UTF-8' },
+        Body: {
+          Html: { Data: html, Charset: 'UTF-8' },
+          Text: { Data: text, Charset: 'UTF-8' },
+        },
+      },
+    }),
+  );
+  return { messageId: res.MessageId ?? '' };
+}
+
+export interface SyncConflictEmailInput {
+  to: string;
+  orgName: string;
+  /** "Umzinto v African Warriors" */
+  matchLine: string;
+  seriesName: string;
+  reason: 'venue-unresolved' | 'clash';
+  /** The clash lines, or the venue that did not resolve. */
+  detail: string[];
+  /** "2026-10-11 13:30 · Toti Oval 1" */
+  proposed: string;
+}
+
+/** Build the "medicoach change held for review" email. Pure — exported for tests. */
+export function syncConflictEmailContent(input: SyncConflictEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const why =
+    input.reason === 'clash'
+      ? 'It would double-book a ground, so it was not applied.'
+      : 'Its venue does not match any ground in your venue list, so it was not applied.';
+  const subject = `Fixture change from medicoach needs review: ${input.matchLine}`;
+  const text =
+    `A schedule change made in medicoach for ${input.matchLine} (${input.seriesName}) is waiting for review.\n\n` +
+    `Proposed: ${input.proposed}\n${why}\n\n` +
+    input.detail.map((d) => `- ${d}`).join('\n') +
+    `\n\nOpen the admin console, go to Medicoach sync, and apply, discard or edit the fixture.\n\n` +
+    `The ${input.orgName} office`;
+  const e = escapeHtml;
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>A schedule change made in medicoach for <strong>${e(input.matchLine)}</strong> (${e(input.seriesName)}) is waiting for review.</p>` +
+    `<p>Proposed: <strong>${e(input.proposed)}</strong><br/>${e(why)}</p>` +
+    `<ul>${input.detail.map((d) => `<li>${e(d)}</li>`).join('')}</ul>` +
+    `<p>Open the admin console, go to <strong>Medicoach sync</strong>, and apply, discard or edit the fixture.</p>` +
+    `<p>The ${e(input.orgName)} office</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+/** Email one admin about a held medicoach schedule change. */
+export async function sendSyncConflictEmail(
+  input: SyncConflictEmailInput,
+): Promise<{ messageId: string }> {
+  const { subject, text, html } = syncConflictEmailContent(input);
+  if (EMAIL_DRY_RUN) {
+    console.log(
+      `[notify:email dry-run] would send sync-conflict notice to ${input.to} for ${input.matchLine}`,
+    );
+    return { messageId: `dry-run-${randomUUID()}` };
+  }
+  const res = await ses!.send(
+    new SendEmailCommand({
+      Source: FROM_EMAIL!,
+      Destination: { ToAddresses: [input.to] },
+      Message: {
+        Subject: { Data: subject, Charset: 'UTF-8' },
+        Body: {
+          Html: { Data: html, Charset: 'UTF-8' },
+          Text: { Data: text, Charset: 'UTF-8' },
+        },
+      },
+    }),
+  );
+  return { messageId: res.MessageId ?? '' };
+}

@@ -73,6 +73,92 @@ export type {
   Weekday,
 };
 export { TEAM_ID_PREFIX } from '../packages/engine/src/types';
+// Umpire allocation shapes — shared with the API through the engine, not hand-ported.
+export type {
+  Umpire,
+  UmpirePublic,
+  OfficialRef,
+  FixtureOfficials,
+} from '../packages/engine/src/umpires';
+// Captain's reports — the rating rules/shapes live in the engine; the stored report view is
+// what the API's club/admin/link routes return (recipient's opaque id stripped, late derived).
+export type { ReportUmpireEntry, AppointedUmpire } from '../packages/engine/src/captainsReport';
+import type {
+  ReportUmpireEntry as _ReportUmpireEntry,
+  AppointedUmpire as _AppointedUmpire,
+} from '../packages/engine/src/captainsReport';
+export interface CaptainsReport {
+  id: string;
+  seriesId: string;
+  fixtureId: string;
+  clubId: string;
+  status: 'pending' | 'submitted' | 'void';
+  /** `manual-unlisted`: filed for a match that is not in the fixture list. */
+  source: 'auto' | 'manual' | 'manual-unlisted';
+  fixtureRef?: string;
+  matchDate: string;
+  side: 'home' | 'away';
+  clubName: string;
+  opponentName: string;
+  competition: string;
+  venue?: string;
+  /** The series withholds the venue from clubs for now (the venue is left out). */
+  venueWithheld?: true;
+  resultSummary?: string | null;
+  umpiresSnapshot: _AppointedUmpire[];
+  recipient: {
+    kind: 'captain' | 'chair' | 'portal';
+    name: string;
+    forwardedBy?: { name: string; via: 'link' | 'portal'; at: string };
+  };
+  captainName: string;
+  umpires: _ReportUmpireEntry[];
+  general: string;
+  declaration?: boolean;
+  ref?: string;
+  submittedBy?: string;
+  submittedVia?: 'portal' | 'link';
+  submittedAt?: string;
+  voidedAt?: string;
+  flagged?: { reason: string; at: string };
+  /** When the emailed/WhatsApp link stops working (ISO). */
+  linkExpiresAt?: string;
+  deliveries?: CaptainsReportDelivery[];
+  /** When a notice first reached someone. */
+  notifiedAt?: string;
+  reminderSentAt?: string;
+  forwardCount?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+/** One channel of one notice about a report (MIRRORS the API's CaptainsReportDelivery). */
+export interface CaptainsReportDelivery {
+  channel: 'email' | 'whatsapp';
+  status: 'sent' | 'failed' | 'skipped';
+  reason?: 'no-contact' | 'no-email' | 'no-cell' | 'dry-run' | 'template-pending' | 'send-failed';
+  at: string;
+  purpose: 'opened' | 'forwarded' | 'reminder';
+  recipientKind: 'captain' | 'chair';
+  providerStatus?: 'sent' | 'delivered' | 'read' | 'failed';
+  providerAt?: string;
+  providerError?: string;
+}
+/** The editable part of a report, as PUT/POST bodies carry it. */
+export interface CaptainsReportFields {
+  captainName: string;
+  umpires: _ReportUmpireEntry[];
+  general: string;
+  declaration: boolean;
+}
+/** GET /captains-report-link/:token — one report, the registry names, the tenant's look. */
+export interface LinkedCaptainsReport {
+  report: CaptainsReport;
+  /** The chair's link: may "Send to captain". */
+  canForward?: boolean;
+  forwardsRemaining?: number;
+  registry: { id: string; displayName: string }[];
+  tenantBranding: { name: string; logoUrl: string; colors: Record<string, string> };
+}
 
 export type Role = 'admin' | 'rep' | 'operator';
 
@@ -163,6 +249,8 @@ export type DocFormat =
   | 'xls'
   | 'xlsx'
   | 'ods'
+  | 'ppt'
+  | 'pptx'
   | 'jpg'
   | 'jpeg'
   | 'png';
@@ -274,6 +362,20 @@ export interface TenantConfig {
   clearanceCertTemplate?: ClearanceCertTemplate;
   /** Union contact details for the certificate footer. Operator-only; missing fields omitted. */
   orgContact?: OrgContact;
+  /**
+   * Scheduled fixture reminders to club chairs. Operator-only (PUT /platform/tenants/:slug);
+   * not projected by GET /tenant/config, so only the operator portal sees it.
+   */
+  fixtureReminders?: FixtureRemindersConfig;
+}
+
+export type FixtureReminderChannel = 'email' | 'whatsapp';
+
+/** Mirror of the API's FixtureRemindersConfig (leadDays 1..30, ≤4 entries). */
+export interface FixtureRemindersConfig {
+  enabled: boolean;
+  leadDays: number[];
+  channels: FixtureReminderChannel[];
 }
 
 export type ClearanceCertTemplate = 'classic' | 'confirmation';
@@ -507,6 +609,7 @@ export interface Club {
   previousName?: string;
   notes?: ClubNote[];
   commLog?: ClubCommEvent[];
+  /** Chair's reminders choice. Absent counts as opted in; only `false` stops fixture reminders. */
   remindersOptIn?: boolean;
   playerRegLink?: { token: string; createdAt: string };
   /** Marks a club loaded from the demo snapshot; gates illustrative-only UI. */
@@ -564,7 +667,16 @@ export interface ClubCommEvent {
     // two stop drifting (packages/api/src/types.ts).
     | 'veterans-request'
     | 'veterans-request-accepted'
-    | 'veterans-request-declined';
+    | 'veterans-request-declined'
+    // Fixture postponement negotiation (ADR 0015) — kept in sync with the API union.
+    | 'postponement-request'
+    | 'postponement-counter'
+    | 'postponement-agreed'
+    | 'postponement-admin-final'
+    | 'postponement-declined'
+    | 'postponement-withdrawn'
+    // Scheduled fixture reminder to the chair (FixtureReminders cron).
+    | 'fixture-reminder';
   summary?: string;
 }
 
@@ -694,35 +806,6 @@ export type VeteransAffiliatePublic = Omit<VeteransAffiliation, 'naturalKey'>;
 
 export type VeteransRequestStatus = 'pending' | 'accepted' | 'declined' | 'withdrawn';
 
-/** One umpire's ratings in a captain's report. MIRRORS the API's `CaptainReportUmpire`. */
-export interface CaptainReportUmpire {
-  name: string;
-  /** decisions · pressure · behaviour · communication · regulations → 1..5 (5 best) */
-  ratings: Record<string, number>;
-  concerns: string[];
-  otherConcern?: string;
-  comments?: string;
-}
-
-/** A captain's post-match report. MIRRORS the API's `CaptainReport`. */
-export interface CaptainReport {
-  id: string;
-  ref: string;
-  clubId: string;
-  clubName: string;
-  fixtureKey?: string;
-  date: string;
-  side: 'Home' | 'Away';
-  opponent: string;
-  competition?: string;
-  venue?: string;
-  captain: string;
-  umpires: CaptainReportUmpire[];
-  general?: string;
-  submittedAt: string;
-  submittedBy: string;
-}
-
 /**
  * MIRRORS the API's `VeteransRequestPublic` (packages/api/src/types.ts) — a veterans
  * squad-selection request (ADR 0013) as any HTTP response returns it. Inbound items
@@ -756,6 +839,54 @@ export interface VeteransRequestPublic {
   resolvedVia?: 'portal' | 'admin';
   declineReason?: string;
   /** TTL (epoch seconds): set on a terminal row so it self-expires after 90 days. */
+  expiresAt?: number;
+  version: number;
+}
+
+/**
+ * MIRRORS the API's `PostponementProposal` (packages/api/src/types.ts) — one proposed new date
+ * in a fixture postponement negotiation (ADR 0015). `time` only while the fixture's kick-off is
+ * revealed; `venueId`/`venueName` only on an admin override.
+ */
+export interface PostponementProposal {
+  by: 'requesting' | 'opposing' | 'admin';
+  date: string;
+  time?: string;
+  venueId?: string;
+  venueName?: string;
+  note?: string;
+  at: string;
+  byUser: string;
+}
+
+export type PostponementStatus = 'open' | 'applied' | 'admin-final' | 'declined' | 'withdrawn';
+
+/**
+ * MIRRORS the API's `PostponementRequest` — a fixture postponement request (ADR 0015) as the
+ * club and admin routes return it. Club-facing responses strip withheld time/venue fields
+ * (ADR 0011) from the snapshot and proposals.
+ */
+export interface PostponementRequest {
+  id: string;
+  seriesId: string;
+  fixtureId: string;
+  requestingClubId: string;
+  opposingClubId: string;
+  originalDate: string;
+  originalTime?: string;
+  reason?: string;
+  /** Every proposal in order; the LAST one is the current proposal. */
+  proposals: PostponementProposal[];
+  awaiting: 'requesting' | 'opposing' | 'none';
+  status: PostponementStatus;
+  /** clubId → acknowledgement of an admin-final ruling. */
+  acknowledgements?: Record<string, { at: string; byUser: string }>;
+  requestedAt: string;
+  requestedBy: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  resolvedVia?: 'portal' | 'admin';
+  declineReason?: string;
   expiresAt?: number;
   version: number;
 }

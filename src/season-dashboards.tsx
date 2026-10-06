@@ -15,7 +15,7 @@ import {
   localISO,
 } from './season';
 import { SCOUTING_EVENTS } from './scouting-data';
-import type { CaptainReport, Club, PlayerRegistration, RequiredDoc } from './types';
+import type { CaptainsReport, Club, PlayerRegistration, RequiredDoc } from './types';
 import { leaderboard } from './scouting';
 
 export type SeasonMode = 'setup' | 'season' | 'reports';
@@ -434,8 +434,8 @@ interface ClubSeasonProps {
   complianceOn: boolean;
   clearancesOn: boolean;
   reportsOn: boolean;
-  /** This club's saved captain's reports — a played fixture counts as filed when one names it. */
-  reports: CaptainReport[];
+  /** This club's captain's reports — a played fixture counts as filed once its report is submitted. */
+  reports: CaptainsReport[];
   goto: (v: string) => void;
   onFileReport: (fixtureKey: string) => void;
 }
@@ -464,7 +464,10 @@ export function ClubSeasonHome({
   const next = asc.find((f) => f.date >= today) ?? null;
   const later = asc.filter((f) => f.date >= today && f !== next).slice(0, 4);
   const played = fixtures.filter((f) => f.date < today);
-  const filed = new Set(reports.map((r) => r.fixtureKey).filter(Boolean));
+  // A report names its fixture as seriesId + fixtureId; the dashboard keys fixtures the same way.
+  const filed = new Set(
+    reports.filter((r) => r.status === 'submitted').map((r) => `${r.seriesId}:${r.fixtureId}`),
+  );
   const reportsDue = played.filter((f) => !filed.has(f.key)).length;
   const homeLeft = asc.filter((f) => f.date >= today && f.isHome).length;
   const awayLeft = asc.filter((f) => f.date >= today && !f.isHome).length;

@@ -1,21 +1,18 @@
-import { describe, it, expect } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { cleanLinkToken } from './CaptainsReport';
 
-describe('captain report rosters', () => {
-  it('sample roster is stable per club and has no duplicate names', async () => {
-    const { sampleRoster } = await import('./captainsReportRoster');
-    const a = sampleRoster('crusaders');
-    expect(sampleRoster('crusaders')).toEqual(a);
-    const names = [...a.players, ...a.coaches, ...a.officials].map((p) => p.name);
-    expect(new Set(names).size).toBe(names.length);
-    expect(sampleRoster('umlazi').players).not.toEqual(a.players);
+describe('cleanLinkToken (broken Meta button prefix, 3-4 Oct 2026)', () => {
+  const tok = 'eyJ0IjoiZG9scGhpbnMifQ.abc_def-123';
+  it('strips a literal {{1}} prefix', () => {
+    expect(cleanLinkToken(`{{1}}${tok}`)).toBe(tok);
   });
-  it('own roster prefers real registrations', async () => {
-    const { ownRoster } = await import('./captainsReportRoster');
-    const r = ownRoster({ id: 'ukzn' }, [
-      { firstName: 'Zane', lastName: 'Adams' },
-      { firstName: 'Ayanda', lastName: 'Cele' },
-    ]);
-    expect(r.sample).toBe(false);
-    expect(r.players.map((p) => p.name)).toEqual(['Ayanda Cele', 'Zane Adams']);
+  it('strips a percent-encoded %7B%7B1%7D%7D prefix', () => {
+    expect(cleanLinkToken(`%7B%7B1%7D%7D${tok}`)).toBe(tok);
+  });
+  it('leaves a clean token untouched', () => {
+    expect(cleanLinkToken(tok)).toBe(tok);
+  });
+  it('survives malformed percent sequences', () => {
+    expect(cleanLinkToken('%zzjunk')).toBe('%zzjunk');
   });
 });

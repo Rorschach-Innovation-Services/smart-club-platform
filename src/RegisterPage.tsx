@@ -59,9 +59,10 @@ const EMPTY = {
   // club other than their chosen current club. Optional; a blank pick sends nothing.
   vetsChoice: '',
   vetsClubId: '',
-  battingHand: 'Right',
-  battingType: 'Mid Order',
-  bowlingHand: 'Right',
+  // Cricket playing profile is optional: '' = not answered, and nothing is sent for it.
+  battingHand: '',
+  battingType: '',
+  bowlingHand: '',
   bowlerType: '',
   isAllRounder: false,
   isWk: false,
@@ -306,9 +307,9 @@ export function RegisterPage() {
         ...(positionsMode
           ? { position: d.position || undefined }
           : {
-              battingHand: d.battingHand,
-              bowlingHand: d.bowlingHand,
-              battingType: d.battingType,
+              battingHand: d.battingHand || undefined,
+              bowlingHand: d.bowlingHand || undefined,
+              battingType: d.battingType || undefined,
               bowlerType: d.bowlerType || undefined,
               isAllRounder: d.isAllRounder,
               isWk: d.isWk,
@@ -559,16 +560,23 @@ export function RegisterPage() {
               <Seg
                 label="Batting hand"
                 options={HANDS}
+                noneLabel="— Not set —"
                 value={d.battingHand}
                 onPick={(v) => setVal('battingHand', v)}
               />
               <Seg
                 label="Bowling hand"
                 options={HANDS}
+                noneLabel="— Not set —"
                 value={d.bowlingHand}
                 onPick={(v) => setVal('bowlingHand', v)}
               />
-              <Select label="Batting type" value={d.battingType} onChange={set('battingType')}>
+              <Select
+                label="Batting type"
+                value={d.battingType}
+                onChange={set('battingType')}
+                placeholder="— Not set —"
+              >
                 {BATTING_TYPES.map((b) => (
                   <option key={b}>{b}</option>
                 ))}
@@ -1074,17 +1082,29 @@ function Seg({
   value,
   onPick,
   span,
+  noneLabel,
 }: {
   label: ReactNode;
   options: string[];
   value: string;
   onPick: (v: string) => void;
   span?: boolean;
+  /** When set, a leading button that picks '' — the "not answered" state. */
+  noneLabel?: string;
 }) {
   return (
     <div className={span ? 'reg-span' : undefined}>
       <Label label={label} />
       <div className="seg">
+        {noneLabel !== undefined && (
+          <button
+            type="button"
+            className={`seg-btn ${value === '' ? 'on' : ''}`}
+            onClick={() => onPick('')}
+          >
+            {noneLabel}
+          </button>
+        )}
         {options.map((o) => (
           <button
             key={o}

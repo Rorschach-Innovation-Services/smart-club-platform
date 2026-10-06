@@ -95,6 +95,11 @@ export interface ParseRosterSheetOptions {
    * `juniorLeagueKeys` is ignored (falls through to the heuristic/unmapped path) so a
    * caller can't smuggle in a league the tenant doesn't have. */
   ageGroupMap?: Record<string, string>;
+  /** When true, a BLANK age-group cell on a sheet that has an Age Group column yields a
+   * team-less (senior) row instead of an `unmapped-age-group` exception. Off by default
+   * (operator intake / CLIs unchanged); the chair spreadsheet upload turns it on because the
+   * downloadable roster template carries an Age Group column for seniors and juniors alike. */
+  allowBlankAgeGroup?: boolean;
 }
 
 /** Parse one worksheet's data rows into candidate PlayerRegistration rows + exceptions.
@@ -108,7 +113,7 @@ export function parseRosterSheet(
   runNow: string,
   options: ParseRosterSheetOptions,
 ): ParseSheetResult | null {
-  const { allowMissingId, juniorLeagueKeys, ageGroupMap } = options;
+  const { allowMissingId, juniorLeagueKeys, ageGroupMap, allowBlankAgeGroup } = options;
 
   // eachRow SKIPS EMPTY ROWS, so the array index here is NOT the real sheet row number —
   // rowNumbers[] tracks ExcelJS's real (rowNumber) per collected row in parallel, so the
@@ -264,10 +269,11 @@ export function parseRosterSheet(
     // `unmapped-age-group` exception, and every distinct raw band (mapped or not) is
     // recorded in ageGroupRaws for the operator's confirm table.
     let team: string | undefined;
-    if (junior && header.columns.ageGroup !== undefined) {
-      const rawAgeGroup = collapseWhitespace(
-        cellString(row.getCell(header.columns.ageGroup + 1).value),
-      );
+    const rawAgeGroup =
+      junior && header.columns.ageGroup !== undefined
+        ? collapseWhitespace(cellString(row.getCell(header.columns.ageGroup + 1).value))
+        : '';
+    if (junior && !(allowBlankAgeGroup && rawAgeGroup === '')) {
       if (!ageGroupRawsSeen.has(rawAgeGroup)) {
         const override = ageGroupMap?.[rawAgeGroup];
         const mapped =

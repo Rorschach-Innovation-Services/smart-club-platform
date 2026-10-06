@@ -13,6 +13,13 @@ import {
   type RegLinkEmailInput,
   veteransRequestEmailContent,
   veteransRequestResolvedEmailContent,
+  postponementOpenedEmailContent,
+  postponementCounteredEmailContent,
+  postponementAgreedEmailContent,
+  postponementAdminFinalEmailContent,
+  postponementDeclinedEmailContent,
+  fixtureReminderEmailContent,
+  fixtureReminderDateLabel,
 } from '../src/notify/email.js';
 import { orgCopy } from '../src/branding.js';
 
@@ -166,5 +173,177 @@ describe('veteransRequestResolvedEmailContent (ADR 0013)', () => {
     assert.match(text, /Glenwood CC has declined the request to register Alex Player/);
     assert.match(text, /Reason: not eligible <this> year/);
     assert.match(html, /not eligible &lt;this&gt; year/);
+  });
+});
+
+describe('postponement notices (ADR 0015)', () => {
+  const fixtureLabel = 'Glenwood CC v Northlands CC · Premier League';
+
+  test('opened: names both dates, the reason, and escapes HTML', () => {
+    const { subject, text, html } = postponementOpenedEmailContent({
+      chairName: 'Pat',
+      requestingClubName: 'Glenwood CC',
+      fixtureLabel,
+      originalDate: '2026-11-07',
+      originalTime: '10:00',
+      proposedDate: '2026-11-14',
+      reason: 'Ground <flooded>',
+    });
+    assert.equal(subject, `Postponement request — ${fixtureLabel}`);
+    assert.match(text, /^Hello Pat,/);
+    assert.match(text, /scheduled for Sat 2026-11-07 at 10:00, to Sat 2026-11-14\./);
+    assert.match(text, /Reason from Glenwood CC: Ground <flooded>/);
+    assert.match(html, /Ground &lt;flooded&gt;/);
+  });
+
+  test('a time that is not passed in never appears (withheld times stay hidden)', () => {
+    const { text } = postponementCounteredEmailContent({
+      chairName: '',
+      counteringClubName: 'Northlands CC',
+      fixtureLabel,
+      originalDate: '2026-11-07',
+      proposedDate: '2026-11-21',
+    });
+    assert.match(text, /^Hello there,/);
+    assert.doesNotMatch(text, / at \d\d:\d\d/);
+  });
+
+  test('agreed / admin-final / declined / withdrawn copy', () => {
+    assert.match(
+      postponementAgreedEmailContent({
+        chairName: 'Pat',
+        fixtureLabel,
+        originalDate: '2026-11-07',
+        newDate: '2026-11-14',
+        newTime: '13:00',
+      }).text,
+      /is now on Sat 2026-11-14 at 13:00/,
+    );
+    const ruling = postponementAdminFinalEmailContent({
+      chairName: 'Pat',
+      fixtureLabel,
+      originalDate: '2026-11-07',
+      newDate: '2026-11-28',
+      venueName: 'Kings Park',
+    });
+    assert.match(ruling.text, /Venue: Kings Park/);
+    assert.match(ruling.text, /Please acknowledge this ruling in your club portal\./);
+    assert.match(
+      postponementDeclinedEmailContent({
+        chairName: 'Pat',
+        actingClubName: 'Northlands CC',
+        fixtureLabel,
+        originalDate: '2026-11-07',
+        outcome: 'declined',
+      }).text,
+      /Northlands CC has declined the request to postpone .*stays on Sat 2026-11-07\./,
+    );
+    assert.equal(
+      postponementDeclinedEmailContent({
+        chairName: 'Pat',
+        actingClubName: 'Glenwood CC',
+        fixtureLabel,
+        originalDate: '2026-11-07',
+        outcome: 'withdrawn',
+      }).subject,
+      `Postponement withdrawn — ${fixtureLabel}`,
+    );
+  });
+});
+
+describe('fixture reminder email', () => {
+  const base = {
+    chairName: 'Sam',
+    clubName: 'Glenwood CC',
+    dateLabel: fixtureReminderDateLabel('2026-11-07'),
+  };
+
+  test('date label carries the weekday', () => {
+    assert.equal(fixtureReminderDateLabel('2026-11-07'), 'Sat 2026-11-07');
+  });
+
+  test('lists each fixture with opponent, home/away, revealed time and venue, and the portal link', () => {
+    const { subject, text, html } = fixtureReminderEmailContent({
+      ...base,
+      portalLink: 'https://glenwood.example.com',
+      fixtures: [
+        {
+          seriesName: 'Premier League',
+          sideName: 'Glenwood CC',
+          opponentName: 'Northlands <CC>',
+          isHome: true,
+          time: '10:00',
+          venue: 'Glenwood Oval',
+        },
+        {
+          seriesName: 'Reserve League',
+          sideName: 'Glenwood B',
+          opponentName: 'Crusaders',
+          isHome: false,
+        },
+      ],
+    });
+    assert.equal(subject, 'Fixture reminder — Glenwood CC · Sat 2026-11-07');
+    assert.match(text, /Hello Sam/);
+    assert.match(text, /has 2 fixtures on Sat 2026-11-07/);
+    assert.match(
+      text,
+      /Premier League · Glenwood CC vs Northlands <CC> \(Home\) · 10:00 · Glenwood Oval/,
+    );
+    assert.match(text, /Reserve League · Glenwood B vs Crusaders \(Away\)\n/);
+    assert.match(text, /club portal: https:\/\/glenwood\.example\.com/);
+    // HTML escapes user-supplied names and links the portal.
+    assert.match(html, /Northlands &lt;CC&gt;/);
+    assert.doesNotMatch(html, /Northlands <CC>/);
+    assert.match(html, /<a href="https:\/\/glenwood\.example\.com">/);
+  });
+
+  test('a time or venue that is not passed in never appears, and no link when the tenant has none', () => {
+    const { text, html } = fixtureReminderEmailContent({
+      ...base,
+      fixtures: [
+        { seriesName: 'Premier League', sideName: 'Glenwood CC', opponentName: 'X', isHome: true },
+      ],
+    });
+    assert.match(text, /has a fixture on/);
+    assert.match(text, /Premier League · Glenwood CC vs X \(Home\)\n/);
+    assert.doesNotMatch(text, /\d{2}:\d{2}/);
+    assert.match(text, /details in your club portal\./);
+    assert.doesNotMatch(html, /<a /);
+  });
+});
+
+describe("captainsReportDueEmailContent · the captain's report link", () => {
+  const input = {
+    to: 'captain@example.com',
+    recipientName: 'Sanele',
+    recipientKind: 'captain' as const,
+    clubName: 'Umzinto CC',
+    matchLine: 'Umzinto CC v African Warriors',
+    matchDateText: 'Sun 4 Oct 2026',
+    expiresText: 'Sunday, 11 Oct',
+    link: 'https://club.example.com/r/tok.sig',
+    orgName: 'Dolphins',
+  };
+
+  test('says the draft can be saved, it submits once, and when the link expires', async () => {
+    const { captainsReportDueEmailContent } = await import('../src/notify/email.js');
+    const { text, html } = captainsReportDueEmailContent(input);
+    assert.match(text, /You can save a draft and submit once\. Link expires Sunday, 11 Oct\./);
+    assert.match(html, /You can save a draft and submit once\. Link expires Sunday, 11 Oct\./);
+    assert.doesNotMatch(text, /works once/);
+  });
+
+  test('a reminder says so in the subject and the body', async () => {
+    const { captainsReportDueEmailContent } = await import('../src/notify/email.js');
+    const { subject, text } = captainsReportDueEmailContent({ ...input, reminder: true });
+    assert.match(subject, /^Reminder: /);
+    assert.match(text, /still open/);
+  });
+
+  test('a forwarded report names the chair who sent it on', async () => {
+    const { captainsReportDueEmailContent } = await import('../src/notify/email.js');
+    const { text } = captainsReportDueEmailContent({ ...input, forwardedBy: 'Uma Chair' });
+    assert.match(text, /Uma Chair asked you to complete/);
   });
 });
