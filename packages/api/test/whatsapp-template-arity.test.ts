@@ -19,7 +19,6 @@ const {
   captainsReportDueParams,
   captainsReportOpsDigestParams,
   sendCaptainsReportOpsDigestWhatsApp,
-  WhatsAppTemplatePendingError,
   urlButtonComponent,
 } = await import('../src/notify/whatsapp.js');
 const { WHATSAPP_TEMPLATES } = await import('../src/notify/whatsapp-templates.js');
@@ -194,10 +193,10 @@ describe("captain's report template (v2 copy, edited in place in Meta 4 Oct 2026
 describe("captain's report ops digest template", () => {
   const digest = WHATSAPP_TEMPLATES.captainsReportOpsDigest;
 
-  test('two body params, no URL button, pending until Meta approves it', () => {
+  test('two body params, no URL button, registered in Meta (6 Oct 2026)', () => {
     assert.equal(digest.name, 'captains_report_ops_digest');
     assert.equal(digest.lang, 'en');
-    assert.equal(digest.status, 'pending');
+    assert.equal(digest.status, 'registered');
     assert.equal(digest.paramCount, 2);
     assert.deepEqual(digest.params, ['recipient name', 'run summary']);
     assert.ok(!('urlButton' in digest));
@@ -219,14 +218,12 @@ describe("captain's report ops digest template", () => {
     assert.doesNotMatch(summary.text, /\n/);
   });
 
-  test('the sender refuses to send while the template is pending', async () => {
-    await assert.rejects(
-      sendCaptainsReportOpsDigestWhatsApp({
-        to: '+27000000000',
-        recipientName: 'Union admin',
-        summary: 'x',
-      }),
-      WhatsAppTemplatePendingError,
-    );
+  test('the sender sends once registered (dry-run without credentials)', async () => {
+    const { messageId } = await sendCaptainsReportOpsDigestWhatsApp({
+      to: '+27000000000',
+      recipientName: 'Union admin',
+      summary: 'x',
+    });
+    assert.match(messageId, /^dry-run-/);
   });
 });

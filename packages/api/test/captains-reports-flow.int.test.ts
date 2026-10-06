@@ -844,7 +844,9 @@ describe('the ops digest after a sync run', () => {
     assert.equal((await reportsOf()).length, 2);
   });
 
-  test('the real sender skips silently while the template is pending', async () => {
+  test('the real sender (dry-run without credentials) never disturbs the run', async () => {
+    // Template registered 6 Oct 2026: the real sender now dry-runs here (no WhatsApp env
+    // in tests) instead of throwing template-pending; the run must stay ok either way.
     page = liveResultPage('live');
     const summary = await syncRun({ sendOpsDigest: undefined });
     assert.equal(summary.status, 'ok');
