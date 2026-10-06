@@ -32,8 +32,11 @@ import {
   bowlSplits,
   scoreBands,
   wicketBands,
+  seasonMoves,
+  seasonSlices,
   type Baseline,
   type ProFilter,
+  type SeasonSlice,
   type ProPlayer,
   type ProRole,
   type SignalKind,
@@ -50,6 +53,9 @@ import {
   ShareRows,
   Spark,
   Tile,
+  TrendLines,
+  Dumbbell,
+  type TrendSeries,
   shortName,
   type MapPt,
   type Tone,
@@ -60,11 +66,12 @@ import { useWatchlist, watchKey } from './scouting-player';
 import type { PoolPlayer, PoolRole } from './scout-pool';
 import { DISMISSAL_KINDS } from './scouting';
 
-type ProTab = 'selection' | 'squad' | 'form' | 'team' | 'callups' | 'matches';
+type ProTab = 'selection' | 'squad' | 'form' | 'seasons' | 'team' | 'callups' | 'matches';
 const PRO_TABS: [ProTab, string][] = [
   ['selection', 'Selection'],
   ['squad', 'Squad'],
   ['form', 'Form'],
+  ['seasons', 'Seasons'],
   ['team', 'Team'],
   ['callups', 'Call-ups'],
   ['matches', 'Matches'],
@@ -264,6 +271,11 @@ export function ProTeamPage() {
     [squad, format, season],
   );
   const ms = useMemo(() => (squad ? filterMatches(squad, filter) : []), [squad, format, season]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Season on season in the chosen format (the season filter doesn't narrow this).
+  const slices = useMemo(
+    () => (squad ? seasonSlices(squad, format, PRO_MATCHES) : []),
+    [squad, format],
+  );
   const candidates = useMemo(
     () => (squad ? [...watchedCandidates(watch.keys), ...poolCandidates(squad.gender)] : []),
     [squad, watch.keys],
@@ -367,6 +379,16 @@ export function ProTeamPage() {
             mode={(params.get('fmode') as FormMode) || 'bat'}
             focus={params.get('fplayer') || null}
             onChange={set}
+            slices={slices}
+          />
+        )}
+        {tab === 'seasons' && (
+          <SeasonsView
+            key={`${squad.gender}-${format}`}
+            squad={squad}
+            format={format}
+            slices={slices}
+            openDive={(name, m) => set({ ptab: 'form', fplayer: name, fmode: m })}
           />
         )}
         {tab === 'team' && <TeamView squad={squad} ms={ms} format={format} />}
@@ -912,6 +934,7 @@ function FormView({
   mode,
   focus,
   onChange,
+  slices,
 }: {
   squad: Squad;
   players: ProPlayer[];
@@ -919,6 +942,7 @@ function FormView({
   mode: FormMode;
   focus: string | null;
   onChange: (patch: Record<string, string>) => void;
+  slices: SeasonSlice[];
 }) {
   const [q, setQ] = useState('');
   const [suggest, setSuggest] = useState(false);
@@ -1021,6 +1045,7 @@ function FormView({
           mode={mode}
           format={format}
           bases={bases}
+          slices={slices}
           onBack={() => onChange({ fplayer: '' })}
         />
       ) : (
@@ -1099,6 +1124,7 @@ function PlayerDeepDive({
   mode,
   format,
   bases,
+  slices,
   onBack,
 }: {
   player: ProPlayer;
@@ -1106,6 +1132,7 @@ function PlayerDeepDive({
   mode: FormMode;
   format: ProFormat | 'all';
   bases: Record<ProFormat, Baseline | null>;
+  slices: SeasonSlice[];
   onBack: () => void;
 }) {
   const showBat = mode !== 'bowl' && p.bat.inns > 0;
@@ -1206,6 +1233,8 @@ function PlayerDeepDive({
       )}
 
       <div className="pv-tiles">
+        <PlayerSeasons name={p.name} mode={mode} slices={slices} />
+
         {showBat && (
           <>
             <Tile
@@ -1493,6 +1522,480 @@ function SplitTable({
                 ))}
               </tr>
             ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ── Seasons: how the squad and each player trend season on season ── */
+
+const pctOf = (won: number, lost: number) => (won + lost ? (won / (won + lost)) * 100 : null);
+
+function SeasonsView({
+  squad,
+  format,
+  slices,
+  openDive,
+}: {
+  squad: Squad;
+  format: ProFormat | 'all';
+  slices: SeasonSlice[];
+  openDive: (name: string, mode: 'bat' | 'bowl') => void;
+}) {
+  const [disc, setDisc] = useState<'bat' | 'bowl'>('bat');
+  // Compare the two most recent seasons with a decent number of games by default.
+  const solid = slices.filter((s) => s.matches.length >= 3);
+  const [aKey, setAKey] = useState(
+    () => (solid.length >= 2 ? solid[solid.length - 2] : slices[0])?.season ?? '',
+  );
+  const [bKey, setBKey] = useState(
+    () => (solid.length >= 2 ? solid[solid.length - 1] : slices[slices.length - 1])?.season ?? '',
+  );
+  if (slices.length < 2)
+    return (
+      <div className="ss-empty">
+        Only one season of {format === 'all' ? '' : `${format} `}games for {squad.name} in the files
+        — trends need two.
+      </div>
+    );
+  const seasons = slices.map((s) => s.season);
+  const notes = slices.map((s) => `${s.matches.length} game${s.matches.length === 1 ? '' : 's'}`);
+  const a = slices.find((s) => s.season === aKey) ?? slices[0];
+  const b = slices.find((s) => s.season === bKey) ?? slices[slices.length - 1];
+  const { moves, arrivals, departures } = seasonMoves(a, b, disc);
+  const mixed = format === 'all';
+  const trend = (
+    label: string,
+    ours: (s: SeasonSlice) => number | null,
+    theirs?: (s: SeasonSlice) => number | null,
+    fmt?: (v: number) => string,
+    sub?: string,
+  ) => (
+    <div className="card" key={label}>
+      <div className="card-head">
+        <div>
+          <div className="card-title">{label}</div>
+          {sub && <div className="card-sub">{sub}</div>}
+        </div>
+      </div>
+      <div className="card-body">
+        <TrendLines
+          categories={seasons}
+          notes={notes}
+          fmt={fmt}
+          series={[
+            { key: 'us', label: shortTeam(squad.name), tone: 'squad', values: slices.map(ours) },
+            ...(theirs
+              ? [
+                  {
+                    key: 'them',
+                    label: 'Opponents',
+                    tone: 'context' as Tone,
+                    values: slices.map(theirs),
+                  },
+                ]
+              : []),
+          ]}
+          height={150}
+        />
+      </div>
+    </div>
+  );
+  return (
+    <>
+      <div className="pro-note">
+        <span>
+          {mixed
+            ? 'All formats mixed — pick a format above for like-for-like trends. '
+            : `${format} only. `}
+          Every season is rated against the same average (all seasons in the files), so a rise is a
+          real rise. The season filter doesn't apply here.
+        </span>
+      </div>
+
+      <div className="card">
+        <div className="card-head">
+          <div>
+            <div className="card-title">Season by season</div>
+            <div className="card-sub">Results and run rates for each season</div>
+          </div>
+        </div>
+        <div className="tbl-w">
+          <table className="tbl pro-tbl" aria-label="Season record">
+            <thead>
+              <tr>
+                <th>Season</th>
+                <th>P</th>
+                <th>W</th>
+                <th>L</th>
+                <th>D / NR</th>
+                <th>Win % (decided)</th>
+                <th>Run rate</th>
+                <th>Conceded</th>
+                <th>Players used</th>
+              </tr>
+            </thead>
+            <tbody>
+              {slices.map((s, i) => {
+                const prev = slices[i - 1];
+                const w = pctOf(s.summary.won, s.summary.lost);
+                const pw = prev ? pctOf(prev.summary.won, prev.summary.lost) : null;
+                return (
+                  <tr key={s.season}>
+                    <td>
+                      <strong>{s.season}</strong>
+                    </td>
+                    <td>{s.summary.played}</td>
+                    <td>{s.summary.won}</td>
+                    <td>{s.summary.lost}</td>
+                    <td>{s.summary.drawn + s.summary.tied + s.summary.noResult}</td>
+                    <td>
+                      {w === null ? '–' : `${Math.round(w)}%`}
+                      {w !== null && pw !== null && <Delta v={w - pw} unit="pts" />}
+                    </td>
+                    <td>
+                      {r1(s.comps.runRate.ours)}
+                      {prev && !mixed && (
+                        <Delta v={s.comps.runRate.ours - prev.comps.runRate.ours} />
+                      )}
+                    </td>
+                    <td>
+                      {r1(s.comps.runRate.theirs)}
+                      {prev && !mixed && (
+                        <Delta v={s.comps.runRate.theirs - prev.comps.runRate.theirs} invert />
+                      )}
+                    </td>
+                    <td>{s.players.size}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="pro-trend-grid">
+        {trend(
+          'Win rate',
+          (s) => pctOf(s.summary.won, s.summary.lost),
+          undefined,
+          (v) => `${Math.round(v)}%`,
+          'Of games with a result',
+        )}
+        {!mixed &&
+          trend(
+            'Run rate',
+            (s) => s.comps.runRate.ours,
+            (s) => s.comps.runRate.theirs,
+            undefined,
+            'Scored v conceded',
+          )}
+        {trend(
+          'Runs per innings',
+          (s) => s.comps.runsPerInns.ours,
+          (s) => s.comps.runsPerInns.theirs,
+          (v) => `${Math.round(v)}`,
+        )}
+        {trend(
+          'Score at the 3rd wicket',
+          (s) => s.comps.scoreAt3rdWicket.ours,
+          (s) => s.comps.scoreAt3rdWicket.theirs,
+          (v) => `${Math.round(v)}`,
+          'How the top order sets up the innings',
+        )}
+        {trend(
+          'Dot balls bowled',
+          (s) => s.comps.dotPct.ours,
+          (s) => s.comps.dotPct.theirs,
+          (v) => `${Math.round(v)}%`,
+          'Share of balls — pressure with the ball',
+        )}
+        {trend(
+          'Wides + no-balls per 10 overs',
+          (s) => s.comps.widesNoBallsPer10.ours,
+          (s) => s.comps.widesNoBallsPer10.theirs,
+          (v) => v.toFixed(1),
+          'Lower is better',
+        )}
+      </div>
+
+      <div className="card">
+        <div className="card-head">
+          <div>
+            <div className="card-title">Who moved between seasons</div>
+            <div className="card-sub">
+              {disc === 'bat' ? 'Batting' : 'Bowling'} index in {a.season} → {b.season}, for players
+              with a qualifying sample in both · biggest rise first
+            </div>
+          </div>
+          <div className="pro-season-bar">
+            <select
+              className="field-select sc-select"
+              aria-label="From season"
+              value={a.season}
+              onChange={(e) => setAKey(e.target.value)}
+            >
+              {seasons.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+            <span>→</span>
+            <select
+              className="field-select sc-select"
+              aria-label="To season"
+              value={b.season}
+              onChange={(e) => setBKey(e.target.value)}
+            >
+              {seasons.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+            <div className="pro-seg small" role="tablist" aria-label="Discipline">
+              <button
+                role="tab"
+                aria-selected={disc === 'bat'}
+                className={disc === 'bat' ? 'on' : ''}
+                onClick={() => setDisc('bat')}
+              >
+                Batting
+              </button>
+              <button
+                role="tab"
+                aria-selected={disc === 'bowl'}
+                className={disc === 'bowl' ? 'on' : ''}
+                onClick={() => setDisc('bowl')}
+              >
+                Bowling
+              </button>
+            </div>
+          </div>
+        </div>
+        <div className="card-body">
+          {a.season === b.season ? (
+            <div className="pv-empty">Pick two different seasons.</div>
+          ) : (
+            <Dumbbell
+              rows={moves.map((m) => ({
+                id: m.name,
+                label: m.name,
+                from: m.from,
+                to: m.to,
+                sub: `${m.name} · ${a.season}: ${m.fromLine} → ${b.season}: ${m.toLine}`,
+              }))}
+              fromLabel={a.season}
+              toLabel={b.season}
+              onPick={(n) => openDive(n, disc)}
+            />
+          )}
+        </div>
+      </div>
+
+      {a.season !== b.season && (
+        <div className="sc-two">
+          <div className="card">
+            <div className="card-head">
+              <div>
+                <div className="card-title">New in {b.season}</div>
+                <div className="card-sub">
+                  {disc === 'bat' ? 'Batted' : 'Bowled'} in {b.season} but not {a.season}
+                </div>
+              </div>
+            </div>
+            <div className="card-body pro-chips">
+              {arrivals.length ? (
+                arrivals.map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    className="pro-chip"
+                    onClick={() => openDive(n, disc)}
+                  >
+                    {n}
+                  </button>
+                ))
+              ) : (
+                <span className="pv-empty">Nobody new.</span>
+              )}
+            </div>
+          </div>
+          <div className="card">
+            <div className="card-head">
+              <div>
+                <div className="card-title">Not seen in {b.season}</div>
+                <div className="card-sub">
+                  {disc === 'bat' ? 'Batted' : 'Bowled'} in {a.season} but not {b.season}
+                </div>
+              </div>
+            </div>
+            <div className="card-body pro-chips">
+              {departures.length ? (
+                departures.map((n) => (
+                  <span key={n} className="pro-chip static">
+                    {n}
+                  </span>
+                ))
+              ) : (
+                <span className="pv-empty">Everyone is still there.</span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+/** "+3.2" / "−1.0" beside a number: navy when it's better, red when it's worse. */
+function Delta({ v, unit, invert }: { v: number; unit?: string; invert?: boolean }) {
+  if (!Number.isFinite(v) || Math.abs(v) < 0.05) return null;
+  const good = invert ? v < 0 : v > 0;
+  return (
+    <span className={`pro-delta ${good ? 'up' : 'down'}`}>
+      {v > 0 ? '+' : '−'}
+      {Math.abs(v) >= 10 ? Math.round(Math.abs(v)) : Math.abs(v).toFixed(1)}
+      {unit ? ` ${unit}` : ''}
+    </span>
+  );
+}
+
+/** A player's season-by-season card for the deep dive. */
+function PlayerSeasons({
+  name,
+  mode,
+  slices,
+}: {
+  name: string;
+  mode: 'bat' | 'bowl' | 'ar';
+  slices: SeasonSlice[];
+}) {
+  const rows = slices
+    .map((s) => ({ season: s.season, p: s.players.get(name) ?? null }))
+    .filter((r) => r.p && (r.p.bat.inns > 0 || r.p.bowl.inns > 0));
+  if (rows.length < 2)
+    return (
+      <div className="card">
+        <div className="card-head">
+          <div>
+            <div className="card-title">Season by season</div>
+            <div className="card-sub">
+              Only one season in this format so far — trends start with the second.
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  const seasons = rows.map((r) => r.season);
+  const series: TrendSeries[] = [];
+  if (mode !== 'bowl')
+    series.push({
+      key: 'bat',
+      label: 'Batting index',
+      tone: 'squad',
+      values: rows.map((r) => (r.p!.qualifies.bat ? (r.p!.idx.bat?.idx ?? null) : null)),
+    });
+  if (mode !== 'bat')
+    series.push({
+      key: 'bowl',
+      label: 'Bowling index',
+      tone: 'third',
+      values: rows.map((r) => (r.p!.qualifies.bowl ? (r.p!.idx.bowl?.idx ?? null) : null)),
+    });
+  return (
+    <div className="card">
+      <div className="card-head">
+        <div>
+          <div className="card-title">Season by season</div>
+          <div className="card-sub">
+            Index each season against the same all-seasons average · gaps = too few balls that
+            season to rate
+          </div>
+        </div>
+      </div>
+      <div className="card-body">
+        <TrendLines
+          categories={seasons}
+          notes={rows.map((r) => `${r.p!.matches} game${r.p!.matches === 1 ? '' : 's'}`)}
+          series={series}
+          refValue={100}
+          refLabel="average"
+          fmt={(v) => `${Math.round(v)}`}
+        />
+      </div>
+      <div className="tbl-w">
+        <table className="tbl pro-tbl" aria-label="Season by season">
+          <thead>
+            <tr>
+              <th>Season</th>
+              <th>M</th>
+              {mode !== 'bowl' && (
+                <>
+                  <th>Runs</th>
+                  <th>Avg</th>
+                  <th>SR</th>
+                </>
+              )}
+              {mode !== 'bat' && (
+                <>
+                  <th>Wkts</th>
+                  <th>Econ</th>
+                  <th>Bowl SR</th>
+                </>
+              )}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => {
+              const p = r.p!;
+              const q = i ? rows[i - 1].p! : null;
+              return (
+                <tr key={r.season}>
+                  <td>
+                    <strong>{r.season}</strong>
+                  </td>
+                  <td>{p.matches}</td>
+                  {mode !== 'bowl' && (
+                    <>
+                      <td>{p.bat.inns ? p.bat.runs : '–'}</td>
+                      <td>
+                        {r1(p.bat.avg)}
+                        {q && p.bat.avg !== null && q.bat.avg !== null && (
+                          <Delta v={p.bat.avg - q.bat.avg} />
+                        )}
+                      </td>
+                      <td>
+                        {r0(p.bat.sr)}
+                        {q && p.bat.sr !== null && q.bat.sr !== null && (
+                          <Delta v={p.bat.sr - q.bat.sr} />
+                        )}
+                      </td>
+                    </>
+                  )}
+                  {mode !== 'bat' && (
+                    <>
+                      <td>{p.bowl.inns ? p.bowl.wkts : '–'}</td>
+                      <td>
+                        {r1(p.bowl.econ)}
+                        {q && p.bowl.econ !== null && q.bowl.econ !== null && (
+                          <Delta v={p.bowl.econ - q.bowl.econ} invert />
+                        )}
+                      </td>
+                      <td>
+                        {r1(p.bowl.sr)}
+                        {q && p.bowl.sr !== null && q.bowl.sr !== null && (
+                          <Delta v={p.bowl.sr - q.bowl.sr} invert />
+                        )}
+                      </td>
+                    </>
+                  )}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

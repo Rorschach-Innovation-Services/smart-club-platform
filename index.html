@@ -6316,6 +6316,21 @@
   .pro-dive .pv-tiles{margin:0}
   .pro-dive-name{font-family:'Montserrat',sans-serif;font-size:26px;font-weight:800;color:var(--ink);margin:2px 0 0}
   .pro-dive .pv-form + .pv-form{margin-top:14px}
+  .pv-trend svg,.pv-dumbbell svg{width:100%;height:auto;display:block;overflow:visible}
+  .pv-tline{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+  .pv-tline.squad{stroke:var(--viz-squad)} .pv-tline.context{stroke:var(--viz-context-ink)} .pv-tline.third{stroke:var(--viz-third)}
+  .pv-tline.pool{stroke:var(--viz-pool)} .pv-tline.risk{stroke:var(--viz-risk)}
+  .pv-tick.faint{fill:var(--muted);opacity:.75}
+  .pv-dline{stroke-width:2.5;stroke-linecap:round}
+  .pv-dline.squad{stroke:var(--viz-squad)} .pv-dline.risk{stroke:var(--viz-risk)}
+  .pv-up{fill:#25336F;font-weight:800} .pv-down{fill:#8E2433;font-weight:800}
+  .pro-delta{display:inline-block;margin-left:6px;font-size:11px;font-weight:800}
+  .pro-delta.up{color:#25336F} .pro-delta.down{color:#8E2433}
+  .pro-chip.static{cursor:default}
+  .pro-trend-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
+  .pro-trend-grid .card{margin:0}
+  .pro-season-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .pro-season-bar span{font-size:12.5px;color:var(--muted)}
   @media (max-width:900px){
     .pro-lanes{grid-template-columns:1fr}
     .pro-need{grid-template-columns:1fr}

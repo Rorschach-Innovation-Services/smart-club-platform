@@ -973,3 +973,78 @@ export const wicketBands = (lines: BowlLine[]) =>
     label,
     n: lines.filter((l) => (i === 4 ? l.w >= 4 : l.w === i)).length,
   }));
+
+/* ─── Season on season ─── */
+
+export interface SeasonSlice {
+  season: string;
+  matches: ProMatch[];
+  summary: TeamSummary;
+  comps: ReturnType<typeof teamComparisons>;
+  /** Every squad player in that season, rated against the all-seasons average for the format. */
+  players: Map<string, ProPlayer>;
+}
+
+/**
+ * The squad season by season in one format (or all formats). Every season is rated against
+ * the same baseline — the average across all the files — so a change between seasons is the
+ * player's change, not the league moving under them. Oldest season first.
+ */
+export function seasonSlices(squad: Squad, format: ProFormat | 'all', allMatches: ProMatch[]): SeasonSlice[] {
+  return seasonsOf(squad.matches)
+    .slice()
+    .reverse()
+    .map((season) => {
+      const f: ProFilter = { format, season };
+      const matches = filterMatches(squad, f);
+      return {
+        season,
+        matches,
+        summary: teamSummary(squad, matches),
+        comps: teamComparisons(squad, matches),
+        players: new Map(squadPlayers(squad, f, allMatches).map((p) => [p.name, p])),
+      };
+    })
+    .filter((s) => s.matches.length > 0);
+}
+
+export interface SeasonMove {
+  name: string;
+  from: number;
+  to: number;
+  change: number;
+  role: ProRole;
+  /** The numbers behind each end, for the tooltip. */
+  fromLine: string;
+  toLine: string;
+}
+
+/**
+ * Who moved between two seasons on one discipline: players with a qualifying sample in both,
+ * sorted biggest rise first. Players only in one of the two come back as arrivals/departures.
+ */
+export function seasonMoves(a: SeasonSlice, b: SeasonSlice, disc: 'bat' | 'bowl') {
+  const moves: SeasonMove[] = [];
+  const line = (p: ProPlayer) =>
+    disc === 'bat'
+      ? `${p.bat.runs} runs in ${p.bat.inns} inns · avg ${p.bat.avg === null ? '–' : p.bat.avg.toFixed(1)} · SR ${p.bat.sr === null ? '–' : Math.round(p.bat.sr)}`
+      : `${p.bowl.wkts} wkts in ${Math.floor(p.bowl.balls / 6)} ov · econ ${p.bowl.econ === null ? '–' : p.bowl.econ.toFixed(1)}`;
+  const ok = (p: ProPlayer) => (disc === 'bat' ? p.qualifies.bat && p.idx.bat : p.qualifies.bowl && p.idx.bowl);
+  for (const [name, pb] of b.players) {
+    const pa = a.players.get(name);
+    if (!pa || !ok(pa) || !ok(pb)) continue;
+    const from = (disc === 'bat' ? pa.idx.bat!.idx : pa.idx.bowl!.idx);
+    const to = (disc === 'bat' ? pb.idx.bat!.idx : pb.idx.bowl!.idx);
+    moves.push({ name, from, to, change: to - from, role: pb.role, fromLine: line(pa), toLine: line(pb) });
+  }
+  moves.sort((x, y) => y.change - x.change);
+  const used = (s: SeasonSlice) =>
+    [...s.players.values()].filter((p) => (disc === 'bat' ? p.bat.inns > 0 : p.bowl.inns > 0)).map((p) => p.name);
+  const inA = new Set(used(a));
+  const inB = new Set(used(b));
+  return {
+    moves,
+    arrivals: [...inB].filter((n) => !inA.has(n)).sort(),
+    departures: [...inA].filter((n) => !inB.has(n)).sort(),
+  };
+}

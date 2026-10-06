@@ -838,3 +838,244 @@ export function Spark({
     </svg>
   );
 }
+
+/* ── Trend lines: a few series over seasons (categorical x), direct end labels ── */
+
+export interface TrendSeries {
+  key: string;
+  label: string;
+  tone: Tone;
+  values: (number | null)[];
+}
+
+export function TrendLines({
+  categories,
+  series,
+  fmt = (v: number) => (Math.round(v * 10) / 10).toString(),
+  height = 170,
+  refValue,
+  refLabel,
+  notes,
+}: {
+  categories: string[];
+  series: TrendSeries[];
+  fmt?: (v: number) => string;
+  height?: number;
+  refValue?: number;
+  refLabel?: string;
+  /** Per category, e.g. "8 games" — shown under the axis label. */
+  notes?: string[];
+}) {
+  const [hover, setHover] = useState<number | null>(null);
+  const W = 520;
+  const H = height;
+  const pad = { l: 40, r: 70, t: 14, b: notes ? 34 : 22 };
+  const vals = series.flatMap((s) => s.values.filter((v): v is number => v !== null));
+  if (!vals.length || categories.length === 0)
+    return <div className="pv-empty">Not enough seasons yet.</div>;
+  let lo = Math.min(...vals, refValue ?? Infinity);
+  let hi = Math.max(...vals, refValue ?? -Infinity);
+  const span = hi - lo || Math.max(1, Math.abs(hi) * 0.2);
+  lo -= span * 0.15;
+  hi += span * 0.15;
+  if (lo > 0 && lo < span) lo = 0;
+  const band = (W - pad.l - pad.r) / Math.max(1, categories.length - 1 || 1);
+  const sx = (i: number) => (categories.length === 1 ? (pad.l + W - pad.r) / 2 : pad.l + band * i);
+  const sy = (v: number) => H - pad.b - ((v - lo) / (hi - lo)) * (H - pad.t - pad.b);
+  // End labels: nudge apart when two series finish close together.
+  const ends = series
+    .map((s) => {
+      const i = s.values
+        .map((v, k) => (v === null ? -1 : k))
+        .filter((k) => k >= 0)
+        .pop();
+      return i === undefined ? null : { s, i, y: sy(s.values[i]!) };
+    })
+    .filter((e): e is { s: TrendSeries; i: number; y: number } => !!e)
+    .sort((a, b) => a.y - b.y);
+  for (let k = 1; k < ends.length; k++)
+    if (ends[k].y - ends[k - 1].y < 12) ends[k].y = ends[k - 1].y + 12;
+  return (
+    <div className="pv-trend">
+      <Legend items={series.map((s) => ({ tone: s.tone, label: s.label }))} />
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        role="img"
+        aria-label={`${series.map((s) => s.label).join(' and ')} by season`}
+      >
+        {niceTicks(lo, hi, 4).map((v) => (
+          <g key={v}>
+            <line className="pv-grid" x1={pad.l} x2={W - pad.r} y1={sy(v)} y2={sy(v)} />
+            <text className="pv-tick" x={pad.l - 6} y={sy(v) + 4} textAnchor="end">
+              {fmt(v)}
+            </text>
+          </g>
+        ))}
+        {refValue !== undefined && (
+          <>
+            <line
+              className="pv-ref"
+              x1={pad.l}
+              x2={W - pad.r}
+              y1={sy(refValue)}
+              y2={sy(refValue)}
+            />
+            <text className="pv-tick" x={W - pad.r + 4} y={sy(refValue) + 4}>
+              {refLabel ?? fmt(refValue)}
+            </text>
+          </>
+        )}
+        {categories.map((c, i) => (
+          <g key={c} onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}>
+            <rect
+              x={sx(i) - band / 2}
+              y={pad.t}
+              width={Math.max(band, 40)}
+              height={H - pad.t - pad.b}
+              fill="transparent"
+            />
+            {hover === i && (
+              <line className="pv-ref" x1={sx(i)} x2={sx(i)} y1={pad.t} y2={H - pad.b} />
+            )}
+            <text className="pv-tick" x={sx(i)} y={H - pad.b + 14} textAnchor="middle">
+              {c}
+            </text>
+            {notes?.[i] && (
+              <text className="pv-tick faint" x={sx(i)} y={H - pad.b + 26} textAnchor="middle">
+                {notes[i]}
+              </text>
+            )}
+          </g>
+        ))}
+        {series.map((s) => {
+          const pts = s.values.map((v, i) => (v === null ? null : ([sx(i), sy(v)] as const)));
+          const d = pts.reduce(
+            (acc, p, i) => (p ? `${acc}${acc && pts[i - 1] ? 'L' : 'M'}${p[0]},${p[1]}` : acc),
+            '',
+          );
+          return (
+            <g key={s.key}>
+              <path className={`pv-tline ${s.tone}`} d={d} />
+              {pts.map((p, i) =>
+                p ? (
+                  <circle key={i} className={`pv-dot ${s.tone}`} cx={p[0]} cy={p[1]} r={4.5} />
+                ) : null,
+              )}
+            </g>
+          );
+        })}
+        {ends.map((e) => (
+          <text key={e.s.key} className="pv-label" x={sx(e.i) + 9} y={e.y + 4}>
+            {fmt(e.s.values[e.i]!)}
+          </text>
+        ))}
+      </svg>
+      <div className="pv-bar-sub">
+        {hover !== null
+          ? `${categories[hover]}: ${series.map((s) => `${s.label} ${s.values[hover] === null ? '–' : fmt(s.values[hover]!)}`).join(' · ')}${notes?.[hover] ? ` · ${notes[hover]}` : ''}`
+          : 'Hover a season for the numbers'}
+      </div>
+    </div>
+  );
+}
+
+/* ── Dumbbell: one row per player, season A → season B ── */
+
+export interface DumbbellRow {
+  id: string;
+  label: string;
+  from: number;
+  to: number;
+  sub?: string;
+}
+
+export function Dumbbell({
+  rows,
+  fromLabel,
+  toLabel,
+  onPick,
+  refValue = 100,
+}: {
+  rows: DumbbellRow[];
+  fromLabel: string;
+  toLabel: string;
+  onPick?: (id: string) => void;
+  refValue?: number;
+}) {
+  const [hover, setHover] = useState<DumbbellRow | null>(null);
+  if (!rows.length) return <div className="pv-empty">Nobody qualified in both seasons.</div>;
+  const W = 560;
+  const rowH = 24;
+  const labW = 140;
+  const valW = 96;
+  const H = rows.length * rowH + 26;
+  const all = rows.flatMap((r) => [r.from, r.to]).concat(refValue);
+  const lo = Math.min(...all) - 8;
+  const hi = Math.max(...all) + 8;
+  const sx = (v: number) => labW + ((v - lo) / (hi - lo)) * (W - labW - valW);
+  return (
+    <div className="pv-dumbbell">
+      <div className="pv-legend" aria-hidden="true">
+        <span>
+          <i className="pv-key context" />
+          {fromLabel}
+        </span>
+        <span>
+          <i className="pv-key squad" />
+          {toLabel}, up
+        </span>
+        <span>
+          <i className="pv-key risk" />
+          {toLabel}, down
+        </span>
+      </div>
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        role="img"
+        aria-label={`Index change from ${fromLabel} to ${toLabel}`}
+      >
+        <line className="pv-ref" x1={sx(refValue)} x2={sx(refValue)} y1={0} y2={H - 18} />
+        <text className="pv-tick" x={sx(refValue)} y={H - 4} textAnchor="middle">
+          {refValue} = average
+        </text>
+        {rows.map((r, i) => {
+          const y = i * rowH + 12;
+          const up = r.to >= r.from;
+          const tone = up ? 'squad' : 'risk';
+          const dir = r.to >= r.from ? 1 : -1;
+          const x2 = sx(r.to) - dir * 5;
+          return (
+            <g
+              key={r.id}
+              className={`pv-bar-row${onPick ? ' click' : ''}`}
+              onMouseEnter={() => setHover(r)}
+              onMouseLeave={() => setHover(null)}
+              onClick={() => onPick?.(r.id)}
+            >
+              <rect x={0} y={y - 11} width={W} height={rowH} fill="transparent" />
+              <text className="pv-bar-label" x={labW - 10} y={y + 4} textAnchor="end">
+                {r.label.length > 20 ? `${r.label.slice(0, 19)}…` : r.label}
+              </text>
+              {Math.abs(sx(r.to) - sx(r.from)) > 6 && (
+                <line className={`pv-dline ${tone}`} x1={sx(r.from)} x2={x2} y1={y} y2={y} />
+              )}
+              <circle className="pv-dot context" cx={sx(r.from)} cy={y} r={4.5} />
+              <circle className={`pv-dot ${tone}`} cx={sx(r.to)} cy={y} r={5.5} />
+              <text className="pv-bar-val" x={W - valW + 8} y={y + 4}>
+                {Math.round(r.from)} → {Math.round(r.to)}{' '}
+                <tspan className={up ? 'pv-up' : 'pv-down'}>
+                  ({up ? '+' : ''}
+                  {Math.round(r.to - r.from)})
+                </tspan>
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+      <div className="pv-bar-sub">
+        {hover?.sub ??
+          'Hover a player for the numbers behind each season · tap for their deep dive'}
+      </div>
+    </div>
+  );
+}
