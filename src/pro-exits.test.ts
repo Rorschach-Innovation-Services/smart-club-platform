@@ -45,23 +45,34 @@ const ms = [
   match('2026-03-01', ['Ben Stay', 'Dee New'], 'Bay Gulls', ['Gus One']),
 ];
 const [squad] = detectSquads(ms);
+// Three more games without Ann or Cal, so both are out of the squad.
+const more = [
+  ...ms,
+  ...['2026-03-05', '2026-03-08', '2026-03-12'].map((d) =>
+    match(d, ['Ben Stay', 'Dee New'], 'Bay Gulls', ['Gus One']),
+  ),
+];
+const [sqMore] = detectSquads(more);
 
 describe('exits', () => {
-  it('sets status from the newest game in the files, not today', () => {
-    expect(statusOf(10)).toBe('active');
-    expect(statusOf(200)).toBe('fading');
-    expect(statusOf(400)).toBe('exited');
+  it('counts games missed in the player’s formats, and time from the newest game in the files', () => {
+    expect(statusOf(2, 400)).toBe('active');
+    expect(statusOf(5, 200)).toBe('fading');
+    expect(statusOf(5, 400)).toBe('exited');
     const r = exitReport(squad, ms);
     expect(r.asOf).toBe('2026-03-01');
     const by = Object.fromEntries(r.rows.map((x) => [x.name, x]));
-    expect(by['Ben Stay'].status).toBe('active');
-    expect(by['Cal Gone'].status).toBe('fading'); // last 2025-08-20: 193 days before the newest game
-    expect(by['Ann Old'].status).toBe('exited');
-    expect(by['Ann Old'].seasons).toEqual({ '2024/25': 2 });
+    expect(by['Ben Stay']).toMatchObject({ status: 'active', missed: 0 });
+    expect(by['Cal Gone']).toMatchObject({ missed: 2, status: 'active' }); // only 2 games since
+    // Three more games without them: Cal drops out, Ann (a year gone) has exited.
+    const later = Object.fromEntries(exitReport(sqMore, more).rows.map((x) => [x.name, x]));
+    expect(later['Cal Gone']).toMatchObject({ missed: 5, status: 'fading' });
+    expect(later['Ann Old']).toMatchObject({ missed: 6, status: 'exited' });
+    expect(later['Ann Old'].seasons).toEqual({ '2024/25': 2 });
   });
 
   it('finds a player at another franchise after they left, and nowhere else', () => {
-    const r = exitReport(squad, ms);
+    const r = exitReport(sqMore, more);
     const ann = r.rows.find((x) => x.name === 'Ann Old')!;
     expect(ann.whereNow).toBe('still-playing');
     expect(ann.sightings[0]).toMatchObject({
@@ -75,7 +86,7 @@ describe('exits', () => {
 
   it('matches names across sources ignoring case and accents, and counts a registration as playing', () => {
     expect(normName('Cál  GONE')).toBe('cal gone');
-    const r = exitReport(squad, ms, {
+    const r = exitReport(sqMore, more, {
       register: [{ name: 'CAL gone', club: 'Ridgeview CC', since: '2024-01-01' }],
       clearances: [
         {

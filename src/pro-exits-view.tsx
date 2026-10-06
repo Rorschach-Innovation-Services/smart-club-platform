@@ -9,7 +9,13 @@ import * as api from './api';
 import { qk } from './query';
 import { PRO_MATCHES, SCOUT_POOLS } from './pro-data';
 import { SCOUTING_EVENTS } from './scouting-data';
-import { ACTIVE_DAYS, FADING_DAYS, exitReport, type ExitRow, type SightingKind } from './pro-exits';
+import {
+  ACTIVE_MISSED,
+  EXITED_DAYS,
+  exitReport,
+  type ExitRow,
+  type SightingKind,
+} from './pro-exits';
 import type { Squad } from './pro-team';
 import { Tile } from './pro-charts';
 
@@ -31,7 +37,7 @@ const KIND_LABEL: Record<SightingKind, string> = {
 };
 const STATUS_LABEL = {
   active: 'In the squad',
-  fading: 'Not seen 6–12 months',
+  fading: 'Dropped out',
   exited: 'Gone 12+ months',
 } as const;
 
@@ -118,10 +124,12 @@ export function ExitsView({
     <>
       <div className="pro-note">
         <span>
-          Measured from the newest game in the files ({fmtDay(asOf)}): in the squad = played in the
-          last 6 months, not seen = 6–12 months, gone = longer. "Where now" looks for the same name
-          in other franchises' scorecards, the scouting pools and competitions, and Smart Club's
-          register and clearances — names match exactly, so check the source.
+          Counted in squad games missed in the formats each player plays (a T20 specialist isn't
+          "gone" because the four-day season started first): in the squad = missed {ACTIVE_MISSED}{' '}
+          or fewer, dropped out = missed more, gone = missed more and nothing for a year before the
+          newest game ({fmtDay(asOf)}). "Where now" looks for the same name in other franchises'
+          scorecards, the scouting pools and competitions, and Smart Club's register and clearances
+          — names match exactly, so check the source.
           {registerFailed
             ? ' The Smart Club register couldn’t be loaded, so it isn’t included.'
             : ''}
@@ -137,10 +145,10 @@ export function ExitsView({
         <Tile
           label="In the squad"
           value={counts.active}
-          sub={`played since ${fmtDay(shift(asOf, -ACTIVE_DAYS))}`}
+          sub={`missed ${ACTIVE_MISSED} or fewer games`}
           tone="good"
         />
-        <Tile label="Not seen 6–12 months" value={counts.fading} sub="fading out" />
+        <Tile label="Dropped out" value={counts.fading} sub="missing games in their formats" />
         <Tile
           label="Gone 12+ months"
           value={counts.exited}
@@ -299,7 +307,7 @@ export function ExitsView({
                 [
                   ['gone', 'Out of the squad'],
                   ['exited', 'Gone 12+ months'],
-                  ['fading', 'Not seen 6–12'],
+                  ['fading', 'Dropped out'],
                   ['all', 'Everyone'],
                 ] as [Filter, string][]
               ).map(([k, l]) => (
@@ -358,7 +366,9 @@ export function ExitsView({
                   })}
                   <td>
                     {fmtDay(r.last)}
-                    <div className="ump-sub">{r.daysSince} days before the newest game</div>
+                    <div className="ump-sub">
+                      missed {r.missed} squad game{r.missed === 1 ? '' : 's'}
+                    </div>
                   </td>
                   <td>
                     <span
@@ -380,8 +390,8 @@ export function ExitsView({
           </table>
         </div>
         <p className="pv-note">
-          {shown.length} of {rows.length} players · statuses use the last {ACTIVE_DAYS} /{' '}
-          {FADING_DAYS} days of the data.
+          {shown.length} of {rows.length} players · gone = nothing for {EXITED_DAYS}+ days before
+          the newest game.
         </p>
       </div>
     </>
@@ -400,7 +410,8 @@ function WhereCard({ r, onOpen }: { r: ExitRow; onOpen: (name: string) => void }
         </span>
       </div>
       <div className="ump-sub">
-        {r.games} games for the squad · last {fmtDay(r.last)} ({r.lastFormat})
+        {r.games} games for the squad · last {fmtDay(r.last)} ({r.lastFormat}) · missed {r.missed}{' '}
+        since
       </div>
       {r.sightings.length > 0 ? (
         <ul className="pro-sightings">
@@ -416,8 +427,4 @@ function WhereCard({ r, onOpen }: { r: ExitRow; onOpen: (name: string) => void }
       )}
     </div>
   );
-}
-
-function shift(date: string, d: number) {
-  return new Date(Date.parse(`${date}T00:00:00Z`) + d * 86_400_000).toISOString().slice(0, 10);
 }

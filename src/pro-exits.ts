@@ -1,9 +1,11 @@
 /**
  * Exits: who has stopped playing for the squad, and where they are now. Pure.
  *
- * A player's status is measured from the newest game in the files (not today), so an old
- * export doesn't make everyone look gone: active = played in the last 6 months of the data,
- * fading = 6–12 months, exited = longer. "Where now" looks for the same name everywhere else
+ * A player's status counts the squad games they have missed since their last one, in the formats
+ * they play — a T20 specialist isn't "gone" because the four-day season started first — and
+ * measures time from the newest game in the files (not today), so an old export doesn't make
+ * everyone look gone: active = missed 3 or fewer, exited = missed 4+ and nothing for 12 months,
+ * fading = in between. "Where now" looks for the same name everywhere else
  * the platform can see: another franchise in the scorecards after they left, a scouting pool
  * (club cricket), a senior scouting competition, the Smart Club player register and its
  * clearances. Names are matched exactly (accents, case and punctuation ignored) — a common
@@ -44,6 +46,10 @@ export interface ExitRow {
   first: string;
   last: string;
   lastFormat: string;
+  /** The formats they've played for the squad. */
+  formats: string[];
+  /** Squad games in those formats since their last one. */
+  missed: number;
   /** Games per season. */
   seasons: Record<string, number>;
   daysSince: number;
@@ -78,11 +84,12 @@ export const normName = (n: string) =>
 const days = (a: string, b: string) =>
   Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86_400_000);
 
-export const ACTIVE_DAYS = 183;
-export const FADING_DAYS = 365;
+export const ACTIVE_MISSED = 3;
+export const EXITED_DAYS = 365;
 
-export function statusOf(daysSince: number): ExitStatus {
-  return daysSince <= ACTIVE_DAYS ? 'active' : daysSince <= FADING_DAYS ? 'fading' : 'exited';
+export function statusOf(missed: number, daysSince: number): ExitStatus {
+  if (missed <= ACTIVE_MISSED) return 'active';
+  return daysSince > EXITED_DAYS ? 'exited' : 'fading';
 }
 
 /** Every name that played for the squad, with dates, games per season and last format. */
@@ -94,6 +101,7 @@ export function squadHistory(squad: Squad) {
       dates: string[];
       seasons: Record<string, Set<string>>;
       lastFormat: string;
+      formats: Set<string>;
     }
   >();
   for (const m of [...squad.matches].sort((a, b) => a.date.localeCompare(b.date))) {
@@ -103,7 +111,14 @@ export function squadHistory(squad: Squad) {
       else inn.bowling.forEach((b) => names.add(b.n));
     }
     names.forEach((n) => {
-      const r = by.get(n) ?? { games: new Set(), dates: [], seasons: {}, lastFormat: m.format };
+      const r = by.get(n) ?? {
+        games: new Set<string>(),
+        dates: [],
+        seasons: {},
+        lastFormat: m.format,
+        formats: new Set<string>(),
+      };
+      r.formats.add(m.format);
       r.games.add(m.id);
       r.dates.push(m.date);
       (r.seasons[m.season] ??= new Set()).add(m.id);
@@ -188,7 +203,8 @@ export function exitReport(
   const rows: ExitRow[] = [...history].map(([name, h]) => {
     const last = h.dates[h.dates.length - 1];
     const daysSince = days(last, asOf);
-    const status = statusOf(daysSince);
+    const missed = squad.matches.filter((m) => m.date > last && h.formats.has(m.format)).length;
+    const status = statusOf(missed, daysSince);
     const sightings: Sighting[] = [];
     const other = elsewhere.get(normName(name));
     if (other && other.date > last)
@@ -209,6 +225,8 @@ export function exitReport(
       first: h.dates[0],
       last,
       lastFormat: h.lastFormat,
+      formats: [...h.formats],
+      missed,
       seasons: Object.fromEntries(Object.entries(h.seasons).map(([k, v]) => [k, v.size])),
       daysSince,
       status,
