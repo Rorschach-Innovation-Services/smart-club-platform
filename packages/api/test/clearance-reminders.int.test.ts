@@ -454,9 +454,48 @@ describe('reminder runs', () => {
       ),
       null,
     );
-    // Same weekly cadence as a chair reminder: not on day 8, again on day 14.
+    // The mention is logged on the DESTINATION club (PII-free: no admin named).
+    const mentions = await reminderRows('cr-chairless', 'dst');
+    assert.equal(mentions.length, 1);
+    assert.equal(mentions[0].idempotencyKey, `clearance-clr-dir-reminder-${TODAY}-digest`);
+    assert.equal(mentions[0].by, cron.CLEARANCE_REMINDER_ACTOR);
+    assert.equal(mentions[0].to, undefined);
+    // Same weekly cadence as a chair reminder: not on day 8 or 13, again on day 14.
     assert.equal((await run(['cr-chairless'], '2026-10-21')).digests.length, 0);
+    // (The on-system clearance falls due by 26 Oct, so a digest goes out — without the chairless one.)
+    assert.deepEqual((await run(['cr-chairless'], '2026-10-26')).digests[0]?.chairless, []);
     assert.equal((await run(['cr-chairless'], '2026-10-27')).digests[0]?.chairless.length, 1);
+  });
+
+  test('chairless digest is missed-run robust: a skipped day-14 run is caught up on day 15', async () => {
+    await seedTenant('cr-chairless-missed', '2026-10-19T08:00:00Z'); // on-system one: never due here
+    await seedChairless('cr-chairless-missed', 'clr-dir-missed', '2026-10-13T08:00:00Z');
+    assert.equal((await run(['cr-chairless-missed'], TODAY)).summary.chairless, 1);
+    // No run on 27 Oct. Under the old modulo rule 28 Oct (age 15) was silent for a week.
+    const caughtUp = await run(['cr-chairless-missed'], '2026-10-28');
+    assert.equal(caughtUp.digests[0]?.chairless.length, 1);
+    // The clock now follows the 28 Oct mention.
+    assert.equal((await run(['cr-chairless-missed'], '2026-11-03')).digests.length, 0);
+    assert.equal((await run(['cr-chairless-missed'], '2026-11-04')).digests.length, 1);
+  });
+
+  test('a chairless digest that fails to send records no mention, so the next run retries', async () => {
+    await seedTenant('cr-chairless-fail', '2026-10-15T08:00:00Z'); // 5 days: not due
+    await seedChairless('cr-chairless-fail', 'clr-dir-fail', '2026-10-13T08:00:00Z');
+    const failed = await run(['cr-chairless-fail'], TODAY, {
+      sendDigest: async (args) => ({
+        results: args.to.map((to) => ({
+          channel: 'email' as const,
+          to,
+          status: 'failed' as const,
+          error: 'ses down',
+        })),
+      }),
+    });
+    assert.equal(failed.summary.chairless, 1);
+    assert.equal((await reminderRows('cr-chairless-fail', 'dst')).length, 0);
+    assert.equal((await run(['cr-chairless-fail'], '2026-10-21')).digests.length, 1);
+    assert.equal((await reminderRows('cr-chairless-fail', 'dst')).length, 1);
   });
 
   test('a failing tenant does not stop the others', async () => {

@@ -1110,6 +1110,43 @@ describe('durable report opening (REPORTOPEN# markers)', () => {
     assert.equal(notices.length, 2);
   });
 
+  test('the captain erased while the opening is pending: the retry still notifies both sides, the scoring side via its chair', async () => {
+    await seedCaptain();
+    page = liveResultPage('live');
+    await puller.runMedicoachSync('dolphins', 'cron', {
+      repo,
+      url: stubUrl,
+      secret: SECRET,
+      log: () => {},
+      captainsReports: failingDeps,
+    });
+    const [marker] = await repo.listReportOpenMarkers('dolphins');
+    assert.equal(marker.captainRef, CAPTAIN_REF);
+
+    const counts = await repo.erasePlayerData('dolphins', CAPTAIN_KEY, { by: 'admin@test' });
+    assert.equal(counts?.reportOpenMarkers, 1);
+    const [scrubbed] = await repo.listReportOpenMarkers('dolphins');
+    assert.equal(scrubbed.ref, marker.ref, 'marker kept — it is the retry queue for both clubs');
+    assert.equal(scrubbed.captainRef, undefined);
+    assert.equal(await tableItemsContaining(CAPTAIN_REF), 0);
+
+    const { retryPendingReportOpens } = await import('../src/captains-reports.js');
+    const retry = await retryPendingReportOpens('dolphins', { repo, ...sender });
+    assert.deepEqual(retry, { retried: 1, done: 1, failed: 0, gaveUp: 0 });
+    assert.deepEqual(
+      notices.map((n) => n.recipientKind),
+      ['chair', 'chair'],
+    );
+    assert.deepEqual(notices.map((n) => n.to.email).sort(), [
+      'chair@aw.test',
+      'chair@umzinto.test',
+    ]);
+    assert.ok(notices.every((n) => !n.ccEmail));
+    assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
+    // A marker that is already gone is a no-op, not an error.
+    assert.equal(await repo.scrubReportOpenMarkerCaptainRef('dolphins', marker.ref), false);
+  });
+
   test('a notice that failed on every channel is retried (claim released); a partial success is done', async () => {
     await seedCaptain();
     page = liveResultPage('live');

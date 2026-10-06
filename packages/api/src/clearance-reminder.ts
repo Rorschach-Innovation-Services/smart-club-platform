@@ -43,8 +43,32 @@ export function clearanceReminderCommEvents(
 }
 
 /**
- * When the clearance's source chair was last reminded (latest `clearance-reminder` comm-log row on
- * the source club), or null when never.
+ * The comm-log row (DESTINATION club) recording that a chairless clearance — source club off the
+ * system — was carried in the admin reminder digest on tenant day `date`. One PII-free summary row
+ * (admins are not named); it shares the reminder key prefix so {@link lastClearanceReminderAt}
+ * drives the digest cadence exactly as it drives chair reminders.
+ */
+export function clearanceDigestMentionEvent(
+  clearance: Pick<PlayerClearance, 'id'>,
+  date: string,
+  at: string,
+  by: string,
+): ClubCommEvent {
+  return {
+    id: randomUUID(),
+    channel: 'email',
+    status: 'sent',
+    at,
+    by,
+    idempotencyKey: `${clearanceReminderKeyPrefix(clearance.id)}${date}-digest`,
+    kind: 'clearance-reminder',
+  };
+}
+
+/**
+ * When the clearance was last reminded: the latest `clearance-reminder` comm-log row for it in
+ * `commLog` — the source club's (chair reminders) or, for a chairless clearance, the destination
+ * club's (digest mentions) — or null when never.
  */
 export function lastClearanceReminderAt(
   commLog: ClubCommEvent[] | undefined,

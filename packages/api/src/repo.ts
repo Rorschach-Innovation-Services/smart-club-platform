@@ -1424,6 +1424,32 @@ export async function deleteReportOpenMarker(tenant: string, ref: string): Promi
   await ddb.send(new DeleteCommand({ TableName: TABLE, Key: reportOpenKey(tenant, ref) }));
 }
 
+/**
+ * Drop a pending marker's `captainRef` (player erasure), keeping the marker itself: the retry
+ * still opens the fixture's reports, and with no captain ref the scoring side's report goes to the
+ * club chair (`resolveCaptain` → null). False when the marker vanished meanwhile (it opened, or
+ * the retry gave up) — nothing left to scrub.
+ */
+export async function scrubReportOpenMarkerCaptainRef(
+  tenant: string,
+  ref: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportOpenKey(tenant, ref),
+        UpdateExpression: 'REMOVE captainRef',
+        ConditionExpression: 'attribute_exists(pk)',
+      }),
+    );
+    return true;
+  } catch (err: unknown) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
 /** One failed attempt to open/notify a marker's reports. */
 export async function markReportOpenFailed(
   tenant: string,
@@ -7566,7 +7592,9 @@ const normCell = (s: string | undefined | null) => {
  *  - veterans requests (canonical VETREQ# + OUTBOUND_VETREQ# mirror);
  *  - captain's reports that NAME the person (full name / email / cell match) are SCRUBBED in
  *    place, not deleted (the report is the club's and the umpires' record too);
- *  - pending REPORTOPEN# markers whose captain ref is this person's player ref are deleted.
+ *  - pending REPORTOPEN# markers whose captain ref is this person's player ref have that ref
+ *    REMOVED (the marker stays — it is the retry queue for both clubs' reports; with no captain
+ *    ref the scoring side's report goes to the club chair).
  *
  * Gate: a pending clearance naming the person, or any `clearance-pending` row, throws
  * {@link PlayerErasureBlockedError} BEFORE anything is touched. Returns null when nothing in any
@@ -7715,12 +7743,13 @@ export async function erasePlayerData(
   }
 
   // ── Pending report-open markers addressed to this person's player ref ──
+  // Scrub the ref, never delete the marker: it is the retry queue that opens BOTH clubs' reports
+  // for the fixture. Without a captain ref the scoring side's report falls back to the chair.
   const ref = medicoachRefs.player(tenant, naturalKey);
   let reportOpenMarkers = 0;
   for (const m of await listReportOpenMarkers(tenant)) {
     if (m.captainRef !== ref) continue;
-    await deleteReportOpenMarker(tenant, m.ref);
-    reportOpenMarkers++;
+    if (await scrubReportOpenMarkerCaptainRef(tenant, m.ref)) reportOpenMarkers++;
   }
 
   // ── PLAYER# rows last (the re-run anchor) ──

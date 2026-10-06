@@ -16,7 +16,9 @@
  *
  * Directory-source (chairless) clearances — the source club is not on the system — are never
  * claimed or sent; they go in the admin digest instead, since only the union office can resolve
- * them. No eligible clearance in a tenant ⇒ no digest.
+ * them. They follow the same rule (pending ≥ 7 days AND last mention ≥ 7 days old); the mention is
+ * a PII-free `clearance-reminder` comm-log row on the DESTINATION club, written only once the
+ * digest has actually gone out. No eligible clearance in a tenant ⇒ no digest.
  *
  * WhatsApp goes to the source chair only when the `whatsappInvites` feature is on AND the
  * `club_clearance_pending` registry entry is "registered". Admins get email only.
@@ -40,6 +42,7 @@ import {
 } from '../notify/whatsapp-templates.js';
 import {
   clearanceReminderClaimKey,
+  clearanceDigestMentionEvent,
   clearanceReminderCommEvents,
   lastClearanceReminderAt,
 } from '../clearance-reminder.js';
@@ -187,6 +190,8 @@ export async function runClearanceReminders(
       };
       const nudged: ClearanceReminderDigestLine[] = [];
       const chairless: ClearanceReminderDigestLine[] = [];
+      /** Chairless clearances in this digest; their mention is logged on the destination club. */
+      const chairlessMentions: Array<{ clearance: PlayerClearance; toClubId: string }> = [];
 
       for (const clearance of pending) {
         let claimed = false;
@@ -195,13 +200,15 @@ export async function runClearanceReminders(
         try {
           const fromClub = await clubOf(clearance.fromClubId);
           if (!fromClub) {
-            // Off-system source: no chair to nudge, so no claim either. The digest carries it
-            // on the same cadence a chair reminder would (from the clearance's own age).
-            const age = daysPending(clearance, today);
-            if ((age - CLEARANCE_REMINDER_AFTER_DAYS) % CLEARANCE_REMINDER_EVERY_DAYS === 0) {
-              summary.chairless++;
-              chairless.push(digestLine(clearance, today));
-            }
+            // Off-system source: no chair to nudge, so no claim either. The digest carries it on
+            // the same missed-run-robust cadence as a chair reminder, keyed off the last digest
+            // mention recorded on the DESTINATION club (the only on-system club it has).
+            const toClub = await clubOf(clearance.toClubId);
+            const lastMention = lastClearanceReminderAt(toClub?.commLog, clearance.id);
+            if (!isReminderDue(clearance, today, lastMention)) continue;
+            summary.chairless++;
+            chairless.push(digestLine(clearance, today));
+            if (toClub) chairlessMentions.push({ clearance, toClubId: toClub.id });
             continue;
           }
           if (
@@ -281,7 +288,30 @@ export async function runClearanceReminders(
         nudged,
         chairless,
       });
-      summary.digests += results.filter((r) => r.status === 'sent').length;
+      const sentCount = results.filter((r) => r.status === 'sent').length;
+      summary.digests += sentCount;
+      // Only a digest that actually went out counts as a mention; otherwise tomorrow retries.
+      if (sentCount > 0) {
+        const mentionAt = deps.now().toISOString();
+        for (const { clearance, toClubId } of chairlessMentions) {
+          await repo
+            .appendClubCommEvents(tenant, toClubId, [
+              clearanceDigestMentionEvent(clearance, today, mentionAt, CLEARANCE_REMINDER_ACTOR),
+            ])
+            .catch((err: unknown) => {
+              summary.errors++;
+              deps.captureException(err, {
+                tenant,
+                clearanceId: clearance.id,
+                cron: 'clearance-reminders',
+              });
+              console.error(
+                `clearance-reminders: could not log digest mention ${tenant}/${clearance.id}`,
+                err,
+              );
+            });
+        }
+      }
     } catch (err) {
       summary.errors++;
       deps.captureException(err, { tenant, cron: 'clearance-reminders' });

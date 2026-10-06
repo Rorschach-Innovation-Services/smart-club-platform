@@ -657,7 +657,10 @@ export interface PlayerErasureCounts {
   certificates: number;
   /** Captain's reports that named the person and were scrubbed in place (not deleted). */
   captainsReportsScrubbed: number;
-  /** Pending REPORTOPEN# markers whose captain ref was this person, deleted. */
+  /**
+   * Pending REPORTOPEN# markers whose captain ref was this person: the ref is scrubbed, the
+   * marker kept (its retry then addresses the scoring side's chair instead).
+   */
   reportOpenMarkers: number;
 }
 

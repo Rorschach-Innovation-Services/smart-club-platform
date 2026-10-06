@@ -6,7 +6,8 @@
  *  - rows at two clubs + an approved clearance with a certificate + a registration review + a
  *    veterans request + a captain's report naming the person + a pending REPORTOPEN# marker →
  *    every category removed (CERT# gone, PDF prefix gone, playerCount decremented), the report
- *    scrubbed in place, other people's data untouched, a PII-free audit row, per-category counts;
+ *    scrubbed in place, the marker's captain ref scrubbed (marker kept for the retry), other
+ *    people's data untouched, a PII-free audit row, per-category counts;
  *  - re-running the erasure 404s (nothing left in any category);
  *  - a window-auto-rejected clearance with NO player rows anywhere is still erasable (the gate
  *    must not 404 on "no player row") and its snapshot ID document is collected;
@@ -388,9 +389,17 @@ describe('full erasure across every category', () => {
     assert.equal(other.captainName, 'Someone Else');
   });
 
-  test('REPORTOPEN marker addressed to the person deleted; others kept', async () => {
-    const refs = (await repo.listReportOpenMarkers(TENANT)).map((m) => m.ref);
-    assert.deepEqual(refs, ['res-2']);
+  test('REPORTOPEN marker addressed to the person keeps its retry but loses the captain ref; others untouched', async () => {
+    const markers = await repo.listReportOpenMarkers(TENANT);
+    // Both markers survive: deleting one would silently stop that fixture's reports opening for
+    // BOTH clubs. The scrubbed one's retry addresses the scoring side's chair instead.
+    assert.deepEqual(markers.map((m) => m.ref).sort(), ['res-1', 'res-2']);
+    const scrubbed = markers.find((m) => m.ref === 'res-1')!;
+    assert.equal(scrubbed.captainRef, undefined);
+    assert.equal(scrubbed.fixtureId, 'f3');
+    assert.equal(scrubbed.attempts, 0);
+    const other = markers.find((m) => m.ref === 'res-2')!;
+    assert.equal(other.captainRef, `smartclub:${TENANT}:player:${bystander.naturalKey}`);
   });
 
   test('audit row: actor + counts only, no PII', async () => {

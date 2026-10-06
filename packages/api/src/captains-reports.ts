@@ -618,10 +618,14 @@ export async function openCaptainReports(
       const captainContact = existing.recipientContact
         ? { name: existing.recipient.name, ...existing.recipientContact }
         : captain;
+      // No captain contact left (e.g. the captain was erased: report contact + marker ref both
+      // scrubbed) → the chair gets the notice, as the chair, with the chair's wording.
+      const reachCaptain = toCaptain && !!captainContact;
       const sent = await notifyRecipient(deps, tenant, config, existing, {
-        contact: toCaptain && captainContact ? captainContact : chair,
-        ccChair: toCaptain && captainContact ? chair : null,
+        contact: reachCaptain && captainContact ? captainContact : chair,
+        ccChair: reachCaptain ? chair : null,
         purpose: existing.recipient.forwardedBy ? 'forwarded' : 'opened',
+        recipientKind: reachCaptain ? 'captain' : 'chair',
       });
       if (sent === 'sent') out.notified.push(existing.id);
       else if (sent === 'failed') failedNotices.push(existing.id);
@@ -695,6 +699,8 @@ async function notifyRecipient(
     ccChair: { email?: string } | null;
     purpose: CaptainsReportDelivery['purpose'];
     forwardedBy?: string;
+    /** Who is actually being reached, when it differs from the report's recipient kind. */
+    recipientKind?: 'captain' | 'chair';
   },
 ): Promise<'sent' | 'undelivered' | 'already' | 'failed'> {
   const { repo } = deps;
@@ -713,7 +719,7 @@ async function notifyRecipient(
   const audience = `${reminder ? 'reminder' : 'recipient'}#${report.recipient.memberId}`;
   if (!(await repo.claimCaptainsReportNotify(tenant, report.id, audience))) return 'already';
   const recipientKind: 'captain' | 'chair' =
-    report.recipient.kind === 'captain' ? 'captain' : 'chair';
+    opts.recipientKind ?? (report.recipient.kind === 'captain' ? 'captain' : 'chair');
   const home = report.side === 'home' ? report.clubName : report.opponentName;
   const away = report.side === 'home' ? report.opponentName : report.clubName;
   const cc =
