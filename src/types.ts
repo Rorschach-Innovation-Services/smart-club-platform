@@ -676,7 +676,10 @@ export interface ClubCommEvent {
     | 'postponement-declined'
     | 'postponement-withdrawn'
     // Scheduled fixture reminder to the chair (FixtureReminders cron).
-    | 'fixture-reminder';
+    | 'fixture-reminder'
+    // Destination chair's clearance heads-up, and the pending-clearance reminder (manual or cron).
+    | 'clearance-inbound'
+    | 'clearance-reminder';
   summary?: string;
 }
 

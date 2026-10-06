@@ -14,6 +14,9 @@ import {
   sendClearanceResolvedEmail,
   sendClearanceReopenedSourceEmail,
   sendClearanceReopenedDestEmail,
+  sendClearanceOpenedDestEmail,
+  sendClearanceOpenedAdminEmail,
+  sendClearanceReminderDigestEmail,
   sendVeteransRequestEmail,
   sendVeteransRequestResolvedEmail,
   sendPostponementEmail,
@@ -34,6 +37,7 @@ import type {
   PostponementAdminFinalEmailInput,
   PostponementDeclinedEmailInput,
   FixtureReminderLine,
+  ClearanceReminderDigestLine,
 } from './email.js';
 import {
   sendStaffInviteWhatsApp,
@@ -524,6 +528,94 @@ export async function sendClearanceReopenedNotice(args: {
     }),
   );
   return { results };
+}
+
+// ───────────────── Clearance opened (destination chair + union admins) ─────────────────
+
+/**
+ * Tell the DESTINATION chairman a clearance opened into their club. Email only (there is no
+ * destination WhatsApp template). Non-throwing: a bad/blank chair email becomes a `skipped` /
+ * `failed` result. The caller owns the comm-log append (kind `clearance-inbound`).
+ */
+export async function sendClearanceDestNotice(args: {
+  chair: { name?: string; email?: string; cell?: string };
+  fromClubName: string;
+  playerName: string;
+  toClubName: string;
+}): Promise<{ results: SendResult[] }> {
+  const { chair, fromClubName, playerName, toClubName } = args;
+  const email = (chair.email ?? '').trim();
+  if (!EMAIL_RE.test(email)) {
+    return {
+      results: [
+        {
+          channel: 'email',
+          status: 'skipped',
+          ...(email ? { to: email } : {}),
+          error: 'no valid chair email on file',
+        },
+      ],
+    };
+  }
+  try {
+    const { messageId } = await sendClearanceOpenedDestEmail({
+      to: email,
+      chairName: (chair.name ?? '').trim(),
+      fromClubName,
+      playerName,
+      toClubName,
+    });
+    return { results: [{ channel: 'email', status: 'sent', to: email, messageId }] };
+  } catch (err) {
+    return { results: [{ channel: 'email', status: 'failed', to: email, error: errMessage(err) }] };
+  }
+}
+
+/** Send one email per address, sequentially; never throws (each failure becomes a result). */
+async function sendAdminEmails(
+  to: string[],
+  send: (address: string) => Promise<{ messageId: string }>,
+): Promise<{ results: SendResult[] }> {
+  const results: SendResult[] = [];
+  for (const address of to) {
+    if (!EMAIL_RE.test(address)) {
+      results.push({ channel: 'email', status: 'skipped', to: address, error: 'invalid email' });
+      continue;
+    }
+    try {
+      const { messageId } = await send(address);
+      results.push({ channel: 'email', status: 'sent', to: address, messageId });
+    } catch (err) {
+      results.push({ channel: 'email', status: 'failed', to: address, error: errMessage(err) });
+    }
+  }
+  return { results };
+}
+
+/** Tell each tenant admin a clearance opened. Email only; not comm-logged (no club owns it). */
+export async function sendClearanceAdminNotice(args: {
+  to: string[];
+  fromClubName: string;
+  playerName: string;
+  toClubName: string;
+}): Promise<{ results: SendResult[] }> {
+  const { to, fromClubName, playerName, toClubName } = args;
+  return sendAdminEmails(to, (address) =>
+    sendClearanceOpenedAdminEmail({ to: address, fromClubName, playerName, toClubName }),
+  );
+}
+
+/** The ClearanceReminders cron's per-tenant admin digest, one email per admin. */
+export async function sendClearanceReminderDigest(args: {
+  to: string[];
+  orgName: string;
+  nudged: ClearanceReminderDigestLine[];
+  chairless: ClearanceReminderDigestLine[];
+}): Promise<{ results: SendResult[] }> {
+  const { to, orgName, nudged, chairless } = args;
+  return sendAdminEmails(to, (address) =>
+    sendClearanceReminderDigestEmail({ to: address, orgName, nudged, chairless }),
+  );
 }
 
 // ───────────────────────── Fixtures broadcast ─────────────────────────

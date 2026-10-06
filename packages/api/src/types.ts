@@ -559,7 +559,13 @@ export interface ClubCommEvent {
     | 'postponement-withdrawn'
     // Scheduled fixture reminder to the chair (FixtureReminders cron), one row per channel,
     // idempotency-keyed `fixture-reminder-<targetDate>-<channel>`.
-    | 'fixture-reminder';
+    | 'fixture-reminder'
+    // Destination chair's heads-up that a clearance opened INTO the club (recorded on the
+    // destination). A separate kind so it never counts toward the source-club daily cap.
+    | 'clearance-inbound'
+    // Pending-clearance nudge to the source chair (admin "Send reminder" or the ClearanceReminders
+    // cron), keyed `clearance-<id>-reminder-<date>-<channel>`. Bypasses the daily cap.
+    | 'clearance-reminder';
   /** Aggregate, PII-free outcome for a broadcast send, e.g. "8 sent · 2 skipped" (sent · skipped · failed; zero parts omitted). */
   summary?: string;
 }

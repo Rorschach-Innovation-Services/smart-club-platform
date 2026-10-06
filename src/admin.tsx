@@ -5421,6 +5421,8 @@ export function AdminClubDetail({
                   'clearance-approved': 'Clearance approved notice',
                   'clearance-rejected': 'Clearance rejected notice',
                   'clearance-reopened': 'Clearance reopened notice',
+                  'clearance-inbound': 'Clearance inbound notice',
+                  'clearance-reminder': 'Clearance reminder',
                   'veterans-request': 'Veterans request notice',
                   'veterans-request-accepted': 'Veterans request accepted notice',
                   'veterans-request-declined': 'Veterans request declined notice',
@@ -7144,6 +7146,7 @@ export function AdminClearances({
   onReject,
   onReassign,
   onReopen,
+  onRemind = undefined,
   onRevokeCertificate,
   onCertificateViewed = undefined,
   busyId,
@@ -7414,6 +7417,11 @@ export function AdminClearances({
                         : `The Union office can override ${req.fromClubName}'s approval and issue the clearance to ${req.toClubName}, or reject it — ${rejectClause[predicted]}.${canReallocate ? ` If ${req.fromClubName} has since registered under a slightly different name, reallocate this clearance to it instead.` : ''}`}
                     </div>
                   </div>
+                  {onRemind && !offSystem && (
+                    <Btn tone="outline" disabled={busy} onClick={() => onRemind(req)}>
+                      {busy && busyAction === 'remind' ? 'Sending…' : 'Send reminder'}
+                    </Btn>
+                  )}
                   {canReallocate && (
                     <Btn
                       tone="outline"

@@ -1316,7 +1316,7 @@ function Shell({
   // Override button reads "Issuing…". (approveClearance is the club-rep view — it
   // sets only busyClearanceId and needs no action kind.)
   const [busyClearanceAction, setBusyClearanceAction] = useStateApp<
-    'reject' | 'override' | 'reassign' | 'reopen' | 'revoke' | null
+    'reject' | 'override' | 'reassign' | 'reopen' | 'revoke' | 'remind' | null
   >(null);
   const [busyReviewId, setBusyReviewId] = useStateApp(null);
   // Which veterans request (id) is mid-action, and which action, so the admin table can label
@@ -2080,6 +2080,33 @@ function Shell({
           setBusyClearanceAction(null);
         })
     );
+  }
+  // Admin nudges a pending clearance's source chair. At most once per clearance per day (shared
+  // with the daily reminders cron): the server's 409/422 copy is shown as-is.
+  function remindClearanceReq(req) {
+    setBusyClearanceId(req.id);
+    setBusyClearanceAction('remind');
+    return withToast(
+      () => api.remindClearance(req.id, req.fromClubId),
+      'Could not send the reminder',
+      { rawClientError: true, invalidate: [qk.allClearances(), qk.clubs()] },
+    )
+      .then((res) => {
+        invalidate(qk.clubs());
+        const sent = (res?.results ?? []).some((r) => r.status === 'sent');
+        toastShow(
+          sent
+            ? `Reminder sent to ${req.fromClubName}'s chair`
+            : `No reminder delivered — ${req.fromClubName} has no usable chair contact on file`,
+          sent ? undefined : 'warn',
+        );
+        return 'ok';
+      })
+      .catch(() => 'failed')
+      .finally(() => {
+        setBusyClearanceId(null);
+        setBusyClearanceAction(null);
+      });
   }
   // Admin reopens a rejected clearance (rejected → pending) — restores the pre-reject rows from
   // the snapshot the reject stored, and the source club gets to decide again. Reversible: a
@@ -2883,6 +2910,7 @@ function Shell({
             onReject={rejectClearanceReq}
             onReassign={reassignClearanceReq}
             onReopen={reopenClearanceReq}
+            onRemind={remindClearanceReq}
             onRevokeCertificate={revokeClearanceCertificateReq}
             onCertificateViewed={() => invalidate(qk.allClearances())}
             busyId={busyClearanceId}

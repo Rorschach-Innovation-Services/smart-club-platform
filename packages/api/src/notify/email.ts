@@ -544,6 +544,187 @@ export async function sendClearanceReopenedDestEmail(
   return { messageId: res.MessageId ?? '' };
 }
 
+const EMAIL_WRAP_OPEN = `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">`;
+
+async function sendSesEmail(
+  to: string,
+  content: { subject: string; text: string; html: string },
+  dryRunLabel: string,
+): Promise<{ messageId: string }> {
+  if (EMAIL_DRY_RUN) {
+    console.log(`[notify:email dry-run] would send ${dryRunLabel} to ${to}`);
+    return { messageId: `dry-run-${randomUUID()}` };
+  }
+  const res = await ses!.send(
+    new SendEmailCommand({
+      Source: FROM_EMAIL!,
+      Destination: { ToAddresses: [to] },
+      Message: {
+        Subject: { Data: content.subject, Charset: 'UTF-8' },
+        Body: {
+          Html: { Data: content.html, Charset: 'UTF-8' },
+          Text: { Data: content.text, Charset: 'UTF-8' },
+        },
+      },
+    }),
+  );
+  return { messageId: res.MessageId ?? '' };
+}
+
+export interface ClearanceOpenedDestEmailInput {
+  to: string;
+  chairName: string;
+  fromClubName: string;
+  playerName: string;
+  toClubName: string;
+}
+
+/**
+ * DESTINATION-chair heads-up that a clearance opened into the club. The destination does not act
+ * on it (the source club decides), so the copy is informational. Pure — exported for tests.
+ */
+export function clearanceOpenedDestEmailContent(input: Omit<ClearanceOpenedDestEmailInput, 'to'>): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { chairName, fromClubName, playerName, toClubName } = input;
+  const subject = `Incoming clearance — ${playerName.replace(/\s+/g, ' ').trim()}`;
+  const greetName = chairName || 'there';
+  const body =
+    `${playerName} has applied to join ${toClubName} from ${fromClubName}. A clearance from ` +
+    `${fromClubName} is now pending; the player becomes active at ${toClubName} once it is issued.`;
+  const text =
+    `Hello ${greetName},\n\n` +
+    `${body}\n\n` +
+    `If you have any questions, please contact your union office.\n\n` +
+    `Thank you,\nThe union office`;
+  const html =
+    EMAIL_WRAP_OPEN +
+    `<p>Hello ${escapeHtml(greetName)},</p>` +
+    `<p>${escapeHtml(body)}</p>` +
+    `<p>If you have any questions, please contact your union office.</p>` +
+    `<p>Thank you,<br/>The union office</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+export async function sendClearanceOpenedDestEmail(
+  input: ClearanceOpenedDestEmailInput,
+): Promise<{ messageId: string }> {
+  return sendSesEmail(
+    input.to,
+    clearanceOpenedDestEmailContent(input),
+    `clearance-opened (destination) notice for ${input.toClubName}`,
+  );
+}
+
+export interface ClearanceOpenedAdminEmailInput {
+  to: string;
+  fromClubName: string;
+  playerName: string;
+  toClubName: string;
+}
+
+/** Union-office (tenant admin) notice that a clearance opened. Pure — exported for tests. */
+export function clearanceOpenedAdminEmailContent(
+  input: Omit<ClearanceOpenedAdminEmailInput, 'to'>,
+): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { fromClubName, playerName, toClubName } = input;
+  const subject = `New clearance — ${playerName.replace(/\s+/g, ' ').trim()}`;
+  const body =
+    `A clearance has opened for ${playerName}: ${fromClubName} → ${toClubName}. ` +
+    `It is waiting on ${fromClubName}'s decision and is listed under Clearances in the admin console.`;
+  const text = `Hello,\n\n${body}\n\nThe union office platform`;
+  const html =
+    EMAIL_WRAP_OPEN +
+    `<p>Hello,</p>` +
+    `<p>${escapeHtml(body)}</p>` +
+    `<p>The union office platform</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+export async function sendClearanceOpenedAdminEmail(
+  input: ClearanceOpenedAdminEmailInput,
+): Promise<{ messageId: string }> {
+  return sendSesEmail(
+    input.to,
+    clearanceOpenedAdminEmailContent(input),
+    `clearance-opened (admin) notice for ${input.fromClubName} → ${input.toClubName}`,
+  );
+}
+
+export interface ClearanceReminderDigestLine {
+  playerName: string;
+  fromClubName: string;
+  toClubName: string;
+  /** Whole days the clearance has been pending (tenant wall-clock). */
+  daysPending: number;
+}
+
+export interface ClearanceReminderDigestEmailInput {
+  to: string;
+  orgName: string;
+  /** Clearances whose source chair was reminded this run. */
+  nudged: ClearanceReminderDigestLine[];
+  /** Stale clearances whose source club is not on the system — only the union can resolve them. */
+  chairless: ClearanceReminderDigestLine[];
+}
+
+/** The ClearanceReminders cron's per-tenant admin digest. Pure — exported for tests. */
+export function clearanceReminderDigestEmailContent(
+  input: Omit<ClearanceReminderDigestEmailInput, 'to'>,
+): { subject: string; text: string; html: string } {
+  const { orgName, nudged, chairless } = input;
+  const total = nudged.length + chairless.length;
+  const subject = `${orgName}: ${total} clearance${total === 1 ? '' : 's'} still pending`;
+  const line = (l: ClearanceReminderDigestLine) =>
+    `${l.playerName}: ${l.fromClubName} → ${l.toClubName} (${l.daysPending} days)`;
+  const sections: Array<{ title: string; lines: ClearanceReminderDigestLine[] }> = [
+    { title: "Reminded the source club's chair today", lines: nudged },
+    {
+      title: 'Source club not on the system — the union office must resolve these',
+      lines: chairless,
+    },
+  ].filter((s) => s.lines.length > 0);
+  const text =
+    `Hello,\n\n` +
+    sections
+      .map((s) => `${s.title}:\n${s.lines.map((l) => `- ${line(l)}`).join('\n')}`)
+      .join('\n\n') +
+    `\n\nThese are listed under Clearances in the admin console.\n\nThe union office platform`;
+  const html =
+    EMAIL_WRAP_OPEN +
+    `<p>Hello,</p>` +
+    sections
+      .map(
+        (s) =>
+          `<p><strong>${escapeHtml(s.title)}</strong></p><ul>` +
+          s.lines.map((l) => `<li>${escapeHtml(line(l))}</li>`).join('') +
+          `</ul>`,
+      )
+      .join('') +
+    `<p>These are listed under Clearances in the admin console.</p>` +
+    `<p>The union office platform</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+export async function sendClearanceReminderDigestEmail(
+  input: ClearanceReminderDigestEmailInput,
+): Promise<{ messageId: string }> {
+  return sendSesEmail(
+    input.to,
+    clearanceReminderDigestEmailContent(input),
+    `clearance-reminder digest for ${input.orgName}`,
+  );
+}
+
 export interface FixturesEmailInput {
   to: string;
   playerName: string;

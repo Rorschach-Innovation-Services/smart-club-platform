@@ -173,6 +173,8 @@ import {
   sendClearanceNotice,
   sendClearanceResolvedNotice,
   sendClearanceReopenedNotice,
+  sendClearanceDestNotice,
+  sendClearanceAdminNotice,
   sendVeteransRequestNotice,
   sendVeteransRequestResolvedNotice,
   notifyPostponementOpened,
@@ -275,7 +277,9 @@ import { normaliseSerial } from './certificates/serial.js';
 import { activeVerifyKeys, certSigner, type VerifyKey } from './certificates/signer.js';
 import { validateCertTemplate, validateOrgContact } from './certificates/config.js';
 import { validateFixtureReminders } from './fixture-reminders-config.js';
-import { TENANT_UTC_OFFSET_MINUTES } from './tenant-time.js';
+import { TENANT_UTC_OFFSET_MINUTES, tenantDate } from './tenant-time.js';
+import { listTenantAdminEmails } from './notify/admin-emails.js';
+import { clearanceReminderClaimKey, clearanceReminderCommEvents } from './clearance-reminder.js';
 
 // Strict date-only parsing for calendar validation — dayjs's lenient default would roll
 // '2026-02-31' into March and store a date the operator never entered.
@@ -1371,6 +1375,7 @@ async function findPlayerByIdNumber(
 }
 
 const CLEARANCE_NOTICES_PER_DAY = 3;
+const CAP_REACHED = 'daily clearance-notice cap reached';
 /**
  * Best-effort heads-up to the FROM-club chairman that a clearance now awaits the club's
  * decision. Never throws — a notify fault must not fail the clearance write that already
@@ -1381,6 +1386,13 @@ const CLEARANCE_NOTICES_PER_DAY = 3;
  * There is deliberately no claim/idempotency machinery here — every creation site 409s a
  * duplicate pending clearance before a second notice could exist, and the clearance id is
  * minted fresh per request so it could never key a retry dedupe anyway.
+ *
+ * Fan-out: the DESTINATION chair also gets an email-only heads-up (comm-log kind
+ * `clearance-inbound` on the destination club, so it never counts toward this cap) and every
+ * tenant admin gets an email (not comm-logged). Both ride the same source-club cap gate: when it
+ * fires the destination rows are recorded `skipped` and no admin email goes out, which bounds the
+ * anonymous path. Authenticated roster bulk uploads are not capped beyond that by design — their
+ * volume is a deliberate, visible union-side action.
  */
 async function notifyClearanceOpened(
   tenant: string,
@@ -1390,6 +1402,7 @@ async function notifyClearanceOpened(
   by: string,
   opts: { bypassCap?: boolean } = {},
 ): Promise<void> {
+  let capped = false;
   try {
     const channels: Channel[] = hasFeature(tenantConfig, 'whatsappInvites', true)
       ? ['email', 'whatsapp']
@@ -1402,22 +1415,22 @@ async function notifyClearanceOpened(
     const noticesToday = (fromClub.commLog ?? []).filter(
       (e) => e.kind === 'clearance' && e.channel === 'email' && e.at.slice(0, 10) === today,
     ).length;
-    const results: SendResult[] =
-      !opts.bypassCap && noticesToday >= CLEARANCE_NOTICES_PER_DAY
-        ? channels.map((channel) => ({
-            channel,
-            status: 'skipped' as const,
-            error: 'daily clearance-notice cap reached',
-          }))
-        : (
-            await sendClearanceNotice({
-              chair: chairContactOf(fromClub),
-              fromClubName: fromClub.name,
-              playerName: clearance.playerName,
-              toClubName: clearance.toClubName,
-              channels,
-            })
-          ).results;
+    capped = !opts.bypassCap && noticesToday >= CLEARANCE_NOTICES_PER_DAY;
+    const results: SendResult[] = capped
+      ? channels.map((channel) => ({
+          channel,
+          status: 'skipped' as const,
+          error: CAP_REACHED,
+        }))
+      : (
+          await sendClearanceNotice({
+            chair: chairContactOf(fromClub),
+            fromClubName: fromClub.name,
+            playerName: clearance.playerName,
+            toClubName: clearance.toClubName,
+            channels,
+          })
+        ).results;
     await repo.appendClubCommEvents(
       tenant,
       fromClub.id,
@@ -1436,6 +1449,55 @@ async function notifyClearanceOpened(
     );
   } catch (err) {
     console.error('clearance notice failed', err);
+  }
+  try {
+    const toClub = await repo.getClub(tenant, clearance.toClubId);
+    if (toClub) {
+      const { results } = capped
+        ? {
+            results: [
+              { channel: 'email' as const, status: 'skipped' as const, error: CAP_REACHED },
+            ],
+          }
+        : await sendClearanceDestNotice({
+            chair: chairContactOf(toClub),
+            fromClubName: clearance.fromClubName,
+            playerName: clearance.playerName,
+            toClubName: clearance.toClubName,
+          });
+      await repo.appendClubCommEvents(
+        tenant,
+        toClub.id,
+        results.map((r: SendResult) => ({
+          id: randomUUID(),
+          channel: r.channel,
+          ...(r.to ? { to: r.to } : {}),
+          status: r.status,
+          ...(r.messageId ? { messageId: r.messageId } : {}),
+          ...(r.error ? { error: r.error } : {}),
+          at: now(),
+          by,
+          idempotencyKey: `clearance-${clearance.id}-inbound-${r.channel}`,
+          kind: 'clearance-inbound' as const,
+        })),
+      );
+    }
+  } catch (err) {
+    console.error('clearance destination notice failed', err);
+  }
+  if (capped) return;
+  try {
+    const admins = await listTenantAdminEmails(repo, tenant);
+    if (admins.length > 0) {
+      await sendClearanceAdminNotice({
+        to: admins,
+        fromClubName: clearance.fromClubName,
+        playerName: clearance.playerName,
+        toClubName: clearance.toClubName,
+      });
+    }
+  } catch (err) {
+    console.error('clearance admin notice failed', err);
   }
 }
 
@@ -11546,6 +11608,63 @@ app.post('/admin/clearances/:cid/reopen', async (c) => {
     if (err instanceof repo.SourceClubGoneError) throw new HttpError(409, err.message);
     throw err;
   }
+});
+
+/**
+ * Union "Send reminder": re-send the pending-clearance notice (email + WhatsApp when the tenant's
+ * `whatsappInvites` is on) to the SOURCE chair. Admin-only. Bypasses the creation daily cap and
+ * logs comm-log kind `clearance-reminder` (never `clearance`, so it cannot consume that cap).
+ * At most one reminder per clearance per tenant day: the route claims the same INVITE# marker the
+ * ClearanceReminders cron uses (see clearance-reminder.ts), so a second click — from any tab — or
+ * that day's cron run gets 409. 404 unknown; 409 not pending; 422 when the source club is not on
+ * the system (a directory source has no chair to remind).
+ */
+app.post('/admin/clearances/:cid/remind', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const cid = c.req.param('cid');
+  const body = await c.req.json<{ fromClubId?: string }>();
+  if (!body.fromClubId) throw new HttpError(400, 'fromClubId required');
+  const clearance = await repo.getClearance(ra.tenant, body.fromClubId, cid);
+  if (!clearance) throw new HttpError(404, 'clearance not found');
+  if (clearance.status !== 'pending') throw new HttpError(409, 'clearance already resolved');
+  const fromClub = await repo.getClub(ra.tenant, body.fromClubId);
+  if (!fromClub) throw new HttpError(422, 'source club has no chair on file');
+  const tenantConfig = await getTenantConfigCached(c, ra.tenant).catch(() => null);
+  const channels: Channel[] = hasFeature(tenantConfig, 'whatsappInvites', true)
+    ? ['email', 'whatsapp']
+    : ['email'];
+  const today = tenantDate();
+  const key = clearanceReminderClaimKey(cid, today);
+  const replay = await repo.claimInviteSend(
+    ra.tenant,
+    fromClub.id,
+    key,
+    channels,
+    'clearance-reminder',
+  );
+  if (replay) throw new HttpError(409, 'already reminded today');
+  let results: SendResult[];
+  try {
+    ({ results } = await sendClearanceNotice({
+      chair: chairContactOf(fromClub),
+      fromClubName: fromClub.name,
+      playerName: clearance.playerName,
+      toClubName: clearance.toClubName,
+      channels,
+    }));
+  } catch (err) {
+    await repo.releaseInviteClaim(ra.tenant, fromClub.id, key).catch((releaseErr) => {
+      console.error(`clearance remind: could not release ${key}`, releaseErr);
+    });
+    throw err;
+  }
+  await repo.completeInviteSend(ra.tenant, fromClub.id, key, results);
+  await repo.appendClubCommEvents(
+    ra.tenant,
+    fromClub.id,
+    clearanceReminderCommEvents(clearance, results, today, now(), ra.email),
+  );
+  return c.json({ results });
 });
 
 // ───────────────────── Admin: registration reviews ─────────────────────

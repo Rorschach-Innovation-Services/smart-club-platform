@@ -614,6 +614,14 @@ export const rejectClearance = (clearanceId: string, body: unknown) =>
 // Restores the pre-reject rows from the snapshot the reject stored; the source club decides again.
 export const reopenClearance = (clearanceId: string, body: unknown) =>
   request<PlayerClearance>(`/admin/clearances/${clearanceId}/reopen`, { method: 'POST', body });
+// Union "Send reminder" to a pending clearance's source chair (email + WhatsApp). 409 when it
+// was already reminded today (manually or by the daily cron) or is no longer pending; 422 when
+// the source club is not on the system.
+export const remindClearance = (clearanceId: string, fromClubId: string) =>
+  request<{ results: SendResult[] }>(
+    `/admin/clearances/${encodeURIComponent(clearanceId)}/remind`,
+    { method: 'POST', body: { fromClubId } },
+  );
 // Union reallocation of a directory-sourced clearance to a real club that has since
 // registered: body { fromClubId, newFromClubId, version? }. The clearance moves into the
 // target club's queue for its rep to action via the normal flow.

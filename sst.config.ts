@@ -626,6 +626,30 @@ export default $config({
       },
     });
 
+    // ── Clearance reminders cron ── daily 05:00 UTC = 07:00 SAST. Nudges the source chair of every
+    // clearance pending ≥ 7 days (again every 7 days) and emails each tenant's admins a digest.
+    // Same least-privilege link/env as FixtureReminders, minus the portal-origin vars it never uses.
+    new sst.aws.Cron('ClearanceReminders', {
+      schedule: 'cron(0 5 * * ? *)',
+      function: {
+        handler: 'packages/api/src/crons/clearance-reminders.handler',
+        link: [table, fromEmail, whatsappAccessToken, whatsappPhoneNumberId],
+        permissions: [{ actions: ['ses:SendEmail', 'ses:SendRawEmail'], resources: ['*'] }],
+        timeout: '5 minutes',
+        environment: {
+          TABLE_NAME: table.name,
+          STAGE: $app.stage,
+          SENTRY_DSN: sentryDsnApi.value,
+          SENTRY_RELEASE: sentryRelease,
+          SES_REGION: 'eu-west-1',
+          FROM_EMAIL: fromEmail.value,
+          WHATSAPP_ACCESS_TOKEN: whatsappAccessToken.value,
+          WHATSAPP_PHONE_NUMBER_ID: whatsappPhoneNumberId.value,
+          NOTIFY_DRY_RUN: process.env.NOTIFY_DRY_RUN ?? '',
+        },
+      },
+    });
+
     // ── Medicoach sync puller (ADR 0016) ── One cron, every 15 minutes, all day (user
     // decision: worst-case 15 min delay at ~672 runs a week). It pulls changed fixtures for
     // every tenant with `features.medicoachSync`; a quiet run is a handful of small reads.

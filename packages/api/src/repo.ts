@@ -726,9 +726,16 @@ export async function appendClubCommEvents(
 /**
  * What an INVITE#-keyspace idempotency marker guards. `fixture-reminder` is the FixtureReminders
  * cron's once-per-(club, match date, send date) marker (key
- * `fixture-reminder:<targetDate>:<sendDate>`).
+ * `fixture-reminder:<targetDate>:<sendDate>`). `clearance-reminder` is the once-per-(clearance,
+ * tenant day) reminder marker under the SOURCE club (key `clearance-reminder:<clearanceId>:<date>`),
+ * shared by the admin "Send reminder" route and the ClearanceReminders cron.
  */
-export type InviteSendKind = 'invite' | 'fixtures' | 'staff-invite' | 'fixture-reminder';
+export type InviteSendKind =
+  | 'invite'
+  | 'fixtures'
+  | 'staff-invite'
+  | 'fixture-reminder'
+  | 'clearance-reminder';
 
 /** Outcome of a duplicate idempotency claim: prior results + whether the first attempt is still running. */
 export interface InviteSendReplay {
