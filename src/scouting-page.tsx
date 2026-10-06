@@ -9,6 +9,7 @@ import type { Watchlist } from './scouting-player';
 import { MatchDashboard } from './scouting-match';
 import { TeamDetail } from './scouting-team';
 import { ProTeamPage } from './pro-team-page';
+import { PathwaysPage } from './pathways-page';
 import { QuadrantMap, type MapPt, type Tone } from './pro-charts';
 import { SCOUTING_EVENTS } from './scouting-data';
 import type { ScoutPlayer, ScoutingEvent, ScoutProfile } from './scouting-data';
@@ -918,9 +919,13 @@ export function AdminScoutingPage({ orgName }: { orgName: string }) {
     window.scrollTo({ top: 0 });
   };
   const back = () => window.history.back();
-  // Player scouting (competitions) or the professional team built on it (?view=pro).
-  const view = params.get('view') === 'pro' ? 'pro' : 'scouting';
-  const pickView = (v: 'pro' | 'scouting') => setParams(v === 'pro' ? { view: 'pro' } : {});
+  // Player scouting (competitions), the professional team built on it (?view=pro), or the
+  // amateur and school pathway beneath it (?view=pathways).
+  const raw = params.get('view');
+  const view: 'pro' | 'pathways' | 'scouting' =
+    raw === 'pro' ? 'pro' : raw === 'pathways' ? 'pathways' : 'scouting';
+  const pickView = (v: 'pro' | 'pathways' | 'scouting') =>
+    setParams(v === 'scouting' ? {} : { view: v });
 
   return (
     <div>
@@ -932,6 +937,10 @@ export function AdminScoutingPage({ orgName }: { orgName: string }) {
               <>
                 Professional <em>Team</em>
               </>
+            ) : view === 'pathways' ? (
+              <>
+                Pathways <em>&amp; Feeders</em>
+              </>
             ) : (
               <>
                 Player <em>Scouting</em>
@@ -941,7 +950,9 @@ export function AdminScoutingPage({ orgName }: { orgName: string }) {
           <p className="ph-desc">
             {view === 'pro'
               ? 'The franchise squads from their scorecards — who to promote, who is at risk, the squad and team pictures, and call-ups from the scouting pools.'
-              : 'Performance across leagues and tournaments — leaderboards, performance maps, team profiles and the selection shortlist.'}
+              : view === 'pathways'
+                ? 'The school and club pyramid from the union’s results — where it is dense or thin, which competitions show real ability, and which clubs and schools carry players all the way up.'
+                : 'Performance across leagues and tournaments — leaderboards, performance maps, team profiles and the selection shortlist.'}
           </p>
         </div>
         {view === 'scouting' && (
@@ -987,10 +998,21 @@ export function AdminScoutingPage({ orgName }: { orgName: string }) {
         >
           Professional team
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === 'pathways'}
+          className={view === 'pathways' ? 'on' : ''}
+          onClick={() => pickView('pathways')}
+        >
+          Pathways
+        </button>
       </div>
 
       {view === 'pro' ? (
         <ProTeamPage />
+      ) : view === 'pathways' ? (
+        <PathwaysPage />
       ) : !event ? (
         <div className="ss-empty">No scouting data yet.</div>
       ) : (
