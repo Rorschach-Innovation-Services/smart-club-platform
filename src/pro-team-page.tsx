@@ -1233,8 +1233,6 @@ function PlayerDeepDive({
       )}
 
       <div className="pv-tiles">
-        <PlayerSeasons name={p.name} mode={mode} slices={slices} />
-
         {showBat && (
           <>
             <Tile
@@ -1282,6 +1280,8 @@ function PlayerDeepDive({
           sub={`${p.field.ct} ct · ${p.field.st} st · ${p.field.ro} ro`}
         />
       </div>
+
+      <PlayerSeasons name={p.name} mode={mode} slices={slices} />
 
       {showBat && (
         <>

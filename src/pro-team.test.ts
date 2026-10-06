@@ -168,3 +168,48 @@ describe('one player, sliced', () => {
     ).toEqual([1, 1, 0, 0, 1, 1]);
   });
 });
+
+describe('season on season', () => {
+  const [men] = detectSquads(ms);
+
+  it('slices the squad by season, oldest first, with every game counted once', async () => {
+    const { seasonSlices } = await import('./pro-team');
+    const slices = seasonSlices(men, 'all', ms);
+    expect(slices.length).toBeGreaterThanOrEqual(2);
+    expect(slices.map((s) => s.season)).toEqual([...slices.map((s) => s.season)].sort());
+    expect(slices.reduce((n, s) => n + s.matches.length, 0)).toBe(men.matches.length);
+    for (const s of slices) expect(s.summary.played).toBe(s.matches.length);
+  });
+
+  it('rates every season against the same average, so a player’s change is their own', async () => {
+    const { seasonSlices } = await import('./pro-team');
+    const [a, b] = seasonSlices(men, 'T20', ms);
+    // Same baseline: a player with identical numbers in both seasons would get the same index.
+    const someone = [...a.players.values()].find((p) => p.idx.bat);
+    expect(someone).toBeTruthy();
+    const all = baselines(ms.filter((m) => m.gender === 'men')).T20!;
+    const again = batIndex(
+      { runs: someone!.bat.runs, balls: someone!.bat.balls, inns: someone!.bat.inns },
+      all,
+    )!;
+    expect(someone!.idx.bat!.idx).toBeCloseTo(again.idx, 5);
+    expect(b.season > a.season).toBe(true);
+  });
+
+  it('lists who rose and fell between two seasons, plus arrivals and departures', async () => {
+    const { seasonSlices, seasonMoves } = await import('./pro-team');
+    const slices = seasonSlices(men, 'all', ms);
+    const a = slices[0];
+    const b = slices[slices.length - 1];
+    const { moves, arrivals, departures } = seasonMoves(a, b, 'bat');
+    for (let i = 1; i < moves.length; i++)
+      expect(moves[i - 1].change).toBeGreaterThanOrEqual(moves[i].change);
+    for (const m of moves) {
+      expect(a.players.get(m.name)?.qualifies.bat).toBe(true);
+      expect(b.players.get(m.name)?.qualifies.bat).toBe(true);
+      expect(m.change).toBeCloseTo(m.to - m.from);
+    }
+    for (const n of arrivals) expect(a.players.get(n)?.bat.inns ?? 0).toBe(0);
+    for (const n of departures) expect(b.players.get(n)?.bat.inns ?? 0).toBe(0);
+  });
+});

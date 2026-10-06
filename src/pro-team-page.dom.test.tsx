@@ -122,4 +122,27 @@ describe('Professional team', () => {
     await user.type(screen.getByRole('searchbox', { name: 'Search a player' }), 'zzzz');
     expect(screen.getByText(/No players match “zzzz” for batting/)).toBeTruthy();
   });
+
+  it('trends the team season on season and shows who moved', async () => {
+    const user = userEvent.setup();
+    renderPage('&ptab=seasons&format=all');
+    const record = screen.getByRole('table', { name: 'Season record' });
+    expect(within(record).getAllByRole('row').length).toBeGreaterThanOrEqual(3); // header + 2 seasons
+    expect(screen.getByRole('img', { name: /Hawks by season/ })).toBeTruthy();
+    expect(screen.getByText(/All formats mixed — pick a format/)).toBeTruthy();
+    expect(screen.getByText('Who moved between seasons')).toBeTruthy();
+    const from = screen.getByLabelText('From season') as HTMLSelectElement;
+    const to = screen.getByLabelText('To season') as HTMLSelectElement;
+    expect(from.value < to.value).toBe(true);
+    await user.selectOptions(to, from.value);
+    expect(screen.getByText('Pick two different seasons.')).toBeTruthy();
+  });
+
+  it('shows a player’s seasons in their deep dive', async () => {
+    renderPage('&ptab=form&format=all');
+    const name = document.querySelector('.pro-grid .pro-name')!.textContent!;
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name }));
+    expect(screen.getByText('Season by season')).toBeTruthy();
+  });
 });

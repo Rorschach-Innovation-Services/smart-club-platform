@@ -990,7 +990,11 @@ export interface SeasonSlice {
  * the same baseline — the average across all the files — so a change between seasons is the
  * player's change, not the league moving under them. Oldest season first.
  */
-export function seasonSlices(squad: Squad, format: ProFormat | 'all', allMatches: ProMatch[]): SeasonSlice[] {
+export function seasonSlices(
+  squad: Squad,
+  format: ProFormat | 'all',
+  allMatches: ProMatch[],
+): SeasonSlice[] {
   return seasonsOf(squad.matches)
     .slice()
     .reverse()
@@ -1029,17 +1033,28 @@ export function seasonMoves(a: SeasonSlice, b: SeasonSlice, disc: 'bat' | 'bowl'
     disc === 'bat'
       ? `${p.bat.runs} runs in ${p.bat.inns} inns · avg ${p.bat.avg === null ? '–' : p.bat.avg.toFixed(1)} · SR ${p.bat.sr === null ? '–' : Math.round(p.bat.sr)}`
       : `${p.bowl.wkts} wkts in ${Math.floor(p.bowl.balls / 6)} ov · econ ${p.bowl.econ === null ? '–' : p.bowl.econ.toFixed(1)}`;
-  const ok = (p: ProPlayer) => (disc === 'bat' ? p.qualifies.bat && p.idx.bat : p.qualifies.bowl && p.idx.bowl);
+  const ok = (p: ProPlayer) =>
+    disc === 'bat' ? p.qualifies.bat && p.idx.bat : p.qualifies.bowl && p.idx.bowl;
   for (const [name, pb] of b.players) {
     const pa = a.players.get(name);
     if (!pa || !ok(pa) || !ok(pb)) continue;
-    const from = (disc === 'bat' ? pa.idx.bat!.idx : pa.idx.bowl!.idx);
-    const to = (disc === 'bat' ? pb.idx.bat!.idx : pb.idx.bowl!.idx);
-    moves.push({ name, from, to, change: to - from, role: pb.role, fromLine: line(pa), toLine: line(pb) });
+    const from = disc === 'bat' ? pa.idx.bat!.idx : pa.idx.bowl!.idx;
+    const to = disc === 'bat' ? pb.idx.bat!.idx : pb.idx.bowl!.idx;
+    moves.push({
+      name,
+      from,
+      to,
+      change: to - from,
+      role: pb.role,
+      fromLine: line(pa),
+      toLine: line(pb),
+    });
   }
   moves.sort((x, y) => y.change - x.change);
   const used = (s: SeasonSlice) =>
-    [...s.players.values()].filter((p) => (disc === 'bat' ? p.bat.inns > 0 : p.bowl.inns > 0)).map((p) => p.name);
+    [...s.players.values()]
+      .filter((p) => (disc === 'bat' ? p.bat.inns > 0 : p.bowl.inns > 0))
+      .map((p) => p.name);
   const inA = new Set(used(a));
   const inB = new Set(used(b));
   return {
