@@ -74,11 +74,21 @@ FixtureChange = {
     scoringSide: "home" | "away" | null,     // side whose team sheet the captain came from (live only);
                                              // null when the scoring team is not one of the fixture's sides
     captainRef: string | null,      // player ref of that side's captain; null when unknown
-    medicoachMatchUrl: string | null
+    medicoachMatchUrl: string | null,
+    play?: null | {                 // OPTIONAL (additive, Oct 2026): time on the ground and balls
+      startedAt: string | null,     //   first delivery (ISO UTC; scorer device clock)
+      endedAt: string | null,       //   last delivery / match closed (ISO UTC; >= startedAt)
+      legalBalls: number | null,    //   legal balls bowled, both innings (0..2000)
+      deliveries: number | null     //   every delivery incl. extras (>= legalBalls, 0..3000)
+    }
   },
   resultClearedAt: string | null    // ISO-8601 UTC; set when a previously recorded result was removed/reopened
 }
 ```
+`play` is smart club's ground-use / pitch-load proxy (ADR 0017). Smart club drops a malformed
+block to `null` rather than failing the page, and a result without it still syncs. Example:
+`changes-result-with-play.json`. Smart club stores a result only when `recordedAt` is newer, so
+adding `play` to an already-synced result needs a `resultRecordedAt` bump in medicoach.
 Consumer rules (smart club):
 - Result: store only if `result.recordedAt` > stored `recordedAt`. Clear only if `resultClearedAt` > stored `recordedAt`.
   A result recorded again after a clear (a live match reopened then completed again, or a fixture

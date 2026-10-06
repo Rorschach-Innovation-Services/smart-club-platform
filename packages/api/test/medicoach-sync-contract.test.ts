@@ -42,11 +42,12 @@ const schemaFor = (file: string) =>
 describe('contract examples', () => {
   const files = readdirSync(EXAMPLES).filter((f) => f.endsWith('.json'));
 
-  test('all five shared examples are present', () => {
+  test('all six shared examples are present', () => {
     assert.deepEqual(files.sort(), [
       'changes-knockout-reschedule.json',
       'changes-live-result.json',
       'changes-manual-and-cleared.json',
+      'changes-result-with-play.json',
       'schedule-push-request.json',
       'schedule-push-response.json',
     ]);
@@ -240,5 +241,37 @@ describe('stored result view', () => {
         .medicoachMatchUrl,
       'https://live.medicoach.co.za/m/1',
     );
+  });
+});
+
+describe('result play block (ground time and balls)', () => {
+  const base = () =>
+    JSON.parse(readFileSync(path.join(EXAMPLES, 'changes-result-with-play.json'), 'utf8'));
+
+  test('is optional: a medicoach that does not send it still parses', () => {
+    const raw = JSON.parse(readFileSync(path.join(EXAMPLES, 'changes-live-result.json'), 'utf8'));
+    const parsed = ChangesResponseSchema.parse(raw);
+    assert.equal(parsed.fixtures[0].result?.play, undefined);
+  });
+
+  test('a malformed block becomes null; the result and the page still parse', () => {
+    for (const bad of [
+      { startedAt: 'yesterday', endedAt: null, legalBalls: 1, deliveries: 1 },
+      { startedAt: null, endedAt: null, legalBalls: -4, deliveries: 1 },
+      {
+        startedAt: '2026-10-04T12:00:00.000Z',
+        endedAt: '2026-10-04T08:00:00.000Z',
+        legalBalls: 1,
+        deliveries: 1,
+      },
+      { startedAt: null, endedAt: null, legalBalls: 240, deliveries: 100 },
+      'two hundred balls',
+    ]) {
+      const raw = base();
+      raw.fixtures[0].result.play = bad;
+      const parsed = ChangesResponseSchema.parse(raw);
+      assert.equal(parsed.fixtures[0].result?.play, null, JSON.stringify(bad));
+      assert.equal(parsed.fixtures[0].result?.homeScore, '184/6 (20)');
+    }
   });
 });

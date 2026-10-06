@@ -336,6 +336,10 @@ describe('medicoach sync puller', () => {
       source: 'live',
       recordedAt: '2026-10-04T14:31:58.000Z',
       medicoachMatchUrl: 'https://live.medicoach.co.za/match/example',
+      // No ground time/balls in this example; no office confirmation yet.
+      play: null,
+      confirmation: null,
+      changedSinceConfirmed: false,
     });
     assert.equal(f3.syncMapped, true);
     assert.equal(fixtureOf(all, 's-planb-premier-men-t20-g1', 'f1').result, undefined);

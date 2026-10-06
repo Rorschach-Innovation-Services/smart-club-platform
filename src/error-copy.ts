@@ -72,6 +72,14 @@ export function seasonRunErrorMessage(err: unknown, fallback: string): string {
 export const SETUP_MISSING_MESSAGE =
   'This league has no season setup yet — ask your operator to set it up in the operator console.';
 
+/** The league's setup names a structure the operator has since removed. */
+export const STRUCTURE_MISSING_MESSAGE =
+  "This league's season setup points at a structure that no longer exists — ask your operator to choose a structure for it.";
+
+/** The league's setup names a season calendar the operator has since removed. */
+export const CALENDAR_MISSING_MESSAGE =
+  "This league's season setup points at a season calendar that no longer exists — ask your operator to choose a calendar for it.";
+
 /** The league already runs a season under that label (one setup per league). */
 export const SEASON_EXISTS_MESSAGE =
   'That season label is already running for this league — pick a different label or continue the existing season.';
@@ -83,6 +91,8 @@ export const SEASON_EXISTS_MESSAGE =
 export function startSeasonErrorMessage(err: unknown): string | null {
   if (!(err instanceof ApiError)) return null;
   if (err.code === 'setup_missing') return SETUP_MISSING_MESSAGE;
+  if (err.code === 'structure_missing') return STRUCTURE_MISSING_MESSAGE;
+  if (err.code === 'calendar_missing') return CALENDAR_MISSING_MESSAGE;
   if (err.code === 'season_exists') return SEASON_EXISTS_MESSAGE;
   return null;
 }

@@ -60,6 +60,7 @@ import {
   joinFixtureResults,
   seriesIsSyncMapped,
   stripResponseOnlyFixtureFields,
+  toResultView,
 } from './medicoach-sync/series-results.js';
 import { MedicoachSyncError } from './medicoach-sync/puller.js';
 import { runTenantSync } from './medicoach-sync/run.js';
@@ -115,6 +116,20 @@ import {
   stripJoinedOfficials,
   umpireIdFor,
 } from './umpires.js';
+import { applyScorerInput, findScorerNameClash, parseScorerInput, scorerIdFor } from './scorers.js';
+import {
+  advanceCompetition,
+  competitionSeriesName,
+  parseCompetitionBody,
+  seriesOfCompetition,
+  seriesTable,
+  withResults,
+} from './competitions.js';
+import {
+  planCompetition,
+  type CompetitionMeta,
+  type CompetitionSpec,
+} from '../../engine/src/competition.js';
 import {
   validateCalendars,
   validateStructures,
@@ -232,6 +247,7 @@ import { applyWhatsAppStatuses, parseStatuses } from './notify/whatsapp-status.j
 import {
   SYNC_SIGNATURE_HEADER,
   SYNC_TIMESTAMP_HEADER,
+  isoInstant,
   verifySignature as verifySyncSignature,
 } from './medicoach-sync-contract.js';
 import { submissionProblems } from '../../engine/src/captainsReport.js';
@@ -1902,6 +1918,10 @@ app.use('/venues/*', authenticate, requireTenantMembership);
 app.use('/venues', authenticate, requireTenantMembership);
 app.use('/umpires/*', authenticate, requireTenantMembership);
 app.use('/umpires', authenticate, requireTenantMembership);
+app.use('/scorers/*', authenticate, requireTenantMembership);
+app.use('/competitions/*', authenticate, requireTenantMembership, requireAdmin);
+app.use('/competitions', authenticate, requireTenantMembership, requireAdmin);
+app.use('/scorers', authenticate, requireTenantMembership);
 app.use('/club/*', authenticate, requireTenantMembership);
 app.use('/captains-reports', authenticate, requireTenantMembership);
 app.use('/captains-reports/*', authenticate, requireTenantMembership);
@@ -3868,14 +3888,19 @@ app.get('/series', async (c) => {
   // has umpires at all (they are never deleted, so none ⇒ no appointments) — one for the
   // appointments. The FIXRESULT# query runs only with the medicoach sync on: a tenant
   // without it has no results to join.
-  const [all, config, umpires] = await Promise.all([
+  const [all, config, umpires, scorers] = await Promise.all([
     repo.listSeries(ra.tenant),
     repo.getTenantConfig(ra.tenant),
     repo.listUmpires(ra.tenant),
+    repo.listScorers(ra.tenant),
   ]);
-  const [results, officialRows] = await Promise.all([
-    hasFeature(config, 'medicoachSync') ? repo.listFixtureResults(ra.tenant) : [],
-    umpires.length ? repo.listFixtureOfficials(ra.tenant) : [],
+  const isAdmin = ra.membership.role === 'admin';
+  const syncOn = hasFeature(config, 'medicoachSync');
+  const [results, officialRows, confirmations] = await Promise.all([
+    syncOn ? repo.listFixtureResults(ra.tenant) : [],
+    umpires.length || scorers.length ? repo.listFixtureOfficials(ra.tenant) : [],
+    // The office's result confirmations are admin information.
+    syncOn && isAdmin ? repo.listResultConfirmations(ra.tenant) : [],
   ]);
   // Admins get the raw list (drafts, unreleased venues/times, approval state). Everyone
   // else sees the club-facing projection: released + activated series only, with any
@@ -3883,7 +3908,8 @@ app.get('/series', async (c) => {
   // leaked every draft and all fields to reps.
   const officials = indexOfficials(officialRows);
   const namesById = new Map(umpires.map((u) => [u.id, u.displayName]));
-  if (ra.membership.role === 'admin') {
+  const scorerNames = new Map(scorers.map((x) => [x.id, x.displayName]));
+  if (isAdmin) {
     // `syncMapped` marks the fixtures whose result medicoach owns, so the console locks
     // the manual "completed" status there (and only there). Resolved exactly as the outbox
     // and the generate gate resolve it (`seriesMappedForSync`): a season-run series carries
@@ -3904,10 +3930,15 @@ app.get('/series', async (c) => {
     return c.json(
       joinFixtureResults(
         all.map((s) =>
-          joinOfficials(s, officials, namesById, { include: () => true, audit: true }),
+          joinOfficials(s, officials, namesById, {
+            include: () => true,
+            audit: true,
+            scorerNames,
+          }),
         ),
         results,
         (s) => mapped.has(s.id),
+        confirmations,
       ),
     );
   }
@@ -3933,6 +3964,7 @@ app.get('/series', async (c) => {
             : joinOfficials(s, officials, namesById, {
                 include: (f) => fixtureClubIds(s, f).some((id) => ownClubs.has(id)),
                 audit: false,
+                scorerNames,
               }),
         ),
       results,
@@ -4012,7 +4044,11 @@ async function createSeries(
 }
 
 /** A series PATCH may also carry the `reveal` ACTION key — not a stored field. */
-type SeriesPatch = Partial<Series> & { reveal?: unknown };
+type SeriesPatch = Partial<Series> & {
+  reveal?: unknown;
+  /** Action key: the admin confirmed removing fixtures medicoach already holds (orphans them). */
+  confirmRemoveSynced?: unknown;
+};
 
 app.patch('/series/:id', requireAdmin, async (c) => {
   const ra = c.get('requestAuth')!;
@@ -4135,6 +4171,39 @@ async function applySeriesPatch(
   // Put stays as the final guard against a race between here and the write.
   if (patch.version !== undefined && patch.version !== current.version)
     throw new HttpError(409, 'series changed; refetch');
+
+  // ── Removing fixtures medicoach already holds ──
+  // Medicoach never deletes a synced fixture (contract v1: organisers mark it Cancelled) and
+  // the v1 contract has no delete, so dropping one here would leave it live in medicoach's
+  // match centre with no way to reach it again. On a released, sync-mapped series the write is
+  // refused (409 `synced_fixture_removed`) unless the admin explicitly confirmed it; the
+  // console offers "Mark cancelled" instead. Removed fixtures' appointments are cleaned up
+  // after the write either way (they would otherwise outlive the fixture, invisibly).
+  const confirmRemoveSynced = patch.confirmRemoveSynced === true;
+  delete patch.confirmRemoveSynced;
+  let removedFixtureIds: string[] = [];
+  if (patch.fixtures !== undefined && Array.isArray(patch.fixtures)) {
+    const nextIds = new Set(
+      (patch.fixtures as Array<{ id?: unknown }>).map((f) => f?.id).filter(Boolean),
+    );
+    removedFixtureIds = ((current.fixtures ?? []) as Array<{ id?: unknown }>)
+      .map((f) => f?.id)
+      .filter((fid): fid is string => typeof fid === 'string' && !nextIds.has(fid));
+    if (
+      removedFixtureIds.length &&
+      current.released &&
+      origin !== 'medicoach' &&
+      !confirmRemoveSynced
+    ) {
+      const config = await repo.getTenantConfig(tenant);
+      if (await seriesMappedForSync(repo, tenant, current, config))
+        throw new HttpError(
+          409,
+          `${removedFixtureIds.length === 1 ? 'This fixture is' : `${removedFixtureIds.length} fixtures are`} already in medicoach, which can't delete a synced fixture. Mark it cancelled instead — or confirm you want it removed here only.`,
+          { code: 'synced_fixture_removed', fixtureIds: removedFixtureIds },
+        );
+    }
+  }
 
   // The tenant-wide series/clubs/venues lists both clash gates read, loaded at most once and
   // only when a gate actually runs — a draft fixture edit with no release transition pays no
@@ -4280,6 +4349,14 @@ async function applySeriesPatch(
     throw err;
   }
   await scheduleSync?.enqueue();
+  if (removedFixtureIds.length) {
+    // Best effort, after the write landed: a failure here leaves invisible rows, never a
+    // wrong schedule, so it must not fail the edit the admin already made.
+    await Promise.all([
+      repo.deleteFixtureOfficialsFor(tenant, id, removedFixtureIds),
+      ...removedFixtureIds.map((fid) => repo.deleteResultConfirmation(tenant, id, fid)),
+    ]).catch((err) => console.warn(`[series] cleanup of removed fixtures in ${id} failed`, err));
+  }
   return written;
 }
 
@@ -4683,6 +4760,262 @@ app.delete('/series/:id', requireAdmin, async (c) => {
   return c.json({ ok: true });
 });
 
+/* ─── Leagues & tournaments (ADR 0018) ───
+   A competition is the set of series sharing `competition.id`, generated server-side by the
+   engine's `planCompetition` (circle-method round robin, seeded knockout, groups → knockout)
+   and written through `createSeries` / `applySeriesPatch`, so drafts, approval, release, the
+   clash gates, officials, results and the medicoach sync all behave exactly as for any
+   series. Admin only (the /competitions/* middleware below). */
+
+/** Everything a competition write needs, read once. */
+async function competitionInputs(tenant: string) {
+  const [series, clubs, venues, config] = await Promise.all([
+    repo.listSeries(tenant),
+    repo.listClubs(tenant),
+    repo.listVenues(tenant),
+    repo.getTenantConfig(tenant),
+  ]);
+  return { series, clubs, venues, config, aliases: venueAliasesFor(config) };
+}
+
+/** Plan a spec, or answer 400 with every problem in the office's words. */
+function planOrRefuse(spec: CompetitionSpec) {
+  const plan = planCompetition(spec);
+  if (!plan.ok)
+    throw new HttpError(400, plan.problems[0], {
+      code: 'invalid_competition',
+      problems: plan.problems,
+    });
+  return plan;
+}
+
+/** Ground double-bookings the new series would carry against everything already scheduled. */
+function competitionClashes(
+  plan: ReturnType<typeof planCompetition> & { ok: true },
+  inputs: Awaited<ReturnType<typeof competitionInputs>>,
+  replacing: string[] = [],
+) {
+  const others = inputs.series.filter((s) => !replacing.includes(String(s.id)));
+  const all = [...others, ...(plan.series as unknown as Series[])];
+  return plan.series.flatMap((s) =>
+    findClashes(s as unknown as Series, all, inputs.clubs, inputs.venues, inputs.aliases).map((c) =>
+      formatClashForHumans(c),
+    ),
+  );
+}
+
+/** The plan as the console previews it: no write. Clashes are warnings (release gates them). */
+app.post('/competitions/preview', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const inputs = await competitionInputs(tenant);
+  const spec = parseCompetitionBody(await c.req.json().catch(() => null), inputs.clubs);
+  const plan = planOrRefuse(spec);
+  return c.json({
+    id: spec.id,
+    series: plan.series,
+    summary: plan.summary,
+    warnings: plan.warnings,
+    clashes: competitionClashes(plan, inputs),
+  });
+});
+
+/**
+ * Create a league or tournament as DRAFT series (approve and release as for any series). The
+ * id from the preview is reused so the draw the admin saw is the one stored; a taken id is
+ * 409. If a later series fails to write, the ones already written are removed again.
+ */
+app.post('/competitions', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const inputs = await competitionInputs(tenant);
+  const spec = parseCompetitionBody(await c.req.json().catch(() => null), inputs.clubs);
+  const plan = planOrRefuse(spec);
+  const taken = new Set(inputs.series.map((s) => String(s.id)));
+  if (
+    plan.series.some((s) => taken.has(s.id)) ||
+    seriesOfCompetition(inputs.series, spec.id).length
+  )
+    throw new HttpError(409, 'a competition with this id already exists', {
+      code: 'competition_exists',
+    });
+  const written: string[] = [];
+  try {
+    for (const s of plan.series) {
+      await createSeries(tenant, s as unknown as Series);
+      written.push(s.id);
+    }
+  } catch (err) {
+    await Promise.all(written.map((id) => repo.deleteSeries(tenant, id).catch(() => {})));
+    throw err;
+  }
+  return c.json(
+    {
+      id: spec.id,
+      series: await Promise.all(plan.series.map((s) => repo.getSeries(tenant, s.id))),
+      warnings: plan.warnings,
+      clashes: competitionClashes(plan, inputs),
+    },
+    201,
+  );
+});
+
+const competitionOr404 = (all: Series[], id: string) => {
+  const series = seriesOfCompetition(all, id);
+  if (!series.length) throw new HttpError(404, 'competition not found');
+  return series;
+};
+
+/** Rename, or change the points: every series of the competition, version-checked. */
+app.patch('/competitions/:id', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const body = (await c.req.json().catch(() => null)) as {
+    name?: unknown;
+    points?: unknown;
+  } | null;
+  if (!body || (body.name === undefined && body.points === undefined))
+    throw new HttpError(400, 'send a name and/or points');
+  const series = competitionOr404(await repo.listSeries(ra.tenant), c.req.param('id'));
+  const meta0 = series[0].competition!;
+  // Validate through the engine with the current spec and the new values.
+  const probe = planCompetition({
+    id: meta0.id,
+    type: meta0.type,
+    name: typeof body.name === 'string' ? body.name : meta0.name,
+    overs: Number(series[0].maxOvers ?? 20),
+    teams: [
+      { teamId: 'a', clubId: 'a', name: 'A' },
+      { teamId: 'b', clubId: 'b', name: 'B' },
+    ],
+    format: { kind: 'round-robin', legs: 1 },
+    schedule: meta0.schedule,
+    points: (body.points as CompetitionMeta['points']) ?? meta0.points,
+  });
+  if (!probe.ok)
+    throw new HttpError(400, probe.problems[0], {
+      code: 'invalid_competition',
+      problems: probe.problems,
+    });
+  const name = typeof body.name === 'string' ? body.name.trim() : meta0.name;
+  const out = [];
+  for (const s of series) {
+    const meta = {
+      ...s.competition!,
+      name,
+      ...(body.points !== undefined ? { points: body.points as CompetitionMeta['points'] } : {}),
+    };
+    out.push(
+      await applySeriesPatch(
+        ra.tenant,
+        String(s.id),
+        { competition: meta, name: competitionSeriesName(name, meta), version: s.version } as never,
+        ra.email ?? 'unknown',
+      ),
+    );
+  }
+  return c.json({ id: meta0.id, series: out });
+});
+
+/**
+ * Regenerate a competition's draw (new teams, format, dates or seed). Drafts only: a released
+ * competition is refused (409 `competition_released` — recall it first), and so is one with
+ * results in (409 `has_results`). The old series are replaced whole.
+ */
+app.post('/competitions/:id/regenerate', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const inputs = await competitionInputs(tenant);
+  const current = competitionOr404(inputs.series, id);
+  if (current.some((s) => s.released))
+    throw new HttpError(409, 'this competition is released — recall it before regenerating', {
+      code: 'competition_released',
+    });
+  const results = hasFeature(inputs.config, 'medicoachSync')
+    ? await repo.listFixtureResults(tenant)
+    : [];
+  if (current.some((s) => withResults(s, results).some((f) => f.result)))
+    throw new HttpError(
+      409,
+      'results are already in for this competition — it can’t be regenerated',
+      {
+        code: 'has_results',
+      },
+    );
+  const raw = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  const spec = parseCompetitionBody({ ...(raw ?? {}), id }, inputs.clubs);
+  const plan = planOrRefuse(spec);
+  const oldIds = current.map((s) => String(s.id));
+  for (const sid of oldIds) {
+    await repo.deleteSeries(tenant, sid);
+    await repo.deleteFixtureOfficialsForSeries(tenant, sid);
+    await repo.deleteSeriesSyncState(tenant, sid);
+  }
+  for (const s of plan.series) await createSeries(tenant, s as unknown as Series);
+  return c.json({
+    id,
+    series: await Promise.all(plan.series.map((s) => repo.getSeries(tenant, s.id))),
+    warnings: plan.warnings,
+    clashes: competitionClashes(plan, inputs, oldIds),
+  });
+});
+
+/** Delete a competition and everything hanging off its series. Released ⇒ recall first. */
+app.delete('/competitions/:id', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const series = competitionOr404(await repo.listSeries(tenant), c.req.param('id'));
+  if (series.some((s) => s.released))
+    throw new HttpError(409, 'this competition is released — recall it before deleting it', {
+      code: 'competition_released',
+    });
+  for (const s of series) {
+    await repo.deleteSeries(tenant, String(s.id));
+    await repo.deleteFixtureOfficialsForSeries(tenant, String(s.id));
+    await repo.deleteSeriesSyncState(tenant, String(s.id));
+  }
+  return c.json({ ok: true, deleted: series.map((s) => s.id) });
+});
+
+/** The league table(s): one per league/group series, from the medicoach results. */
+app.get('/competitions/:id/standings', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const [all, config] = await Promise.all([repo.listSeries(tenant), repo.getTenantConfig(tenant)]);
+  const series = competitionOr404(all, c.req.param('id'));
+  const results = hasFeature(config, 'medicoachSync') ? await repo.listFixtureResults(tenant) : [];
+  return c.json({
+    id: c.req.param('id'),
+    tables: series
+      .filter((s) => s.competition?.role !== 'knockout')
+      .map((s) => seriesTable(s, results)),
+  });
+});
+
+/**
+ * Fill the knockout: group places from finished group tables (`allowIncomplete` to fill from
+ * the tables as they stand), and later rounds from knockout results. Written as an admin edit
+ * of the knockout series (version-checked; the in-season clash gate applies when released).
+ */
+app.post('/competitions/:id/advance', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const body = (await c.req.json().catch(() => ({}))) as { allowIncomplete?: unknown };
+  const [all, config] = await Promise.all([
+    repo.listSeries(ra.tenant),
+    repo.getTenantConfig(ra.tenant),
+  ]);
+  const series = competitionOr404(all, c.req.param('id'));
+  const results = hasFeature(config, 'medicoachSync')
+    ? await repo.listFixtureResults(ra.tenant)
+    : [];
+  const { ko, fixtures, filled, waiting } = advanceCompetition(series, results, {
+    allowIncomplete: body?.allowIncomplete === true,
+  });
+  if (!filled) return c.json({ filled: 0, waiting });
+  const written = await applySeriesPatch(
+    ra.tenant,
+    String(ko.id),
+    { fixtures: fixtures.map(({ result: _r, ...f }) => f), version: ko.version } as never,
+    ra.email ?? 'unknown',
+  );
+  return c.json({ filled, waiting, series: written });
+});
+
 /* ─── Umpire allocation ───
    A tenant umpire registry plus per-fixture appointments. Appointments are their own
    FIXOFFICIALS# items, so writing them never touches the Series item: no version bump, no
@@ -4691,6 +5024,13 @@ app.delete('/series/:id', requireAdmin, async (c) => {
 /**
  * Appoint a fixture's officials: up to two umpires and an optional referee, by registry
  * id. An empty body (`{ umpires: [] }`) clears the appointment.
+ */
+/**
+ * Appoint a fixture's officials: umpires (≤2), referee, scorers (≤2: scorer + backup). Each
+ * key the body sends replaces that part; a key it leaves out is kept as stored — saving the
+ * umpires never drops the scorers or a referee the appointments upload wrote. An appointment
+ * left with nobody deletes the item. Last write wins (no version): officials live apart from
+ * the series precisely so this never contends with a whole-series edit.
  */
 app.put('/series/:id/fixtures/:fixtureId/officials', requireAdmin, async (c) => {
   const ra = c.get('requestAuth')!;
@@ -4701,21 +5041,143 @@ app.put('/series/:id/fixtures/:fixtureId/officials', requireAdmin, async (c) => 
   if (!series) throw new HttpError(404, 'series not found');
   const fixtures = (series.fixtures ?? []) as Array<{ id?: unknown }>;
   if (!fixtures.some((f) => f.id === fixtureId)) throw new HttpError(404, 'fixture not found');
-  const registry = new Map((await repo.listUmpires(ra.tenant)).map((u) => [u.id, u]));
+  const [umpires, scorers, stored] = await Promise.all([
+    input.umpireIds || input.refereeId ? repo.listUmpires(ra.tenant) : [],
+    input.scorerIds ? repo.listScorers(ra.tenant) : [],
+    repo.getFixtureOfficials(ra.tenant, seriesId, fixtureId),
+  ]);
+  const umpireById = new Map(umpires.map((u) => [u.id, u]));
   const ref = (umpireId: string) => {
-    const u = registry.get(umpireId);
+    const u = umpireById.get(umpireId);
     if (!u) throw new HttpError(400, `unknown umpire ${umpireId}`);
     if (!u.active) throw new HttpError(400, `${u.displayName} is no longer active`);
     return { umpireId, name: u.displayName };
   };
+  const scorerById = new Map(scorers.map((x) => [x.id, x]));
+  const scorerRef = (scorerId: string) => {
+    const x = scorerById.get(scorerId);
+    if (!x) throw new HttpError(400, `unknown scorer ${scorerId}`);
+    if (!x.active) throw new HttpError(400, `${x.displayName} is no longer active`);
+    return { scorerId, name: x.displayName };
+  };
+  const umpiresNext = input.umpireIds ? input.umpireIds.map(ref) : (stored?.umpires ?? []);
+  const refereeNext =
+    input.refereeId === null ? undefined : input.refereeId ? ref(input.refereeId) : stored?.referee;
+  if (refereeNext && umpiresNext.some((u) => u.umpireId === refereeNext.umpireId))
+    throw new HttpError(400, 'the referee cannot also stand as an umpire');
+  const scorersNext = input.scorerIds ? input.scorerIds.map(scorerRef) : (stored?.scorers ?? []);
   const officials = {
-    umpires: input.umpireIds.map(ref),
-    ...(input.refereeId ? { referee: ref(input.refereeId) } : {}),
+    umpires: umpiresNext,
+    ...(refereeNext ? { referee: refereeNext } : {}),
+    ...(scorersNext.length ? { scorers: scorersNext } : {}),
     updatedAt: now(),
     updatedBy: ra.email ?? 'unknown',
   };
   await repo.putFixtureOfficials(ra.tenant, seriesId, fixtureId, officials);
   return c.json({ seriesId, fixtureId, ...officials });
+});
+
+/* ── Scorer register (admin) ── same shape as umpires; see scorers.ts. */
+app.get('/scorers', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  return c.json(
+    (await repo.listScorers(tenant)).sort((a, b) => a.displayName.localeCompare(b.displayName)),
+  );
+});
+
+app.post('/scorers', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const input = parseScorerInput(await c.req.json().catch(() => null), 'create');
+  const existing = await repo.listScorers(tenant);
+  const clash = findScorerNameClash(input.displayName!, existing);
+  if (clash)
+    throw new HttpError(409, `${clash.displayName} is already in the register`, {
+      code: 'scorer_name_taken',
+      scorerId: clash.id,
+    });
+  const stem = scorerIdFor(input.displayName!);
+  const taken = new Set(existing.map((x) => x.id));
+  const id = taken.has(stem) ? `${stem}-${randomUUID().slice(0, 6)}` : stem;
+  const scorer = applyScorerInput(undefined, input, id, now());
+  try {
+    await repo.createScorer(tenant, scorer);
+  } catch (err) {
+    if (err instanceof repo.ScorerExistsError)
+      throw new HttpError(409, 'a scorer with that id already exists');
+    throw err;
+  }
+  return c.json(scorer, 201);
+});
+
+app.patch('/scorers/:id', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const input = parseScorerInput(await c.req.json().catch(() => null), 'patch');
+  const current = await repo.getScorer(tenant, id);
+  if (!current) throw new HttpError(404, 'scorer not found');
+  if (input.displayName !== undefined) {
+    const clash = findScorerNameClash(input.displayName, await repo.listScorers(tenant), id);
+    if (clash)
+      throw new HttpError(409, `${clash.displayName} is already in the register`, {
+        code: 'scorer_name_taken',
+        scorerId: clash.id,
+      });
+  }
+  return c.json(await repo.putScorer(tenant, applyScorerInput(current, input, id, now())));
+});
+
+/**
+ * The office confirms a fixture's result ("checked and validated"). The body names the
+ * `recordedAt` of the result the admin LOOKED AT; if medicoach has since sent a newer result
+ * (or cleared it) the confirmation is refused with 409 `result_changed` and the current
+ * result, so nobody confirms figures they didn't see. A confirmation stays tied to that
+ * result: a later result from medicoach shows as "changed since confirmed" until re-checked.
+ */
+app.post('/series/:id/fixtures/:fixtureId/result/confirm', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const seriesId = c.req.param('id');
+  const fixtureId = c.req.param('fixtureId');
+  const body = (await c.req.json().catch(() => null)) as {
+    recordedAt?: unknown;
+    note?: unknown;
+  } | null;
+  if (!body || typeof body.recordedAt !== 'string' || !Number.isFinite(Date.parse(body.recordedAt)))
+    throw new HttpError(400, 'recordedAt (the result you checked) is required');
+  if (body.note !== undefined && (typeof body.note !== 'string' || body.note.length > 500))
+    throw new HttpError(400, 'note must be text of at most 500 characters');
+  const config = await repo.getTenantConfig(ra.tenant);
+  if (!hasFeature(config, 'medicoachSync'))
+    throw new HttpError(409, 'results come from the medicoach sync, which is off for this union');
+  const series = await repo.getSeries(ra.tenant, seriesId);
+  if (!series) throw new HttpError(404, 'series not found');
+  if (!((series.fixtures ?? []) as Array<{ id?: unknown }>).some((f) => f.id === fixtureId))
+    throw new HttpError(404, 'fixture not found');
+  const stored = await repo.getFixtureResult(ra.tenant, seriesId, fixtureId);
+  const view = stored ? toResultView(stored) : null;
+  if (!view)
+    throw new HttpError(409, 'this fixture has no result to confirm', { code: 'no_result' });
+  if (isoInstant(body.recordedAt) !== isoInstant(view.recordedAt))
+    throw new HttpError(
+      409,
+      'medicoach has sent a newer result since you loaded this page — check it, then confirm',
+      { code: 'result_changed', result: view },
+    );
+  const conf = await repo.putResultConfirmation(ra.tenant, {
+    seriesId,
+    fixtureId,
+    recordedAt: view.recordedAt,
+    confirmedAt: now(),
+    confirmedBy: ra.email ?? 'unknown',
+    ...(typeof body.note === 'string' && body.note.trim() ? { note: body.note.trim() } : {}),
+  });
+  return c.json(conf);
+});
+
+/** Withdraw a confirmation (confirmed by mistake). Idempotent. */
+app.delete('/series/:id/fixtures/:fixtureId/result/confirm', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  await repo.deleteResultConfirmation(ra.tenant, c.req.param('id'), c.req.param('fixtureId'));
+  return c.json({ ok: true });
 });
 
 /** The registry. Admins get every entry with contacts; club members get active names only. */

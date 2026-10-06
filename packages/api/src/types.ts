@@ -70,6 +70,8 @@ export type {
   OfficialRef,
   FixtureOfficials,
   FixtureOfficialsRecord,
+  Scorer,
+  ScorerRef,
 } from '../../engine/src/umpires.js';
 export type { ReportUmpireEntry, AppointedUmpire } from '../../engine/src/captainsReport.js';
 import type { ReportUmpireEntry, AppointedUmpire } from '../../engine/src/captainsReport.js';
@@ -1102,7 +1104,39 @@ export interface StoredFixtureResult {
   recordedAt?: string;
   scoringSide?: 'home' | 'away' | null;
   medicoachMatchUrl?: string | null;
+  /** Time on the ground and balls bowled, from the medicoach scorecard (contract `play`). */
+  play?: ResultPlay | null;
   storedAt: string;
+}
+
+/**
+ * How long a match occupied its ground and how many balls were bowled on it — the union's
+ * ground-usage / pitch-load proxy. From medicoach's ball-by-ball (scorer device clock).
+ */
+export interface ResultPlay {
+  /** First ball (ISO UTC). */
+  startedAt: string | null;
+  /** Last ball / match closed (ISO UTC). */
+  endedAt: string | null;
+  /** Legal balls bowled in the match, both innings. */
+  legalBalls: number | null;
+  /** Every delivery recorded, extras included. */
+  deliveries: number | null;
+}
+
+/**
+ * The union office's "checked and validated" on one fixture's result. Valid only while the
+ * result it names is the current one: `recordedAt` must equal the stored result's — a newer
+ * result or a clear from medicoach leaves it stale (shown as "changed since you confirmed").
+ */
+export interface ResultConfirmation {
+  seriesId: string;
+  fixtureId: string;
+  /** The `recordedAt` of the result that was checked. */
+  recordedAt: string;
+  confirmedAt: string;
+  confirmedBy: string;
+  note?: string;
 }
 
 /** The read-only result joined onto a fixture in GET /series (no captain/player data). */
@@ -1116,6 +1150,11 @@ export interface FixtureResultView {
   source: 'live' | 'manual' | 'import';
   recordedAt: string;
   medicoachMatchUrl: string | null;
+  play: ResultPlay | null;
+  /** The office's confirmation of THIS result, or null (none, or it confirmed an older one). */
+  confirmation: { confirmedAt: string; confirmedBy: string; note?: string } | null;
+  /** True when the office confirmed an earlier version of this result: check it again. */
+  changedSinceConfirmed: boolean;
 }
 
 /** One SYNCLOG# audit row: counts and outcomes only — never player refs. */

@@ -171,21 +171,24 @@ test('operator sets a league up; admin starts, the calendar follows live until g
   expect(calendar.label).toBe(SEASON);
   await op.context().close();
 
-  // ── Admin: launcher offers only set-up leagues ──
+  // ── Admin: one Start a season modal; only ready leagues can be picked ──
   await signInAsAdmin(page);
-  await page.goto('/admin/fixtures');
+  // Leagues & tournaments: the operator's seasons panel the rest of this test works in.
+  await page.goto('/admin/fixtures?tab=series');
   await page.getByRole('button', { name: 'Start a season' }).first().click();
   const launcher = page.getByRole('dialog', { name: 'Start a season' });
   const leagueSelect = launcher.getByRole('combobox', { name: 'League' });
-  await expect(leagueSelect.locator('option', { hasText: LEAGUE_LABEL }).first()).toBeEnabled();
+  await expect(
+    leagueSelect.locator('option', { hasText: new RegExp(`^${LEAGUE_LABEL}$`) }).first(),
+  ).toBeEnabled();
   await expect(leagueSelect.locator('option[disabled]').first()).toBeAttached();
   await expect(launcher.getByText(/Ask your operator to set this league up/)).toBeVisible();
   await leagueSelect.selectOption({ label: LEAGUE_LABEL });
-  await launcher.getByRole('button', { name: 'Continue' }).click();
 
-  await page.getByRole('textbox', { name: 'Season' }).fill(SEASON);
-  await expect(page.getByText('Flat round robin · 20 overs').first()).toBeVisible();
-  await page.getByRole('button', { name: 'Start season' }).click();
+  // Same modal, no Continue step: the season label, the summary and Start season.
+  await launcher.getByRole('textbox', { name: 'Season' }).fill(SEASON);
+  await expect(launcher.getByText('Flat round robin · 20 overs').first()).toBeVisible();
+  await launcher.getByRole('button', { name: 'Start season' }).click();
   await expect(page.getByText(`${LEAGUE_LABEL} · ${SEASON} started`)).toBeVisible();
 
   // ── Live calendar until first generate (the stale-dates bug) ──

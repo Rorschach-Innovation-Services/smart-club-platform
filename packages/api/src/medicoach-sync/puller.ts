@@ -263,6 +263,8 @@ function resultItem(
     // No captainRef: a player ref is never kept on the result (POPIA). It rides only on the
     // REPORTOPEN# marker while the reports are pending.
     medicoachMatchUrl: r.medicoachMatchUrl,
+    // Ground time and balls (contract `play`, optional): kept with the result it came with.
+    ...(r.play ? { play: r.play } : {}),
     storedAt: now,
   };
 }
