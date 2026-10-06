@@ -1133,6 +1133,7 @@ export function Dumbbell({
       </svg>
       <div className="pv-bar-sub">
         {hover?.sub ??
+          hint ??
           'Hover a player for the numbers behind each season · tap for their deep dive'}
       </div>
     </div>

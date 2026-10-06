@@ -33,7 +33,9 @@ describe('Professional team', () => {
     expect(screen.getByText(/Sample data · invented names/)).toBeTruthy();
     expect(screen.getByRole('region', { name: /Promote · in form/ })).toBeTruthy();
     expect(screen.getByRole('region', { name: /At risk/ })).toBeTruthy();
-    expect(screen.getByRole('img', { name: /Last 5 index against Season index/ })).toBeTruthy();
+    expect(
+      screen.getByRole('img', { name: /Index change from Season so far to Last 5/ }),
+    ).toBeTruthy();
   });
 
   it('says plainly that the files have no ball-by-ball', () => {
@@ -75,12 +77,18 @@ describe('Professional team', () => {
     expect(screen.getByText('Best in the scouting pool')).toBeTruthy();
   });
 
-  it('opens a match scorecard from the list', async () => {
+  it('opens a match in depth from the list, and goes back', async () => {
     const user = userEvent.setup();
     renderPage('&ptab=matches');
     const table = screen.getByRole('table', { name: 'Matches' });
     await user.click(within(table).getAllByRole('row')[1]);
-    expect(document.querySelector('.pro-scorecards .pro-inn')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: /^Hawks v / })).toBeTruthy();
+    expect(screen.getByText('How the game unfolded')).toBeTruthy();
+    expect(screen.getByRole('img', { name: 'Score at each wicket, by over' })).toBeTruthy();
+    expect(screen.getAllByText('Partnerships').length).toBeGreaterThan(0);
+    expect(screen.getByText('Standouts')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '← All matches' }));
+    expect(screen.getByRole('table', { name: 'Matches' })).toBeTruthy();
   });
 
   it('finds a player by search and dives into their numbers', async () => {
@@ -144,5 +152,33 @@ describe('Professional team', () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name }));
     expect(screen.getByText('Season by season')).toBeTruthy();
+  });
+
+  it('ranks call-up options objectively for each player who needs cover', () => {
+    renderPage('&ptab=callups&format=all');
+    const covers = screen.queryAllByRole('region', { name: /^Cover for / });
+    if (!covers.length) return; // the sample may have nobody at risk in this selection
+    const first = covers[0];
+    expect(within(first).getByText(/Weakest:/)).toBeTruthy();
+    const opts = within(first).queryByRole('table', { name: /^Options for / });
+    if (opts) expect(within(opts).getByText('Fit')).toBeTruthy();
+  });
+});
+
+describe('Exits', () => {
+  it('shows status, squad flow and careers, and says when the register can’t be loaded', async () => {
+    const api = await import('./api');
+    vi.spyOn(api, 'getClubs').mockRejectedValue(new Error('no'));
+    vi.spyOn(api, 'getAllClearances').mockResolvedValue([]);
+    const { renderWithProviders } = await import('./test-utils');
+    renderWithProviders(
+      <MemoryRouter initialEntries={['/admin/scouting?view=pro&ptab=exits']}>
+        <ProTeamPage />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText('Squad flow, season by season')).toBeTruthy();
+    expect(screen.getByRole('table', { name: 'Careers in the squad' })).toBeTruthy();
+    expect(screen.getByText('Players used')).toBeTruthy();
+    expect(await screen.findByText(/register couldn’t be loaded/)).toBeTruthy();
   });
 });

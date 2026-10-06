@@ -47,12 +47,19 @@ export function percentileOf(v: number, population: number[], better: 'high' | '
 export type Percentiles = Record<string, number | null>;
 
 /** Percentile on each measure, within the population's values for that measure. */
-export function percentiles(values: Values, population: Values[], measures: Measure[]): Percentiles {
+export function percentiles(
+  values: Values,
+  population: Values[],
+  measures: Measure[],
+): Percentiles {
   const out: Percentiles = {};
   for (const m of measures) {
     const v = values[m.key];
-    const pop = population.map((p) => p[m.key]).filter((x): x is number => typeof x === 'number' && Number.isFinite(x));
-    out[m.key] = typeof v === 'number' && Number.isFinite(v) ? percentileOf(v, pop, m.better) : null;
+    const pop = population
+      .map((p) => p[m.key])
+      .filter((x): x is number => typeof x === 'number' && Number.isFinite(x));
+    out[m.key] =
+      typeof v === 'number' && Number.isFinite(v) ? percentileOf(v, pop, m.better) : null;
   }
   return out;
 }

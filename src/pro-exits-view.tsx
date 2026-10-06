@@ -188,36 +188,43 @@ export function ExitsView({
               >
                 <div className="pro-flow-up" role="cell">
                   <span className="pro-flow-n">{f.retained + f.arrived}</span>
-                  <i
-                    className="third"
-                    style={{ height: `${(f.arrived / maxUp) * 100}%` }}
-                    title={`${f.arrived} new`}
-                  >
-                    {f.arrived ? f.arrived : ''}
-                  </i>
-                  <i
-                    className="squad"
-                    style={{ height: `${(f.retained / maxUp) * 100}%` }}
-                    title={`${f.retained} kept`}
-                  >
-                    {f.retained ? f.retained : ''}
-                  </i>
+                  {f.arrived > 0 && (
+                    <i
+                      className="third"
+                      style={{ height: `${(f.arrived / maxUp) * 100}%` }}
+                      title={`${f.arrived} new`}
+                    >
+                      {f.arrived ? f.arrived : ''}
+                    </i>
+                  )}
+                  {f.retained > 0 && (
+                    <i
+                      className="squad"
+                      style={{ height: `${(f.retained / maxUp) * 100}%` }}
+                      title={`${f.retained} kept`}
+                    >
+                      {f.retained ? f.retained : ''}
+                    </i>
+                  )}
                 </div>
                 <div className="pro-flow-axis" role="cell">
                   <strong>{f.season}</strong>
                   <small>
                     {f.games} game{f.games === 1 ? '' : 's'}
                     {f.partial ? ' · under way' : ''}
+                    {f.season === flow[0].season ? ' · first in the files' : ''}
                   </small>
                 </div>
                 <div className="pro-flow-down" role="cell">
-                  <i
-                    className="risk"
-                    style={{ height: `${(f.left / maxDown) * 100}%` }}
-                    title={`${f.left} left`}
-                  >
-                    {f.left ? f.left : ''}
-                  </i>
+                  {f.left > 0 && (
+                    <i
+                      className="risk"
+                      style={{ height: `${(f.left / maxDown) * 100}%` }}
+                      title={`${f.left} left`}
+                    >
+                      {f.left ? f.left : ''}
+                    </i>
+                  )}
                 </div>
               </div>
             ))}
