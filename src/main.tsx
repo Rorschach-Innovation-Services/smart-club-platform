@@ -3029,11 +3029,7 @@ function Shell({
                 reportsOn={reportsOn}
                 reports={captainReports}
                 goto={gotoClubView}
-                onFileReport={(key) =>
-                  navigate(
-                    `/club/${activeClub.id}/captains-report?fixture=${encodeURIComponent(key)}`,
-                  )
-                }
+                onFileReport={() => navigate(`/club/${activeClub.id}/captains-report`)}
               />
             }
           />

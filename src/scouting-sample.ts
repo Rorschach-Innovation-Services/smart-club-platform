@@ -240,7 +240,7 @@ export const SAMPLE_TOURNAMENT: ScoutingEvent = {
           exb: { w: 11, nb: 0, b: 0, lb: 0 },
           batting: [
             { n: 'Elijah Fourie', pos: 1, r: 0, b: 1, f4: 0, f6: 0, out: 'b Connor Engelbrecht' },
-            { n: 'Nathan Jacobs', pos: 2, r: 2, b: 8, f4: 0, f6: 0, out: 'b Musa Hadebe' },
+            { n: 'Nathan Jaxley', pos: 2, r: 2, b: 8, f4: 0, f6: 0, out: 'b Musa Hadebe' },
             { n: 'Bongani Engelbrecht', pos: 3, r: 2, b: 27, f4: 0, f6: 0, out: 'not out' },
             { n: 'Elijah Khoza', pos: 4, r: 0, b: 2, f4: 0, f6: 0, out: 'b Nathan Govindsamy' },
             { n: 'Josh Khoza', pos: 5, r: 0, b: 2, f4: 0, f6: 0, out: 'b Nathan Govindsamy' },
@@ -257,7 +257,7 @@ export const SAMPLE_TOURNAMENT: ScoutingEvent = {
           ],
           fow: [
             { wkt: 1, score: 0, batter: 'Elijah Fourie', over: '0.1' },
-            { wkt: 2, score: 7, batter: 'Nathan Jacobs', over: '2.4' },
+            { wkt: 2, score: 7, batter: 'Nathan Jaxley', over: '2.4' },
             { wkt: 3, score: 9, batter: 'Elijah Khoza', over: '3.2' },
             { wkt: 4, score: 9, batter: 'Josh Khoza', over: '3.4' },
             { wkt: 5, score: 9, batter: 'Xola Botes', over: '4' },
@@ -582,7 +582,7 @@ export const SAMPLE_TOURNAMENT: ScoutingEvent = {
               f6: 0,
               out: 'c Pieter Van Rooyen b Caleb Hadebe',
             },
-            { n: 'Nathan Jacobs', pos: 11, r: 1, b: 4, f4: 0, f6: 0, out: 'b Caleb Hadebe' },
+            { n: 'Nathan Jaxley', pos: 11, r: 1, b: 4, f4: 0, f6: 0, out: 'b Caleb Hadebe' },
           ],
           bowling: [
             { n: 'Caleb Hadebe', o: '8.1', m: 0, r: 23, w: 3, wd: 2, nb: 1, dots: 40 },
@@ -603,7 +603,7 @@ export const SAMPLE_TOURNAMENT: ScoutingEvent = {
             { wkt: 7, score: 94, batter: 'Faheem Hadebe', over: '28.3' },
             { wkt: 8, score: 98, batter: 'Elijah Fourie', over: '29.1' },
             { wkt: 9, score: 103, batter: 'Brandon Jacobs', over: '30.1' },
-            { wkt: 10, score: 116, batter: 'Nathan Jacobs', over: '31.3' },
+            { wkt: 10, score: 116, batter: 'Nathan Jaxley', over: '31.3' },
           ],
           perOver: [
             [1, 1, 0],
@@ -1700,7 +1700,7 @@ export const SAMPLE_TOURNAMENT: ScoutingEvent = {
             { n: 'Xola Adams', pos: 8, r: 1, b: 4, f4: 0, f6: 0, out: 'b Caleb Adams' },
             { n: 'Musa Tshabalala', pos: 9, r: 1, b: 3, f4: 0, f6: 0, out: 'b Vusi Botes' },
             {
-              n: 'Nathan Jacobs',
+              n: 'Nathan Jaxley',
               pos: 10,
               r: 0,
               b: 1,
@@ -1728,7 +1728,7 @@ export const SAMPLE_TOURNAMENT: ScoutingEvent = {
             { wkt: 6, score: 37, batter: 'Luca Fraser', over: '12.5' },
             { wkt: 7, score: 41, batter: 'Xola Adams', over: '14.1' },
             { wkt: 8, score: 42, batter: 'Musa Tshabalala', over: '15.1' },
-            { wkt: 9, score: 42, batter: 'Nathan Jacobs', over: '15.2' },
+            { wkt: 9, score: 42, batter: 'Nathan Jaxley', over: '15.2' },
             { wkt: 10, score: 42, batter: 'Brandon Jacobs', over: '15.4' },
           ],
           perOver: [
@@ -3708,7 +3708,7 @@ export const SAMPLE_TOURNAMENT: ScoutingEvent = {
       ro: null,
     },
     {
-      name: 'Nathan Jacobs',
+      name: 'Nathan Jaxley',
       hub: 'CST',
       m: 3,
       runs: 3,
