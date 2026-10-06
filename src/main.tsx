@@ -112,7 +112,7 @@ import { ResyncDialog, isResyncRequired } from './ResyncDialog';
 import { CaptainsReportView, CaptainsReportLinkPage } from './CaptainsReport';
 import { AdminCaptainsReportsView } from './AdminCaptainsReports';
 import { AdminMedicoachSyncView } from './AdminMedicoachSync';
-import { useFeature, useModule, useSeasonLabel, useVertical } from './branding';
+import { tenantQueryOptions, useFeature, useModule, useSeasonLabel, useVertical } from './branding';
 
 /** The admin cancelled the medicoach-resync confirmation: the request is simply not sent. */
 class ResyncCancelled extends Error {
@@ -371,14 +371,9 @@ function AppRoutes() {
   // retry the tenant config: it carries the league/district catalogue the authed app
   // derives everything from, so a transient failure here (previously retry:0) would
   // otherwise leave `tenantConfig` undefined and silently zero the leagues/teams breakdown.
-  // A 404 is NOT transient (the slug names no tenant — common on the wildcard host for an
-  // unclaimed subdomain): don't retry it (also stops subdomain-scanning bots tripling the
-  // DynamoDB reads), and show the dedicated "unknown club" screen below.
-  const tenantQuery = useQuery({
-    queryKey: qk.tenant(),
-    queryFn: api.getTenant,
-    retry: (count, err) => !(err instanceof ApiError && err.status === 404) && count < 2,
-  });
+  // A 404 is NOT transient: tenantQueryOptions doesn't retry it, and we show the dedicated
+  // "unknown club" screen below.
+  const tenantQuery = useQuery(tenantQueryOptions());
   useEffect(() => {
     if (tenantQuery.data?.branding && !onVerify) applyTheme(tenantQuery.data.branding);
   }, [tenantQuery.data, onVerify]);
