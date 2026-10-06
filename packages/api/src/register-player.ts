@@ -391,8 +391,14 @@ async function discardRepeatUploads(
   earlier: PlayerClearance,
 ): Promise<void> {
   try {
+    // The route already asserts the key against the link club's prefix; re-assert the tenant
+    // here so this function is tenant-scoped no matter who calls it. The link club can differ
+    // from the destination, so the guard stops at the tenant segment.
     const fresh = [player.idDocMeta?.objectKey, player.previousIdDocMeta?.objectKey].filter(
-      (k): k is string => !!k && PUBLIC_REG_UPLOAD_RE.test(k),
+      (k): k is string =>
+        !!k &&
+        PUBLIC_REG_UPLOAD_RE.test(k) &&
+        (k.startsWith(`${tenant}/`) || k.startsWith('local/')),
     );
     if (fresh.length === 0) return;
     // The listing mirror carries no snapshot: read the canonical for the keys it still holds.
