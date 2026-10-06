@@ -60,6 +60,19 @@ function cleanParam(value: string, max = 100): string {
 type TemplateParam = { type: 'text'; text: string };
 
 /**
+ * The Cloud API component for a URL button's dynamic suffix: button index 0, one text
+ * parameter. Exported so the arity test can assert the shape.
+ */
+export function urlButtonComponent(suffix: string) {
+  return {
+    type: 'button',
+    sub_type: 'url',
+    index: '0',
+    parameters: [{ type: 'text', text: suffix }],
+  };
+}
+
+/**
  * POST a pre-approved template message to the Cloud API with rate-limit retry.
  * Shared by the staff-invite and fixtures senders so the auth/retry/dry-run
  * handling lives in exactly one place.
@@ -70,7 +83,11 @@ async function sendTemplate(
   templateLang: string,
   params: TemplateParam[],
   dryRunLabel: string,
+  /** The dynamic suffix of the template's URL button (index 0), if it has one. Never logged. */
+  urlButtonSuffix?: string,
 ): Promise<{ messageId: string }> {
+  const components: Array<Record<string, unknown>> = [{ type: 'body', parameters: params }];
+  if (urlButtonSuffix !== undefined) components.push(urlButtonComponent(urlButtonSuffix));
   const payload = {
     messaging_product: 'whatsapp',
     to,
@@ -78,7 +95,7 @@ async function sendTemplate(
     template: {
       name: templateName,
       language: { code: templateLang },
-      components: [{ type: 'body', parameters: params }],
+      components,
     },
   };
 
@@ -319,4 +336,61 @@ export async function sendFixtureReminderWhatsApp(
     fixtureReminderParams(input),
     `fixture reminder for ${clubName}`,
   );
+}
+
+export interface CaptainsReportDueWhatsAppInput {
+  to: string; // already E.164 (see toE164)
+  recipientName: string;
+  clubName: string;
+  /** The union's display name ("KZN Dolphins") — v2 template {{2}}. */
+  orgName: string;
+  /** "Umzinto v African Warriors on Sun 4 Oct 2026" */
+  match: string;
+  /** The signed report token — the URL button's dynamic suffix. Never logged. */
+  token: string;
+}
+
+/**
+ * Build the three body params for `captains_report_due` (v2 copy, edited in place in Meta
+ * on 4 Oct 2026), in order: {{1}} recipient name (fallback 'there'), {{2}} the union's
+ * display name ("KZN Dolphins"), {{3}} match line + date ("Umzinto v African Warriors on
+ * Sun 4 Oct 2026"). The link is NOT a body param — it rides in the URL button
+ * (see `captainsReportDue.urlButton`).
+ */
+export function captainsReportDueParams(
+  input: Pick<CaptainsReportDueWhatsAppInput, 'recipientName' | 'orgName' | 'match'>,
+): TemplateParam[] {
+  return [
+    { type: 'text', text: cleanParam(input.recipientName || 'there') },
+    { type: 'text', text: cleanParam(input.orgName) },
+    { type: 'text', text: cleanParam(input.match) },
+  ];
+}
+
+/**
+ * Captain's report link over WhatsApp (URL button with the token as its suffix). Throws
+ * `WhatsAppTemplatePendingError` while the registry entry is not `registered` — the
+ * channel is then skipped as `template-pending`, never failed.
+ */
+export async function sendCaptainsReportDueWhatsApp(
+  input: CaptainsReportDueWhatsAppInput,
+): Promise<{ messageId: string }> {
+  const { name, lang, status } = WHATSAPP_TEMPLATES.captainsReportDue;
+  if (status !== 'registered') throw new WhatsAppTemplatePendingError();
+  return sendTemplate(
+    input.to,
+    name,
+    lang,
+    captainsReportDueParams(input),
+    `captain's report link for ${input.clubName}`,
+    input.token,
+  );
+}
+
+/** No approved captain's-report template in Meta: the channel is skipped, not failed. */
+export class WhatsAppTemplatePendingError extends Error {
+  constructor() {
+    super("no captain's report WhatsApp template is approved yet");
+    this.name = 'WhatsAppTemplatePendingError';
+  }
 }

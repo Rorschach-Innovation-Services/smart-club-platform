@@ -10,8 +10,15 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { staffInviteParams, regLinkParams, fixturesParams, clearanceParams, fixtureReminderParams } =
-  await import('../src/notify/whatsapp.js');
+const {
+  staffInviteParams,
+  regLinkParams,
+  fixturesParams,
+  clearanceParams,
+  fixtureReminderParams,
+  captainsReportDueParams,
+  urlButtonComponent,
+} = await import('../src/notify/whatsapp.js');
 const { WHATSAPP_TEMPLATES } = await import('../src/notify/whatsapp-templates.js');
 
 const LINK = 'https://club.example.com/sign-in';
@@ -42,6 +49,14 @@ const BUILDERS = [
       playerName: 'A Player',
       clubName: 'Adelaar CC',
       season: '2026-27',
+    }),
+  },
+  {
+    key: 'captainsReportDue' as const,
+    params: captainsReportDueParams({
+      recipientName: 'Sanele Mthembu',
+      orgName: 'KZN Dolphins',
+      match: 'Umzinto v African Warriors on Sun 4 Oct 2026',
     }),
   },
   {
@@ -88,4 +103,72 @@ describe('whatsapp template arity', () => {
       assert.equal(def.params.length, def.paramCount);
     });
   }
+});
+
+describe('whatsapp URL buttons', () => {
+  test('every template with a URL button registers exactly one {{1}} suffix at the end', () => {
+    for (const def of Object.values(WHATSAPP_TEMPLATES)) {
+      const button = (def as { urlButton?: { urlTemplate: string } }).urlButton;
+      if (!button) continue;
+      assert.match(button.urlTemplate, /^https:\/\/[^{}]+\{\{1\}\}$/);
+    }
+  });
+
+  test('the captains_report_due button carries the token as its single suffix param', () => {
+    assert.ok(WHATSAPP_TEMPLATES.captainsReportDue.urlButton);
+    const c = urlButtonComponent('tok.sig');
+    assert.deepEqual(c, {
+      type: 'button',
+      sub_type: 'url',
+      index: '0',
+      parameters: [{ type: 'text', text: 'tok.sig' }],
+    });
+  });
+
+  test('the report link never rides in the body params', () => {
+    const params = captainsReportDueParams({
+      recipientName: 'A',
+      orgName: 'O',
+      match: 'C',
+    });
+    for (const p of params) assert.doesNotMatch(p.text, /https?:\/\//);
+  });
+});
+
+describe("captain's report template (v2 copy, edited in place in Meta 4 Oct 2026)", () => {
+  const due = WHATSAPP_TEMPLATES.captainsReportDue;
+
+  test('three body params: recipient name, union name, match line + date', () => {
+    assert.equal(due.name, 'captains_report_due');
+    assert.equal(due.status, 'registered');
+    assert.equal(due.paramCount, 3);
+    assert.deepEqual(due.params, ['recipient name', 'org name', 'match line + date']);
+    assert.equal(
+      due.bodyText,
+      'Hello {{1}},\n\n' +
+        "The {{2}} captain's report for {{3}} is open. Please rate the umpires.\n\n" +
+        'Tap the button below to open it. You can submit it once; the link expires on the date shown in the report.',
+    );
+    assert.deepEqual(
+      captainsReportDueParams({
+        recipientName: 'Sanele',
+        orgName: 'KZN Dolphins',
+        match: 'Umzinto v AW on Sun 20 Sep 2026',
+      }).map((p) => p.text),
+      ['Sanele', 'KZN Dolphins', 'Umzinto v AW on Sun 20 Sep 2026'],
+    );
+  });
+
+  test('the copy says "submit it once" and never "works once" or a possessive club name', () => {
+    assert.match(due.bodyText, /You can submit it once; the link expires on the date shown/);
+    assert.doesNotMatch(due.bodyText, /works once/);
+    assert.doesNotMatch(due.bodyText, /'s captain's report/);
+  });
+
+  test("there is exactly one captain's-report template in the registry", () => {
+    const names = Object.values(WHATSAPP_TEMPLATES)
+      .map((d) => d.name)
+      .filter((n) => n.startsWith('captains_report'));
+    assert.deepEqual(names, ['captains_report_due']);
+  });
 });

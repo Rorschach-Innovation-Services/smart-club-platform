@@ -10,7 +10,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 
-const DDB_PORT = 4667; // next free odd port after postponements (4665/4666)
+const DDB_PORT = 4681; // next free odd port after postponements (4679/4680)
 const TABLE = 'SmartClubTest';
 process.env.TABLE_NAME = TABLE;
 process.env.DYNAMO_ENDPOINT = `http://localhost:${DDB_PORT}`;

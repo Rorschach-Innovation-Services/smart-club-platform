@@ -14,6 +14,28 @@ removes it again when the season machinery takes over.
    Promotion Men); Premier Men T20 keeps its matchups/dates/times from the Dolphins file
    and only borrows venues from this one, matched by unordered team pair.
 
+## Medicoach sync tenants — pause the sync before a bulk series CLI
+
+On a tenant with `features.medicoachSync` (ADR 0016) the 15-minute `MedicoachSyncPuller`
+cron applies medicoach reschedules to series while a bulk CLI (`import-planb`,
+`resolve-venue-clashes`, `normalise-venue-names`, `merge-duplicate-venues`) holds its own
+copy of them. Every one of these CLIs writes **version-checked against the series it read**:
+a series that changed in between is skipped with "changed since this run read it — NOT
+written. Re-run", the run exits 1, and you simply re-run it. To avoid the re-run, pause the
+cron for the window:
+
+```bash
+# find the rule SST created for the cron (one per stage)
+aws events list-rules --query "Rules[?contains(Name, 'MedicoachSyncPuller')].[Name,State]" --output table
+aws events disable-rule --name <that rule name>
+# … dry run, review, --confirm …
+aws events enable-rule --name <that rule name>
+```
+
+Do **not** turn `features.medicoachSync` off instead: that also stops smart club stamping
+and queuing its own schedule changes, so the CLI's edits would never reach medicoach. Avoid
+"Sync now" in the console while paused.
+
 ## 2026-27 Release workbook (single file, release mode)
 
 In Sep 2026 the union replaced the two-workbook supply with **one finished release

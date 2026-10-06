@@ -14,8 +14,8 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { Server } from 'node:http';
 
-const DDB_PORT = 4665; // dynalite (next free odd port after 4663)
-const PROXY_PORT = 4666; // the interleaving proxy the app talks to
+const DDB_PORT = 4679; // dynalite (next free odd port after chair-roster's 4677)
+const PROXY_PORT = 4680; // the interleaving proxy the app talks to
 const TABLE = 'SmartClubTest';
 process.env.TABLE_NAME = TABLE;
 process.env.DYNAMO_ENDPOINT = `http://localhost:${PROXY_PORT}`;

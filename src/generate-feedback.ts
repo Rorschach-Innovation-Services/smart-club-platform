@@ -41,6 +41,11 @@ function structuredConflictMessage(err: ApiError): string | null {
   if (err.code === 'does_not_fit') return doesNotFitMessage(err.message);
   if (err.code === 'no_block')
     return 'This stage points at a playing block that no longer exists on the calendar. Ask your operator to fix the structure\'s "Plays in" setting.';
+  if (err.code === 'sync_resync_required') {
+    const refs = err.details?.orphanedRefs;
+    const n = Array.isArray(refs) ? refs.length : 0;
+    return `These released fixtures are synced with medicoach; regenerating would orphan ${n} of them there. Ask your operator — it has to be done deliberately (allowResync)`;
+  }
   if (err.code === 'released_overwrite')
     return "Some of this stage's fixtures are released; the console will ask before replacing them";
   if (err.code === 'venue_clash') {

@@ -98,8 +98,11 @@ async function signInTo(
   await page.goto(`/?tenant=${tenant}`);
   // A previous dev identity persists in localStorage — sign it out first (as signInAsRep does).
   const signOut = page.getByRole('button', { name: 'Sign out' });
-  if (await signOut.isVisible().catch(() => false)) await signOut.click();
   const picker = page.locator('select.field-select').first();
+  // Wait for the page to settle on one or the other: checking `signOut` the instant after
+  // goto races the authed app's first render and can miss a still-signed-in identity.
+  await expect(signOut.or(picker).first()).toBeVisible();
+  if (await signOut.isVisible().catch(() => false)) await signOut.click();
   await expect(picker).toBeVisible();
   await picker.selectOption(role);
   if (role === 'rep') await page.getByPlaceholder('ukzn, clares').fill(clubId ?? '');
@@ -312,6 +315,8 @@ test('the league admin console hides the disabled modules and rolls up two phase
     'Clearances',
     'Registration Reviews',
     'Veterans Requests',
+    'Umpires',
+    "Captain's reports",
   ])
     expect(labels, `${hidden} is not in the football admin nav`).not.toContain(hidden);
   expect(labels).toContain('All Schools');
@@ -370,6 +375,8 @@ test('a cricket tenant in the same run keeps its cricket nav, labels and registr
     'Clearances',
     'Registration Reviews',
     'Veterans Requests',
+    'Umpires',
+    "Captain's reports",
   ])
     expect(adminNav, `${item} is in the cricket admin nav`).toContain(item);
   await expect(

@@ -332,6 +332,120 @@ const CATALOGUES: Record<string, RequiredDoc[]> = {
       matchHints: ['funding', 'funds', 'transport claim', 'coaching staff', 'trial', 'training'],
     },
   ],
+
+  /**
+   * Lions (Central Gauteng Lions / CGL), from the union's "Club Compliance 2025 and 2026"
+   * folders. A fresh tenant, so no archived legacy keys. Key names reuse the titans/tuskers
+   * ones wherever the meaning matches (constitution, agmMinutes, financials, committee,
+   * memberDatabase, chairmansReport, clubLogo, clubRecords) so cross-tenant tooling stays
+   * consistent. Docs a club may legitimately lack (bank letter, NPO/CIPC registration,
+   * financials, logo) carry allowUnavailable; the BEE certificate, chairman's report and
+   * the catch-all club records are `optional`, never counted towards completion.
+   */
+  lions: [
+    {
+      key: 'constitution',
+      name: 'Club constitution',
+      desc: 'Your club’s adopted constitution',
+      accepts: [...OFFICE],
+      matchHints: ['constitution', 'consti'],
+    },
+    {
+      key: 'agmMinutes',
+      name: 'AGM minutes',
+      desc: 'Agenda and minutes of your most recent annual general meeting',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 6,
+      accepts: [...OFFICE],
+      matchHints: ['agm', 'annual general', 'minutes', 'agenda'],
+    },
+    {
+      key: 'financials',
+      name: 'Financial statements',
+      desc: 'Annual financial statements or treasurer’s reports',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 6,
+      allowUnavailable: true,
+      // Old Parktonians' financials arrived as a slide deck (.pptx) — download-only.
+      accepts: [...OFFICE, 'pptx'],
+      matchHints: ['financ', 'treasurer', 'afs', 'income', 'balance sheet'],
+    },
+    {
+      key: 'committee',
+      // Not keyed `exco` — that key is the on-platform committee FORM (titans precedent).
+      name: 'Club committee',
+      desc: 'Executive committee and office-bearers for the season',
+      accepts: [...SHEET],
+      matchHints: ['committee', 'exco', 'executive', 'office bearers'],
+      role: 'committee',
+    },
+    {
+      key: 'memberDatabase',
+      name: 'Member database',
+      desc: 'Full player/member register for the season',
+      accepts: [...SHEET],
+      // No bare 'register': the classifier matches at word starts, so it would also hit
+      // "registration" (orgRegistration's files).
+      matchHints: ['database', 'databse', 'player list', 'member list', 'members database'],
+      role: 'memberDatabase',
+    },
+    {
+      key: 'chairmansReport',
+      name: 'Chairman’s report',
+      desc: 'Chairperson’s or annual report to the AGM',
+      optional: true,
+      accepts: [...OFFICE],
+      matchHints: ['chairman', 'annual report'],
+    },
+    {
+      key: 'bankConfirmation',
+      name: 'Bank confirmation letter',
+      desc: 'Bank-stamped letter confirming the club’s account details',
+      allowUnavailable: true,
+      // Several clubs sent phone photos of the stamped letter.
+      accepts: ['pdf', ...IMAGE],
+      matchHints: ['bank', 'confirmation of banking', 'bank letter', 'account confirmation'],
+    },
+    {
+      key: 'orgRegistration',
+      name: 'NPO/CIPC registration',
+      desc: 'NPO or CIPC registration certificate',
+      allowUnavailable: true,
+      accepts: ['pdf'],
+      matchHints: ['npo', 'cipc', 'registration certificate', 'npc'],
+    },
+    {
+      key: 'beeCert',
+      name: 'BEE certificate',
+      desc: 'B-BBEE certificate or sworn affidavit',
+      optional: true,
+      accepts: ['pdf'],
+      matchHints: ['bee', 'b-bbee', 'bbbee', 'affidavit'],
+    },
+    {
+      key: 'clubLogo',
+      name: 'Club logo',
+      desc: 'Your club’s logo as an image',
+      optional: true,
+      allowUnavailable: true,
+      accepts: [...IMAGE],
+      matchHints: ['logo'],
+    },
+    {
+      key: 'clubRecords',
+      name: 'Other club records',
+      desc: 'Any other club paperwork the union keeps on file',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 10,
+      optional: true,
+      // No matchHints: a catch-all should land in the intake review table, not win
+      // auto-classification.
+      accepts: [...SHEET, ...IMAGE],
+    },
+  ],
 };
 
 async function main(): Promise<void> {

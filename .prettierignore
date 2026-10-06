@@ -3,3 +3,6 @@ node_modules
 package-lock.json
 public
 *.html
+# Shared with the medicoach repo byte-for-byte (sync contract v1) — never reformat.
+docs/integrations/medicoach-sync-examples
+docs/integrations/medicoach-sync-contract.md

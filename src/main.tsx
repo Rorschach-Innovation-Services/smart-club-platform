@@ -2,6 +2,7 @@ import { resolveCompetitionDefaults } from '../packages/engine/src/defaults';
 import { Sentry } from './sentry'; // first — installs global error handlers before render
 import { useState as useStateApp, useMemo as useMemoApp, useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
+import type { Umpire } from './types';
 import { ErrorBoundary } from 'react-error-boundary';
 import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
@@ -104,7 +105,22 @@ import {
 } from './club';
 import { AdminPostponements, postponementAttentionCount } from './club-postponements';
 import { Onboarding } from './onboarding';
-import { useModule, useSeasonLabel, useVertical } from './branding';
+import { AdminUmpiresView, mergeErrorMessage } from './umpires';
+import { UmpireAppointmentsUpload } from './UmpireAppointmentsUpload';
+import { ResyncDialog, isResyncRequired } from './ResyncDialog';
+
+import { CaptainsReportView, CaptainsReportLinkPage } from './CaptainsReport';
+import { AdminCaptainsReportsView } from './AdminCaptainsReports';
+import { AdminMedicoachSyncView } from './AdminMedicoachSync';
+import { useFeature, useModule, useSeasonLabel, useVertical } from './branding';
+
+/** The admin cancelled the medicoach-resync confirmation: the request is simply not sent. */
+class ResyncCancelled extends Error {
+  constructor() {
+    super('cancelled');
+    this.name = 'ResyncCancelled';
+  }
+}
 
 // Resolve the tenant before any query runs so x-tenant is attached to requests.
 const TENANT_SLUG = resolveTenantSlug();
@@ -346,7 +362,10 @@ function AppRoutes() {
   // (which may resolve to no tenant, or the wrong one) and themes itself from the
   // certificate's own tenant. So neither the host's /tenant theme nor its 404 screen applies.
   const { pathname } = useLocation();
-  const onVerify = pathname === '/verify' || pathname.startsWith('/verify/');
+  // The captain's-report link page (/r/<token>) is tenant-independent the same way: the token
+  // names its tenant, and the page themes itself from the report's tenant.
+  const onVerify =
+    pathname === '/verify' || pathname.startsWith('/verify/') || pathname.startsWith('/r/');
 
   // Tenant branding/config (public). Apply theme as soon as it loads.
   // retry the tenant config: it carries the league/district catalogue the authed app
@@ -378,6 +397,8 @@ function AppRoutes() {
       {/* Public transfer-certificate check — the target of the certificate's QR code. */}
       <Route path="/verify" element={<VerifyCertificatePage />} />
       <Route path="/verify/:serial" element={<VerifyCertificatePage />} />
+      {/* Public submit-once captain's report link (the token is the capability). */}
+      <Route path="/r/:token" element={<CaptainsReportLinkPage />} />
       <Route
         path="/*"
         element={
@@ -412,6 +433,20 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   // null = closed; {} = create; a league object = edit
   const [showLeagueForm, setShowLeagueForm] = useStateApp(null);
   const [showHelp, setShowHelp] = useStateApp(false);
+  // Medicoach sync: a regenerate/rebase that would orphan synced fixtures asks first
+  // (ResyncDialog); the pending answer resolves the request that is waiting on it.
+  const [resyncAsk, setResyncAsk] = useStateApp<{
+    error: ApiError;
+    action: 'regenerate' | 'rebase';
+    resolve: (ok: boolean) => void;
+  } | null>(null);
+  function askResync(error: ApiError, action: 'regenerate' | 'rebase') {
+    return new Promise<boolean>((resolve) => setResyncAsk({ error, action, resolve }));
+  }
+  function answerResync(ok: boolean) {
+    resyncAsk?.resolve(ok);
+    setResyncAsk(null);
+  }
 
   const membership = membershipFor(memberships, TENANT_SLUG);
   const role = routingRole(membership);
@@ -623,7 +658,8 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       return await fn();
     } catch (err) {
       const conflict = err instanceof ApiError && err.status === 409;
-      toastShow(toastCopy(err, errMsg, opts), 'warn');
+      // The admin cancelled a confirmation (ResyncCancelled): nothing to tell them.
+      if (!(err instanceof ResyncCancelled)) toastShow(toastCopy(err, errMsg, opts), 'warn');
       if (conflict) {
         (opts.invalidate ?? [qk.clubs(), qk.series(), qk.tenant()]).forEach(invalidate);
       }
@@ -672,6 +708,23 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       .then(() => invalidate(qk.series()))
       .catch(() => {});
   }
+  /**
+   * Run a generate/rebase; when the server refuses because released fixtures are synced with
+   * medicoach (409 `sync_resync_required`), list them in ResyncDialog and, only on confirm,
+   * send it again with `allowResync: true`. Cancel throws ResyncCancelled (never toasted).
+   */
+  async function withResync<T>(
+    action: 'regenerate' | 'rebase',
+    send: (allowResync: { allowResync?: true }) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await send({});
+    } catch (err) {
+      if (!isResyncRequired(err)) throw err;
+      if (!(await askResync(err, action))) throw new ResyncCancelled();
+      return send({ allowResync: true });
+    }
+  }
   /* ─── Season runs (ADR 0008) ─── */
   function createSeasonRun(run) {
     // A league with no setup (400 setup_missing) or a label already running (409
@@ -703,11 +756,16 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   // thing moved — the structure (reopen Review changes) or the run (refreshed) — rather
   // than the generic series-conflict line; any other 409 is shown as the server worded it.
   function rebaseSeasonRun(id, body) {
-    return withToast(() => api.rebaseSeasonRun(id, body), 'Could not apply the structure', {
-      invalidate: [qk.seasonRuns()],
-      rawConflict: true,
-      conflictMessage: seasonRunConflictMessage,
-    }).then((r) => {
+    return withToast(
+      () =>
+        withResync('rebase', (allowResync) => api.rebaseSeasonRun(id, { ...body, ...allowResync })),
+      'Could not apply the structure',
+      {
+        invalidate: [qk.seasonRuns()],
+        rawConflict: true,
+        conflictMessage: seasonRunConflictMessage,
+      },
+    ).then((r) => {
       invalidate(qk.seasonRuns());
       return r;
     });
@@ -727,7 +785,10 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
    */
   async function generateStageSeries(run, stage) {
     return withToast(
-      () => generateStageSeriesInner(run, stage),
+      () =>
+        withResync('regenerate', (allowResync) =>
+          generateStageSeriesInner(run, stage, allowResync),
+        ),
       'Could not generate the fixtures',
       // A structured refusal (clash gate, released overwrite, awaiting entrants, does not
       // fit, missing block) names what to do; any other 409 is a
@@ -743,7 +804,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   }
   // The server materialises the stage itself with the shared engine (ADR 0014); the
   // browser's materialisation only drives the preview.
-  async function generateStageSeriesInner(run, stage) {
+  async function generateStageSeriesInner(run, stage, allowResync: { allowResync?: true } = {}) {
     // The Seasons panel asks "Regenerate a released schedule?" before calling here whenever
     // this cache shows any of the stage's series released — so a released series in the
     // cache means the admin has already confirmed. When the cache is stale (released
@@ -761,6 +822,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
     const { series, warnings = [] } = await api.generateStage(run.id, stage.id, {
       version: run.version,
       ...(confirmed ? { confirmReleasedOverwrite: true as const } : {}),
+      ...allowResync,
     });
     invalidate(qk.series());
     invalidate(qk.seasonRuns());
@@ -1112,6 +1174,14 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       {toastNode}
+      {resyncAsk && (
+        <ResyncDialog
+          error={resyncAsk.error}
+          action={resyncAsk.action}
+          onCancel={() => answerResync(false)}
+          onConfirm={() => answerResync(true)}
+        />
+      )}
       {showHelp && (
         <HelpModal
           onClose={() => setShowHelp(false)}
@@ -1209,6 +1279,8 @@ function Shell({
   const veteransOn = useModule('veterans');
   const cqiOn = useModule('cqi');
   const complianceOn = useModule('compliance');
+  // Medicoach fixture/result sync (ADR 0016): the admin "Medicoach sync" page.
+  const medicoachSyncOn = useFeature('medicoachSync');
   const clearancesOn = useModule('clearances');
 
   // ── Derive clubId from URL ──
@@ -1333,6 +1405,55 @@ function Shell({
   const allReviews = allReviewsQuery.data ?? [];
   const allVeteransRequests = allVeteransRequestsQuery.data ?? [];
   const signupLink = signupLinkQuery.data?.clubSignupLink ?? null;
+
+  // ── Umpire allocation (admin) ──
+  // The registry with contacts; appointments ride on GET /series as each fixture's
+  // `officials`, so saving one refetches the series list rather than a separate query.
+  // Admins get the full registry; club members (cricket) the names-only list the captain's
+  // report's "a different umpire stood" picker offers.
+  const umpiresQuery = useQuery({
+    queryKey: qk.umpires(),
+    queryFn: api.getUmpires,
+    enabled: role === 'admin' || vertical.sport === 'cricket',
+  });
+  const allUmpires = umpiresQuery.data ?? [];
+  // Captain's reports (union office view + the Umpires page's rating averages).
+  const captainsReportsQuery = useQuery({
+    queryKey: qk.captainsReports(),
+    queryFn: () => api.getCaptainsReports(),
+    enabled: role === 'admin' && vertical.sport === 'cricket',
+  });
+  const allCaptainsReports = captainsReportsQuery.data ?? [];
+  function saveOfficials(seriesId: string, fixtureId: string, umpireIds: string[]) {
+    return withToast(
+      () => api.putFixtureOfficials(seriesId, fixtureId, umpireIds),
+      'Could not save the umpires',
+    ).then(() => invalidate(qk.series()));
+  }
+  function createUmpire(body: Partial<Umpire>): Promise<Umpire> {
+    return withToast(() => api.createUmpire(body), 'Could not add the umpire').then((u) => {
+      invalidate(qk.umpires());
+      return u;
+    });
+  }
+  function patchUmpire(id: string, body: Partial<Umpire>) {
+    return withToast(() => api.patchUmpire(id, body), 'Could not save the umpire').then(() => {
+      invalidate(qk.umpires());
+      invalidate(qk.series());
+    });
+  }
+  function mergeUmpire(sourceId: string, targetId: string) {
+    // An umpire already merged elsewhere (a stale page) says where it went, and the 409
+    // refreshes the list so its row shows "Merged into …".
+    return withToast(() => api.mergeUmpire(sourceId, targetId), 'Could not merge the umpires', {
+      errorMessage: mergeErrorMessage,
+      invalidate: [qk.umpires(), qk.series()],
+    }).then((res) => {
+      toastShow(`Merged — ${res.repointed} appointment(s) moved to ${res.target.displayName}`);
+      invalidate(qk.umpires());
+      invalidate(qk.series());
+    });
+  }
 
   // ── Derive view from URL ──
   let view;
@@ -2332,6 +2453,23 @@ function Shell({
       num: adminOpenPostponements || undefined,
       dot: adminOpenPostponements ? 'gold' : 'teal',
     },
+    // Umpires and captain's reports are cricket modules (the union's umpire panel).
+    ...(vertical.sport === 'cricket'
+      ? [
+          {
+            v: 'umpires',
+            label: 'Umpires',
+            icon: Icon.Whistle,
+            num: allUmpires.filter((u) => u.active).length || undefined,
+          },
+          {
+            v: 'captains_reports',
+            label: "Captain's reports",
+            icon: Icon.Form,
+            num: allCaptainsReports.filter((r) => r.status === 'pending').length || undefined,
+          },
+        ]
+      : []),
     ...(clearancesOn
       ? [
           {
@@ -2361,6 +2499,7 @@ function Shell({
           },
         ]
       : []),
+    ...(medicoachSyncOn ? [{ v: 'medicoach_sync', label: 'Medicoach sync', icon: Icon.Live }] : []),
     { v: 'team', label: 'Team & Access', icon: Icon.Users, num: users.length || undefined },
   ].sort((a, b) => a.label.localeCompare(b.label));
 
@@ -2453,13 +2592,18 @@ function Shell({
                   : 'muted',
             num: myPostponementAttention || (hasReleased ? 'NEW' : undefined),
           },
+          // Post-match umpire ratings (the union's Captain's Report on Umpires).
+          ...(vertical.sport === 'cricket'
+            ? [{ v: 'captains-report', label: "Captain's Report", icon: Icon.Whistle }]
+            : []),
           { v: '_help', label: 'Need Help?', icon: Icon.Mail, action: () => setShowHelp(true) },
         ].sort((a, b) => a.label.localeCompare(b.label))
       : [];
 
   const nav = role === 'admin' ? adminNav : clubNav;
   // The league drill-down is a sub-view of Insights — keep its nav item lit.
-  const navView = view === 'insights_league' ? 'insights' : view;
+  const navView =
+    view === 'insights_league' ? 'insights' : view === 'umpire_upload' ? 'umpires' : view;
   const orgName = branding?.name ?? 'Smart Club';
   const orgFooter = branding?.copy?.footer ?? 'Powered by Medicoach';
 
@@ -2669,6 +2813,64 @@ function Shell({
             onRebaseSeasonRun={rebaseSeasonRun}
             onFetchSeasonRun={fetchSeasonRun}
             onGenerateStageSeries={generateStageSeries}
+            umpires={allUmpires}
+            onSaveOfficials={saveOfficials}
+            onCreateUmpire={(displayName) => createUmpire({ displayName })}
+          />
+        );
+      if (view === 'umpires' && vertical.sport === 'cricket')
+        return (
+          <AdminUmpiresView
+            umpires={allUmpires}
+            allSeries={allSeries}
+            loading={umpiresQuery.isLoading}
+            onCreate={createUmpire}
+            onPatch={patchUmpire}
+            onMerge={mergeUmpire}
+            onUpload={() => gotoAdminView('umpire_upload')}
+            reports={allCaptainsReports}
+          />
+        );
+      if (view === 'umpire_upload' && vertical.sport === 'cricket')
+        return (
+          <UmpireAppointmentsUpload
+            onBack={() => gotoAdminView('umpires')}
+            onDone={() => {
+              invalidate(qk.umpires());
+              invalidate(qk.series());
+            }}
+          />
+        );
+      if (view === 'medicoach_sync' && medicoachSyncOn)
+        return (
+          <AdminMedicoachSyncView
+            allSeries={allSeries}
+            onEditFixture={(seriesId) =>
+              navigate(`/admin/fixtures?series=${encodeURIComponent(seriesId)}`)
+            }
+            onOpenSeries={(seriesId) =>
+              navigate(`/admin/fixtures?series=${encodeURIComponent(seriesId)}`)
+            }
+            onToast={(message, tone) => toastShow(message, tone)}
+          />
+        );
+      if (view === 'captains_reports' && vertical.sport === 'cricket')
+        return (
+          <AdminCaptainsReportsView
+            reports={allCaptainsReports}
+            loading={captainsReportsQuery.isLoading}
+            umpires={allUmpires}
+            onOpenClub={setActiveClub}
+            onCreateUmpire={(displayName) => createUmpire({ displayName })}
+            onAttribute={(reportId, index, umpireId, action) =>
+              withToast(
+                () => api.attributeCaptainsReportUmpire(reportId, index, { umpireId, action }),
+                'Could not attribute the umpire',
+              ).then((r) => {
+                invalidate(qk.captainsReports());
+                return r;
+              })
+            }
           />
         );
       if (view === 'clearances')
@@ -2802,6 +3004,19 @@ function Shell({
             onDeclineVeteransRequest={declineVeteransRequest}
             busyVeteransId={busyVeteransId}
             districts={allDistricts}
+          />
+        );
+      }
+      if (view === 'captains-report' && vertical.sport === 'cricket') {
+        return (
+          <CaptainsReportView
+            club={activeClub}
+            allSeries={allSeries}
+            clubs={clubs}
+            players={players}
+            directory={clubDirectory}
+            umpires={allUmpires}
+            toast={toastShow}
           />
         );
       }

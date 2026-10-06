@@ -17,7 +17,7 @@ import ExcelJS from 'exceljs';
 import type { Club, League, PlayerRegistration } from '../src/types.js';
 
 // Env must be set BEFORE importing repo/app — repo reads TABLE_NAME at module load.
-const DDB_PORT = 4663; // unique: after chair-register (4661)
+const DDB_PORT = 4677; // unique: after chair-register (4675)
 const TABLE = 'SmartClubChairRosterTest';
 process.env.TABLE_NAME = TABLE;
 process.env.DYNAMO_ENDPOINT = `http://localhost:${DDB_PORT}`;

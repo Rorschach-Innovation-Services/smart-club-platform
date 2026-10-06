@@ -312,3 +312,38 @@ describe('fixture reminder email', () => {
     assert.doesNotMatch(html, /<a /);
   });
 });
+
+describe("captainsReportDueEmailContent · the captain's report link", () => {
+  const input = {
+    to: 'captain@example.com',
+    recipientName: 'Sanele',
+    recipientKind: 'captain' as const,
+    clubName: 'Umzinto CC',
+    matchLine: 'Umzinto CC v African Warriors',
+    matchDateText: 'Sun 4 Oct 2026',
+    expiresText: 'Sunday, 11 Oct',
+    link: 'https://club.example.com/r/tok.sig',
+    orgName: 'Dolphins',
+  };
+
+  test('says the draft can be saved, it submits once, and when the link expires', async () => {
+    const { captainsReportDueEmailContent } = await import('../src/notify/email.js');
+    const { text, html } = captainsReportDueEmailContent(input);
+    assert.match(text, /You can save a draft and submit once\. Link expires Sunday, 11 Oct\./);
+    assert.match(html, /You can save a draft and submit once\. Link expires Sunday, 11 Oct\./);
+    assert.doesNotMatch(text, /works once/);
+  });
+
+  test('a reminder says so in the subject and the body', async () => {
+    const { captainsReportDueEmailContent } = await import('../src/notify/email.js');
+    const { subject, text } = captainsReportDueEmailContent({ ...input, reminder: true });
+    assert.match(subject, /^Reminder: /);
+    assert.match(text, /still open/);
+  });
+
+  test('a forwarded report names the chair who sent it on', async () => {
+    const { captainsReportDueEmailContent } = await import('../src/notify/email.js');
+    const { text } = captainsReportDueEmailContent({ ...input, forwardedBy: 'Uma Chair' });
+    assert.match(text, /Uma Chair asked you to complete/);
+  });
+});

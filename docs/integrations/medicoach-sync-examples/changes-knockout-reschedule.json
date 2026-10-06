@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "tenant": "dolphins",
+  "nextCursor": "2026-11-20T09:00:00.000Z",
+  "hasMore": false,
+  "fixtures": [
+    {
+      "ref": "smartclub:dolphins:fixture:recipe:premier:t20:sf1",
+      "syncStamp": "2026-11-20T09:00:00.000Z",
+      "schedule": {
+        "scheduledTime": "2026-11-29T10:00:00+02:00",
+        "timeTbc": false,
+        "dateTbc": false,
+        "venue": "Kingsmead Oval",
+        "postponed": false,
+        "cancelled": false,
+        "changedAt": "2026-11-20T09:00:00.000Z"
+      },
+      "teams": {
+        "homeRef": "smartclub:dolphins:team:premier:crusaders",
+        "awayRef": "smartclub:dolphins:team:premier:harlequins"
+      },
+      "result": null,
+      "resultClearedAt": null
+    },
+    {
+      "ref": "smartclub:dolphins:fixture:s-planb-veterans-premier-t20-1:f2",
+      "syncStamp": "2026-11-19T06:10:00.000Z",
+      "schedule": {
+        "scheduledTime": null,
+        "timeTbc": true,
+        "dateTbc": true,
+        "venue": null,
+        "postponed": true,
+        "cancelled": false,
+        "changedAt": "2026-11-19T06:10:00.000Z"
+      },
+      "teams": { "homeRef": null, "awayRef": null },
+      "result": null,
+      "resultClearedAt": null
+    }
+  ]
+}

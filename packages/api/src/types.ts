@@ -64,6 +64,15 @@ export type {
   Weekday,
 };
 export { TEAM_ID_PREFIX } from '../../engine/src/types.js';
+export type {
+  Umpire,
+  UmpirePublic,
+  OfficialRef,
+  FixtureOfficials,
+  FixtureOfficialsRecord,
+} from '../../engine/src/umpires.js';
+export type { ReportUmpireEntry, AppointedUmpire } from '../../engine/src/captainsReport.js';
+import type { ReportUmpireEntry, AppointedUmpire } from '../../engine/src/captainsReport.js';
 
 export type Role = 'admin' | 'rep' | 'operator';
 
@@ -147,6 +156,8 @@ export type DocFormat =
   | 'xls'
   | 'xlsx'
   | 'ods'
+  | 'ppt'
+  | 'pptx'
   | 'jpg'
   | 'jpeg'
   | 'png';
@@ -316,9 +327,19 @@ export interface TenantConfig {
    * Per-tenant feature flags, read via hasFeature() (features.ts) so each flag
    * carries its own default. Known flags: 'whatsappInvites' (default TRUE —
    * shared WABA templates are dolphins-flavored, so new clients launch
-   * email-only), 'selfServeBranding' (reserved, default false).
+   * email-only), 'selfServeBranding' (reserved, default false), 'medicoachSync' (default
+   * false — the medicoach fixture/result sync puller runs for this tenant, ADR 0016).
    */
   features?: Record<string, boolean>;
+  /**
+   * Third-party integration settings. Operator-only (ADR 0006): PUT /tenant/config strips
+   * it, only PUT /platform/tenants/:slug writes it.
+   *  - medicoach.goLiveDate (YYYY-MM-DD): results for matches before this date never open
+   *    captain's reports (Slice 2.3); stored now, read by the result hook.
+   */
+  integrations?: {
+    medicoach?: { goLiveDate?: string };
+  };
   /**
    * Operator "setup complete" milestone (D6) — informational only (the client is
    * publicly live from creation and every setting stays editable). Present ⇒ an
@@ -1150,4 +1171,314 @@ export interface RegistrationReview {
   resolvedAt?: string;
   resolvedBy?: string;
   version: number;
+}
+
+/**
+ * A medicoach-owned fixture result (ADR 0016), stored as its own FIXRESULT# item per fixture
+ * so a whole-series PATCH can never overwrite or drop it. Written ONLY by the sync puller.
+ *
+ * Ordering: `orderAt` is the newest of `recordedAt` / `clearedAt` ever applied. A pulled
+ * result is stored only when its `recordedAt` is newer, a clear only when its
+ * `resultClearedAt` is newer — so an out-of-order or replayed change can never win. A
+ * cleared result keeps its item as a tombstone (`cleared: true`, no score fields).
+ *
+ * No player ref is stored here (POPIA): a pulled result's `captainRef` lives only on the
+ * REPORTOPEN# marker while its captain's reports are pending (see `ReportOpenMarker`).
+ */
+export interface StoredFixtureResult {
+  seriesId: string;
+  fixtureId: string;
+  /** The fixture ref medicoach sent (fixture refs carry no personal data). */
+  ref: string;
+  orderAt: string;
+  cleared?: boolean;
+  clearedAt?: string;
+  homeScore?: string | null;
+  awayScore?: string | null;
+  summary?: string | null;
+  winner?: 'home' | 'away' | 'tie' | 'none' | null;
+  method?: string | null;
+  noResult?: boolean;
+  resultSource?: 'live' | 'manual' | 'import';
+  recordedAt?: string;
+  scoringSide?: 'home' | 'away' | null;
+  medicoachMatchUrl?: string | null;
+  storedAt: string;
+}
+
+/** The read-only result joined onto a fixture in GET /series (no captain/player data). */
+export interface FixtureResultView {
+  homeScore: string | null;
+  awayScore: string | null;
+  summary: string | null;
+  winner: 'home' | 'away' | 'tie' | 'none' | null;
+  method: string | null;
+  noResult: boolean;
+  source: 'live' | 'manual' | 'import';
+  recordedAt: string;
+  medicoachMatchUrl: string | null;
+}
+
+/** One SYNCLOG# audit row: counts and outcomes only — never player refs. */
+export interface SyncLogEntry {
+  id: string;
+  at: string;
+  /** `write`/`cli`: a smart-club series write (admin/API or a CLI), not a sync run. */
+  trigger: 'cron' | 'manual' | 'write' | 'cli';
+  outcome: 'ok' | 'error';
+  pages: number;
+  fixtures: number;
+  counts: {
+    resultsStored: number;
+    resultsStale: number;
+    resultsCleared: number;
+    unmapped: number;
+    slotsFilled: number;
+    scheduleDiffers: number;
+    /** Inbound schedule changes applied (medicoach newer). Absent on pre-Slice-3 rows. */
+    scheduleApplied?: number;
+    /** Inbound schedule changes dropped because smart club's change is newer. */
+    scheduleStale?: number;
+    /** Inbound schedule changes held as SYNCCONFLICT# for admin review. */
+    scheduleConflicts?: number;
+  };
+  /** Fixture refs whose medicoach schedule differs from smart club's. */
+  scheduleDiffersRefs?: string[];
+  /** Refs whose inbound schedule was dropped as older than smart club's (most-recent-wins). */
+  scheduleStaleRefs?: string[];
+  /**
+   * `push` rows record an outbox flush (Slice 4); `new-fixtures` a write that added fixtures
+   * to a mapped series which medicoach does not have (needs a bundle top-up); absent ⇒ a pull.
+   */
+  kind?: 'pull' | 'push' | 'new-fixtures';
+  /** Refs of the new fixtures (`new-fixtures` rows only). Fixture refs carry no PII. */
+  newFixtureRefs?: string[];
+  /** Outbox flush outcome counts (push rows only). */
+  push?: SchedulePushCounts;
+  /** Technical failure text (field paths and statuses only — never a payload value). */
+  error?: string;
+  /** `error` in plain language for the admin page (medicoach-sync/explain.ts). */
+  message?: string;
+}
+
+/** SYNCHEALTH#<tenant> — the last successful and the last failed sync run (admin page). */
+export interface SyncHealth {
+  lastAttemptAt?: string;
+  /** A pull that completed (dry runs never count). */
+  lastSuccessAt?: string;
+  lastErrorAt?: string;
+  /** Technical text (the "Details" toggle); the page explains it with explainSyncError. */
+  lastError?: string;
+}
+
+/** What one outbox flush did (Slice 4). */
+export interface SchedulePushCounts {
+  sent: number;
+  applied: number;
+  stale: number;
+  unchanged: number;
+  unmapped: number;
+  errors: number;
+}
+
+/** A smart-club fixture schedule in the wire shape (`SyncSchedule`, contract v1). */
+export interface SyncScheduleSnapshot {
+  scheduledTime: string | null;
+  timeTbc: boolean;
+  dateTbc: boolean;
+  venue: string | null;
+  postponed: boolean;
+  cancelled: boolean;
+  changedAt: string;
+}
+
+/**
+ * PENDINGSYNC#<ref> — the latest smart-club schedule for one mapped fixture, waiting to be
+ * pushed to medicoach. Collapsed per ref (a newer edit overwrites the row and resets the
+ * attempt count); deleted only when medicoach answers a success status for THIS snapshot.
+ */
+export interface PendingScheduleSync {
+  ref: string;
+  seriesId: string;
+  fixtureId: string;
+  schedule: SyncScheduleSnapshot;
+  origin: ScheduleChangeOrigin;
+  enqueuedAt: string;
+  attempts: number;
+  lastError?: string;
+  lastAttemptAt?: string;
+  /**
+   * The series withholds venue and/or time from clubs (ADR 0011), so this snapshot must not
+   * reach medicoach's public match centre yet: the flush skips it until the series is fully
+   * revealed (the reveal re-queues the series with its real schedule).
+   */
+  heldUntilReveal?: boolean;
+}
+
+/** Who changed a fixture's schedule. `medicoach` = the Slice 3 inbound apply (never echoed). */
+export type ScheduleChangeOrigin = 'admin' | 'generate' | 'cli' | 'medicoach';
+
+/**
+ * SYNCCONFLICT#<ref> — a medicoach schedule change held for admin review instead of applied.
+ * The latest proposal per ref wins; `notifiedAt` records the one admin email per proposal.
+ */
+export interface SyncConflict {
+  ref: string;
+  seriesId: string;
+  fixtureId: string;
+  /** Display context for the inbox (names, never refs of people). */
+  seriesName?: string;
+  matchLine?: string;
+  current: { date?: string; time?: string; venue?: string; status?: string; dateTbc?: boolean };
+  proposed: SyncScheduleSnapshot;
+  fields: string[];
+  reason: 'venue-unresolved' | 'clash';
+  /** Human lines: the clashes, or the venue name that did not resolve. */
+  detail: string[];
+  detectedAt: string;
+  notifiedAt?: string;
+}
+
+/** REPORTOPEN#<ref> — captain's reports still to open + notify for a stored result. */
+export interface ReportOpenMarker {
+  ref: string;
+  seriesId: string;
+  fixtureId: string;
+  /** The stored result's recordedAt this marker was written for. */
+  recordedAt: string;
+  createdAt: string;
+  attempts: number;
+  lastError?: string;
+  lastAttemptAt?: string;
+  /**
+   * The result's captain player ref (a hashed ID number — PII), kept ONLY while the reports
+   * are pending so a retry can still address the captain. Deleted with the marker; never
+   * returned by any route, logged or written to SYNCLOG.
+   */
+  captainRef?: string | null;
+}
+
+// ── Captain's reports (ADR 0016, Slice 2) ──
+
+export type CaptainsReportStatus = 'pending' | 'submitted' | 'void';
+
+/**
+ * Who the report link went to. `memberId` is an OPAQUE random id minted when the report
+ * opened (never a player's natural key — that is a hashed ID number); the submit-once link is
+ * bound to it, so re-addressing a report kills the old link. `kind: 'portal'` marks a report
+ * a club filed by hand from the portal (no link was sent).
+ */
+export interface CaptainsReportRecipient {
+  kind: 'captain' | 'chair' | 'portal';
+  memberId: string;
+  name: string;
+  /** Set when the chair sent the report on to the match captain ("Send to captain"). */
+  forwardedBy?: { name: string; via: 'link' | 'portal'; at: string };
+}
+
+/**
+ * Why a notice channel was not sent: `no-contact` (no email AND no cell on file), `no-email`,
+ * `no-cell`, `dry-run` (NOTIFY_DRY_RUN / no provider credentials), `template-pending` (no
+ * approved WhatsApp template), `send-failed` (the provider refused or errored).
+ */
+export type CaptainsReportDeliveryReason =
+  | 'no-contact'
+  | 'no-email'
+  | 'no-cell'
+  | 'dry-run'
+  | 'template-pending'
+  | 'send-failed';
+
+/**
+ * One channel of one notice about a report (the opening, a chair's forward, the reminder).
+ * Never carries an address. `messageId` (the provider's id) is kept server-side only: the
+ * WhatsApp status webhook matches on it; views strip it.
+ */
+export interface CaptainsReportDelivery {
+  channel: 'email' | 'whatsapp';
+  status: 'sent' | 'failed' | 'skipped';
+  reason?: CaptainsReportDeliveryReason;
+  at: string;
+  messageId?: string;
+  purpose: 'opened' | 'forwarded' | 'reminder';
+  recipientKind: 'captain' | 'chair';
+  /** Meta's latest delivery status for a sent WhatsApp message (status webhook). */
+  providerStatus?: 'sent' | 'delivered' | 'read' | 'failed';
+  providerAt?: string;
+  /** Meta's error title for a failed WhatsApp message (no address, no body). */
+  providerError?: string;
+}
+
+/**
+ * A captain's report: `CAPREPORT#<seriesId>#<fixtureId>#<clubId>`, one per fixture side.
+ * Opened `pending` when medicoach reports a result (or created by hand from the portal),
+ * `submitted` exactly once, `void` when the result is cleared before submission. There is no
+ * due date: the link expires 7 days after the match and the club can file from the portal
+ * at any time.
+ */
+export interface CaptainsReport {
+  /** `<seriesId>~<fixtureId>~<clubId>` — URL-safe and deterministic. */
+  id: string;
+  seriesId: string;
+  fixtureId: string;
+  clubId: string;
+  status: CaptainsReportStatus;
+  /**
+   * `auto` opened by a pulled result; `manual` filed from the portal for a listed fixture;
+   * `manual-unlisted` filed for a match that is not in the fixture list (seriesId `unlisted`).
+   */
+  source: 'auto' | 'manual' | 'manual-unlisted';
+  /** The medicoach sync ref for the fixture (fixture refs carry no personal data). */
+  fixtureRef?: string;
+  matchDate: string;
+  /** LEGACY: reports opened before the due date was dropped carry one; ignored, never served. */
+  deadline?: string;
+  side: 'home' | 'away';
+  clubName: string;
+  opponentName: string;
+  competition: string;
+  venue?: string;
+  resultSummary?: string | null;
+  /** The appointed umpires when the report opened (FIXOFFICIALS#). */
+  umpiresSnapshot: AppointedUmpire[];
+  recipient: CaptainsReportRecipient;
+  captainName: string;
+  umpires: ReportUmpireEntry[];
+  general: string;
+  declaration?: boolean;
+  /** `CR-YYYY-NNNN`, assigned from the per-tenant counter at submission. */
+  ref?: string;
+  submittedBy?: string;
+  submittedVia?: 'portal' | 'link';
+  submittedAt?: string;
+  voidedAt?: string;
+  /** Set when the result behind a SUBMITTED report was cleared — the admin should look. */
+  flagged?: { reason: string; at: string };
+  /**
+   * When the emailed/WhatsApp link stops working (ISO): 23:59:59 SAST on the later of the
+   * match date + 7 days and the day the result first arrived + 3 days. Absent on reports
+   * opened before it was stored (then: match date + 7 days).
+   */
+  linkExpiresAt?: string;
+  /** Per-channel outcome of every notice sent about this report (no addresses). */
+  deliveries?: CaptainsReportDelivery[];
+  /** When a notice about this report first reached someone (a channel `sent`). */
+  notifiedAt?: string;
+  /** When the one pre-expiry reminder went out. */
+  reminderSentAt?: string;
+  /**
+   * After "Send to captain": the chair's own link id, which keeps working until the report
+   * is submitted (first submit wins). Server-only — never served.
+   */
+  chairMemberId?: string;
+  /** How many times the chair has sent the report on (max 3). */
+  forwardCount?: number;
+  /**
+   * The captain recipient's notify contact, kept so the reminder can reach them (a captain's
+   * roster key is a hashed ID number and is never stored). Server-only — never served or
+   * logged; deleted with the report.
+   */
+  recipientContact?: { email?: string; cell?: string };
+  createdAt: string;
+  updatedAt: string;
 }

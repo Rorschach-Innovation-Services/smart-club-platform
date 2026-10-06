@@ -103,7 +103,7 @@ export function ReleaseDialog({
     {
       field: 'venue',
       label: 'Withhold venues',
-      hint: "Clubs see 'Venue to be confirmed'; distance and travel cost are hidden until you reveal venues.",
+      hint: "Clubs see 'Venue to be confirmed'; distance is hidden until you reveal venues.",
     },
     {
       field: 'time',

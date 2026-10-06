@@ -33,8 +33,10 @@ import {
   JUNK_GROUND,
   DEFAULT_VENUE_ALIASES,
   venueAliasesFor,
+  isClashExempt,
 } from './venue-clash.js';
 import type { Series, Venue } from './types.js';
+import { writeSeriesFromSnapshot } from './medicoach-sync/cli-write.js';
 
 const TENANT = 'dolphins';
 
@@ -238,6 +240,10 @@ async function main() {
     repo.listClubs(TENANT),
   ]);
 
+  // The series exactly as this run read them: the version every write is conditional on, and
+  // the baseline of the medicoach schedule diff (the working copies below are mutated).
+  const originalById = new Map(allSeries.map((x) => [String(x.id), structuredClone(x)]));
+
   const clubsById = new Map(clubs.map((c) => [c.id, c]));
   const byNorm = buildVenueIndex(venues);
   const registryMiss = new Set<string>();
@@ -300,7 +306,7 @@ async function main() {
     const out: Booking[] = [];
     for (const s of allSeries) {
       for (const f of (s.fixtures as StoredFixture[]) ?? []) {
-        if (!f.date || f.status === 'cancelled') continue;
+        if (!f.date || isClashExempt(f)) continue;
         const ground = effectiveGround(s, f);
         if (!ground) continue;
         out.push({
@@ -570,11 +576,19 @@ async function main() {
   await writeFile(backupPath, JSON.stringify(backup, null, 2));
   console.log(`\nBackup written: ${backupPath} (${backup.series.length} series)`);
 
+  let drifted = 0;
   for (const id of dirtySeriesIds) {
     const s = allSeries.find((x) => String(x.id) === id)!;
-    s.version = (Number(s.version) || 1) + 1;
-    await repo.putSeries(TENANT, s);
+    // Version-checked against this run's read; diff original-read → written (ADR 0016).
+    if ((await writeSeriesFromSnapshot(repo, TENANT, originalById.get(id), s)) === 'drifted') {
+      drifted++;
+      continue;
+    }
     console.log(`wrote series ${s.id} v${s.version}`);
+  }
+  if (drifted) {
+    process.exitCode = 1;
+    console.error(`\n${drifted} series changed while this ran and were NOT written — re-run.`);
   }
   console.log('Done.');
 }

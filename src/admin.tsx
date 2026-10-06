@@ -93,6 +93,7 @@ import type {
   SeasonRun,
   Series,
   Clash,
+  Umpire,
   Venue,
   WithheldField,
 } from './types';
@@ -133,6 +134,7 @@ import { PlayerDetailModal } from './PlayerDetailModal';
 import { RegLinkModal } from './RegLinkModal';
 import { ReleaseDialog } from './ReleaseDialog';
 import { ClashPanel } from './ClashPanel';
+import { UmpireCell, doubleBookingIndex } from './umpires';
 import { ClubNameModal } from './ClubNameModal';
 import {
   Icon,
@@ -208,6 +210,48 @@ type SelectedPlayerState = PlayerRegistration & { clubName?: string };
    Only the operator-facing moves get a pill — a plain allocated ground or a Union T20
    slot is the normal case and gets none. Prefixes match what the allocator/import write
    (see packages/engine/src/venues.ts and packages/api/src/import-planb-fixtures.ts). */
+/**
+ * A fixture's display status. A medicoach result (joined onto the fixture by GET /series,
+ * ADR 0016) makes it completed whatever the stored status says.
+ */
+function fixtureStatus(f: { status?: string; result?: unknown }): string {
+  return f.result ? 'completed' : f.status || 'scheduled';
+}
+
+interface FixtureResultView {
+  homeScore: string | null;
+  awayScore: string | null;
+  summary: string | null;
+  noResult: boolean;
+  medicoachMatchUrl: string | null;
+}
+
+/** Read-only medicoach result under a fixture's status pill: score, summary, link. */
+function FixtureResult({ result }: { result: FixtureResultView }) {
+  const score =
+    result.homeScore || result.awayScore
+      ? `${result.homeScore ?? '–'} v ${result.awayScore ?? '–'}`
+      : null;
+  return (
+    <div className="fix-row-result" aria-label="Result from medicoach">
+      {score && <div className="fix-row-result-score">{score}</div>}
+      {(result.summary || result.noResult) && (
+        <div className="fix-row-result-summary">{result.summary || 'No result'}</div>
+      )}
+      {result.medicoachMatchUrl && (
+        <a
+          className="fix-row-result-link"
+          href={result.medicoachMatchUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          View in medicoach
+        </a>
+      )}
+    </div>
+  );
+}
+
 function venueReasonPill(reason?: string, status?: string): string | null {
   if (!reason || status === 'home') return null;
   if (reason.startsWith(VENUE_REASON_PREFIX.movedToAvoid)) return 'moved';
@@ -241,7 +285,7 @@ export type CheckClashes = (
   candidates: unknown[],
 ) => Promise<{ results: ClashResult[] }>;
 
-/* ─── AdminFixtures — series cards + drilldown fixture table with distance + travel-cost ─── */
+/* ─── AdminFixtures — series cards + drilldown fixture table with travel distance ─── */
 interface AdminFixturesProps {
   clubs: Club[];
   // `Series.fixtures` is `unknown[]` (frontend strict ratchet, deferred) and this
@@ -285,6 +329,12 @@ interface AdminFixturesProps {
   onRebaseSeasonRun?;
   onFetchSeasonRun?;
   onGenerateStageSeries?;
+  /** The umpire registry (admin view, contacts included). Absent ⇒ Umpires column read-only. */
+  umpires?: Umpire[];
+  /** Appoint a fixture's umpires (own call — never the series PATCH). */
+  onSaveOfficials?: (seriesId: string, fixtureId: string, umpireIds: string[]) => Promise<unknown>;
+  /** Add an umpire from the picker's "add umpire" option. */
+  onCreateUmpire?: (displayName: string) => Promise<Umpire>;
 }
 
 // Export row shape shared by the per-series and whole-season exports — the same
@@ -350,7 +400,6 @@ export function seriesScheduleRows(
       Suburb: home?.ground?.suburb || '',
       Away: away?.name || 'TBD',
       'Distance (km)': hasGeo && cost ? Number(cost.distanceKm.toFixed(1)) : '—',
-      'Travel (R)': hasGeo && cost ? Math.round(cost.fuelR) : '—',
       Status: f.status || 'scheduled',
     };
   });
@@ -366,7 +415,6 @@ export const SCHEDULE_COLS = [
   'Suburb',
   'Away',
   'Distance (km)',
-  'Travel (R)',
   'Status',
 ] as const;
 
@@ -446,6 +494,9 @@ export function AdminFixtures({
   onRebaseSeasonRun,
   onFetchSeasonRun,
   onGenerateStageSeries,
+  umpires = [],
+  onSaveOfficials,
+  onCreateUmpire,
 }: AdminFixturesProps) {
   const vt = useVertical().terms;
   const copy = useCopy();
@@ -456,7 +507,13 @@ export function AdminFixtures({
   // Owned here, not in SeasonRunsPanel, so its own button and the header button share it.
   const [launcherOpen, setLauncherOpen] = useStateA(false);
   const [viewerOpen, setViewerOpen] = useStateA(false);
-  const [activeId, setActiveId] = useStateA(allSeries[0]?.id);
+  // `?series=<id>` (from the Medicoach sync page) opens that series; else the first one.
+  const [activeId, setActiveId] = useStateA(
+    () =>
+      (typeof window !== 'undefined'
+        ? new URLSearchParams(window.location.search).get('series')
+        : null) ?? allSeries[0]?.id,
+  );
   const active = allSeries.find((s) => s.id === activeId) || allSeries[0];
   const [confirm, setConfirm] = useStateA<ConfirmDialogState | null>(null); // shared confirmation modal state (recall/reveal)
   const [releaseFor, setReleaseFor] = useStateA<ReleaseSeriesState | null>(null); // series whose ReleaseDialog is open
@@ -467,10 +524,9 @@ export function AdminFixtures({
   // The tenant's travel-cost defaults (ADR 0014); a series' own values win.
   const travel = resolveCompetitionDefaults(tenantConfig).travel;
 
-  // Aggregate distance + fuel per series
+  // Aggregate distance per series
   const seriesAgg = (s) => {
-    let totalKm = 0,
-      totalCost = 0;
+    let totalKm = 0;
     s.fixtures.forEach((f) => {
       const home = teamBy(s, f.home),
         away = teamBy(s, f.away);
@@ -478,9 +534,8 @@ export function AdminFixtures({
       const t = seriesTravel(s, travel);
       const c = fixtureCost(home, away, t.costPerKm, t.carsPerAwayTrip, fixtureVenue(f));
       totalKm += c.roundTripKm;
-      totalCost += c.fuelR;
     });
-    return { totalKm, totalCost };
+    return { totalKm };
   };
 
   function exportSchedule(s: Series) {
@@ -561,7 +616,7 @@ export function AdminFixtures({
       title: `Reveal ${noun} to all ${vt.clubs}?`,
       body:
         field === 'venue'
-          ? `Every ${vt.club} in ${s.name} will see the allocated grounds, distance and travel cost immediately. This can't be withdrawn without recalling the whole release.`
+          ? `Every ${vt.club} in ${s.name} will see the allocated grounds and travel distance immediately. This can't be withdrawn without recalling the whole release.`
           : `Every ${vt.club} in ${s.name} will see the start times immediately. This can't be withdrawn without recalling the whole release.`,
       yesLabel: field === 'venue' ? 'Reveal venues' : 'Reveal times',
       onYes: () => {
@@ -591,7 +646,7 @@ export function AdminFixtures({
             Every league runs a season, stage by stage, on the setup your platform operator created
             for it. A one-off cup or festival is a season too: your operator can add a One-off
             tournament structure for it. Home venues flow from the affiliation form. Travel distance
-            and fuel cost are calculated for every away fixture.{' '}
+            is calculated for every away fixture.{' '}
             <a className="help-link" href={GUIDE_URL} target="_blank" rel="noopener noreferrer">
               Open the full guide
             </a>
@@ -745,12 +800,6 @@ export function AdminFixtures({
                         {Math.round(agg.totalKm).toLocaleString()}
                       </div>
                     </div>
-                    <div className="series-card-stat">
-                      <div className="series-card-stat-l">Travel</div>
-                      <div className="series-card-stat-n" style={{ color: 'var(--green)' }}>
-                        R {Math.round(agg.totalCost).toLocaleString()}
-                      </div>
-                    </div>
                   </div>
                   {seriesOrigin(s) && (
                     // Its own click target: opening the explainer must not also switch
@@ -783,6 +832,10 @@ export function AdminFixtures({
               allSeasonRuns={allSeasonRuns}
               onAllocateVenues={onAllocateVenues}
               onCheckClashes={onCheckClashes}
+              allSeries={allSeries}
+              umpires={umpires}
+              onSaveOfficials={onSaveOfficials}
+              onCreateUmpire={onCreateUmpire}
             />
           )}
         </>
@@ -1037,11 +1090,7 @@ function SeasonViewer({
                         {SCHEDULE_COLS.map((col) => (
                           <th
                             key={col}
-                            style={
-                              col === 'Distance (km)' || col === 'Travel (R)'
-                                ? { textAlign: 'right' }
-                                : undefined
-                            }
+                            style={col === 'Distance (km)' ? { textAlign: 'right' } : undefined}
                           >
                             {col}
                           </th>
@@ -1061,7 +1110,6 @@ function SeasonViewer({
                             <td>{row.Suburb}</td>
                             <td>{row.Away}</td>
                             <td style={{ textAlign: 'right' }}>{row['Distance (km)']}</td>
-                            <td style={{ textAlign: 'right' }}>{row['Travel (R)']}</td>
                             <td>
                               <span className={`fix-status ${row.Status}`}>{row.Status}</span>
                             </td>
@@ -1114,11 +1162,33 @@ export function FixtureTable({
   allSeasonRuns = [] as SeasonRun[],
   onAllocateVenues,
   onCheckClashes,
+  // Umpire allocation: every series (for the cross-series double-booking warning), the
+  // registry, and the officials write. Without them the column renders names read-only.
+  allSeries = undefined as Series[] | undefined,
+  umpires = [] as Umpire[],
+  onSaveOfficials = undefined as
+    | ((seriesId: string, fixtureId: string, umpireIds: string[]) => Promise<unknown>)
+    | undefined,
+  onCreateUmpire = undefined as ((displayName: string) => Promise<Umpire>) | undefined,
 }) {
   const vt = useVertical().terms;
   const copy = useCopy();
   const showOvers = useVertical().sport === 'cricket';
   const clubBy = (id) => clubs.find((c) => c.id === id);
+  const umpirePool: Series[] = useMemoA(
+    () => (allSeries?.some((s) => s.id === series.id) ? allSeries : [...(allSeries ?? []), series]),
+    [allSeries, series],
+  );
+  // One pass over every appointment: which fixtures put an umpire at two grounds at once.
+  const umpireWarnings = useMemoA(
+    () =>
+      doubleBookingIndex(
+        umpirePool,
+        clubs,
+        (id) => umpires.find((u) => u.id === id)?.displayName ?? id,
+      ),
+    [umpirePool, clubs, umpires],
+  );
   // Resolve a fixture id → team for this series (participant snapshot, else clubId).
   const teamBy = (id) => resolveTeam(series, id, clubBy);
   const [editingId, setEditingId] = useStateA<string | null>(null);
@@ -1238,21 +1308,18 @@ export function FixtureTable({
     );
     return { f, home, away, c };
   });
-  let totalKm = 0,
-    totalCost = 0;
+  let totalKm = 0;
   allRows.forEach((r) => {
     totalKm += r.c.roundTripKm;
-    totalCost += r.c.fuelR;
   });
-  const rows =
-    filter === 'all' ? allRows : allRows.filter((r) => (r.f.status || 'scheduled') === filter);
+  const rows = filter === 'all' ? allRows : allRows.filter((r) => fixtureStatus(r.f) === filter);
 
   const statusCounts = {
     all: allRows.length,
-    scheduled: allRows.filter((r) => (r.f.status || 'scheduled') === 'scheduled').length,
-    completed: allRows.filter((r) => r.f.status === 'completed').length,
-    postponed: allRows.filter((r) => r.f.status === 'postponed').length,
-    cancelled: allRows.filter((r) => r.f.status === 'cancelled').length,
+    scheduled: allRows.filter((r) => fixtureStatus(r.f) === 'scheduled').length,
+    completed: allRows.filter((r) => fixtureStatus(r.f) === 'completed').length,
+    postponed: allRows.filter((r) => fixtureStatus(r.f) === 'postponed').length,
+    cancelled: allRows.filter((r) => fixtureStatus(r.f) === 'cancelled').length,
   };
 
   return (
@@ -1281,19 +1348,6 @@ export function FixtureTable({
             <div className="fix-header-agg-n">
               <CountUp to={Math.round(totalKm)} />
               <span className="unit">km</span>
-            </div>
-          </div>
-          <div className="fix-header-agg">
-            <div className="fix-header-agg-l">Travel cost</div>
-            <div className="fix-header-agg-n">
-              R <CountUp to={Math.round(totalCost)} />
-            </div>
-          </div>
-          <div className="fix-header-agg">
-            <div className="fix-header-agg-l">@ R / km</div>
-            <div className="fix-header-agg-n">
-              R {ownTravel.costPerKm.toFixed(2)}
-              <span className="unit">× {ownTravel.carsPerAwayTrip} cars</span>
             </div>
           </div>
         </div>
@@ -1402,7 +1456,7 @@ export function FixtureTable({
               <th>Venue · Suburb</th>
               <th>Away (visitors)</th>
               <th style={{ width: 90, textAlign: 'right' }}>Distance</th>
-              <th style={{ width: 110, textAlign: 'right' }}>Travel</th>
+              <th style={{ width: 170 }}>Umpires</th>
               <th style={{ width: 110 }}>Status</th>
               <th style={{ width: 80 }}></th>
             </tr>
@@ -1436,7 +1490,7 @@ export function FixtureTable({
                   />
                 );
               }
-              const status = f.status || 'scheduled';
+              const status = fixtureStatus(f);
               return (
                 <tr
                   key={f.id}
@@ -1448,7 +1502,9 @@ export function FixtureTable({
                     <span className="fix-row-rd">R{f.round}</span>
                   </td>
                   <td>
-                    <span className="fix-row-date">{formatWeekdayDay(f.date)}</span>
+                    <span className="fix-row-date">
+                      {f.dateTbc ? 'Date TBC' : formatWeekdayDay(f.date)}
+                    </span>
                     {/* Shown only when the schedule set a start time (double-headers,
                         morning/afternoon slots) — most series have neither. "Time TBC"
                         below only appears when the series itself uses times elsewhere;
@@ -1528,18 +1584,21 @@ export function FixtureTable({
                       <span className="fix-row-dist">—</span>
                     )}
                   </td>
-                  <td style={{ textAlign: 'right' }}>
-                    {c.distanceKm > 0 ? (
-                      <span className="fix-row-cost">
-                        <span className="cur">R</span>
-                        {Math.round(c.fuelR).toLocaleString()}
-                      </span>
-                    ) : (
-                      <span className="fix-row-cost">—</span>
-                    )}
+                  <td>
+                    <UmpireCell
+                      series={series}
+                      fixture={f}
+                      allSeries={umpirePool}
+                      clubs={clubs}
+                      umpires={umpires}
+                      warnings={umpireWarnings.get(`${series.id}#${f.id}`)}
+                      onSave={onSaveOfficials}
+                      onCreate={onCreateUmpire}
+                    />
                   </td>
                   <td>
                     <span className={`fix-status ${status}`}>{status}</span>
+                    {f.result && <FixtureResult result={f.result} />}
                   </td>
                   <td>
                     <div className="fix-row-actions">
@@ -1603,10 +1662,6 @@ export function FixtureTable({
             <div className="fix-totals-l">Total km (round-trip)</div>
             <div className="fix-totals-n">{Math.round(totalKm).toLocaleString()} km</div>
           </div>
-          <div className="fix-totals-item">
-            <div className="fix-totals-l">Season fuel total</div>
-            <div className="fix-totals-n green">R {Math.round(totalCost).toLocaleString()}</div>
-          </div>
         </div>
       </div>
 
@@ -1621,8 +1676,8 @@ export function FixtureTable({
               </div>
               <div className="fix-release-text-sub">
                 Published {formatStamp(series.releasedAt)} · every club portal now shows their
-                schedule{series.withheld?.venue ? '' : ' + travel costs'}. No email or WhatsApp is
-                sent — each club shares fixtures with its players when it chooses.
+                schedule. No email or WhatsApp is sent — each club shares fixtures with its players
+                when it chooses.
               </div>
               {(series.withheld?.venue || series.withheld?.time) && (
                 <div
@@ -2199,7 +2254,11 @@ function EditFixtureRow({
               onChange={(e) => u('status', e.target.value)}
             >
               <option value="scheduled">Scheduled</option>
-              <option value="completed">Completed</option>
+              {/* Medicoach owns the result of a synced fixture (ADR 0016) — it turns
+                  completed when the result arrives, never by hand. */}
+              <option value="completed" disabled={fixture.syncMapped === true}>
+                {fixture.syncMapped ? 'Completed (set by medicoach)' : 'Completed'}
+              </option>
               <option value="postponed">Postponed</option>
               <option value="cancelled">Cancelled</option>
             </select>

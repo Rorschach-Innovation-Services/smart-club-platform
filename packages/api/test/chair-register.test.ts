@@ -17,7 +17,7 @@ import type { Server } from 'node:http';
 import type { Club, League, PlayerRegistration } from '../src/types.js';
 
 // Env must be set BEFORE importing repo/app — repo reads TABLE_NAME at module load.
-const DDB_PORT = 4661; // unique: next free odd port after the 4659 suite
+const DDB_PORT = 4675; // unique: 4661–4673 are taken (sync-break-gate, puller, umpires, captains-reports, …)
 const TABLE = 'SmartClubChairRegisterTest';
 process.env.TABLE_NAME = TABLE;
 process.env.DYNAMO_ENDPOINT = `http://localhost:${DDB_PORT}`;

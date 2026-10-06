@@ -1078,3 +1078,161 @@ export async function sendPostponementEmail(
   );
   return { messageId: res.MessageId ?? '' };
 }
+
+// ───────────────────────── Captain's report due ─────────────────────────
+
+export interface CaptainsReportDueEmailInput {
+  to: string;
+  /** Club chair cc'd when the captain is the recipient. */
+  cc?: string;
+  recipientName: string;
+  /** 'captain' → "you captained"; 'chair' → "please complete or send it to the captain". */
+  recipientKind: 'captain' | 'chair';
+  clubName: string;
+  /** "Umzinto v African Warriors" */
+  matchLine: string;
+  /** "Sun 4 Oct 2026" */
+  matchDateText: string;
+  /** When the link stops working, "Sunday, 11 Oct" (23:59 SAST that day). */
+  expiresText: string;
+  /** The submit-once link. NEVER logged. */
+  link: string;
+  orgName: string;
+  /** The one pre-expiry reminder (same link). */
+  reminder?: boolean;
+  /** The chair who sent the report on to this captain. */
+  forwardedBy?: string;
+}
+
+/** Build the captain's-report-due email. Pure — exported so tests can assert the copy. */
+export function captainsReportDueEmailContent(input: CaptainsReportDueEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { recipientName, recipientKind, clubName, matchLine, matchDateText } = input;
+  const greet = recipientName || 'there';
+  const subject = `${input.reminder ? 'Reminder: ' : ''}Captain's report open: ${matchLine} (${matchDateText})`;
+  const ask = input.forwardedBy
+    ? `${input.forwardedBy} asked you to complete ${clubName}'s captain's report for ${matchLine} on ${matchDateText}. Please rate the umpires.`
+    : recipientKind === 'captain'
+      ? `Please rate the umpires from ${clubName}'s match ${matchLine} on ${matchDateText}.`
+      : `${clubName}'s captain's report for ${matchLine} on ${matchDateText} is open. Please complete it, or use "Send to captain" on the report to pass it to the match captain.`;
+  const lead = input.reminder
+    ? `A reminder: the captain's report is still open and the link expires soon. ${ask}`
+    : ask;
+  const terms = `You can save a draft and submit once. Link expires ${input.expiresText}.`;
+  const after = 'After that, your club chair can still file the report from the club portal.';
+  const text =
+    `Hi ${greet},\n\n${lead}\n\n` +
+    `Open the report here (no sign-in needed):\n\n${input.link}\n\n` +
+    `${terms} ${after}\n\n` +
+    `Thank you,\nThe ${input.orgName} office`;
+  const e = escapeHtml;
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>Hi ${e(greet)},</p>` +
+    `<p>${e(lead)}</p>` +
+    `<p><a href="${e(input.link)}" style="color:#1D9E75;font-weight:600">Open the captain's report</a> (no sign-in needed)</p>` +
+    `<p>${e(terms)} ${e(after)}</p>` +
+    `<p>Thank you,<br/>The ${e(input.orgName)} office</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+/** Send the captain's-report-due email (the link rides in the body; never logged). */
+export async function sendCaptainsReportDueEmail(
+  input: CaptainsReportDueEmailInput,
+): Promise<{ messageId: string }> {
+  const { subject, text, html } = captainsReportDueEmailContent(input);
+  if (EMAIL_DRY_RUN) {
+    console.log(
+      `[notify:email dry-run] would send captain's report link to ${input.to}` +
+        `${input.cc ? ` (cc ${input.cc})` : ''} for ${input.clubName}`,
+    );
+    return { messageId: `dry-run-${randomUUID()}` };
+  }
+  const res = await ses!.send(
+    new SendEmailCommand({
+      Source: FROM_EMAIL!,
+      Destination: { ToAddresses: [input.to], ...(input.cc ? { CcAddresses: [input.cc] } : {}) },
+      Message: {
+        Subject: { Data: subject, Charset: 'UTF-8' },
+        Body: {
+          Html: { Data: html, Charset: 'UTF-8' },
+          Text: { Data: text, Charset: 'UTF-8' },
+        },
+      },
+    }),
+  );
+  return { messageId: res.MessageId ?? '' };
+}
+
+export interface SyncConflictEmailInput {
+  to: string;
+  orgName: string;
+  /** "Umzinto v African Warriors" */
+  matchLine: string;
+  seriesName: string;
+  reason: 'venue-unresolved' | 'clash';
+  /** The clash lines, or the venue that did not resolve. */
+  detail: string[];
+  /** "2026-10-11 13:30 · Toti Oval 1" */
+  proposed: string;
+}
+
+/** Build the "medicoach change held for review" email. Pure — exported for tests. */
+export function syncConflictEmailContent(input: SyncConflictEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const why =
+    input.reason === 'clash'
+      ? 'It would double-book a ground, so it was not applied.'
+      : 'Its venue does not match any ground in your venue list, so it was not applied.';
+  const subject = `Fixture change from medicoach needs review: ${input.matchLine}`;
+  const text =
+    `A schedule change made in medicoach for ${input.matchLine} (${input.seriesName}) is waiting for review.\n\n` +
+    `Proposed: ${input.proposed}\n${why}\n\n` +
+    input.detail.map((d) => `- ${d}`).join('\n') +
+    `\n\nOpen the admin console, go to Medicoach sync, and apply, discard or edit the fixture.\n\n` +
+    `The ${input.orgName} office`;
+  const e = escapeHtml;
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>A schedule change made in medicoach for <strong>${e(input.matchLine)}</strong> (${e(input.seriesName)}) is waiting for review.</p>` +
+    `<p>Proposed: <strong>${e(input.proposed)}</strong><br/>${e(why)}</p>` +
+    `<ul>${input.detail.map((d) => `<li>${e(d)}</li>`).join('')}</ul>` +
+    `<p>Open the admin console, go to <strong>Medicoach sync</strong>, and apply, discard or edit the fixture.</p>` +
+    `<p>The ${e(input.orgName)} office</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+/** Email one admin about a held medicoach schedule change. */
+export async function sendSyncConflictEmail(
+  input: SyncConflictEmailInput,
+): Promise<{ messageId: string }> {
+  const { subject, text, html } = syncConflictEmailContent(input);
+  if (EMAIL_DRY_RUN) {
+    console.log(
+      `[notify:email dry-run] would send sync-conflict notice to ${input.to} for ${input.matchLine}`,
+    );
+    return { messageId: `dry-run-${randomUUID()}` };
+  }
+  const res = await ses!.send(
+    new SendEmailCommand({
+      Source: FROM_EMAIL!,
+      Destination: { ToAddresses: [input.to] },
+      Message: {
+        Subject: { Data: subject, Charset: 'UTF-8' },
+        Body: {
+          Html: { Data: html, Charset: 'UTF-8' },
+          Text: { Data: text, Charset: 'UTF-8' },
+        },
+      },
+    }),
+  );
+  return { messageId: res.MessageId ?? '' };
+}

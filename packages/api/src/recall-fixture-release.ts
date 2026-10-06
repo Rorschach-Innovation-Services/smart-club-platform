@@ -18,6 +18,7 @@
  * release notifications (email/WhatsApp) the accidental release may have triggered.
  */
 import * as repo from './repo.js';
+import { recordScheduleDiff } from './medicoach-sync/schedule.js';
 
 const TENANT = 'dolphins';
 const ID_PREFIX = 's-planb-';
@@ -77,6 +78,17 @@ async function main() {
   }
 
   for (const s of toRecall) {
+    // Medicoach sync (Slice 4): a recall changes release state, never a fixture's schedule,
+    // so the shared diff finds nothing to queue — called anyway so every series write in the
+    // CLIs goes through the one helper. Rows already queued for this series stay held: the
+    // flush re-checks the live series and never pushes a draft (`seriesHoldsSchedule`).
+    const scheduleSync = await recordScheduleDiff(
+      repo,
+      TENANT,
+      s,
+      { ...s, released: false },
+      'cli',
+    );
     await repo.updateSeries(TENANT, String(s.id), {
       released: false,
       releasedAt: null,
@@ -87,6 +99,7 @@ async function main() {
       revealedAt: undefined,
       version: s.version,
     });
+    await scheduleSync.enqueue();
     console.log(`recalled ${s.id} → draft`);
   }
   console.log('Done. Review in the console, then approve + release each series as normal.');

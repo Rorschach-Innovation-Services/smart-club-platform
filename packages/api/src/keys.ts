@@ -17,7 +17,8 @@ export type EntityType =
   | 'REGREVIEW'
   | 'VETAFFIL'
   | 'VETREQ'
-  | 'POSTPONE';
+  | 'POSTPONE'
+  | 'UMPIRE';
 
 const tenantPrefix = (tenant: string) => `TENANT#${tenant}`;
 
@@ -142,6 +143,39 @@ export const venueKey = (tenant: string, venueId: string) => ({
 export const venuesListKey = (tenant: string) => ({
   pk: tenantPrefix(tenant),
   skPrefix: 'VENUE#',
+});
+
+/**
+ * An umpire in the tenant's registry. Own partition + `META`, listed through gsi1 like
+ * clubs. Holds contact details (phone/email), so tenant erasure enumerates it explicitly.
+ */
+export const umpireKey = (tenant: string, umpireId: string) => ({
+  pk: `${tenantPrefix(tenant)}#UMPIRE#${umpireId}`,
+  sk: 'META',
+});
+
+export const umpireGsi1 = (tenant: string, displayName: string) => ({
+  gsi1pk: `${tenantPrefix(tenant)}#TYPE#UMPIRE`,
+  gsi1sk: displayName || ' ',
+});
+
+export const umpiresListGsi1pk = (tenant: string) => `${tenantPrefix(tenant)}#TYPE#UMPIRE`;
+
+/**
+ * The officials appointed to ONE fixture. Deliberately NOT inside the Series item: an
+ * officials write must never contend with (or be lost to) a whole-series PATCH, reset
+ * approval or run a clash gate. Every fixture's item shares one tenant partition so
+ * `GET /series` joins them all with a single Query (a few hundred small rows per season).
+ */
+export const fixtureOfficialsKey = (tenant: string, seriesId: string, fixtureId: string) => ({
+  pk: `${tenantPrefix(tenant)}#OFFICIALS`,
+  sk: `FIXOFFICIALS#${seriesId}#${fixtureId}`,
+});
+
+/** pk + sk-prefix to query every fixture's officials in a tenant. */
+export const fixtureOfficialsListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#OFFICIALS`,
+  skPrefix: 'FIXOFFICIALS#',
 });
 
 /** A player registration, partitioned under its club; naturalKey gives dedup. */
@@ -395,6 +429,149 @@ export const operatorGsi1 = (email: string) => ({
 });
 
 export const OPERATORS_GSI1PK = 'PLATFORM#OPERATORS';
+
+/**
+ * A medicoach-owned fixture RESULT (ADR 0016), one item per fixture. Deliberately NOT inside
+ * the series item: results arrive from the sync puller at any moment, and a whole-series
+ * admin PATCH (or an importer's putSeries) would otherwise overwrite them or lose them to a
+ * version conflict. All of a tenant's results share one partition so GET /series joins them
+ * with a single Query. The item may hold a captain's player ref (a hashed ID number), so it
+ * is personal data: never served raw, and erased explicitly (eraseTenantData/clearCohort).
+ */
+export const fixtureResultKey = (tenant: string, seriesId: string, fixtureId: string) => ({
+  pk: `${tenantPrefix(tenant)}#FIXRESULT`,
+  sk: `FIXRESULT#${seriesId}#${fixtureId}`,
+});
+
+/** pk + sk-prefix to query every result in a tenant. */
+export const fixtureResultsListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#FIXRESULT`,
+  skPrefix: 'FIXRESULT#',
+});
+
+/** The medicoach sync puller's cursor (the last `nextCursor` it fully processed). */
+export const syncCursorKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `SYNCCURSOR#${tenant}`,
+});
+
+/**
+ * The sync's health for the admin page: when a run last succeeded / failed (and why). Written
+ * on every run, quiet ones included — a quiet run leaves no SYNCLOG# row.
+ */
+export const syncHealthKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `SYNCHEALTH#${tenant}`,
+});
+
+/** One audit row per notable sync run: counts and outcomes only, never player refs. */
+export const syncLogKey = (tenant: string, iso: string, id: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `SYNCLOG#${iso}#${id}`,
+});
+
+/** pk + sk-prefix to query a tenant's sync audit rows (newest last). */
+export const syncLogsListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  skPrefix: 'SYNCLOG#',
+});
+
+/** pk of the whole SYNC partition (cursor, logs, conflicts, outbox, report markers), for
+ * erasure and cohort clearing. */
+export const syncPartitionPk = (tenant: string) => `${tenantPrefix(tenant)}#SYNC`;
+
+/**
+ * An inbound medicoach schedule change held for admin review (Slice 3): its venue did not
+ * resolve, or the in-season clash gate would refuse it. One row per fixture ref — the latest
+ * proposal wins.
+ */
+export const syncConflictKey = (tenant: string, ref: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `SYNCCONFLICT#${ref}`,
+});
+
+export const syncConflictsListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  skPrefix: 'SYNCCONFLICT#',
+});
+
+/**
+ * The outbox (Slice 4): one row per fixture ref holding the LATEST smart-club schedule to
+ * push to medicoach. Several edits before the next flush collapse onto the one row.
+ */
+export const pendingSyncKey = (tenant: string, ref: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `PENDINGSYNC#${ref}`,
+});
+
+export const pendingSyncListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  skPrefix: 'PENDINGSYNC#',
+});
+
+/**
+ * A stored result whose captain's reports still have to be opened + notified. Written in the
+ * same step as the result and deleted once that succeeded, so a failure is retried by the
+ * next run instead of being lost (the puller never re-fires the hook for a replay).
+ */
+export const reportOpenKey = (tenant: string, ref: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `REPORTOPEN#${ref}`,
+});
+
+export const reportOpenListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  skPrefix: 'REPORTOPEN#',
+});
+
+/**
+ * Captain's reports: one partition per tenant holding every report
+ * (`CAPREPORT#<seriesId>#<fixtureId>#<clubId>`), the `CR-YYYY-NNNN` counters and the NOTIFY#
+ * send ledger. No gsi1/META listing — tenant erasure and cohort clear enumerate the whole
+ * partition (`captainsReportPartitionPk`).
+ */
+export const captainsReportPartitionPk = (tenant: string) => `${tenantPrefix(tenant)}#CAPREPORT`;
+
+export const captainsReportKey = (
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+  clubId: string,
+) => ({
+  pk: captainsReportPartitionPk(tenant),
+  sk: `CAPREPORT#${seriesId}#${fixtureId}#${clubId}`,
+});
+
+/** pk + sk-prefix to query every captain's report in a tenant. */
+export const captainsReportsListKey = (tenant: string) => ({
+  pk: captainsReportPartitionPk(tenant),
+  skPrefix: 'CAPREPORT#',
+});
+
+/** The atomic per-tenant, per-year `CR-YYYY-NNNN` counter. */
+export const captainsReportCounterKey = (tenant: string, year: string) => ({
+  pk: captainsReportPartitionPk(tenant),
+  sk: `COUNTER#CR#${year}`,
+});
+
+/**
+ * One NOTIFY# ledger row per (report, audience): claimed with `attribute_not_exists` before a
+ * send, so a replayed result or a retried run never notifies twice.
+ */
+export const captainsReportNotifyKey = (tenant: string, reportId: string, audience: string) => ({
+  pk: captainsReportPartitionPk(tenant),
+  sk: `NOTIFY#capreport#${reportId}#${audience}`,
+});
+
+/**
+ * The WhatsApp status webhook's lookup: Meta posts statuses by message id (wamid) with no
+ * tenant, so each captain's-report WhatsApp send writes `WAMSG#<wamid>` → its report. Global
+ * (not tenant-prefixed) and self-expiring (`expiresAt`); it holds ids only, no PII.
+ */
+export const whatsappMessageKey = (wamid: string) => ({
+  pk: `WAMSG#${wamid}`,
+  sk: 'WAMSG',
+});
 
 /** Prefix used to erase an entire tenant's non-user items. */
 export const tenantErasurePrefix = (tenant: string) => `${tenantPrefix(tenant)}#`;
