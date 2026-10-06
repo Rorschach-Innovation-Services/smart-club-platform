@@ -302,8 +302,10 @@ function ProTeamView({ data }: { data: ProData }) {
   const all = data.matches;
   const [params, setParams] = useSearchParams();
   const squads = useMemo(() => detectSquads(all), [all]);
-  const gender = (params.get('squad') as Squad['gender']) || squads[0]?.gender || 'men';
-  const squad = squads.find((s) => s.gender === gender) ?? squads[0];
+  // ?squad= is a squad id ("lions-men"); a bare gender ("women") picks that gender's first.
+  const want = params.get('squad') || '';
+  const squad =
+    squads.find((s) => s.id === want) ?? squads.find((s) => s.gender === want) ?? squads[0];
   const tab = (params.get('ptab') as ProTab) || 'selection';
   // Default to T20 where the squad plays it: rates only compare within a format.
   const format =
@@ -348,13 +350,13 @@ function ProTeamView({ data }: { data: ProData }) {
         <div className="pro-seg" role="tablist" aria-label="Squad">
           {squads.map((s) => (
             <button
-              key={s.gender}
+              key={s.id}
               role="tab"
-              aria-selected={s.gender === squad.gender}
-              className={s.gender === squad.gender ? 'on' : ''}
-              onClick={() => set({ squad: s.gender, fplayer: '', pmatch: '' })}
+              aria-selected={s.id === squad.id}
+              className={s.id === squad.id ? 'on' : ''}
+              onClick={() => set({ squad: s.id, fplayer: '', pmatch: '' })}
             >
-              {s.name}
+              {shortTeam(s.name)}
               <small>{s.gender === 'men' ? 'Men' : 'Women'}</small>
             </button>
           ))}
@@ -394,9 +396,11 @@ function ProTeamView({ data }: { data: ProData }) {
           {data.withBalls ? `, ${data.withBalls} ball by ball` : ''}
         </Pill>
         <span>
-          {ms.length} matches · from scorecards (batting, bowling, fall of wickets). No ball-by-ball
-          in these files, so phases come from when wickets fell; every rating is 100 = the average
-          of everyone in those games, per format.
+          {ms.length} matches ·{' '}
+          {data.withBalls
+            ? `${ms.filter((m) => (m.innings ?? []).some((i) => i.balls?.length)).length} with ball by ball (overs, phases and spells); the rest from scorecards alone`
+            : 'from scorecards (batting, bowling, fall of wickets); phases come from when wickets fell'}
+          ; every rating is 100 = the average of everyone in those games, per format.
         </span>
       </div>
 

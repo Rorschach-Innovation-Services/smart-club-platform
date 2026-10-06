@@ -256,7 +256,13 @@ describe('scoring by phase, from the deliveries', () => {
   it('counts run rate, dots, boundaries and wickets in each phase for each side', async () => {
     const { scoringByPhase } = await import('./pro-team');
     const m = parseBallByBall(BBB, BBB_NAME)!.match;
-    const squad = { gender: 'men' as const, key: 'hawks', name: 'Highveld Hawks', matches: [m] };
+    const squad = {
+      id: 'hawks-men',
+      gender: 'men' as const,
+      key: 'hawks',
+      name: 'Highveld Hawks',
+      matches: [m],
+    };
     const r = scoringByPhase(squad, [m], 'T20');
     expect(r.innings).toEqual({ ours: 1, theirs: 1 });
     const [pp, mid] = r.rows;

@@ -33,7 +33,7 @@ beforeEach(() => localStorage.clear());
 describe('Professional team', () => {
   it('opens on selection for the men’s squad in T20, with the sample flagged', () => {
     renderPage();
-    expect(screen.getByRole('tab', { name: /Highveld Hawks/, selected: true })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: /Hawks.*Men/, selected: true })).toBeTruthy();
     expect((screen.getByLabelText('Format') as HTMLSelectElement).value).toBe('T20');
     expect(screen.getByText(/Sample data · invented names/)).toBeTruthy();
     expect(screen.getByRole('region', { name: /Promote · in form/ })).toBeTruthy();
@@ -45,14 +45,14 @@ describe('Professional team', () => {
 
   it('says plainly that the files have no ball-by-ball', () => {
     renderPage();
-    expect(screen.getByText(/No ball-by-ball in these files/)).toBeTruthy();
+    expect(screen.getByText(/phases come from when wickets fell/)).toBeTruthy();
   });
 
   it('switches to the women’s squad and keeps the views working', async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.click(screen.getByRole('tab', { name: /Highveld Hawks Women/ }));
-    expect(screen.getByRole('tab', { name: /Highveld Hawks Women/, selected: true })).toBeTruthy();
+    await user.click(screen.getByRole('tab', { name: /Hawks.*Women/ }));
+    expect(screen.getByRole('tab', { name: /Hawks.*Women/, selected: true })).toBeTruthy();
     await user.click(screen.getByRole('tab', { name: 'Squad' }));
     expect(screen.getByRole('table', { name: 'Squad' })).toBeTruthy();
     expect(screen.getByText('How each batter used the balls they faced')).toBeTruthy();

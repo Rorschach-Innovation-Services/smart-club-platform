@@ -6610,6 +6610,15 @@
   .pw-results td{vertical-align:top}
   .pw-results .pw-score{white-space:nowrap;font-variant-numeric:tabular-nums}
   .pw-more{margin-top:10px}
+  .pw-track{font:inherit;font-size:12px;font-weight:700;border:1px solid var(--line2);background:var(--white);border-radius:999px;padding:4px 10px;cursor:pointer;color:var(--ink)}
+  .pw-track.on{background:var(--viz-pool);border-color:var(--viz-pool);color:var(--ink)}
+  .pw-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+  .pw-card{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--white)}
+  .pw-card h4{margin:0 0 2px;font-size:15px}
+  .pw-card .pw-card-sub{font-size:12px;color:var(--muted);margin-bottom:8px}
+  .pw-card .pw-card-stats{display:flex;gap:14px;flex-wrap:wrap;margin:6px 0 8px;font-size:12.5px}
+  .pw-card .pw-card-stats b{display:block;font-size:18px;font-weight:800}
+  .pw-lead{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 12px}
   .pw-strip{display:inline-flex;flex-wrap:wrap;gap:2px}
   .pw-strip .pv-res{font-size:10px;width:16px;height:16px;line-height:16px}
   /* Platform → Match library */

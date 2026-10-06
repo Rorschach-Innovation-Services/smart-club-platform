@@ -26,6 +26,8 @@ import {
 /* ─── The squad: which side in the files is "us" ─── */
 
 export interface Squad {
+  /** `${key}-${gender}`, for the URL. */
+  id: string;
   gender: Gender;
   /** The word every one of our team names shares, e.g. "hawks". */
   key: string;
@@ -34,53 +36,46 @@ export interface Squad {
   matches: ProMatch[];
 }
 
-const GENERIC = new Set(['ladies', 'women', 'cricket', 'club', 'cc', 'the', 'and']);
+/** A team is a squad when it plays in at least this share of a gender's matches. */
+export const SQUAD_SHARE = 0.4;
 
 /**
- * One squad per gender: the team-name word that appears on one side of every match (a
- * franchise's files are all its own games, under changing sponsor names).
+ * The franchises the files are about, per gender: a team on one side of most of the matches
+ * (an export is a franchise's own games, under changing sponsor names; the library may hold
+ * several franchises' exports). Opponents who turn up now and then are not squads.
  */
 export function detectSquads(matches: ProMatch[]): Squad[] {
   const out: Squad[] = [];
   for (const gender of ['men', 'women'] as Gender[]) {
     const ms = matches.filter((m) => m.gender === gender);
     if (!ms.length) continue;
-    const counts = new Map<string, number>();
-    for (const m of ms) {
-      const words = new Set(
-        [m.home, m.away]
-          .flatMap((t) => t.toLowerCase().split(/\s+/))
-          .filter((w) => w.length > 2 && !GENERIC.has(w)),
-      );
-      words.forEach((w) => counts.set(w, (counts.get(w) ?? 0) + 1));
+    // Count matches per team, sponsor and gender words stripped ("Fidelity Titans Ladies" →
+    // "Titans"); remember the full names so the most-used one can be the squad's label.
+    const counts = new Map<string, { n: number; names: Map<string, number> }>();
+    for (const m of ms)
+      for (const t of new Set([m.home, m.away])) {
+        const short = shortTeam(t);
+        const c = counts.get(short) ?? { n: 0, names: new Map() };
+        c.n++;
+        c.names.set(t, (c.names.get(t) ?? 0) + 1);
+        counts.set(short, c);
+      }
+    const squads = [...counts]
+      .filter(([, c]) => c.n >= Math.max(3, ms.length * SQUAD_SHARE))
+      .sort((a, b) => b[1].n - a[1].n);
+    for (const [short, c] of squads) {
+      // The club's own name is the last word ("Western Province" → "province" is enough to
+      // tell its sides apart from everyone else's).
+      const key = short.toLowerCase().split(/\s+/).pop() ?? short.toLowerCase();
+      const name = [...c.names].sort((a, b) => b[1] - a[1])[0][0];
+      out.push({
+        id: `${key}-${gender}`,
+        gender,
+        key,
+        name,
+        matches: ms.filter((m) => [m.home, m.away].some((t) => t.toLowerCase().includes(key))),
+      });
     }
-    // Ties (sponsor words travel with the club name) go to the word nearest the end — the
-    // club's own name ("Acme Bank Highveld Hawks" → "hawks") rather than the sponsor's.
-    const lastPos = (w: string) =>
-      Math.max(
-        ...ms.flatMap((m) =>
-          [m.home, m.away].map((t) => {
-            const ws = t
-              .toLowerCase()
-              .split(/\s+/)
-              .filter((x) => !GENERIC.has(x));
-            const i = ws.indexOf(w);
-            return i < 0 ? -Infinity : i - ws.length;
-          }),
-        ),
-      );
-    const best = [...counts].sort((a, b) => b[1] - a[1] || lastPos(b[0]) - lastPos(a[0]))[0];
-    if (!best || best[1] < ms.length * 0.8) continue;
-    const key = best[0];
-    const names = new Map<string, number>();
-    const mine = ms.filter((m) => [m.home, m.away].some((t) => t.toLowerCase().includes(key)));
-    mine.forEach((m) =>
-      [m.home, m.away]
-        .filter((t) => t.toLowerCase().includes(key))
-        .forEach((t) => names.set(t, (names.get(t) ?? 0) + 1)),
-    );
-    const name = [...names].sort((a, b) => b[1] - a[1])[0][0];
-    out.push({ gender, key, name, matches: mine });
   }
   return out;
 }

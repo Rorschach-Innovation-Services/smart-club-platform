@@ -83,9 +83,11 @@ One library of professional matches for the whole platform; every union's scouti
   is left as "not on the scorecard" (rain or DLS) rather than guessed.
 - **Duplicates are dropped**: the same date, teams and totals means the same match.
 
-**Squad detection (`detectSquads`).** For each gender, the squad is the team-name word that
-appears on one side of every match. When words tie, the word nearest the end of the name wins,
-so "Acme Bank Highveld Hawks" resolves to "hawks", not the sponsor.
+**Squad detection (`detectSquads`).** For each gender, every team on one side of at least 40%
+of the matches is a squad (the library can hold several franchises' exports; opponents who
+turn up now and then are not squads). Teams are grouped with sponsor and gender words
+stripped, so "Momentum Multiply Titans" and "Fidelity Titans Ladies" are the Titans men and
+women. The squad switch lists them all; `?squad=lions-men` picks one.
 
 **Phases.** Matches with ball by ball give run rate, dot and boundary balls by phase, the
 worm after every over and the runs in each over. Matches with only a scorecard give phases
