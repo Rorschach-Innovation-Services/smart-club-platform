@@ -209,15 +209,18 @@ export function allLines(
   events: ScoutingEvent[],
   pools: ScoutPool[],
   proMatches: ProMatch[],
+  /** Keep only the sides an event marks as its union's own (a union's dashboard). */
+  opts: { ourSidesOnly?: boolean } = {},
 ): { lines: Line[]; proBySeason: Line[] } {
   const lines: Line[] = [];
   for (const ev of events) {
     const teamName = (code: string) => ev.teams.find((t) => t.code === code)?.name ?? code;
+    const ours = opts.ourSidesOnly && ev.ourTeams ? new Set(ev.ourTeams.map(teamName)) : null;
     lines.push(
       ...linesFromMatches(ev.matches, stageOfAge(ev.ageGroup), {
         gender: () => genderOfText(`${ev.name} ${ev.ageGroup}`),
         team: (t) => teamName(t),
-      }),
+      }).filter((l) => !ours || ours.has(l.team)),
     );
   }
   for (const pool of pools) lines.push(...linesFromPool(pool));

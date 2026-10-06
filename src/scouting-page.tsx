@@ -12,7 +12,7 @@ import { ProTeamPage } from './pro-team-page';
 import { PathwaysPage } from './pathways-page';
 import { ResultsScouting } from './results-scouting';
 import { QuadrantMap, type MapPt, type Tone } from './pro-charts';
-import { SCOUTING_EVENTS } from './scouting-data';
+import { focusEvents, useFocus } from './scouting-focus';
 import type { ScoutPlayer, ScoutingEvent, ScoutProfile } from './scouting-data';
 import {
   LEADERS,
@@ -137,22 +137,40 @@ function Overview({
 
   return (
     <>
-      <div className="kpi-strip sc-kpis">
-        <KPI label="Matches" num={t.matches} sub={event.competitions.join(' · ')} />
-        <KPI label="Players" num={t.players} sub={`${t.hubs} teams`} />
-        <KPI
-          label="Runs"
-          num={t.runs.toLocaleString('en-GB')}
-          sub={`${t.runRate.toFixed(2)} per over`}
-        />
-        <KPI label="Wickets" num={t.wickets} sub={`${t.dotPct}% dot balls`} />
-        <KPI
-          label="Extras"
-          num={t.extras}
-          sub={`${Math.round((t.extras / t.runs) * 100)}% of all runs`}
-          tone="warn"
-        />
-      </div>
+      {event.kind === 'report' ? (
+        // A report lists players, not matches: no match count, extras or dot balls to show.
+        <div className="kpi-strip sc-kpis">
+          <KPI label="Players" num={t.players} sub={`${t.hubs} clubs`} />
+          <KPI
+            label="Leagues"
+            num={event.competitions.length}
+            sub={event.competitions.join(' · ')}
+          />
+          <KPI
+            label="Runs"
+            num={t.runs.toLocaleString('en-GB')}
+            sub={`${t.runRate.toFixed(2)} per over`}
+          />
+          <KPI label="Wickets" num={t.wickets} sub={`${t.sixes} sixes · ${t.fours} fours`} />
+        </div>
+      ) : (
+        <div className="kpi-strip sc-kpis">
+          <KPI label="Matches" num={t.matches} sub={event.competitions.join(' · ')} />
+          <KPI label="Players" num={t.players} sub={`${t.hubs} teams`} />
+          <KPI
+            label="Runs"
+            num={t.runs.toLocaleString('en-GB')}
+            sub={`${t.runRate.toFixed(2)} per over`}
+          />
+          <KPI label="Wickets" num={t.wickets} sub={`${t.dotPct}% dot balls`} />
+          <KPI
+            label="Extras"
+            num={t.extras}
+            sub={`${Math.round((t.extras / t.runs) * 100)}% of all runs`}
+            tone="warn"
+          />
+        </div>
+      )}
 
       <div className="sc-callouts">
         {callouts.map((c) => (
@@ -272,17 +290,19 @@ function Overview({
         </div>
       )}
 
-      <div className="card">
-        <div className="card-head">
-          <div>
-            <div className="card-title">Results</div>
-            <div className="card-sub">
-              {event.matches.length} fixtures · {event.venue} · tap a match for its dashboard
+      {event.matches.length > 0 && (
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">Results</div>
+              <div className="card-sub">
+                {event.matches.length} fixtures · {event.venue} · tap a match for its dashboard
+              </div>
             </div>
           </div>
+          <MatchesTable event={event} openMatch={openMatch} />
         </div>
-        <MatchesTable event={event} openMatch={openMatch} />
-      </div>
+      )}
     </>
   );
 }
@@ -904,8 +924,11 @@ export function AdminScoutingPage({ orgName }: { orgName: string }) {
   // Competition and drill-downs live in the URL (?event=…&team=RHO / &match=<id>) so they
   // can be shared and the browser's Back button returns to the list.
   const [params, setParams] = useSearchParams();
-  const eventId = params.get('event') ?? SCOUTING_EVENTS[0]?.id ?? '';
-  const event = SCOUTING_EVENTS.find((e) => e.id === eventId);
+  // A union's own dashboard offers its events and its club players from the reports.
+  const focus = useFocus();
+  const events = useMemo(() => focusEvents(focus), [focus]);
+  const eventId = params.get('event') ?? events[0]?.id ?? '';
+  const event = events.find((e) => e.id === eventId);
   const shortlisted = useMemo(() => new Set((event?.profiles ?? []).map((p) => p.name)), [event]);
   const teamCode = params.get('team');
   const matchId = params.get('match');
@@ -975,7 +998,7 @@ export function AdminScoutingPage({ orgName }: { orgName: string }) {
                 setTab('overview');
               }}
             >
-              {SCOUTING_EVENTS.map((e) => (
+              {events.map((e) => (
                 <option key={e.id} value={e.id}>
                   {e.name}
                 </option>

@@ -31,4 +31,5 @@ const localPools = Object.values(poolFiles)
 
 export const PRO_IS_SAMPLE = localMatches.length === 0;
 export const PRO_MATCHES: ProMatch[] = PRO_IS_SAMPLE ? SAMPLE_PRO_MATCHES : localMatches;
+export const POOLS_ARE_SAMPLE = localPools.length === 0;
 export const SCOUT_POOLS: ScoutPool[] = localPools.length ? localPools : [SAMPLE_POOL];

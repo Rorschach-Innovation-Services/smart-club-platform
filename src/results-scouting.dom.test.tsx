@@ -15,7 +15,12 @@ vi.mock('./pathways-data', async () => {
 });
 vi.mock('./pro-data', async () => {
   const s = await vi.importActual<typeof import('./pro-sample')>('./pro-sample');
-  return { PRO_IS_SAMPLE: true, PRO_MATCHES: s.SAMPLE_PRO_MATCHES, SCOUT_POOLS: [s.SAMPLE_POOL] };
+  return {
+    PRO_IS_SAMPLE: true,
+    POOLS_ARE_SAMPLE: true,
+    PRO_MATCHES: s.SAMPLE_PRO_MATCHES,
+    SCOUT_POOLS: [s.SAMPLE_POOL],
+  };
 });
 
 import { ResultsScouting as PathwaysPage } from './results-scouting';

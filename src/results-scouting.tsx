@@ -38,6 +38,7 @@ import {
 import { PATHWAYS_IS_SAMPLE, PATH_MATCHES } from './pathways-data';
 import { Figure, HeatGrid, Pyramid, WeekColumns, type PyramidRow } from './pathways-charts';
 import { useProMatches } from './pro-library';
+import { isOurFranchise, useFocus } from './scouting-focus';
 import { QuadrantMap, RankBars, Tile, type MapPt, type Tone } from './pro-charts';
 
 type PwTab = 'overview' | 'matches' | 'leaders' | 'map' | 'teams' | 'shortlist';
@@ -182,6 +183,16 @@ export function ResultsScouting({ site }: { site?: Site } = {}) {
   const club = get('club') || null;
   const comp = get('comp') || null;
   const pro = useProMatches();
+  // The professional apex counts the union's own franchise when the dashboard is a union's.
+  const focus = useFocus();
+  const proCount = useMemo(
+    () =>
+      pro.source === 'sample'
+        ? pro.matches.length
+        : pro.matches.filter((m) => isOurFranchise(focus, m.home) || isOurFranchise(focus, m.away))
+            .length,
+    [pro.matches, pro.source, focus],
+  );
   const tracked = useTracked();
   const openClub = (k: string | null) => set({ club: k, pwtab: 'teams' });
 
@@ -366,7 +377,7 @@ export function ResultsScouting({ site }: { site?: Site } = {}) {
           <OverviewView
             ms={ms}
             summaries={competitionSummaries(ms)}
-            proCount={pro.matches.length}
+            proCount={proCount}
             proSource={pro.source}
             activeTier={filter.tier === 'all' ? null : (filter.tier as Tier)}
             pickTier={(t) => set({ tier: filter.tier === t ? null : t })}

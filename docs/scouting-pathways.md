@@ -11,6 +11,34 @@ The Scouting page has four areas: Player scouting · **Schools** · Professional
   franchises (`src/pathways-page.tsx`, `src/milestones.ts`), and underneath, the whole school
   and club pyramid (the same results-scouting page, schools and clubs together).
 
+## A union's own dashboard (the Lions)
+
+When the tenant is a union with a franchise, Scouting shows only that union
+(`src/scouting-focus.ts`, `FOCUS_BY_TENANT`; today `lions` → the Lions, union "Gauteng"):
+
+- **Player scouting:** the union's events only, plus its club players from each scouting
+  report as a report-style event (players and clubs, no matches) — for the Lions, the 101
+  Gauteng players in the national report. In a mixed event (a festival game) the scorecards
+  keep both sides but only the union's players are listed.
+- **Professional team:** only the franchise's squads (Lions men, Lions women). Other
+  franchises' games still set the format averages. Call-ups and exits use only the union's
+  pool players and events.
+- **Pathways:** stages, benchmarks, outliers and improvers from the union's players only; the
+  pyramid's professional apex counts the franchise's matches.
+- **Schools:** the union's results export is already its own.
+
+The focus applies to real data only: with the invented samples nothing is filtered. Other
+tenants see everything. To focus another union, add it to `FOCUS_BY_TENANT`.
+
+**WebSports ball by ball** (`src/websports.ts`): the WebSports Match Centre's commentary feed,
+one row per delivery, read into the match shape (scorecards, fall of wickets, runs per over,
+shot zones from "… in the square leg area" — six areas onto six of the wheel's eight zones). A
+non-striker run out is recorded against the striker (the feed names only the striker).
+`scripts/websports-for-union.ts` keeps a union's games from an export — a side is the union's
+when its club or school played 10+ league games in the union's results — and writes them, with
+a scouting event module, into the git-ignored `src/scouting-local/`. The 2026 export is almost
+all Western Cape and Boland cricket; its only Lions side is one school's 1st XI (one scored game, at a festival).
+
 ## Pathways → Milestones and Improvers
 
 There are **no dates of birth** in any source, so a _stage_ is a level of cricket, not an age:

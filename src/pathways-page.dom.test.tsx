@@ -10,11 +10,19 @@ import { MemoryRouter } from 'react-router-dom';
 
 vi.mock('./scouting-data', async () => {
   const s = await vi.importActual<typeof import('./scouting-sample')>('./scouting-sample');
-  return { SCOUTING_EVENTS: [s.SAMPLE_TOURNAMENT, s.SAMPLE_CLUB_MATCH] };
+  return {
+    SCOUTING_IS_SAMPLE: true,
+    SCOUTING_EVENTS: [s.SAMPLE_TOURNAMENT, s.SAMPLE_CLUB_MATCH],
+  };
 });
 vi.mock('./pro-data', async () => {
   const s = await vi.importActual<typeof import('./pro-sample')>('./pro-sample');
-  return { PRO_IS_SAMPLE: true, PRO_MATCHES: s.SAMPLE_PRO_MATCHES, SCOUT_POOLS: [s.SAMPLE_POOL] };
+  return {
+    PRO_IS_SAMPLE: true,
+    POOLS_ARE_SAMPLE: true,
+    PRO_MATCHES: s.SAMPLE_PRO_MATCHES,
+    SCOUT_POOLS: [s.SAMPLE_POOL],
+  };
 });
 vi.mock('./pathways-data', async () => {
   const p = await vi.importActual<typeof import('./pathways')>('./pathways');

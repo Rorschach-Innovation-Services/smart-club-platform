@@ -98,7 +98,8 @@ export interface ScoutProfile {
 
 export interface ScoutingEvent {
   id: string;
-  kind: 'tournament' | 'league';
+  /** A report is players only (no matches), e.g. a union's club players from the national report. */
+  kind: 'tournament' | 'league' | 'report';
   name: string;
   ageGroup: string;
   competitions: string[];
@@ -137,6 +138,10 @@ export interface ScoutingEvent {
   profiles: ScoutProfile[];
   /** Match-by-match scorecards (summary-only where the source has none). */
   matches: ScoutMatch[];
+  /** The provincial union the event belongs to, when known (a union's own dashboard). */
+  union?: string;
+  /** Codes of the sides that belong to that union; the rest are opponents. */
+  ourTeams?: HubCode[];
 }
 
 /**
@@ -156,6 +161,8 @@ const local = Object.values(
   .filter(Boolean)
   .sort((a, b) => b.dates.to.localeCompare(a.dates.to));
 
+/** True when the invented samples are in use (no local datasets). */
+export const SCOUTING_IS_SAMPLE = local.length === 0;
 export const SCOUTING_EVENTS: ScoutingEvent[] = local.length
   ? local
   : [SAMPLE_TOURNAMENT, SAMPLE_CLUB_MATCH];

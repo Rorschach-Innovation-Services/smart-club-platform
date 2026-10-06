@@ -7,7 +7,8 @@
 import { useMemo, useState, type CSSProperties } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Icon, Pill } from './atoms';
-import { SCOUT_POOLS } from './pro-data';
+import type { ScoutPool } from './scout-pool';
+import { focusEvents, focusPools, isOurFranchise, useFocus } from './scouting-focus';
 import { ProMatchesProvider, useAllProMatches, useProMatches, type ProData } from './pro-library';
 import {
   PRO_FORMATS,
@@ -61,7 +62,7 @@ import {
   type MapPt,
   type Tone,
 } from './pro-charts';
-import { SCOUTING_EVENTS } from './scouting-data';
+import type { ScoutingEvent } from './scouting-data';
 import { ProMatchView } from './pro-match';
 import { ExitsView } from './pro-exits-view';
 import type { ScoutPlayer } from './scouting-data';
@@ -169,44 +170,46 @@ const roleIndex = (c: Pick<Candidate, 'role' | 'batIdx' | 'bowlIdx'>) =>
         : (c.batIdx ?? c.bowlIdx)
       : c.batIdx;
 
-function poolCandidates(gender: Squad['gender']): Candidate[] {
-  return SCOUT_POOLS.filter((p) => p.gender === gender).flatMap((pool) =>
-    pool.players.map((p: PoolPlayer) => ({
-      key: `${p.name}|${p.club}`,
-      name: p.name,
-      club: p.club,
-      union: p.union,
-      role: p.role,
-      source: pool.name,
-      batIdx: p.bat?.batIdx ?? null,
-      bowlIdx: p.bowl?.bowlIdx ?? null,
-      impact: p.impact ?? null,
-      lists: p.lists,
-      note: p.note,
-      vals: {
-        bat: { idx: p.bat?.batIdx, sr: p.bat?.sr, avg: p.bat?.avg ?? null },
-        bowl: {
-          idx: p.bowl?.bowlIdx,
-          econ: p.bowl?.econ,
-          wpo: p.bowl ? p.bowl.wkts / Math.max(1 / 6, oversToBalls(p.bowl.overs) / 6) : null,
-          dot: p.bowl?.dotPct ?? null,
+function poolCandidates(gender: Squad['gender'], pools: ScoutPool[]): Candidate[] {
+  return pools
+    .filter((p) => p.gender === gender)
+    .flatMap((pool) =>
+      pool.players.map((p: PoolPlayer) => ({
+        key: `${p.name}|${p.club}`,
+        name: p.name,
+        club: p.club,
+        union: p.union,
+        role: p.role,
+        source: pool.name,
+        batIdx: p.bat?.batIdx ?? null,
+        bowlIdx: p.bowl?.bowlIdx ?? null,
+        impact: p.impact ?? null,
+        lists: p.lists,
+        note: p.note,
+        vals: {
+          bat: { idx: p.bat?.batIdx, sr: p.bat?.sr, avg: p.bat?.avg ?? null },
+          bowl: {
+            idx: p.bowl?.bowlIdx,
+            econ: p.bowl?.econ,
+            wpo: p.bowl ? p.bowl.wkts / Math.max(1 / 6, oversToBalls(p.bowl.overs) / 6) : null,
+            dot: p.bowl?.dotPct ?? null,
+          },
         },
-      },
-      sample: { balls: p.bat?.balls ?? 0, overs: p.bowl ? oversToBalls(p.bowl.overs) / 6 : 0 },
-      line: [
-        p.bat ? `${p.bat.runs} runs (${p.bat.balls}b) · SR ${Math.round(p.bat.sr)}` : '',
-        p.bowl ? `${p.bowl.wkts}/${p.bowl.runs} in ${p.bowl.overs} ov · econ ${p.bowl.econ}` : '',
-      ]
-        .filter(Boolean)
-        .join(' · '),
-    })),
-  );
+        sample: { balls: p.bat?.balls ?? 0, overs: p.bowl ? oversToBalls(p.bowl.overs) / 6 : 0 },
+        line: [
+          p.bat ? `${p.bat.runs} runs (${p.bat.balls}b) · SR ${Math.round(p.bat.sr)}` : '',
+          p.bowl ? `${p.bowl.wkts}/${p.bowl.runs} in ${p.bowl.overs} ov · econ ${p.bowl.econ}` : '',
+        ]
+          .filter(Boolean)
+          .join(' · '),
+      })),
+    );
 }
 
 /** Senior scouting-event players on the watchlist, rated against their own event. */
-function watchedCandidates(keys: string[]): Candidate[] {
+function watchedCandidates(keys: string[], events: ScoutingEvent[]): Candidate[] {
   const out: Candidate[] = [];
-  for (const ev of SCOUTING_EVENTS) {
+  for (const ev of events) {
     if (/^u\s?\d+/i.test(ev.ageGroup)) continue;
     const ps = ev.players;
     const tot = (f: (p: ScoutPlayer) => number | null) => ps.reduce((n, p) => n + (f(p) ?? 0), 0);
@@ -301,7 +304,16 @@ const SOURCE_NOTE: Record<ProData['source'], string> = {
 function ProTeamView({ data }: { data: ProData }) {
   const all = data.matches;
   const [params, setParams] = useSearchParams();
-  const squads = useMemo(() => detectSquads(all), [all]);
+  // A union's own dashboard shows only its franchise's squads (other franchises' games still set
+  // the format averages). Not with the invented sample.
+  const focus = useFocus();
+  const squads = useMemo(
+    () =>
+      detectSquads(all).filter((s) => data.source === 'sample' || isOurFranchise(focus, s.name)),
+    [all, focus, data.source],
+  );
+  const pools = useMemo(() => focusPools(focus), [focus]);
+  const events = useMemo(() => focusEvents(focus), [focus]);
   // ?squad= is a squad id ("lions-men"); a bare gender ("women") picks that gender's first.
   const want = params.get('squad') || '';
   const squad =
@@ -334,8 +346,11 @@ function ProTeamView({ data }: { data: ProData }) {
     [squad, format, all],
   );
   const candidates = useMemo(
-    () => (squad ? [...watchedCandidates(watch.keys), ...poolCandidates(squad.gender)] : []),
-    [squad, watch.keys],
+    () =>
+      squad
+        ? [...watchedCandidates(watch.keys, events), ...poolCandidates(squad.gender, pools)]
+        : [],
+    [squad, watch.keys, events, pools],
   );
 
   if (!squad) return <div className="ss-empty">No professional-team scorecards yet.</div>;
@@ -397,9 +412,14 @@ function ProTeamView({ data }: { data: ProData }) {
         </Pill>
         <span>
           {ms.length} matches ·{' '}
-          {data.withBalls
-            ? `${ms.filter((m) => (m.innings ?? []).some((i) => i.balls?.length)).length} with ball by ball (overs, phases and spells); the rest from scorecards alone`
-            : 'from scorecards (batting, bowling, fall of wickets); phases come from when wickets fell'}
+          {(() => {
+            const bbb = ms.filter((m) => (m.innings ?? []).some((i) => i.balls?.length)).length;
+            if (!bbb)
+              return 'from scorecards (batting, bowling, fall of wickets); phases come from when wickets fell';
+            return bbb === ms.length
+              ? 'all with ball by ball (overs, phases and spells)'
+              : `${bbb} with ball by ball (overs, phases and spells); the rest from scorecards alone`;
+          })()}
           ; every rating is 100 = the average of everyone in those games, per format.
         </span>
       </div>

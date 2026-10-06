@@ -10,9 +10,14 @@ import { MemoryRouter } from 'react-router-dom';
 
 vi.mock('./pro-data', async () => {
   const s = await vi.importActual<typeof import('./pro-sample')>('./pro-sample');
-  return { PRO_IS_SAMPLE: true, PRO_MATCHES: s.SAMPLE_PRO_MATCHES, SCOUT_POOLS: [s.SAMPLE_POOL] };
+  return {
+    PRO_IS_SAMPLE: true,
+    POOLS_ARE_SAMPLE: true,
+    PRO_MATCHES: s.SAMPLE_PRO_MATCHES,
+    SCOUT_POOLS: [s.SAMPLE_POOL],
+  };
 });
-vi.mock('./scouting-data', () => ({ SCOUTING_EVENTS: [] }));
+vi.mock('./scouting-data', () => ({ SCOUTING_IS_SAMPLE: true, SCOUTING_EVENTS: [] }));
 
 import { ProTeamPage } from './pro-team-page';
 import { qk } from './query';
@@ -180,5 +185,34 @@ describe('Exits', () => {
     expect(screen.getByRole('table', { name: 'Careers in the squad' })).toBeTruthy();
     expect(screen.getByText('Players used')).toBeTruthy();
     expect(await screen.findByText(/register couldn’t be loaded/)).toBeTruthy();
+  });
+});
+
+describe('a union’s own dashboard', () => {
+  it('shows only the Lions squads to the Lions', async () => {
+    const { setActiveTenant } = await import('./api');
+    const s = await vi.importActual<typeof import('./pro-sample')>('./pro-sample');
+    // Invented matches, with the men's franchise renamed to the Lions; the women stay Hawks.
+    const rename = (t: string) => (t === 'Highveld Hawks' ? 'DP World Lions' : t);
+    const library = s.SAMPLE_PRO_MATCHES.map((m) => ({
+      ...m,
+      home: rename(m.home),
+      away: rename(m.away),
+      winner: m.winner ? rename(m.winner) : m.winner,
+      innings: (m.innings ?? []).map((i) => ({ ...i, bat: rename(i.bat), fld: rename(i.fld) })),
+    }));
+    setActiveTenant('lions');
+    try {
+      renderWithProviders(
+        <MemoryRouter initialEntries={['/admin/scouting?view=pro']}>
+          <ProTeamPage />
+        </MemoryRouter>,
+        { seed: [[qk.proMatches(), library]] },
+      );
+      const tabs = within(screen.getByRole('tablist', { name: 'Squad' })).getAllByRole('tab');
+      expect(tabs.map((t) => t.textContent)).toEqual(['LionsMen']);
+    } finally {
+      setActiveTenant(null as unknown as string);
+    }
   });
 });

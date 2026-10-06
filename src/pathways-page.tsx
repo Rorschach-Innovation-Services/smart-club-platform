@@ -36,13 +36,12 @@ import {
   type LadderStage,
   type TrackLine,
 } from './pathways-charts';
-import { SCOUT_POOLS } from './pro-data';
 import { shortTeam } from './pro-scorecards';
 import { detectSquads } from './pro-team';
 import { useProMatches } from './pro-library';
 import { Dumbbell, PairBars, QuadrantMap, RankBars, type MapPt, type Tone } from './pro-charts';
 import { ResultsScouting } from './results-scouting';
-import { SCOUTING_EVENTS } from './scouting-data';
+import { focusEvents, focusPools, isOurFranchise, useFocus } from './scouting-focus';
 
 type Sub = 'milestones' | 'improvers' | 'pyramid';
 const SUBS: [Sub, string][] = [
@@ -74,14 +73,26 @@ export function PathwaysPage() {
   };
   const sub = (get('pw') as Sub) || 'milestones';
   const pro = useProMatches();
-  const { lines, proBySeason } = useMemo(
-    () => allLines(SCOUTING_EVENTS, SCOUT_POOLS, pro.matches),
-    [pro.matches],
-  );
+  // A union's own dashboard: its sides in the events, its club players, its franchise.
+  const focus = useFocus();
+  const { lines, proBySeason } = useMemo(() => {
+    const ours = allLines(focusEvents(focus), focusPools(focus), pro.matches, {
+      ourSidesOnly: !!focus,
+    });
+    if (!focus || pro.source === 'sample') return ours;
+    const keep = (l: Line) => l.stage.key !== 'pro' || isOurFranchise(focus, l.team);
+    return { lines: ours.lines.filter(keep), proBySeason: ours.proBySeason.filter(keep) };
+  }, [focus, pro.matches, pro.source]);
   // Franchises whose whole seasons are in the files; their opponents appear only in those games.
   const squads = useMemo(
-    () => [...new Set(detectSquads(pro.matches).map((s) => shortTeam(s.name)))],
-    [pro.matches],
+    () => [
+      ...new Set(
+        detectSquads(pro.matches)
+          .filter((s) => pro.source === 'sample' || isOurFranchise(focus, s.name))
+          .map((s) => shortTeam(s.name)),
+      ),
+    ],
+    [pro.matches, pro.source, focus],
   );
   const disc: Disc = get('disc') === 'bowl' ? 'bowl' : 'bat';
   const gender: Gender = get('mg') === 'women' ? 'women' : 'men';
