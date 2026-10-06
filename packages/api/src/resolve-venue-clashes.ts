@@ -35,7 +35,7 @@ import {
   venueAliasesFor,
   isClashExempt,
 } from './venue-clash.js';
-import type { Series, Venue } from './types.js';
+import type { Club, Series, Venue } from './types.js';
 import { writeSeriesFromSnapshot } from './medicoach-sync/cli-write.js';
 
 const TENANT = 'dolphins';
@@ -183,10 +183,107 @@ export function chooseFixtureToMove(a: ClashParticipant, b: ClashParticipant): M
 // ─────────────────────────────── venue writing (mirrors the importer) ───────────────────────────────
 
 /** Registry index keyed by groundKey — matches registryResolver's keying (import-planb buildVenueIndex). */
-function buildVenueIndex(venues: Venue[]): Map<string, Venue> {
+export function buildVenueIndex(
+  venues: Venue[],
+  aliases: Record<string, string> = ALIASES,
+): Map<string, Venue> {
   const byNorm = new Map<string, Venue>();
-  for (const v of venues) byNorm.set(groundKey(v.name, ALIASES), v);
+  for (const v of venues) byNorm.set(groundKey(v.name, aliases), v);
   return byNorm;
+}
+
+/**
+ * The union's permitted-fields list lives on the registry as homeClubIds — every venue a
+ * club may use when its first choice is taken. Sorted by name so numbered fields go 1→2→3
+ * (mirrors the importer's permittedByClub).
+ */
+export function buildPermittedByClub(byNorm: Map<string, Venue>): Map<string, Venue[]> {
+  const permittedByClub = new Map<string, Venue[]>();
+  for (const v of new Set(byNorm.values())) {
+    for (const cid of v.homeClubIds ?? []) {
+      const list = permittedByClub.get(cid) ?? [];
+      list.push(v);
+      permittedByClub.set(cid, list);
+    }
+  }
+  for (const list of permittedByClub.values()) list.sort((a, b) => a.name.localeCompare(b.name));
+  return permittedByClub;
+}
+
+export interface CandidateGround {
+  ground: string;
+  label: string;
+}
+
+export interface CandidateGroundInputs {
+  homeClubId: string | undefined;
+  awayClubId: string | undefined;
+  /** The ground the fixture is being moved OFF — never offered back. */
+  contested: string;
+  clubsById: Map<string, Club>;
+  /** Registry index from buildVenueIndex (same aliases). */
+  byNorm: Map<string, Venue>;
+  /** From buildPermittedByClub(byNorm). */
+  permittedByClub: Map<string, Venue[]>;
+  aliases?: Record<string, string>;
+}
+
+/**
+ * The candidate move destinations for a fixture, first-free-wins order (same order and
+ * labels as the importer's runClashPass):
+ *   1. away side's allocated ground (away club's record ground)
+ *   2. home club's secondaryVenue
+ *   3. away club's secondaryVenue
+ *   4. registry venues whose homeClubIds include the home club (union facility list)
+ *   5. registry venues whose homeClubIds include the away club (union facility list)
+ * Skips: the contested ground, junk names, red-listed grounds (BAD_CONDITION_GROUNDS), and
+ * any registry row whose note starts with 'Bad condition'. Deduped by ledger key. Pure — it
+ * does not check availability; the caller tests each candidate against its ledger.
+ */
+export function buildCandidateGrounds({
+  homeClubId,
+  awayClubId,
+  contested,
+  clubsById,
+  byNorm,
+  permittedByClub,
+  aliases = ALIASES,
+}: CandidateGroundInputs): CandidateGround[] {
+  const out: CandidateGround[] = [];
+  const seen = new Set<string>();
+  const add = (g: string | undefined, label: string) => {
+    if (!g) return;
+    const t = g.trim();
+    if (!t || JUNK_GROUND.test(t)) return;
+    if (groundKey(t, aliases) === groundKey(contested, aliases)) return;
+    if (seen.has(groundKey(t, aliases))) return;
+    if (BAD_CONDITION_GROUNDS.has(groundKey(t, aliases))) return;
+    const row = byNorm.get(groundKey(t, aliases));
+    if (row?.note && /^Bad condition/i.test(row.note)) return;
+    seen.add(groundKey(t, aliases));
+    out.push({ ground: t, label });
+  };
+  const addPermitted = (clubId: string | undefined, label: string) => {
+    for (const v of clubId ? (permittedByClub.get(clubId) ?? []) : []) {
+      if (JUNK_GROUND.test(v.name.trim())) continue;
+      add(v.name, label);
+    }
+  };
+  add(
+    awayClubId ? clubsById.get(awayClubId)?.ground?.venue?.trim() : undefined,
+    "away side's allocated ground",
+  );
+  add(
+    homeClubId ? clubsById.get(homeClubId)?.ground?.secondaryVenue?.trim() : undefined,
+    "home club's secondary ground",
+  );
+  add(
+    awayClubId ? clubsById.get(awayClubId)?.ground?.secondaryVenue?.trim() : undefined,
+    "away club's secondary ground",
+  );
+  addPermitted(homeClubId, "home club's permitted field (union facility list)");
+  addPermitted(awayClubId, "away club's permitted field (union facility list)");
+  return out;
 }
 
 function resolveVenue(name: string, byNorm: Map<string, Venue>): Venue | undefined {
@@ -249,18 +346,9 @@ async function main() {
   const registryMiss = new Set<string>();
   const hardErrors: string[] = [];
 
-  // The union's permitted-fields list lives on the registry as homeClubIds — every venue a
-  // club may use when its first choice is taken. Sorted by name so numbered fields go 1→2→3
-  // (mirrors the importer's permittedByClub).
-  const permittedByClub = new Map<string, Venue[]>();
-  for (const v of new Set(byNorm.values())) {
-    for (const cid of v.homeClubIds ?? []) {
-      const list = permittedByClub.get(cid) ?? [];
-      list.push(v);
-      permittedByClub.set(cid, list);
-    }
-  }
-  for (const list of permittedByClub.values()) list.sort((a, b) => a.name.localeCompare(b.name));
+  // The union's permitted-fields list lives on the registry as homeClubIds (see
+  // buildPermittedByClub).
+  const permittedByClub = buildPermittedByClub(byNorm);
 
   const seriesSlug = (id: string): string =>
     id.startsWith('s-planb-') ? id.slice('s-planb-'.length) : id;
@@ -388,58 +476,20 @@ async function main() {
     return ledger;
   };
 
-  /**
-   * The candidate move destinations for a fixture, first-free-wins order (same order and
-   * labels as the importer's runClashPass):
-   *   1. away side's allocated ground (away club's record ground)
-   *   2. home club's secondaryVenue
-   *   3. away club's secondaryVenue
-   *   4. registry venues whose homeClubIds include the home club (union facility list)
-   *   5. registry venues whose homeClubIds include the away club (union facility list)
-   * Skips: the contested ground, junk names, red-listed grounds, and any registry row whose
-   * note starts with 'Bad condition'. Deduped by ledger key.
-   */
   const buildCandidates = (
     homeClubId: string | undefined,
     awayClubId: string | undefined,
     contested: string,
-  ): Array<{ ground: string; label: string }> => {
-    const out: Array<{ ground: string; label: string }> = [];
-    const seen = new Set<string>();
-    const add = (g: string | undefined, label: string) => {
-      if (!g) return;
-      const t = g.trim();
-      if (!t || JUNK_GROUND.test(t)) return;
-      if (groundKey(t, ALIASES) === groundKey(contested, ALIASES)) return;
-      if (seen.has(groundKey(t, ALIASES))) return;
-      if (BAD_CONDITION_GROUNDS.has(groundKey(t, ALIASES))) return;
-      const row = byNorm.get(groundKey(t, ALIASES));
-      if (row?.note && /^Bad condition/i.test(row.note)) return;
-      seen.add(groundKey(t, ALIASES));
-      out.push({ ground: t, label });
-    };
-    const addPermitted = (clubId: string | undefined, label: string) => {
-      for (const v of clubId ? (permittedByClub.get(clubId) ?? []) : []) {
-        if (JUNK_GROUND.test(v.name.trim())) continue;
-        add(v.name, label);
-      }
-    };
-    add(
-      awayClubId ? clubsById.get(awayClubId)?.ground?.venue?.trim() : undefined,
-      "away side's allocated ground",
-    );
-    add(
-      homeClubId ? clubsById.get(homeClubId)?.ground?.secondaryVenue?.trim() : undefined,
-      "home club's secondary ground",
-    );
-    add(
-      awayClubId ? clubsById.get(awayClubId)?.ground?.secondaryVenue?.trim() : undefined,
-      "away club's secondary ground",
-    );
-    addPermitted(homeClubId, "home club's permitted field (union facility list)");
-    addPermitted(awayClubId, "away club's permitted field (union facility list)");
-    return out;
-  };
+  ): CandidateGround[] =>
+    buildCandidateGrounds({
+      homeClubId,
+      awayClubId,
+      contested,
+      clubsById,
+      byNorm,
+      permittedByClub,
+      aliases: ALIASES,
+    });
 
   // ── Resolve: move one fixture per detected clash until the tenant scan is clean. ──
   console.log('■ Resolving ground/date/time clashes across the whole tenant');

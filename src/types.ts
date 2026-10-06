@@ -367,6 +367,48 @@ export interface TenantConfig {
    * not projected by GET /tenant/config, so only the operator portal sees it.
    */
   fixtureReminders?: FixtureRemindersConfig;
+  /**
+   * Transfer windows (inclusive YYYY-MM-DD ranges). Absent or empty ⇒ no restriction.
+   * Operator-only to write; served on GET /tenant and GET /tenant/config.
+   */
+  transferWindows?: TransferWindow[];
+  /**
+   * Server-computed status for TODAY (tenant wall-clock) — present only when windows are
+   * configured. Read-only; UI copy must use this, never the device clock.
+   */
+  transferWindowStatus?: TransferWindowStatus;
+}
+
+/** Mirror of the API's TransferWindow. */
+export interface TransferWindow {
+  label: string;
+  start: string;
+  end: string;
+}
+
+/** Mirror of the API's TransferWindowStatus. */
+export interface TransferWindowStatus {
+  open: boolean;
+  current?: TransferWindow;
+  next?: TransferWindow;
+}
+
+/** `rejectedBy` on a clearance auto-rejected because it arrived outside every transfer window. */
+export const TRANSFER_WINDOW_REJECTOR = 'system:transfer-window';
+
+/**
+ * What one tenant-wide player erasure (`DELETE /admin/players/:nk`) removed, per category.
+ * Mirrors packages/api/src/types.ts — counts only, never the person's identity.
+ */
+export interface PlayerErasureCounts {
+  playerRows: number;
+  clearances: number;
+  registrationReviews: number;
+  veteransRequests: number;
+  documents: number;
+  certificates: number;
+  captainsReportsScrubbed: number;
+  reportOpenMarkers: number;
 }
 
 export type FixtureReminderChannel = 'email' | 'whatsapp';
@@ -676,7 +718,10 @@ export interface ClubCommEvent {
     | 'postponement-declined'
     | 'postponement-withdrawn'
     // Scheduled fixture reminder to the chair (FixtureReminders cron).
-    | 'fixture-reminder';
+    | 'fixture-reminder'
+    // Destination chair's clearance heads-up, and the pending-clearance reminder (manual or cron).
+    | 'clearance-inbound'
+    | 'clearance-reminder';
   summary?: string;
 }
 
@@ -912,8 +957,14 @@ export type ClearanceStatus = 'pending' | 'approved' | 'admin-override' | 'rejec
  *   source-reactivated  — the move is cancelled; the player is (or returns to) active at the source.
  *   moved-to-source     — the registration (details + ID doc) is moved to the source club.
  *   stays-at-destination — the source is not on the system, so the player stays at the destination.
+ *   not-registered      — auto-rejected outside a transfer window; the registration was never
+ *                         completed, so the player remains unregistered / at their current club.
  */
-export type RejectOutcome = 'source-reactivated' | 'moved-to-source' | 'stays-at-destination';
+export type RejectOutcome =
+  | 'source-reactivated'
+  | 'moved-to-source'
+  | 'stays-at-destination'
+  | 'not-registered';
 
 /** An inter-club transfer/clearance request. */
 export interface PlayerClearance {

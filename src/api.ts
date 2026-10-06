@@ -15,6 +15,7 @@ import { devAuthHeader } from './devAuth';
 import type { LibraryMatch } from './match-import';
 import type {
   TenantConfig,
+  TransferWindow,
   TenantBranding,
   TenantSummary,
   TutorialVideo,
@@ -37,6 +38,7 @@ import type {
   CaptainsReportFields,
   LinkedCaptainsReport,
   SendResult,
+  PlayerErasureCounts,
   LogoUploadPost,
   TutorialUploadGrant,
   TenantOverview,
@@ -480,6 +482,14 @@ export const getPlayerIdDocViewUrl = (clubId: string, naturalKey: string) =>
 // player is mid-transfer.
 export const deletePlayer = (clubId: string, naturalKey: string) =>
   request(`/clubs/${clubId}/players/${encodeURIComponent(naturalKey)}`, { method: 'DELETE' });
+// Union admin: erase a person from EVERY club in this organisation (rows, ID documents,
+// clearances + certificates, reviews, veterans requests; captain's-report mentions scrubbed).
+// 404 when nothing names them; 409 while a clearance naming them is pending.
+export const adminErasePlayer = (naturalKey: string) =>
+  request<{ ok: true; counts: PlayerErasureCounts }>(
+    `/admin/players/${encodeURIComponent(naturalKey)}`,
+    { method: 'DELETE' },
+  );
 
 // Rep-safe {id,name} list of sibling clubs (for clearance source/destination choice).
 export const getClubDirectory = () => request<{ id: string; name: string }[]>('/clubs/directory');
@@ -615,6 +625,15 @@ export const rejectClearance = (clearanceId: string, body: unknown) =>
 // Restores the pre-reject rows from the snapshot the reject stored; the source club decides again.
 export const reopenClearance = (clearanceId: string, body: unknown) =>
   request<PlayerClearance>(`/admin/clearances/${clearanceId}/reopen`, { method: 'POST', body });
+// Union "Send reminder" to a pending clearance's source chair (email + WhatsApp). 409 when it
+// was already reminded today (manually or by the daily cron) or is no longer pending; 422 when
+// the source club is not on the system. `reminded: false` ⇒ nothing was delivered (no usable
+// chair contact, or every channel failed); the day's claim was released, so a retry may follow.
+export const remindClearance = (clearanceId: string, fromClubId: string) =>
+  request<{ results: SendResult[]; reminded: boolean }>(
+    `/admin/clearances/${encodeURIComponent(clearanceId)}/remind`,
+    { method: 'POST', body: { fromClubId } },
+  );
 // Union reallocation of a directory-sourced clearance to a real club that has since
 // registered: body { fromClubId, newFromClubId, version? }. The clearance moves into the
 // target club's queue for its rep to action via the normal flow.
@@ -1198,12 +1217,14 @@ export const getRegistration = (clubId: string, token: string) =>
   }>(`/register/${clubId}`, { auth: false, query: { t: token } });
 // `clearance` present ⇔ the registration opened a transfer from the named previous club
 // (the player lands on the joining club's roster as clearance-pending until that club or
-// the union office approves). Body may include `currentClubId` to register into a club
+// the union office approves). `transferWindow` present ⇔ it arrived outside every transfer
+// window: recorded as an auto-rejected clearance, the player is NOT registered. Body may include `currentClubId` to register into a club
 // other than the one whose link was used — no consent from that club is required.
 export const submitRegistration = (clubId: string, token: string, body: unknown) =>
   request<{
     ok: boolean;
     clearance?: { fromClubName: string };
+    transferWindow?: { closed: true; nextWindow?: TransferWindow };
   }>(`/register/${clubId}`, {
     method: 'POST',
     auth: false,

@@ -43,7 +43,11 @@ export const qk = {
   tenantConfig: () => ['tenant-config', t()],
   users: () => ['users', t()],
   players: (clubId: string) => ['players', t(), clubId],
+  // Prefix of every club's roster query — invalidates them all at once (tenant-wide erasure).
+  playersAll: () => ['players', t()],
   clearances: (clubId: string) => ['clearances', t(), clubId],
+  // Prefix of every club's clearance query.
+  clearancesAllClubs: () => ['clearances', t()],
   allClearances: () => ['clearances-all', t()],
   allRegistrationReviews: () => ['registration-reviews-all', t()],
   demographics: () => ['demographics', t()],

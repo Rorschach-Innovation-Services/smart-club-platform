@@ -235,7 +235,8 @@ export const WHATSAPP_TEMPLATES = {
       'Hello {{1}},\n\n' +
       "Captain's report run update: {{2}}.\n\n" +
       'Automated status message for union administrators.',
-    status: 'pending',
+    // Approved in Meta on 6 Oct 2026.
+    status: 'registered',
   },
 } as const satisfies Record<string, WhatsAppTemplateDefinition>;
 

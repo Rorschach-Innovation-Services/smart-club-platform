@@ -159,6 +159,7 @@ import {
   registerPlayerForClub,
   resolveDeclaredPreviousClubId,
   buildCrossClubIndex,
+  type ClearanceOpenedNotifier,
   type RegisterPlayerOutcome,
 } from './register-player.js';
 import { luhnValid, normalizeGender, normalizeRace } from './roster-normalize.js';
@@ -173,6 +174,10 @@ import {
   sendClearanceNotice,
   sendClearanceResolvedNotice,
   sendClearanceReopenedNotice,
+  sendClearanceDestNotice,
+  sendClearanceAdminNotice,
+  sendClearanceAdminSummaryNotice,
+  sendClearanceAutoRejectedAdminNotice,
   sendVeteransRequestNotice,
   sendVeteransRequestResolvedNotice,
   notifyPostponementOpened,
@@ -275,7 +280,16 @@ import { normaliseSerial } from './certificates/serial.js';
 import { activeVerifyKeys, certSigner, type VerifyKey } from './certificates/signer.js';
 import { validateCertTemplate, validateOrgContact } from './certificates/config.js';
 import { validateFixtureReminders } from './fixture-reminders-config.js';
-import { TENANT_UTC_OFFSET_MINUTES } from './tenant-time.js';
+import { TENANT_UTC_OFFSET_MINUTES, tenantDate } from './tenant-time.js';
+import {
+  TRANSFER_WINDOW_REJECTOR,
+  closedTransferWindow,
+  servedTransferWindowStatus,
+  transfersClosedMessage,
+  validateTransferWindows,
+} from './transfer-windows.js';
+import { adminEmailsProvider, type AdminEmailsProvider } from './notify/admin-emails.js';
+import { clearanceReminderClaimKey, clearanceReminderCommEvents } from './clearance-reminder.js';
 
 // Strict date-only parsing for calendar validation — dayjs's lenient default would roll
 // '2026-02-31' into March and store a date the operator never entered.
@@ -612,6 +626,11 @@ app.get('/tenant', async (c) => {
     // (matchFormats/matchDays/timeSlots) reverted to built-ins, and the two that survive —
     // travel cost and venue aliases — are operational detail nobody on a public page reads,
     // so they stay on the authenticated GET /tenant/config.
+    // Transfer windows are published union dates (no personal data). The STATUS is computed
+    // here, on the tenant's calendar day, so the public form never trusts the device clock at
+    // a window boundary. Absent status ⇔ no windows ⇔ unrestricted.
+    transferWindows: config.transferWindows ?? [],
+    transferWindowStatus: servedTransferWindowStatus(config),
     // Structures are deliberately NOT here. They are only needed by the authenticated
     // "Start a season" flow, and GET /tenant is unauthenticated and hit on every public
     // page load — serving up to 50 structures × 20 stages of competition configuration
@@ -913,6 +932,7 @@ app.post('/register/:clubId', async (c) => {
   body.lastName = body.lastName!.replace(/\s+/g, ' ').trim().slice(0, 60);
   // The stored row's identity/provenance fields (naturalKey, dob, isMinor, idType, idNumber,
   // status, registeredVia, version, consentAt, createdAt) are stamped by registerPlayerForClub.
+  const cricketProfile = resolveVertical(cfg).playerProfile !== 'positions';
   const fields: Partial<PlayerRegistration> = {
     firstName: body.firstName,
     lastName: body.lastName,
@@ -933,12 +953,18 @@ app.post('/register/:clubId', async (c) => {
     // Veterans second-club affiliation — name derived server-side (above), never from the client.
     veteransClub: veteransClub?.name,
     veteransClubId: veteransClub?.id,
-    battingHand: body.battingHand,
-    bowlingHand: body.bowlingHand,
-    battingType: body.battingType,
-    bowlerType: body.bowlerType,
-    isAllRounder: body.isAllRounder ?? false,
-    isWk: body.isWk ?? false,
+    // Cricket playing-profile fields only for a cricket-profile tenant; a 'positions' tenant
+    // silently drops them (like `position` on a cricket tenant) so a crafted POST can't store them.
+    ...(cricketProfile
+      ? {
+          battingHand: body.battingHand,
+          bowlingHand: body.bowlingHand,
+          battingType: body.battingType,
+          bowlerType: body.bowlerType,
+          isAllRounder: body.isAllRounder ?? false,
+          isWk: body.isWk ?? false,
+        }
+      : {}),
     ...(position ? { position } : {}),
     idDocMeta: {
       objectKey: idDocMeta.objectKey,
@@ -1030,6 +1056,9 @@ app.post('/register/:clubId', async (c) => {
       linkClub: { id: clubId, name: regClub.name },
       directory: directoryClubs(cfg),
       notifyClearanceOpened,
+      // An anonymous submission outside every transfer window must not vanish: it is recorded
+      // as an auto-rejected clearance the union office can reopen.
+      windowClosed: { mode: 'auto-reject', notify: notifyClearanceAutoRejected },
     });
   } catch (err: unknown) {
     if (err instanceof repo.DestinationClubGoneError) throw new HttpError(409, err.message);
@@ -1051,6 +1080,20 @@ app.post('/register/:clubId', async (c) => {
         .catch((err) => console.error('source-club counter bump failed', err));
     }
     return c.json({ ok: true, clearance: { fromClubName: result.clearance.fromClubName } }, 201);
+  }
+  if (result.outcome === 'clearance-auto-rejected') {
+    // Recorded, not registered. A same-stretch resubmission (`repeat`) gets the identical
+    // answer. No source-club quota charge — nothing landed in its queue to act on.
+    return c.json(
+      {
+        ok: true,
+        transferWindow: {
+          closed: true,
+          ...(result.nextWindow ? { nextWindow: result.nextWindow } : {}),
+        },
+      },
+      201,
+    );
   }
 
   // Plain-active outcome (no clearance was opened): the player row is live on the joining
@@ -1371,43 +1414,79 @@ async function findPlayerByIdNumber(
 }
 
 const CLEARANCE_NOTICES_PER_DAY = 3;
+const CAP_REACHED = 'daily clearance-notice cap reached';
+
+/** Today's (UTC) comm-log rows matching `pred` — the read half of the notice caps below. */
+function countToday(log: ClubCommEvent[] | undefined, pred: (e: ClubCommEvent) => boolean): number {
+  const today = now().slice(0, 10);
+  return (log ?? []).filter((e) => e.at.slice(0, 10) === today && pred(e)).length;
+}
+
+interface ClearanceOpenedNotifyOpts {
+  /** Authenticated admin reassign: deliberate union action, not the abuse the cap exists for. */
+  bypassCap?: boolean;
+  /** This request's memoised admin list; absent ⇒ a fresh one (one listing per notice). */
+  adminEmails?: AdminEmailsProvider;
+  /**
+   * Chair bulk routes: collect the clearance here instead of emailing admins per creation — the
+   * route sends ONE summary per request (notifyClearanceAdminSummary). Collected even when the
+   * cap fires: the summary is a single email per authenticated request, so the bound the cap
+   * provides is already met, and the union office still learns about every clearance.
+   */
+  adminBatch?: PlayerClearance[];
+}
+
 /**
- * Best-effort heads-up to the FROM-club chairman that a clearance now awaits the club's
- * decision. Never throws — a notify fault must not fail the clearance write that already
- * committed. Capped per source club per (UTC) day because the public register route can
- * open clearances anonymously: past the cap both channels are recorded as `skipped`, so
- * the comm log still shows the clearance arrived silently (authenticated admin reassigns
- * bypass the cap — they are deliberate union action, not the abuse the cap exists for).
- * There is deliberately no claim/idempotency machinery here — every creation site 409s a
- * duplicate pending clearance before a second notice could exist, and the clearance id is
- * minted fresh per request so it could never key a retry dedupe anyway.
+ * Best-effort notices for a newly opened clearance. Never throws — a notify fault must not fail
+ * the clearance write that already committed. There is deliberately no claim/idempotency
+ * machinery here — every creation site 409s a duplicate pending clearance before a second notice
+ * could exist, and the clearance id is minted fresh per request so it could never key a retry
+ * dedupe anyway.
+ *
+ * Fan-out:
+ *  - SOURCE chair (on-system source only — `fromClub` null means a directory source, which has
+ *    no club record and no chair): email + WhatsApp, comm-log kind `clearance` on the source.
+ *  - DESTINATION chair: email-only heads-up, comm-log kind `clearance-inbound` on the destination.
+ *  - Every tenant ADMIN: one email each (not comm-logged) — or, on the chair bulk routes, the
+ *    clearance is collected into `opts.adminBatch` for one summary email per request.
+ *
+ * Daily cap (CLEARANCE_NOTICES_PER_DAY), because the public register route can open clearances
+ * anonymously. When it fires every recipient's row is recorded `skipped` (`CAP_REACHED`), so the
+ * comm log still shows the clearance arrived silently, and no admin email goes out:
+ *  - On-system source: counted per SOURCE club — today's `clearance` email rows on it.
+ *  - Directory source: there is no source counter, so it is counted per DESTINATION club —
+ *    today's directory-source `clearance-inbound` email rows on it (keyed
+ *    `clearance-<id>-inbound-directory-email`, so on-system inbound notices never consume it and
+ *    a busy day of ordinary transfers can't silence the clearances only the union can resolve).
+ *    A failed destination read fails CLOSED here (no destination or admin notice; Sentry).
+ * Email is attempted on every notice, so counting email rows counts notices — including capped
+ * ones, which keeps the gate shut for the rest of the day. Read-then-append with no transaction:
+ * parallel creates can briefly overshoot the cap. Fine for an anti-abuse bound; not a quota.
  */
 async function notifyClearanceOpened(
   tenant: string,
   tenantConfig: TenantConfig | null,
-  fromClub: Club,
+  fromClub: Club | null,
   clearance: PlayerClearance,
   by: string,
-  opts: { bypassCap?: boolean } = {},
+  opts: ClearanceOpenedNotifyOpts = {},
 ): Promise<void> {
-  try {
-    const channels: Channel[] = hasFeature(tenantConfig, 'whatsappInvites', true)
-      ? ['email', 'whatsapp']
-      : ['email'];
-    // Email is attempted on every notice, so counting today's email rows counts notices —
-    // including capped ones, which keeps the gate shut for the rest of the day. Read-then-
-    // append with no transaction: parallel creates can briefly overshoot the cap. Fine for
-    // an anti-abuse bound; this is not a hard quota.
-    const today = now().slice(0, 10);
-    const noticesToday = (fromClub.commLog ?? []).filter(
-      (e) => e.kind === 'clearance' && e.channel === 'email' && e.at.slice(0, 10) === today,
-    ).length;
-    const results: SendResult[] =
-      !opts.bypassCap && noticesToday >= CLEARANCE_NOTICES_PER_DAY
+  let capped = false;
+  if (fromClub) {
+    try {
+      const channels: Channel[] = hasFeature(tenantConfig, 'whatsappInvites', true)
+        ? ['email', 'whatsapp']
+        : ['email'];
+      const noticesToday = countToday(
+        fromClub.commLog,
+        (e) => e.kind === 'clearance' && e.channel === 'email',
+      );
+      capped = !opts.bypassCap && noticesToday >= CLEARANCE_NOTICES_PER_DAY;
+      const results: SendResult[] = capped
         ? channels.map((channel) => ({
             channel,
             status: 'skipped' as const,
-            error: 'daily clearance-notice cap reached',
+            error: CAP_REACHED,
           }))
         : (
             await sendClearanceNotice({
@@ -1418,24 +1497,126 @@ async function notifyClearanceOpened(
               channels,
             })
           ).results;
-    await repo.appendClubCommEvents(
-      tenant,
-      fromClub.id,
-      results.map((r) => ({
-        id: randomUUID(),
-        channel: r.channel,
-        ...(r.to ? { to: r.to } : {}),
-        status: r.status,
-        ...(r.messageId ? { messageId: r.messageId } : {}),
-        ...(r.error ? { error: r.error } : {}),
-        at: now(),
-        by,
-        idempotencyKey: `clearance-${clearance.id}-${r.channel}`,
-        kind: 'clearance' as const,
-      })),
-    );
+      await repo.appendClubCommEvents(
+        tenant,
+        fromClub.id,
+        results.map((r) => ({
+          id: randomUUID(),
+          channel: r.channel,
+          ...(r.to ? { to: r.to } : {}),
+          status: r.status,
+          ...(r.messageId ? { messageId: r.messageId } : {}),
+          ...(r.error ? { error: r.error } : {}),
+          at: now(),
+          by,
+          idempotencyKey: `clearance-${clearance.id}-${r.channel}`,
+          kind: 'clearance' as const,
+        })),
+      );
+    } catch (err) {
+      console.error('clearance notice failed', err);
+    }
+  }
+  // Directory-source rows carry a distinct key segment so the directory cap counts only them.
+  const inboundKey = fromClub ? 'inbound' : 'inbound-directory';
+  try {
+    const toClub = await repo.getClub(tenant, clearance.toClubId);
+    if (!fromClub) {
+      capped =
+        !opts.bypassCap &&
+        countToday(
+          toClub?.commLog,
+          (e) =>
+            e.kind === 'clearance-inbound' &&
+            e.channel === 'email' &&
+            e.idempotencyKey.includes('-inbound-directory-'),
+        ) >= CLEARANCE_NOTICES_PER_DAY;
+    }
+    if (toClub) {
+      const { results } = capped
+        ? {
+            results: [
+              { channel: 'email' as const, status: 'skipped' as const, error: CAP_REACHED },
+            ],
+          }
+        : await sendClearanceDestNotice({
+            chair: chairContactOf(toClub),
+            fromClubName: clearance.fromClubName,
+            playerName: clearance.playerName,
+            toClubName: clearance.toClubName,
+          });
+      await repo.appendClubCommEvents(
+        tenant,
+        toClub.id,
+        results.map((r: SendResult) => ({
+          id: randomUUID(),
+          channel: r.channel,
+          ...(r.to ? { to: r.to } : {}),
+          status: r.status,
+          ...(r.messageId ? { messageId: r.messageId } : {}),
+          ...(r.error ? { error: r.error } : {}),
+          at: now(),
+          by,
+          idempotencyKey: `clearance-${clearance.id}-${inboundKey}-${r.channel}`,
+          kind: 'clearance-inbound' as const,
+        })),
+      );
+    }
   } catch (err) {
-    console.error('clearance notice failed', err);
+    if (!fromClub) {
+      // The directory cap could not be checked: fail closed (the clearance itself stands, and
+      // the reminder digest still surfaces it to admins).
+      capped = true;
+    }
+    Sentry.captureException(err);
+    console.error('clearance destination notice failed', err);
+  }
+  if (opts.adminBatch) {
+    opts.adminBatch.push(clearance);
+    return;
+  }
+  if (capped) return;
+  try {
+    const admins = await (opts.adminEmails ?? adminEmailsProvider(repo, tenant))();
+    if (admins.length > 0) {
+      await sendClearanceAdminNotice({
+        to: admins,
+        fromClubName: clearance.fromClubName,
+        playerName: clearance.playerName,
+        toClubName: clearance.toClubName,
+        ...(clearance.fromClubDirectory ? { fromClubDirectory: true } : {}),
+      });
+    }
+  } catch (err) {
+    console.error('clearance admin notice failed', err);
+  }
+}
+
+/**
+ * The chair bulk routes' single admin email: every clearance one request opened, collected via
+ * notifyClearanceOpened's `adminBatch`. Never throws; a no-op for an empty batch.
+ */
+async function notifyClearanceAdminSummary(
+  tenant: string,
+  toClubName: string,
+  opened: PlayerClearance[],
+  adminEmails: AdminEmailsProvider,
+): Promise<void> {
+  if (opened.length === 0) return;
+  try {
+    const admins = await adminEmails();
+    if (admins.length === 0) return;
+    await sendClearanceAdminSummaryNotice({
+      to: admins,
+      toClubName,
+      clearances: opened.map((x) => ({
+        playerName: x.playerName,
+        fromClubName: x.fromClubName,
+        ...(x.fromClubDirectory ? { fromClubDirectory: true } : {}),
+      })),
+    });
+  } catch (err) {
+    console.error(`clearance admin summary failed for ${tenant}`, err);
   }
 }
 
@@ -1514,6 +1695,61 @@ async function notifyClearanceResolved(
     await Promise.all([notifyClub(fromClub), notifyClub(toClub)]);
   } catch (err) {
     console.error('clearance resolved notice failed', err);
+  }
+}
+
+/**
+ * Notices for a registration auto-rejected outside the transfer window: both chairs via
+ * notifyClearanceResolved ('rejected' with the 'not-registered' copy; an off-system source is
+ * skipped as usual) and every tenant admin by email. Never throws.
+ *
+ * Unlike an admin resolution this fires from the ANONYMOUS register route, so it is capped.
+ * The primary guard is upstream — a resubmission in the same closed stretch reuses the existing
+ * record and never reaches here — and this per-destination-club daily cap (counting today's
+ * window auto-reject email rows, the same read-then-append bound as notifyClearanceOpened) is
+ * the backstop against many distinct fabricated identities. Admin emails share the gate. A cap
+ * check that cannot read the destination club fails CLOSED — no notices (the clearance is still
+ * recorded and listed for admins) — and is reported to Sentry.
+ */
+async function notifyClearanceAutoRejected(
+  tenant: string,
+  clearance: PlayerClearance,
+  adminEmails: AdminEmailsProvider = adminEmailsProvider(repo, tenant),
+): Promise<void> {
+  try {
+    const toClub = await repo.getClub(tenant, clearance.toClubId);
+    const sentToday = countToday(
+      toClub?.commLog,
+      (e) =>
+        e.kind === 'clearance-rejected' &&
+        e.channel === 'email' &&
+        e.by === TRANSFER_WINDOW_REJECTOR,
+    );
+    if (sentToday >= CLEARANCE_NOTICES_PER_DAY) {
+      console.warn(
+        `transfer-window auto-reject notices for ${tenant}/${clearance.toClubId}: ${CAP_REACHED}`,
+      );
+      return;
+    }
+  } catch (err) {
+    Sentry.captureException(err);
+    console.error('transfer-window auto-reject cap check failed — notices skipped', err);
+    return;
+  }
+  await notifyClearanceResolved(tenant, clearance, 'rejected', TRANSFER_WINDOW_REJECTOR);
+  try {
+    const admins = await adminEmails();
+    if (admins.length > 0) {
+      await sendClearanceAutoRejectedAdminNotice({
+        to: admins,
+        fromClubName: clearance.fromClubName,
+        playerName: clearance.playerName,
+        toClubName: clearance.toClubName,
+        reason: clearance.rejectReason ?? '',
+      });
+    }
+  } catch (err) {
+    console.error('transfer-window auto-reject admin notice failed', err);
   }
 }
 
@@ -2218,6 +2454,7 @@ app.post('/clubs/:id/players', async (c) => {
     // Veterans second-club affiliation — name derived server-side (above), never from the client.
     veteransClub: veteransClub?.name,
     veteransClubId: veteransClub?.id,
+    // Cricket fields deliberately NOT vertical-gated here (authed caller, unlike public /register); follow-up pending.
     battingHand: body.battingHand,
     bowlingHand: body.bowlingHand,
     battingType: body.battingType,
@@ -2248,6 +2485,10 @@ app.post('/clubs/:id/players', async (c) => {
   }
   if (result.outcome === 'clearance-already-open') {
     throw new HttpError(409, 'a clearance for this player is already in progress');
+  }
+  if (result.outcome === 'clearance-auto-rejected') {
+    // Unreachable: without `windowClosed` the core refuses (409) instead of auto-rejecting.
+    throw new HttpError(409, 'transfers are closed');
   }
   const player = result.player;
   // Only an ACTIVE row materializes the veterans affiliation now (write-on-activation); a
@@ -2346,6 +2587,11 @@ function playerLeagueKeys(cfg: TenantConfig | null): Set<string> {
  * Run validated bulk rows through registerPlayerForClub sequentially (deterministic order — an
  * in-request duplicate resolves to skipped-duplicate on the later row), with one cross-club
  * index prefetched for the whole request, then reconcile the club's playerCount once.
+ *
+ * Clearance notices: source + destination chairs are notified per clearance as usual, but the
+ * per-creation ADMIN email is collected and sent once per request as a summary (one email per
+ * admin listing every clearance this request opened) — so a 30-transfer upload is one admin
+ * email, not thirty, and the admin list is read once.
  */
 async function registerChairRows(
   ra: RequestAuth,
@@ -2358,6 +2604,13 @@ async function registerChairRows(
   const crossClubIndex = toRegister.length
     ? await buildCrossClubIndex(ra.tenant, await repo.listClubs(ra.tenant), club.id)
     : undefined;
+  const adminEmails = adminEmailsProvider(repo, ra.tenant);
+  const adminBatch: PlayerClearance[] = [];
+  const notifyOpened: ClearanceOpenedNotifier = (tenant, tenantConfig, fromClub, clearance, by) =>
+    notifyClearanceOpened(tenant, tenantConfig, fromClub, clearance, by, {
+      adminEmails,
+      adminBatch,
+    });
   for (const row of rows) {
     const base = {
       index: row.index,
@@ -2374,7 +2627,7 @@ async function registerChairRows(
         registeredVia: 'portal',
         registeredBy: ra.email,
         tenantConfig: cfg,
-        notifyClearanceOpened,
+        notifyClearanceOpened: notifyOpened,
         prefetch: { crossClubIndex },
       });
       const naturalKey = r.player.naturalKey;
@@ -2389,6 +2642,9 @@ async function registerChairRows(
         results.push({ ...base, outcome: 'clearance-already-open', naturalKey });
       } else if (r.outcome === 'duplicate') {
         results.push({ ...base, outcome: 'skipped-duplicate', naturalKey });
+      } else if (r.outcome === 'clearance-auto-rejected') {
+        // Unreachable: without `windowClosed` the core refuses (409 → per-row error) instead.
+        results.push({ ...base, outcome: 'error', naturalKey, error: 'transfers are closed' });
       } else {
         results.push({ ...base, outcome: 'created', naturalKey });
       }
@@ -2401,6 +2657,7 @@ async function registerChairRows(
       }
     }
   }
+  await notifyClearanceAdminSummary(ra.tenant, club.name, adminBatch, adminEmails);
   const { actual } = await repo.reconcilePlayerCount(ra.tenant, club.id);
   return { results, playerCount: actual };
 }
@@ -3390,6 +3647,11 @@ app.post('/clubs/:id/clearances', async (c) => {
   }
   if (body.fromClubId === toClubId)
     throw new HttpError(400, 'source and destination are the same club');
+  // Outside every transfer window a rep request is refused outright — the rep is present to
+  // read why. (A public registration instead records an auto-rejected clearance: an anonymous
+  // submission must not vanish. See transfer-windows.ts.)
+  const closed = closedTransferWindow(await getTenantConfigCached(c, ra.tenant));
+  if (closed) throw new HttpError(409, transfersClosedMessage(closed.next));
   const [fromClub, toClub] = await Promise.all([
     repo.getClub(ra.tenant, body.fromClubId),
     repo.getClub(ra.tenant, toClubId),
@@ -7767,6 +8029,8 @@ async function applyTenantConfigPatch(
   // `liveUrl` is response-only (GET /tenant/config derives it from the slug) — never
   // persist it, so a console echoing the row back can't write it onto the stored config.
   delete (patch as { liveUrl?: unknown }).liveUrl;
+  // Same for the server-computed transfer-window status (GET /tenant, GET /tenant/config).
+  delete (patch as { transferWindowStatus?: unknown }).transferWindowStatus;
   // Table/index keys are derived at the repo write choke point — strip them here
   // too so a malicious patch can't even attempt to retarget another tenant's row
   // or corrupt the platform registry index.
@@ -8320,6 +8584,8 @@ function tenantConfigView(config: TenantConfig) {
     tutorials: tutorialsFor(config),
     features: config.features ?? {},
     calendars: config.calendars ?? [],
+    transferWindows: config.transferWindows ?? [],
+    transferWindowStatus: servedTransferWindowStatus(config),
     // The reason this route exists.
     structures: config.structures ?? [],
     // All of it, aliases and travel included: admin-level setup data (ADR 0014).
@@ -8347,6 +8613,7 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   delete (patch as { clearanceCertTemplate?: unknown }).clearanceCertTemplate;
   delete (patch as { orgContact?: unknown }).orgContact;
   delete (patch as { fixtureReminders?: unknown }).fixtureReminders;
+  delete (patch as { transferWindows?: unknown }).transferWindows;
   delete (patch as { sport?: unknown }).sport;
   delete (patch as { seasonLabel?: unknown }).seasonLabel;
   delete (patch as { integrations?: unknown }).integrations;
@@ -8939,6 +9206,10 @@ app.put('/platform/tenants/:slug', async (c) => {
     patch.fixtureReminders = validateFixtureReminders(body.fixtureReminders);
   }
   if (body.integrations !== undefined) patch.integrations = validateIntegrations(body.integrations);
+  // Whole-key write (the card sends the full list); normalised: labels trimmed, sorted by start.
+  if (body.transferWindows !== undefined) {
+    patch.transferWindows = validateTransferWindows(body.transferWindows);
+  }
   // Calendars, structures and the league setups binding them go through the shared
   // operator write (validation, version minting, referrer guards, calendar-edit warnings).
   if (body.calendars !== undefined) patch.calendars = body.calendars;
@@ -11173,6 +11444,37 @@ app.post('/admin/export-log', async (c) => {
 });
 
 /**
+ * Tenant-wide player erasure (POPIA "right to erasure"). Admin-only via the /admin/* chain.
+ * Removes the person's rows at EVERY club in this organisation, every clearance naming them
+ * (canonical + mirror, deleted outright, with snapshot ID docs + certificate PDFs + CERT#
+ * items), registration reviews, veterans requests; scrubs captain's-report mentions; drops
+ * pending report-open markers addressed to them. See repo.erasePlayerData.
+ *
+ * 404 only when NOTHING exists in any category — a person already removed via the per-club
+ * delete (or a window-rejected-only registrant) has no player row but still has PII on
+ * clearance rows, and that must stay erasable. 409 while a clearance naming them is pending
+ * (or a row is clearance-pending), and on a lost race with a concurrent clearance. Data already
+ * exported to Medicoach is NOT recalled (no delete signal exists). Returns per-category counts.
+ */
+app.delete('/admin/players/:nk', async (c) => {
+  const ra = c.get('requestAuth')!;
+  try {
+    const counts = await repo.erasePlayerData(ra.tenant, c.req.param('nk'), {
+      by: ra.email ?? 'unknown',
+      at: now(),
+    });
+    if (!counts) throw new HttpError(404, 'player not found');
+    return c.json({ ok: true, counts });
+  } catch (err: unknown) {
+    if (err instanceof repo.PlayerErasureBlockedError) throw new HttpError(409, err.message);
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+      throw new HttpError(409, 'player is mid-transfer — refresh and try again');
+    }
+    throw err;
+  }
+});
+
+/**
  * GET /admin/insights/demographics — anonymised cohort histograms (age / gender /
  * race) for the Season Insights dashboard, plus the exact per-league split and the
  * unattributed remainder. Buckets only — no player rows leave the API (the repo
@@ -11546,6 +11848,72 @@ app.post('/admin/clearances/:cid/reopen', async (c) => {
     if (err instanceof repo.SourceClubGoneError) throw new HttpError(409, err.message);
     throw err;
   }
+});
+
+/**
+ * Union "Send reminder": re-send the pending-clearance notice (email + WhatsApp when the tenant's
+ * `whatsappInvites` is on) to the SOURCE chair. Admin-only. Bypasses the creation daily cap and
+ * logs comm-log kind `clearance-reminder` (never `clearance`, so it cannot consume that cap).
+ * At most one reminder per clearance per tenant day: the route claims the same INVITE# marker the
+ * ClearanceReminders cron uses (see clearance-reminder.ts), so a second click — from any tab — or
+ * that day's cron run gets 409. 404 unknown; 409 not pending; 422 when the source club is not on
+ * the system (a directory source has no chair to remind).
+ *
+ * `reminded` is false when every channel skipped (no usable chair contact) or failed: nothing was
+ * delivered, so the day's claim is released — fix the chair's details and retry the same day —
+ * and the comm-log rows (kept for the audit trail) never count toward the reminder cadence.
+ */
+app.post('/admin/clearances/:cid/remind', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const cid = c.req.param('cid');
+  const body = await c.req.json<{ fromClubId?: string }>();
+  if (!body.fromClubId) throw new HttpError(400, 'fromClubId required');
+  const clearance = await repo.getClearance(ra.tenant, body.fromClubId, cid);
+  if (!clearance) throw new HttpError(404, 'clearance not found');
+  if (clearance.status !== 'pending') throw new HttpError(409, 'clearance already resolved');
+  const fromClub = await repo.getClub(ra.tenant, body.fromClubId);
+  if (!fromClub) throw new HttpError(422, 'source club is not on the system');
+  const tenantConfig = await getTenantConfigCached(c, ra.tenant).catch(() => null);
+  const channels: Channel[] = hasFeature(tenantConfig, 'whatsappInvites', true)
+    ? ['email', 'whatsapp']
+    : ['email'];
+  const today = tenantDate();
+  const key = clearanceReminderClaimKey(cid, today);
+  const replay = await repo.claimInviteSend(
+    ra.tenant,
+    fromClub.id,
+    key,
+    channels,
+    'clearance-reminder',
+  );
+  if (replay) throw new HttpError(409, 'already reminded today');
+  let results: SendResult[];
+  try {
+    ({ results } = await sendClearanceNotice({
+      chair: chairContactOf(fromClub),
+      fromClubName: fromClub.name,
+      playerName: clearance.playerName,
+      toClubName: clearance.toClubName,
+      channels,
+    }));
+  } catch (err) {
+    await repo.releaseInviteClaim(ra.tenant, fromClub.id, key).catch((releaseErr) => {
+      console.error(`clearance remind: could not release ${key}`, releaseErr);
+    });
+    throw err;
+  }
+  const reminded = results.some((r) => r.status === 'sent');
+  if (reminded) {
+    await repo.completeInviteSend(ra.tenant, fromClub.id, key, results);
+  } else {
+    await repo.releaseInviteClaim(ra.tenant, fromClub.id, key);
+  }
+  await repo.appendClubCommEvents(
+    ra.tenant,
+    fromClub.id,
+    clearanceReminderCommEvents(clearance, results, today, now(), ra.email),
+  );
+  return c.json({ results, reminded });
 });
 
 // ───────────────────── Admin: registration reviews ─────────────────────

@@ -9,6 +9,9 @@ import {
   fetchClearance,
   openClearancesFilteredTo,
   RUN,
+  API_BASE,
+  adminAuthHeader,
+  apiHeaders,
 } from './helpers';
 
 /**
@@ -31,6 +34,8 @@ const CLUBS = {
   // run-unique name, so reject moves the registration there. See the test for why leftovers at
   // `prevClub` are harmless.
   regC: { linkClub: 'verulam', prevClub: 'phoenix', prevName: 'Phoenix' },
+  // "Send reminder": the test gives Chatsworth a chair contact (the demo seed has none).
+  remind: { from: 'chatsworth', fromName: 'Chatsworth Sporting CC', to: 'clares' },
 };
 
 // A status pill button reads "<Label> <count>"; assert on the count that follows the label.
@@ -315,5 +320,49 @@ test('rejecting a registration-origin (case C) clearance moves the player to the
     .toBe('clearance-pending');
   expect((await listPlayers(request, prevClub)).find((p) => p.lastName === name)).toBeUndefined();
   // The card is pending again (Reject available once more).
+  await expect(card.getByRole('button', { name: 'Reject' })).toBeVisible();
+});
+
+test('"Send reminder" nudges the source chair once per day', async ({ page, request }) => {
+  const name = `Remind-${RUN}`;
+  const { from, fromName, to } = CLUBS.remind;
+  // The demo seed has no chair contact; give the source club one so the reminder is deliverable
+  // (the local stack's senders run dry, which still counts as sent).
+  const club = await request.get(`${API_BASE}/clubs/${from}`, {
+    headers: apiHeaders(adminAuthHeader()),
+  });
+  expect(club.ok()).toBeTruthy();
+  const { version, exco } = (await club.json()) as { version: number; exco?: object };
+  const patched = await request.patch(`${API_BASE}/clubs/${from}`, {
+    headers: apiHeaders(adminAuthHeader()),
+    data: {
+      exco: {
+        ...exco,
+        chair: { name: 'Remind Chair', email: `chair.${from}@example.test`, cell: '0821234567' },
+      },
+      version,
+    },
+  });
+  expect(
+    patched.ok(),
+    `PATCH /clubs/${from} → ${patched.status()} ${await patched.text()}`,
+  ).toBeTruthy();
+  await seedPendingClearance(request, { from, to, name });
+
+  await openClearancesFilteredTo(page, name);
+  const card = page.locator('.clr-card', { hasText: `Test ${name}` });
+  await expect(card).toBeVisible();
+  const remind = card.getByRole('button', { name: 'Send reminder' });
+
+  await remind.click();
+  await expect(
+    page.locator('.toast', { hasText: `Reminder sent to ${fromName}'s chair` }),
+  ).toBeVisible();
+
+  // The same day again: the shared INVITE# day-claim refuses it (the 409 is surfaced raw).
+  await expect(remind).toBeEnabled();
+  await remind.click();
+  await expect(page.locator('.toast', { hasText: 'already reminded today' })).toBeVisible();
+  // Still pending: a reminder never resolves anything.
   await expect(card.getByRole('button', { name: 'Reject' })).toBeVisible();
 });

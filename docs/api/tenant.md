@@ -12,7 +12,7 @@ explicit `[]` (freshly created client) comes through empty.
 
 ```
 200 → { tenant, branding, submissionDeadline, leagues, districts, requiredDocs,
-        tutorials, features, calendars }
+        tutorials, features, calendars, transferWindows, transferWindowStatus? }
 400 → unknown tenant
 404 → tenant not found
 ```
@@ -21,6 +21,13 @@ explicit `[]` (freshly created client) comes through empty.
 doc names and behaviour flags are as public as league and district names, and the rep
 portal reads only this payload. The operator-only `matchHints` (bulk-intake classifier
 keywords) are stripped — they are served solely on `GET /platform/tenants/:slug`.
+
+`transferWindows` (`[]` when none) and `transferWindowStatus` ride the public payload too:
+windows are published union dates with no personal data, and the public registration form
+needs the status before submit. The status is **computed by the server** on the tenant's
+calendar day, so the form never trusts the device clock at a window boundary. It is absent when
+no windows are configured (unrestricted) — see
+[`transferWindows`](#transfer-windows) below.
 
 Used at first paint for theming: the SPA ships a neutral default theme and applies
 `branding` (colors, copy, favicon, `--hero-image`) at runtime — see
@@ -42,8 +49,8 @@ it is a projection by construction — a denylist would expose every field later
 
 ```
 200 → { tenant, branding, submissionDeadline, leagues, districts, requiredDocs,
-        tutorials, features, calendars, structures, competitionDefaults,
-        setupCompletedAt }
+        tutorials, features, calendars, transferWindows, transferWindowStatus?,
+        structures, competitionDefaults, setupCompletedAt }
 401 → not authenticated
 404 → tenant not found
 ```
@@ -174,6 +181,29 @@ operator's `PUT /platform/tenants/:slug`
 > changes a league's `setup.calendarId` appends "N ungenerated season run(s) of "<league>"
 > will follow the new dates", because a run follows its league's live setup until its first
 > generate.
+
+> <a id="transfer-windows"></a>`transferWindows` — the periods in which a player clearance may be
+> opened ([ADR 0017](../architecture/0017-transfer-windows-and-auto-reject.md)) — is
+> **operator-only**: stripped here, written only via `PUT /platform/tenants/:slug` as a
+> whole-array replace (the operator card sends the full list).
+>
+> ```
+> transferWindows: [ { label, start, end } ]   // ≤12; label 1–60 chars (trimmed);
+>                                              // start/end real YYYY-MM-DD, start ≤ end
+> ```
+>
+> Validated by `validateTransferWindows` (unknown keys are a 400; lenient dates like
+> `2026-02-30` are rejected) and stored sorted by `start`. Overlaps are allowed. **Absent or
+> `[]` means unrestricted** — an empty list never locks a tenant out. Dates are inclusive tenant
+> wall-clock days (SAST, [ADR 0008](../architecture/0008-configurable-league-structures.md)): at
+> 23:00 SAST on a window's last day transfers are still open.
+>
+> Read back on both `GET /tenant` and `GET /tenant/config`, each with a server-computed
+> `transferWindowStatus: { open, current?, next? }` (`current` = the window containing today,
+> `next` = the earliest window starting after today; absent when no windows are configured).
+> The status is response-only: `applyTenantConfigPatch` strips it from every write, so a console
+> echoing the row back cannot persist it. What "closed" does to each registration path is in
+> [clearances.md](clearances.md#transfer-windows-and-auto-reject).
 
 ## `GET` / `PUT /platform/tenants/:slug` — the operator's view of one tenant
 
