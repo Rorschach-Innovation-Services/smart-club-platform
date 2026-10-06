@@ -1,150 +1,160 @@
-# Scouting → Schools and Pathways
+# Scouting: Schools, Pathways and the Lions dashboard
 
-**Status:** prototype (October 2026), on `feature/pathways` (built on `feature/season-dashboards`).
+**Status:** prototype, October 2026. Frontend only: no API, schema or infra changes. Ships with
+invented sample data; real data is git-ignored (see _Data_).
 
-The Scouting page has four areas: Player scouting · **Schools** · Professional team ·
-**Pathways**.
+## Read this first (two minutes)
 
-- **Schools** (`?view=schools`): school cricket from the union's results export, laid out like
-  Player scouting (`src/results-scouting.tsx` with `site="school"`).
-- **Pathways** (`?view=pathways`): developmental milestones from age-group cricket to the
-  franchises (`src/pathways-page.tsx`, `src/milestones.ts`), and underneath, the whole school
-  and club pyramid (the same results-scouting page, schools and clubs together).
+**What it adds.** The Scouting page gains two areas and one behaviour:
 
-## A union's own dashboard (the Lions)
+| Area                   | URL              | What it is                                                                                                                                            |
+| ---------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Schools**            | `?view=schools`  | School cricket from the union's results export, laid out like Player scouting (ladders, leaderboards, maps, teams, shortlist).                        |
+| **Pathways**           | `?view=pathways` | Developmental milestones: the bar at each stage from age-group cricket to the franchise, benchmark players, outliers, improvers; the pyramid beneath. |
+| **A union's own view** | any              | For the `lions` tenant, every Scouting area shows the Lions only. Other tenants see everything.                                                       |
 
-When the tenant is a union with a franchise, Scouting shows only that union
-(`src/scouting-focus.ts`, `FOCUS_BY_TENANT`; today `lions` → the Lions, union "Gauteng"):
+**To run it.** `npm run dev:local:demo`, sign in as admin, open Scouting. With no real data it
+shows the invented "Highveld" sample and says so. To see the Lions view, sign in to the `lions`
+tenant (`?tenant=lions` on a bare host).
 
-- **Player scouting:** the union's events only, plus its club players from each scouting
-  report as a report-style event (players and clubs, no matches) — for the Lions, the 101
-  Gauteng players in the national report. In a mixed event (a festival game) the scorecards
-  keep both sides but only the union's players are listed.
-- **Professional team:** only the franchise's squads (Lions men, Lions women). Other
+**To check it.** `npm run typecheck && npx vitest run` (1,733 tests). Nothing in `packages/api`
+changed. `eslint`: 0 errors, the same 103 pre-existing warnings as `main`.
+
+**What needs a decision from you.** Nothing to deploy differently. Two things to know:
+
+1. Real data (scorecards, results, the national report) is read from `src/scouting-local/`,
+   which is git-ignored. A production build made on a machine that has that folder bundles the
+   data into the JS. The match library (API, PR #4) is the right home for scorecards; results
+   exports and the report still need an upload path. See _Open points_.
+2. To give another union its own view, add one line to `FOCUS_BY_TENANT` in
+   `src/scouting-focus.ts`.
+
+**Files, in reading order.**
+
+| File                             | Role                                                                                     |
+| -------------------------------- | ---------------------------------------------------------------------------------------- |
+| `src/scouting-focus.ts`          | The union filter (`FOCUS_BY_TENANT`, `focusEvents`, `focusPools`, `isOurFranchise`).     |
+| `src/pathways.ts`                | Reads a results export; tiers, ages, formats, clubs; ladders, summaries, pipeline. Pure. |
+| `src/milestones.ts`              | Stages, the bar at each stage, ratings within a stage, outliers, improvers. Pure.        |
+| `src/websports.ts`               | Reads a WebSports ball-by-ball export into the match shape. Pure.                        |
+| `src/scouting-build.ts`          | Builds a scouting event from scorecards or from a report's players. Pure.                |
+| `src/results-scouting.tsx`       | The Schools page and the pyramid page (one component, optional site lock).               |
+| `src/pathways-page.tsx`          | The Pathways page (Milestones · Improvers · Pyramid & leagues).                          |
+| `src/pathways-charts.tsx`        | Pyramid, heat grid, weekly columns, milestone ladder, stage strips, percentile track.    |
+| `src/scouting-page.tsx`          | The area switch (Player scouting · Schools · Professional team · Pathways).              |
+| `scripts/websports-for-union.ts` | Keeps a union's games from a WebSports export; writes them into `scouting-local/`.       |
+
+Everything with a `.test.ts` / `.dom.test.tsx` beside it is tested on invented data.
+
+---
+
+## The union's own dashboard
+
+`src/scouting-focus.ts`. `FOCUS_BY_TENANT` maps a tenant to its franchise word and its
+provincial union(s); today `lions` → franchise "lions", union "Gauteng". With a focus:
+
+- **Player scouting** offers the union's events, plus its club players from each scouting
+  report as a report-style event (players and clubs, no matches): for the Lions, the 101
+  Gauteng players in the national report. In a mixed event (a festival) the scorecards keep both
+  sides but only the union's players are listed.
+- **Professional team** shows only the franchise's squads (Lions men, Lions women). Other
   franchises' games still set the format averages. Call-ups and exits use only the union's
-  pool players and events.
-- **Pathways:** stages, benchmarks, outliers and improvers from the union's players only; the
-  pyramid's professional apex counts the franchise's matches.
-- **Schools:** the union's results export is already its own.
+  players.
+- **Pathways** rates only the union's players; the pyramid's professional apex counts the
+  franchise's matches.
+- **Schools** is the union's own results export already.
 
-The focus applies to real data only: with the invented samples nothing is filtered. Other
-tenants see everything. To focus another union, add it to `FOCUS_BY_TENANT`.
-
-**WebSports ball by ball** (`src/websports.ts`): the WebSports Match Centre's commentary feed,
-one row per delivery, read into the match shape (scorecards, fall of wickets, runs per over,
-shot zones from "… in the square leg area" — six areas onto six of the wheel's eight zones). A
-non-striker run out is recorded against the striker (the feed names only the striker).
-`scripts/websports-for-union.ts` keeps a union's games from an export — a side is the union's
-when its club or school played 10+ league games in the union's results — and writes them, with
-a scouting event module, into the git-ignored `src/scouting-local/`. The 2026 export is almost
-all Western Cape and Boland cricket; its only Lions side is one school's 1st XI (one scored game, at a festival).
+The focus applies to real data only; with the samples nothing is filtered (a fresh clone still
+has something to show). `ScoutingEvent` gained two optional fields for this: `union` and
+`ourTeams` (codes of the union's sides).
 
 ## Pathways → Milestones and Improvers
 
-There are **no dates of birth** in any source, so a _stage_ is a level of cricket, not an age:
+`src/milestones.ts`. No source has dates of birth, so a **stage is a level of cricket**:
 
-| Stage                                 | Source                                                    | Notes                                                      |
-| ------------------------------------- | --------------------------------------------------------- | ---------------------------------------------------------- |
-| U13 (and any age group with an event) | Age-group events (`src/scouting-local/*.ts`)              | Juniors qualify on half the senior sample (short innings). |
-| Senior club                           | Club and university matches                               | Drawn only with 8+ qualifying players.                     |
-| Scouted club                          | The national scouting report (`pool-*.ts`)                | Its _selection_ — the top of club cricket, not all of it.  |
-| Professional                          | The match library (franchise scorecards and ball by ball) | Everyone in those games, opponents included.               |
+| Stage                   | Source                                    | Note                                                   |
+| ----------------------- | ----------------------------------------- | ------------------------------------------------------ |
+| An age group (e.g. U13) | Age-group events in `scouting-local/*.ts` | Juniors qualify on half the senior sample.             |
+| Senior club             | Club and university matches               | A stage is drawn only with 8+ qualifying players.      |
+| Scouted club            | The national report (`pool-*.ts`)         | Its selection: the top of club cricket, not all of it. |
+| Professional            | The match library                         | Everyone in those games unless a focus narrows it.     |
 
-Per stage, format (T20, One-Day, Multi-day) and gender:
+Per stage, format and gender: the spread of each measure (10th–90th percentile, middle half,
+median) and the **top-10% mark, the benchmark**; every player **rated within their own stage**
+(100 = the stage median; √ of the two core indices, shrunk on small samples with the national
+report's 30/60/120 and 24/48/96 balls); **outliers** (both core measures 15%+ above the stage);
+the **benchmark players** (top 10%); **players seen at two stages**, by percentile within each
+(age-group names are never matched to senior names); and **improvers**, franchise players rated
+within each season, latest against the one before.
 
-- **The bar at each stage** — strike rate, runs per innings, boundary balls %, economy, wickets
-  per 10 overs: 10th–90th percentile, middle half, median and the **top-10% mark (the
-  benchmark)**. "Place a player" marks a searched player on their stage's row.
-- **Outliers at every stage** — every player rated against their own stage (100 = the stage
-  median; rating = √ of the two core indices, shrunk on a small sample with the national
-  report's 30/60/120 and 24/48/96 balls). Gold = both core measures 15%+ above the stage.
-- **The benchmark players** — the top 10% of each stage (at least three).
-- **Where the players who went up stood below** — players found at two stages (same name),
-  by percentile within each stage. Age-group names are never matched to senior ones (a shared
-  name is almost always a different person; on the real files one U13 shares a franchise
-  player's name). In the real files four bowlers went from the scouted club group to a
-  franchise; below the step they sat at the 66th–76th percentile.
-- **Improvers** — franchise players rated within each season, latest season against the one
-  before: a season-on-season map (above the diagonal = improved; gold up 15+, red down 15+),
-  the biggest improvers and drops, and a player's measures season against season. Only the
-  squads with whole seasons in the files (Titans, Lions); opponents appear only in their games
-  against them.
-
-**Raw numbers are not compared across stages.** The opposition gets harder going up — franchise
-T20 batters strike more slowly than the report's club batters — so standing within a stage is
-what carries to the next one.
+Raw numbers are not compared across stages: the opposition gets harder going up (franchise T20
+batters strike more slowly than the report's club batters), so standing within a stage is what
+carries to the next.
 
 ## Schools, and Pathways → Pyramid & leagues
 
-Laid out like Player scouting — Overview · Matches · Leaderboards · Performance map · Teams ·
-Shortlist — with sides and institutions where that page has players. One filter bar over
-everything (site, gender, tier, age, format, competition, dates, team or club search, practice
-games on or off), kept in the URL so a view can be shared.
+`src/results-scouting.tsx`, laid out like Player scouting (Overview · Matches · Leaderboards ·
+Performance map · Teams · Shortlist) with sides and institutions where that page has players.
+One filter bar over everything (site, gender, tier, age, format, competition, dates, search,
+practice games), kept in the URL.
 
-| View            | What it answers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Overview        | The pyramid: matches at every tier, schools v clubs, the franchise's match-library count above (tap a tier to focus the page). A tier × age heat grid for where the pathway thins; formats by tier; matches per week (schools, clubs, representative); a competition-by-competition table (close finishes, abandonments, batting-first wins, average first innings). With a competition chosen: its ladder (win %, net run rate, last five, biggest win), a batting-v-bowling strength map of its sides, and how its games are won. |
-| Matches         | The filtered results, newest first, each with tier, age and format.                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| Leaderboards    | Sides or institutions ranked on win %, net run rate, runs per over, runs conceded per over, average score or close games won, with a minimum-games control. Tap a bar for the institution.                                                                                                                                                                                                                                                                                                                                          |
-| Performance map | Every side with 3+ games and overs recorded: scoring rate against runs conceded, both indexed to the selection's average (100). "Where results are earned": competitions by close finishes against how even the ladder is. Close-finish and abandonment rankings.                                                                                                                                                                                                                                                                   |
-| Teams           | Who fields the ladder (club/school × age-rung grid), juniors v seniors win rates, and a card per institution: win rate by rung, the season so far, net run rate, every side.                                                                                                                                                                                                                                                                                                                                                        |
-| Shortlist       | Clubs and schools shortlisted from a ladder, a leaderboard or a card (per browser, like the scouting watchlist): followed across the whole season whatever the filters, gold on every map. Plus the grounds hosting the most cricket.                                                                                                                                                                                                                                                                                               |
+- **Overview**: the pyramid (matches per tier, schools v clubs, the franchise above), a tier ×
+  age heat grid, formats by tier, matches per week, a competition table; with a competition
+  chosen, its ladder, a batting-v-bowling strength map and how its games are won.
+- **Leaderboards**: sides or institutions on win %, net run rate, runs per over, runs conceded,
+  average score, close games won; minimum-games control.
+- **Performance map**: every side's scoring rate v runs conceded (100 = the selection's average);
+  competitions by close finishes v ladder evenness.
+- **Teams**: who fields the ladder (club × age rung), juniors v seniors, a card per institution.
+- **Shortlist**: institutions followed across the season (per browser, like the watchlist).
 
 ## Data
 
-**The results export** — one row per match: Site, Competition, Division, Match Type, Date, both
-teams with score and overs, Result, Venue, Status, Match ID. Read by `src/pathways.ts`
-(`parseResults`), which also places every match on the pyramid.
+| Source                   | Format                                                               | Reader                         | Lives in                         |
+| ------------------------ | -------------------------------------------------------------------- | ------------------------------ | -------------------------------- |
+| Union results export     | CSV, one row per match (Site, Competition, Division, teams, scores…) | `parseResults` (`pathways.ts`) | `scouting-local/results/*.csv`   |
+| Age-group / club events  | `ScoutingEvent` modules                                              | —                              | `scouting-local/*.ts`            |
+| National scouting report | `ScoutPool` module                                                   | `linesFromPool`                | `scouting-local/pool-*.ts`       |
+| Franchise scorecards     | Match library (API) or the exports' CSVs                             | `match-import.ts` (PR #4)      | `scouting-local/pro/*.csv`       |
+| WebSports ball by ball   | CSV of the Match Centre feed, one row per delivery                   | `parseWebSports`               | `scouting-local/websports/*.csv` |
 
-- **Team 1 is the side batting first** (every "won by wickets" result in the real file goes to
-  Team 2). Batting-first win rates rely on this.
-- **Scores** "181/5"; time cricket "196/10 & 105/10". **Overs** "12.2/20" (faced / allotted), or
-  just "59" when the allotment wasn't recorded.
-- **Results** read: won by N runs / wickets (with D/L), by an innings, tie, draw, abandoned, no
-  result, forfeits ("Forfeited. Winner: …" and "Winner: …"), games in progress. Anything else
-  is `unknown` and counts for nothing.
-- **Tier** comes from the competition and division names (`tierOf`): trials, provincial, SA20
-  schools, regional/area weeks and district events are _representative_; school competitions are
-  _primary_ or _high school_ by their age groups; club competitions are _juniors & youth_,
-  _Saturday & Sunday leagues_ (incl. women's promotion and development leagues), _Presidents_
-  or _Premier_. A misplaced competition is a one-line change to those rules.
-- **Age** from "U13A", "Under 13", "U15s"; senior sides and school 1st XIs are _Open_.
-  **Gender** from women/ladies/girls in the names. **Format** from the allotted overs, else the
-  words (T20, 35 over, Time, 100's), else the longer innings when that settles it (over 36 overs
-  → 40–50; 21–36 → 25–35; a full 20 or 10 → T20 / T10); otherwise _not recorded_ — about a
-  quarter of the real file.
-- **Clubs and schools** are grouped by name with grade, age, side number, gender and season
-  tokens stripped (`clubName`): "GM Old Summit U13 Prem 2025" → "GM Old Summit",
-  "St Judes 3rd XI 2025" → "St Judes". Heuristic; the club card says so. A **side** keeps its
-  grade but drops the season, so one side is one ladder row.
-- **Close finish** = decided by 10 runs or 2 wickets or less, or a tie. **Dominance** = top
-  side's win % minus the median side's, among sides with 3+ games. **Net run rate** only where
-  both sides' overs were recorded.
+Rules worth knowing in the results reader: Team 1 is the side batting first; tiers come from
+competition and division names (`tierOf`; one line to move a competition); age from "U13A" /
+"Under 13"; format from the allotted overs, else the words, else the longer innings, else "not
+recorded" (about a quarter of club games); clubs grouped by name with grade, age, side number,
+gender and season tokens stripped (`clubName`, a heuristic, and the UI says so); a close finish
+is 10 runs or 2 wickets or less.
 
-**Where it lives.** Real exports in `src/scouting-local/results/*.csv` (git-ignored); with none
-present the invented "Highveld" sample (`src/pathways-sample.ts`, written in the export's own
-layout so the same reader runs) is used and the filter bar says so. `src/pathways-data.ts`
-chooses.
+WebSports: runs off the bat are separated from extras (the feed's `RunsOffBall` includes them);
+dismissals and shot areas come from the description (six areas onto six of the wheel's eight
+zones); a non-striker run out is recorded against the striker because the feed names only the
+striker. `scripts/websports-for-union.ts <websports.csv> <results.csv> <out-dir> <slug> [union]`
+keeps a union's games (a side is the union's when its club or school played 10+ league games in
+the union's results) and writes the CSV and an event module into `scouting-local/`.
 
-## Charts (`src/pathways-charts.tsx`)
-
-`Pyramid` (stacked tier bars, hollow apex), `HeatGrid`, `WeekColumns`, `Figure`, and for the milestones `MilestoneLadder` (the spread and top-10% mark per stage), `StageStrips` (every player rated within their stage) and `PercentileTrack` (standing stage by stage); the rest reuse
-`pro-charts` (`QuadrantMap` with `shortLabels={false}`, `RankBars`, `Tile`). Navy = schools,
-sky = clubs, gold = representative, grey = context.
+Samples: `src/pathways-sample.ts` (an invented union's results, in the export's own layout),
+`src/scouting-sample.ts`, `src/pro-sample.ts`. The real-data flags (`PATHWAYS_IS_SAMPLE`,
+`SCOUTING_IS_SAMPLE`, `POOLS_ARE_SAMPLE`, `PRO_IS_SAMPLE`) decide when the focus applies.
 
 ## Tests
 
-| File                                | What it covers                                                                                                                                |
-| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/pathways.test.ts`              | Reading every score, overs and result wording; tiers, ages, genders, formats; club naming; ladders; summaries; sample.                        |
-| `src/results-scouting.dom.test.tsx` | The six views on the sample; the filter bar; a competition's ladder; leaderboards; a club card; the shortlist; Schools locked to schools.     |
-| `src/milestones.test.ts`            | Reading scorecards and pools into lines; quantiles; junior samples; ratings, outliers, benchmarks; improvers; matching players across stages. |
-| `src/pathways-page.dom.test.tsx`    | Milestones (stages, measures, formats, placing a player, girls and women), Improvers, the pyramid underneath.                                 |
+| File                                | Covers                                                                                |
+| ----------------------------------- | ------------------------------------------------------------------------------------- |
+| `src/pathways.test.ts`              | The results reader, tiers, ages, formats, club naming, ladders, summaries, sample.    |
+| `src/milestones.test.ts`            | Lines from scorecards and pools, quantiles, ratings, outliers, benchmarks, improvers. |
+| `src/websports.test.ts`             | Ball codes, extras, dismissals, zones, fall of wickets, results, keeping games.       |
+| `src/scouting-focus.test.ts`        | The Lions focus; building events from scorecards and from a report.                   |
+| `src/results-scouting.dom.test.tsx` | The six views, the filter bar, a ladder, leaderboards, a club card, the shortlist.    |
+| `src/pathways-page.dom.test.tsx`    | Milestones, Improvers, the pyramid underneath.                                        |
+| `src/pro-team-page.dom.test.tsx`    | Includes: the Lions tenant sees only the Lions squads.                                |
 
 ## Open points
 
-1. The export has no player names, so the pathway is institutional. Player-level pathways need
-   scorecards from these competitions (the scouting match format) or the register.
-2. A results upload for the operator (like the match library) would replace the local files.
-3. Where overs aren't recorded (a quarter of club games) there is no run rate; the ladder still
-   has win %.
+1. **Uploads.** Results exports, the national report and WebSports files are read from
+   `scouting-local/`. An operator upload (like the match library) would replace that, and keep
+   real data out of builds.
+2. **Player-level pathways from schools.** The results export has no player names, and the only
+   Lions school scorecards so far are one festival game. School scorecards in any format the
+   platform reads (scorecard CSV, ball by ball, WebSports) would fill the lower stages.
+3. **Girls and women** have only the professional stage: no girls' event or women's report yet.
+4. **Shortlists and the watchlist are per browser.** They need an API to be shared.

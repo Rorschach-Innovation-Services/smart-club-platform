@@ -72,8 +72,8 @@ describe('the focus', () => {
     expect(isOurFranchise(LIONS, 'DP World Lions')).toBe(true);
     expect(isOurFranchise(LIONS, 'DP World Lions Women')).toBe(true);
     expect(isOurFranchise(LIONS, 'Momentum Multiply Titans')).toBe(false);
-    // A word, not a substring: "Stallions" is not the Lions.
-    expect(isOurFranchise(LIONS, 'Stallions U13')).toBe(false);
+    // A word, not a substring: "Scallions" is not the Lions.
+    expect(isOurFranchise(LIONS, 'Scallions XI')).toBe(false);
   });
 
   it('narrows pools to the union, and offers its club players as a report', () => {
