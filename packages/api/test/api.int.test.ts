@@ -7147,7 +7147,7 @@ describe('Clearance chairman notice (comm log + channels)', () => {
     assert.ok(events.every((e) => e.status === 'skipped'));
   });
 
-  test('declaring a DIRECTORY previous club opens the clearance with no notice (no chairman on file)', async () => {
+  test('declaring a DIRECTORY previous club opens the clearance with no SOURCE notice (no chairman on file)', async () => {
     const cfg = await repo.getTenantConfig('dolphins');
     assert.ok(cfg, 'precondition: tenant config exists');
     await repo.putTenantConfig({
@@ -7184,8 +7184,8 @@ describe('Clearance chairman notice (comm log + channels)', () => {
       (x) => x.playerName === 'Dumi Zwane',
     );
     assert.ok(opened?.fromClubDirectory, 'the clearance is flagged as directory-sourced');
-    // No Club record exists for a directory entry, so there is nowhere a notice could have
-    // landed — the skip branch is exactly "no on-system source club".
+    // No Club record exists for a directory entry, so there is nowhere a source notice could
+    // have landed (the destination + admin fan-out is covered in clearance-notify.int.test).
     assert.equal(await repo.getClub('dolphins', 'ntc-dir-prev'), null);
   });
 });

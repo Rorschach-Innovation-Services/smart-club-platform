@@ -29,7 +29,15 @@ import {
   type DobError,
 } from './data';
 import { leagueOptionsForDistrict } from '../packages/engine/src/leagues';
-import { useModule, useSeasonLabel, useTenantSettled, useVertical } from './branding';
+import {
+  useModule,
+  useSeasonLabel,
+  useTenantSettled,
+  useTransferWindowStatus,
+  useVertical,
+} from './branding';
+import { formatDayYear } from './dates';
+import type { TransferWindow } from './types';
 
 const EMPTY = {
   surname: '',
@@ -99,6 +107,8 @@ export function RegisterPage() {
   const [clubs, setClubs] = useState<{ id: string; name: string; directory?: boolean }[]>([]);
   // Set when the submit opened a transfer — drives the clearance success variant.
   const [clearanceFrom, setClearanceFrom] = useState('');
+  // Set when the submit arrived outside every transfer window (recorded, not registered).
+  const [windowClosed, setWindowClosed] = useState<{ nextWindow?: TransferWindow } | null>(null);
   const [d, setD] = useState(EMPTY);
   const [idFile, setIdFile] = useState<File | null>(null);
   const [error, setError] = useState('');
@@ -111,6 +121,9 @@ export function RegisterPage() {
   const seasonLabel = useSeasonLabel();
   const clearancesOn = useModule('clearances');
   const veteransOn = useModule('veterans');
+  // Server-computed (never the device clock): closed ⇒ a transfer can't complete right now.
+  const windowStatus = useTransferWindowStatus();
+  const transfersClosed = clearancesOn && !!windowStatus && !windowStatus.open;
   // Until GET /tenant settles, useVertical() falls back to cricket — gate the first paint on
   // it so a football tenant never flashes cricket fields / cricket copy.
   const tenantSettled = useTenantSettled();
@@ -320,7 +333,9 @@ export function RegisterPage() {
         guardianName: minor ? d.guardianName : undefined,
         idDocMeta: { objectKey, size: idFile.size, contentType },
       });
-      if (res?.clearance?.fromClubName) setClearanceFrom(res.clearance.fromClubName);
+      if (res?.transferWindow?.closed)
+        setWindowClosed({ nextWindow: res.transferWindow.nextWindow });
+      else if (res?.clearance?.fromClubName) setClearanceFrom(res.clearance.fromClubName);
       setState('done');
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
@@ -358,6 +373,28 @@ export function RegisterPage() {
       currentClubId === clubId
         ? clubName
         : currentClubOptions.find((c) => c.id === currentClubId)?.name || clubName;
+    if (windowClosed) {
+      const next = windowClosed.nextWindow;
+      return (
+        <CenterCard>
+          <h1 className="ps-title" style={{ fontSize: 22 }}>
+            Registration recorded — transfers are closed
+          </h1>
+          <p className="ps-desc">
+            Your details have been recorded, but because you were registered at another club and
+            transfers are closed
+            {next ? (
+              <>
+                {' '}
+                until <strong>{formatDayYear(next.start)}</strong> ({next.label})
+              </>
+            ) : null}
+            , you have not been registered with {joiningClubName}. The Union office has been
+            notified.
+          </p>
+        </CenterCard>
+      );
+    }
     if (clearanceFrom) {
       // The server names the clearance's REAL source: it may match the player's directory
       // pick, or a real club it auto-routed to via the ID-number match — so classify by
@@ -610,6 +647,20 @@ export function RegisterPage() {
 
         {(clearancesOn || (veteransOn && clubs.length > 0)) && (
           <Section title={clearancesOn ? 'Registration history' : 'Veterans'}>
+            {transfersClosed && (
+              <div
+                className="reg-span"
+                role="note"
+                style={{ fontSize: 12.5, color: 'var(--gold, #E0B341)', marginBottom: 8 }}
+              >
+                Transfers between clubs are currently closed
+                {windowStatus?.next
+                  ? ` — the next window opens ${formatDayYear(windowStatus.next.start)} (${windowStatus.next.label})`
+                  : ''}
+                . If you were last registered at another club, your registration will be recorded
+                but not completed until the Union office reopens it.
+              </div>
+            )}
             {!clearancesOn ? null : clubs.length === 0 ? (
               // Older backend (no club list in the link context) — legacy free text.
               <Field

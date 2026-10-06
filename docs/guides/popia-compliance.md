@@ -129,8 +129,14 @@ deletion:
   `TENANT#<t>#TYPE#USER` GSI (`repo.listTenantUsers`) and deleted, along with their Cognito
   accounts.
 
-For an individual erasure request (a single player/official), delete that item by its key
-(`PLAYER#<naturalKey>` under the club, or the `USER#` record + Cognito user).
+For an individual **player** erasure request, a union admin uses "Erase player" in the admin
+player modal, which calls `DELETE /admin/players/:nk`. It removes the person from every club in
+the tenant: player rows, clearances (with certificates and ID documents), registration reviews,
+veterans requests; it scrubs captain's reports that name them and the `captainRef` on pending
+`REPORTOPEN#` markers; and it writes a PII-free `PLAYERERASE#` audit row. See the
+[API reference](../api/clearances.md#player-erasure) for the contract and what it does **not**
+cover (past comm-log entries, `INVITE#` markers, data already exported to Medicoach). For an
+official, delete the `USER#` record + Cognito user.
 
 ## Retention
 

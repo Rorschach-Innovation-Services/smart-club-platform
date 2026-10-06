@@ -11,7 +11,7 @@ import { useQuery } from '@tanstack/react-query';
 import { qk } from './query';
 import * as api from './api';
 import { ApiError } from './api';
-import type { TenantBranding } from './types';
+import type { TenantBranding, TransferWindowStatus } from './types';
 import { currentSeasonLabel } from './data';
 import {
   resolveVertical,
@@ -148,6 +148,14 @@ export function useModule(module: ModuleKey): boolean {
 /** One vertical term, e.g. useTerm('Club') ⇒ 'Club' (cricket) / 'School' (football). */
 export function useTerm(key: TermKey): string {
   return useVertical().terms[key];
+}
+
+/**
+ * The SERVER-computed transfer-window status for today (absent ⇒ no windows ⇒ unrestricted).
+ * Never derive this from the device clock.
+ */
+export function useTransferWindowStatus(): TransferWindowStatus | undefined {
+  return useTenantPayload()?.transferWindowStatus;
 }
 
 /** The tenant's display season label; absent ⇒ the built-in current season label. */

@@ -112,6 +112,8 @@ import { ResyncDialog, isResyncRequired } from './ResyncDialog';
 import { CaptainsReportView, CaptainsReportLinkPage } from './CaptainsReport';
 import { AdminCaptainsReportsView } from './AdminCaptainsReports';
 import { AdminMedicoachSyncView } from './AdminMedicoachSync';
+import { erasureSummary } from './PlayerDetailModal';
+import { clearanceRemindToast } from './clearance-remind-copy';
 import { tenantQueryOptions, useFeature, useModule, useSeasonLabel, useVertical } from './branding';
 
 /** The admin cancelled the medicoach-resync confirmation: the request is simply not sent. */
@@ -1311,7 +1313,7 @@ function Shell({
   // Override button reads "Issuing…". (approveClearance is the club-rep view — it
   // sets only busyClearanceId and needs no action kind.)
   const [busyClearanceAction, setBusyClearanceAction] = useStateApp<
-    'reject' | 'override' | 'reassign' | 'reopen' | 'revoke' | null
+    'reject' | 'override' | 'reassign' | 'reopen' | 'revoke' | 'remind' | null
   >(null);
   const [busyReviewId, setBusyReviewId] = useStateApp(null);
   // Which veterans request (id) is mid-action, and which action, so the admin table can label
@@ -2061,7 +2063,9 @@ function Shell({
                 ? `${req.playerName}'s clearance rejected — their registration moved back to ${req.fromClubName}`
                 : outcome === 'stays-at-destination'
                   ? `${req.playerName}'s clearance rejected — ${req.fromClubName} is not on the system, so they stay at ${req.toClubName}`
-                  : `${req.playerName}'s clearance rejected`,
+                  : outcome === 'not-registered'
+                    ? `${req.playerName}'s clearance rejected — they are not registered at ${req.toClubName}`
+                    : `${req.playerName}'s clearance rejected`,
           );
           return 'ok';
         })
@@ -2075,6 +2079,30 @@ function Shell({
           setBusyClearanceAction(null);
         })
     );
+  }
+  // Admin nudges a pending clearance's source chair. At most once per clearance per day (shared
+  // with the daily reminders cron): the server's 409/422 copy is shown as-is.
+  function remindClearanceReq(req) {
+    setBusyClearanceId(req.id);
+    setBusyClearanceAction('remind');
+    return withToast(
+      () => api.remindClearance(req.id, req.fromClubId),
+      'Could not send the reminder',
+      // `invalidate` here is withToast's 409-only refetch list; the success path below refetches
+      // clubs itself (for the new comm-log rows) — the two never both run for one call.
+      { rawClientError: true, invalidate: [qk.allClearances(), qk.clubs()] },
+    )
+      .then((res) => {
+        invalidate(qk.clubs());
+        const { message, tone } = clearanceRemindToast(req.fromClubName, res?.results);
+        toastShow(message, tone);
+        return 'ok';
+      })
+      .catch(() => 'failed')
+      .finally(() => {
+        setBusyClearanceId(null);
+        setBusyClearanceAction(null);
+      });
   }
   // Admin reopens a rejected clearance (rejected → pending) — restores the pre-reject rows from
   // the snapshot the reject stored, and the source club gets to decide again. Reversible: a
@@ -2335,6 +2363,24 @@ function Shell({
         toastShow(`${playerName} removed`);
       })
       .catch(() => {});
+  }
+  // Union admin erases a person from EVERY club in the organisation (POPIA). Rows at any club,
+  // clearances, reviews and veterans requests may all have changed, so refetch every roster, the
+  // club list (playerCount), demographics and every clearance/review/request list. Resolves on
+  // success (the modal closes); rejects after withToast has toasted the failure (it stays open).
+  function erasePlayerEverywhere(naturalKey, playerName) {
+    return withToast(() => api.adminErasePlayer(naturalKey), 'Could not erase player').then(
+      (res) => {
+        invalidate(qk.playersAll());
+        invalidate(qk.clubs());
+        invalidate(qk.demographics());
+        invalidate(qk.allClearances());
+        invalidate(qk.clearancesAllClubs());
+        invalidate(qk.allRegistrationReviews());
+        invalidate(qk.allVeteransRequests());
+        toastShow(`${playerName} erased — ${erasureSummary(res?.counts)}`);
+      },
+    );
   }
   // Mint (or replace) the tenant-wide club signup link. The server revokes any
   // prior token in the same call, so the old link dies the moment this resolves.
@@ -2770,7 +2816,14 @@ function Shell({
           />
         );
       if (view === 'players')
-        return <AdminPlayersView clubs={clubs} leagues={allLeagues} toast={toastShow} />;
+        return (
+          <AdminPlayersView
+            clubs={clubs}
+            leagues={allLeagues}
+            toast={toastShow}
+            onErasePlayer={erasePlayerEverywhere}
+          />
+        );
       if (view === 'fixtures')
         return (
           <AdminFixtures
@@ -2878,8 +2931,10 @@ function Shell({
             onReject={rejectClearanceReq}
             onReassign={reassignClearanceReq}
             onReopen={reopenClearanceReq}
+            onRemind={remindClearanceReq}
             onRevokeCertificate={revokeClearanceCertificateReq}
             onCertificateViewed={() => invalidate(qk.allClearances())}
+            transferWindowStatus={tenantConfig?.transferWindowStatus}
             busyId={busyClearanceId}
             busyAction={busyClearanceAction}
           />

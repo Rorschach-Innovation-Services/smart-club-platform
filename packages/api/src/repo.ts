@@ -22,6 +22,7 @@ import {
   DeleteObjectsCommand,
   ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
+import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -69,6 +70,8 @@ import {
   tenantConfigGsi1,
   tenantsListGsi1pk,
   exportLogKey,
+  playerEraseLogKey,
+  playerEraseLogsListKey,
   exportLogsListKey,
   userKey,
   userTenantMarkerKey,
@@ -102,11 +105,14 @@ import {
   whatsappMessageKey,
   captainsReportPartitionPk,
 } from './keys.js';
-import { PLATFORM_TENANT } from './types.js';
+import { PLATFORM_TENANT, TRANSFER_WINDOW_REJECTOR } from './types.js';
+import { refs as medicoachRefs } from './medicoach-bundle.js';
 import type {
   Club,
   ClubCommEvent,
   ExportLogEntry,
+  PlayerEraseLogEntry,
+  PlayerErasureCounts,
   League,
   SendResult,
   Series,
@@ -164,17 +170,30 @@ const ddb = DynamoDBDocumentClient.from(
 
 const s3 = new S3Client({});
 const UPLOADS_BUCKET = process.env.UPLOADS_BUCKET;
+/** Charset screen for a `local/` key before it is joined onto LOCAL_UPLOADS_DIR. */
+const LOCAL_KEY_RE = /^[A-Za-z0-9._/-]+$/;
 
 /**
  * Best-effort delete of stored upload objects (compliance PDFs, player ID docs) during
  * tenant/cohort erasure — so a POPIA "right to erasure" actually removes the files, not
- * just the DynamoDB rows. Skips local-dev keys and never throws: a failed object delete is
- * logged (recoverable via a bucket lifecycle rule) and must not abort the erase.
+ * just the DynamoDB rows. Never throws: a failed object delete is logged (recoverable via a
+ * bucket lifecycle rule) and must not abort the erase. `local/` keys are the no-S3 dev
+ * sentinel: skipped, except under dev:local / tests (STAGE=local + LOCAL_UPLOADS_DIR), which
+ * remove the on-disk twin — like deleteUploadPrefixes.
  */
-async function deleteUploadObjects(objectKeys: string[]): Promise<void> {
-  if (!UPLOADS_BUCKET) return;
+export async function deleteUploadObjects(objectKeys: string[]): Promise<void> {
+  const localDir = process.env.STAGE === 'local' ? process.env.LOCAL_UPLOADS_DIR : undefined;
   for (const key of objectKeys) {
-    if (!key || key.startsWith('local/')) continue;
+    if (!key) continue;
+    if (key.startsWith('local/')) {
+      const rel = key.slice('local/'.length);
+      if (!localDir || rel.includes('..') || !LOCAL_KEY_RE.test(rel)) continue;
+      await rm(path.join(localDir, rel), { force: true }).catch((err: unknown) => {
+        console.warn(`erase: failed to delete local upload ${key}`, err);
+      });
+      continue;
+    }
+    if (!UPLOADS_BUCKET) continue;
     try {
       await s3.send(new DeleteObjectCommand({ Bucket: UPLOADS_BUCKET, Key: key }));
     } catch (err) {
@@ -726,9 +745,16 @@ export async function appendClubCommEvents(
 /**
  * What an INVITE#-keyspace idempotency marker guards. `fixture-reminder` is the FixtureReminders
  * cron's once-per-(club, match date, send date) marker (key
- * `fixture-reminder:<targetDate>:<sendDate>`).
+ * `fixture-reminder:<targetDate>:<sendDate>`). `clearance-reminder` is the once-per-(clearance,
+ * tenant day) reminder marker under the SOURCE club (key `clearance-reminder:<clearanceId>:<date>`),
+ * shared by the admin "Send reminder" route and the ClearanceReminders cron.
  */
-export type InviteSendKind = 'invite' | 'fixtures' | 'staff-invite' | 'fixture-reminder';
+export type InviteSendKind =
+  | 'invite'
+  | 'fixtures'
+  | 'staff-invite'
+  | 'fixture-reminder'
+  | 'clearance-reminder';
 
 /** Outcome of a duplicate idempotency claim: prior results + whether the first attempt is still running. */
 export interface InviteSendReplay {
@@ -880,6 +906,39 @@ export async function putExportLog(tenant: string, entry: ExportLogEntry): Promi
 /** Enumerate a tenant's export-log item keys (for erasure — these sit above the pk-prefix sweep). */
 async function listExportLogKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
   const { pk, skPrefix } = exportLogsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+/** Record one player erasure (PII-free: actor + counts). A fresh item per erasure, like EXPORT#. */
+export async function putPlayerEraseLog(tenant: string, entry: PlayerEraseLogEntry): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...playerEraseLogKey(tenant, entry.at, entry.id), ...entry },
+    }),
+  );
+}
+
+/** A tenant's player-erasure audit rows, oldest first. */
+export async function listPlayerEraseLogs(tenant: string): Promise<PlayerEraseLogEntry[]> {
+  const { pk, skPrefix } = playerEraseLogsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<PlayerEraseLogEntry>(i)!);
+}
+
+/** Enumerate a tenant's player-erasure audit keys (tenant erasure — above the pk-prefix sweep). */
+async function listPlayerEraseLogKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
+  const { pk, skPrefix } = playerEraseLogsListKey(tenant);
   const items = await queryAll({
     TableName: TABLE,
     KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
@@ -1376,6 +1435,32 @@ export async function listReportOpenMarkers(tenant: string): Promise<ReportOpenM
 
 export async function deleteReportOpenMarker(tenant: string, ref: string): Promise<void> {
   await ddb.send(new DeleteCommand({ TableName: TABLE, Key: reportOpenKey(tenant, ref) }));
+}
+
+/**
+ * Drop a pending marker's `captainRef` (player erasure), keeping the marker itself: the retry
+ * still opens the fixture's reports, and with no captain ref the scoring side's report goes to the
+ * club chair (`resolveCaptain` → null). False when the marker vanished meanwhile (it opened, or
+ * the retry gave up) — nothing left to scrub.
+ */
+export async function scrubReportOpenMarkerCaptainRef(
+  tenant: string,
+  ref: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportOpenKey(tenant, ref),
+        UpdateExpression: 'REMOVE captainRef',
+        ConditionExpression: 'attribute_exists(pk)',
+      }),
+    );
+    return true;
+  } catch (err: unknown) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
 }
 
 /** One failed attempt to open/notify a marker's reports. */
@@ -4298,6 +4383,97 @@ export async function createPlayerWithSourcelessClearance(
 }
 
 /**
+ * Record a registration that arrived OUTSIDE every transfer window: the clearance is created
+ * already rejected (`rejectedBy: 'system:transfer-window'`, outcome 'not-registered'), with the
+ * would-be destination row kept ONLY on the canonical's snapshot (`{case:'window-closed',
+ * pendingPlayer}`) for a later Reopen.
+ *
+ * Writes ONLY the canonical + mirror clearance items — no player rows, no status flips, no
+ * playerCount changes. That is the whole point: create-then-reject would run rejectClearance,
+ * whose case D (off-system source) leaves the player ACTIVE at the destination, admitting every
+ * player who names a directory club. Because no player row exists, the duplicate-pending guards
+ * (which key on player rows) never see this record, so re-registering once a window opens is
+ * unblocked by construction; the caller's same-nk→destination short-circuit
+ * (findWindowRejectedClearances) is what stops resubmissions during the closed stretch.
+ *
+ * Guards: the destination-club existence check (never write a mirror into a club mid-delete)
+ * and attribute_not_exists on the canonical (a replayed id never double-writes). The dynalite
+ * path has no TransactWriteItems → existence pre-read, canonical first, then the mirror.
+ */
+export async function createAutoRejectedClearance(
+  tenant: string,
+  player: PlayerRegistration,
+  c: PlayerClearance,
+): Promise<PlayerClearance> {
+  const rejected: PlayerClearance = {
+    ...c,
+    rejectSnapshot: { case: 'window-closed', pendingPlayer: player },
+  };
+  const { canonical, mirror } = clearanceItems(tenant, rejected);
+  const canonicalPut = {
+    TableName: TABLE,
+    Item: canonical,
+    ConditionExpression: 'attribute_not_exists(sk)',
+  };
+  try {
+    if (localEndpoint) {
+      if (!(await getClub(tenant, c.toClubId))) throw new DestinationClubGoneError();
+      await ddb.send(new PutCommand(canonicalPut));
+      await ddb.send(new PutCommand({ TableName: TABLE, Item: mirror }));
+    } else {
+      await ddb.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              // Same rationale as createClearance: never create INTO a club mid-delete.
+              ConditionCheck: {
+                TableName: TABLE,
+                Key: clubKey(tenant, c.toClubId),
+                ConditionExpression: 'attribute_exists(pk)',
+              },
+            },
+            { Put: canonicalPut },
+            { Put: { TableName: TABLE, Item: mirror } },
+          ],
+        }),
+      );
+    }
+  } catch (err: unknown) {
+    if (err instanceof DestinationClubGoneError) throw err;
+    const name = (err as { name?: string }).name;
+    if (name === 'TransactionCanceledException') {
+      const reasons = (err as { CancellationReasons?: Array<{ Code?: string }> })
+        .CancellationReasons;
+      if (reasons?.[0]?.Code === 'ConditionalCheckFailed') throw new DestinationClubGoneError();
+      throw new DuplicatePendingClearanceError();
+    }
+    if (name === 'ConditionalCheckFailedException') throw new DuplicatePendingClearanceError();
+    throw err;
+  }
+  return publicClearance(rejected);
+}
+
+/**
+ * Window-closed auto-rejected clearances INTO `toClubId` for this identity, newest first — read
+ * from the destination's own mirror partition (no tenant-wide scan). A reopened one no longer
+ * qualifies (reopen clears rejectedBy).
+ */
+export async function findWindowRejectedClearances(
+  tenant: string,
+  toClubId: string,
+  naturalKey: string,
+): Promise<PlayerClearance[]> {
+  return (await listInboundForDest(tenant, toClubId))
+    .filter(
+      (x) =>
+        x.playerNaturalKey === naturalKey &&
+        x.status === 'rejected' &&
+        x.rejectedBy === TRANSFER_WINDOW_REJECTOR,
+    )
+    .sort((a, b) => (b.rejectedAt ?? '').localeCompare(a.rejectedAt ?? ''));
+}
+
+/**
  * Toggle the source club's fees/misconduct confirmations on a still-pending clearance.
  * Version-guarded (OCC); touches only the canonical item — the mirror tracks `status`,
  * which doesn't change until approval. A lost race throws VersionConflictError (→ 409).
@@ -4523,6 +4699,8 @@ function outcomeForCase(rc: RejectCase): RejectOutcome {
       return 'moved-to-source';
     case 'dest-activated':
       return 'stays-at-destination';
+    case 'window-closed':
+      return 'not-registered';
   }
 }
 
@@ -4537,9 +4715,14 @@ function outcomeForCase(rc: RejectCase): RejectOutcome {
  */
 export function clearanceDocObjectKeys(c: PlayerClearance): string[] {
   const d = c.rejectSnapshot?.destRow;
+  // A window-closed auto-reject never wrote a player row: its snapshot's pendingPlayer is the
+  // ONLY pointer to the registrant's uploaded ID document.
+  const p = c.rejectSnapshot?.pendingPlayer;
   return [
     d?.idDocMeta?.objectKey,
     d?.previousIdDocMeta?.objectKey,
+    p?.idDocMeta?.objectKey,
+    p?.previousIdDocMeta?.objectKey,
     c.certificateMeta?.objectKey,
   ].filter((k): k is string => !!k);
 }
@@ -4965,9 +5148,19 @@ export async function rejectClearance(
       // B″ — keep the placeholder the real registration replaced; reopen puts it back.
       rejectSnapshot = { case: rc, placeholderRow: sourceRow! };
       break;
-    default:
-      // request / moved-to-source / dest-activated — reopen moves the LIVE row, no row snapshot.
+    case 'request':
+    case 'moved-to-source':
+    case 'dest-activated':
+      // Reopen moves the LIVE row, no row snapshot.
       rejectSnapshot = { case: rc };
+      break;
+    case 'window-closed':
+      // Creation-time only (createAutoRejectedClearance) — detectRejectCase never yields it.
+      throw new Error('window-closed is not a reject case for a pending clearance');
+    default: {
+      const _exhaustive: never = rc;
+      throw new Error(`unhandled reject case ${String(_exhaustive)}`);
+    }
   }
   const next: PlayerClearance = {
     ...current,
@@ -5817,6 +6010,103 @@ export async function reopenClearance(
           sourceGuard: 2,
           sourceGuardMsg: 'player no longer available at the destination club',
         });
+      }
+      break;
+    }
+
+    case 'window-closed': {
+      // The auto-reject wrote no player rows; reopen materialises the registration it recorded
+      // as a normal registration-origin pending clearance. Check, never skip (cf. case B′): the
+      // player may have re-registered or transferred since, and registration-origin approve
+      // activates the destination even with no source row, so any row for this identity other
+      // than an ACTIVE one at the source would end up double-active. That one source row is the
+      // expected shape (createPlayerWithClearance's) and is flipped to clearance-pending here.
+      const pending = snap.pendingPlayer;
+      if (!pending)
+        throw new ClearanceReopenBlockedError('the auto-rejected registration was not kept');
+      const nk = current.playerNaturalKey;
+      const hits = await findPlayerAcrossClubs(tenant, nk, '');
+      const sourceActive = hits.some((h) => h.clubId === fromClubId && h.status === 'active');
+      if (hits.some((h) => !(h.clubId === fromClubId && h.status === 'active'))) {
+        throw new ClearanceReopenBlockedError(
+          'the player has registered or transferred since this was auto-rejected',
+        );
+      }
+      const destRow: PlayerRegistration = {
+        ...pending,
+        clubId: current.toClubId,
+        status: 'clearance-pending',
+      };
+      const destPut = {
+        TableName: TABLE,
+        Item: { ...destKey, ...destRow },
+        ConditionExpression: 'attribute_not_exists(sk)',
+      };
+      const sourceActiveToPending = {
+        TableName: TABLE,
+        Key: sourceKey,
+        UpdateExpression: 'SET #s = :pending ADD version :one',
+        ConditionExpression: 'attribute_exists(sk) AND #s = :active',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: {
+          ':pending': 'clearance-pending',
+          ':active': 'active',
+          ':one': 1,
+        },
+      };
+      if (localEndpoint) {
+        await putCanonicalReopen();
+        try {
+          await ddb.send(new PutCommand(destPut));
+        } catch (err) {
+          if (isCcf(err)) {
+            await restoreCanonical(tenant, current);
+            throw new PlayerExistsAtDestinationError();
+          }
+          throw err;
+        }
+        if (sourceActive) {
+          try {
+            await ddb.send(new UpdateCommand(sourceActiveToPending));
+          } catch (err) {
+            if (isCcf(err)) {
+              await undoDestRestore(destRow.version ?? 0);
+              await restoreCanonical(tenant, current);
+              throw new ClearanceReopenBlockedError('player no longer active at the source club');
+            }
+            throw err;
+          }
+        }
+        await swallowCcf(() => ddb.send(new UpdateCommand(destClubInc)));
+        await ddb.send(new PutCommand(mirrorPut));
+      } else {
+        // No source row at read time ⇒ require it still absent, so a row landing in between
+        // can't be left beside an activating destination.
+        const sourceOp = sourceActive
+          ? { Update: sourceActiveToPending }
+          : {
+              ConditionCheck: {
+                TableName: TABLE,
+                Key: sourceKey,
+                ConditionExpression: 'attribute_not_exists(sk)',
+              },
+            };
+        // [0] canonical [1] mirror [2] dest put [3] source (flip / absent check) [4] dest count +1
+        await sendReopen(
+          [
+            { Put: canonicalPut },
+            { Put: mirrorPut },
+            { Put: destPut },
+            sourceOp,
+            { Update: destClubInc },
+          ],
+          {
+            destPut: 2,
+            sourceGuard: 3,
+            sourceGuardMsg: 'the source club record changed; refetch and try again',
+            destCount: 4,
+          },
+        );
       }
       break;
     }
@@ -6928,9 +7218,10 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   for (const r of await listSeasonRuns(tenant)) keys.push(seasonRunKey(tenant, r.id));
   for (const u of await listTenantUsers(tenant)) keys.push(userTenantMarkerKey(u.sub, tenant));
   // Export-audit items sit at pk `TENANT#<t>` (above the `TENANT#<t>#…` prefix sweep),
-  // so enumerate them explicitly like invite markers. Venues share that partition and
-  // the same exposure — miss them and a deleted tenant's ground list survives.
+  // so enumerate them explicitly like invite markers. Player-erasure audit rows, and venues,
+  // share that partition and the same exposure — miss them and they survive the tenant.
   for (const k of await listExportLogKeys(tenant)) keys.push(k);
+  for (const k of await listPlayerEraseLogKeys(tenant)) keys.push(k);
   for (const k of await listVenueKeys(tenant)) keys.push(k);
   // Medicoach sync (ADR 0016): results (may hold a captain's player ref — PII) and the
   // SYNC partition (cursor + audit rows) have no gsi1/META listing; enumerate them.
@@ -7274,4 +7565,226 @@ export async function eraseClubData(
     series,
     seriesFailed,
   };
+}
+
+// ── Tenant-wide player erasure (admin, POPIA) ──
+
+/** Thrown when a player can't be erased yet because a clearance naming them is still open. */
+export class PlayerErasureBlockedError extends Error {
+  constructor(message = 'resolve or reject the open clearance first') {
+    super(message);
+    this.name = 'PlayerErasureBlockedError';
+  }
+}
+
+/** What a scrubbed captain's-report name field reads after erasure. */
+export const ERASED_NAME = '[removed]';
+
+const normName = (s: string | undefined | null) =>
+  (s ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+const normEmail = (s: string | undefined | null) => (s ?? '').trim().toLowerCase();
+/** Last 9 digits: `082…`, `+2782…` and `2782…` spellings of one SA cell all compare equal. */
+const normCell = (s: string | undefined | null) => {
+  const d = (s ?? '').replace(/\D/g, '');
+  return d.length >= 9 ? d.slice(-9) : '';
+};
+
+/**
+ * Erase ONE person (by natural key) from every club in the tenant — the admin's POPIA "right to
+ * erasure". The same person in another tenant is untouched (every key is TENANT#-scoped).
+ *
+ * Inventory (all tenant-wide):
+ *  - PLAYER# rows at every club (`findPlayerAcrossClubs`), each removed via {@link deletePlayer}
+ *    (its ID doc(s) in S3, its VETAFFIL# record, the club's playerCount);
+ *  - every clearance naming the person (`listAllClearances`), DELETED OUTRIGHT — canonical +
+ *    mirror — with its artifacts: snapshot ID docs (incl. a window-closed auto-reject's
+ *    pendingPlayer doc, the only pointer to it), certificate PDF + CERT# registry item + the
+ *    clearance's S3 prefix. Deleting rather than scrubbing closes the re-issue gap (a retained
+ *    approved clearance could otherwise mint a fresh certificate full of PII);
+ *  - registration reviews (REGREVIEW#) + any held pendingPlayer ID doc;
+ *  - veterans requests (canonical VETREQ# + OUTBOUND_VETREQ# mirror);
+ *  - captain's reports that NAME the person (full name / email / cell match) are SCRUBBED in
+ *    place, not deleted (the report is the club's and the umpires' record too);
+ *  - pending REPORTOPEN# markers whose captain ref is this person's player ref have that ref
+ *    REMOVED (the marker stays — it is the retry queue for both clubs' reports; with no captain
+ *    ref the scoring side's report goes to the club chair).
+ *
+ * Gate: a pending clearance naming the person, or any `clearance-pending` row, throws
+ * {@link PlayerErasureBlockedError} BEFORE anything is touched. Returns null when nothing in any
+ * category exists (a clean 404 — and the re-run of a completed erasure).
+ *
+ * Ordering is the re-runnable invariant: S3 first (object keys are only derivable while the
+ * rows naming them exist), then the clearance/review/request rows, then the report scrub, and
+ * the PLAYER# rows LAST — while any of them survives, a re-run finds the person again and
+ * finishes the job. The PII-free audit row (actor + counts) is written once everything landed.
+ */
+export async function erasePlayerData(
+  tenant: string,
+  naturalKey: string,
+  opts: { by: string; at?: string },
+): Promise<PlayerErasureCounts | null> {
+  const at = opts.at ?? new Date().toISOString();
+  // ── Collect ──
+  const hits = await findPlayerAcrossClubs(tenant, naturalKey, '');
+  const rows = (await Promise.all(hits.map((h) => getPlayer(tenant, h.clubId, naturalKey)))).filter(
+    (p): p is PlayerRegistration => p !== null,
+  );
+  const clearances = (await listAllClearances(tenant)).filter(
+    (x) => x.playerNaturalKey === naturalKey,
+  );
+  const reviews = (await listAllReviews(tenant)).filter((r) => r.playerNaturalKey === naturalKey);
+  const vetreqs = (await listAllVeteransRequests(tenant)).filter(
+    (r) => r.playerNaturalKey === naturalKey,
+  );
+  if (!rows.length && !clearances.length && !reviews.length && !vetreqs.length) return null;
+
+  if (
+    rows.some((p) => p.status === 'clearance-pending') ||
+    clearances.some((x) => x.status === 'pending')
+  ) {
+    throw new PlayerErasureBlockedError();
+  }
+
+  const keys: Array<{ pk: string; sk: string }> = [];
+  const objectKeys: string[] = [];
+  const prefixes: string[] = [];
+  // Who to look for in captain's reports: every spelling of the person the inventory holds.
+  const people: Array<
+    Partial<Pick<PlayerRegistration, 'firstName' | 'lastName' | 'email' | 'cell'>>
+  > = [...rows];
+  const names = new Set<string>();
+
+  let certificates = 0;
+  for (const x of clearances) {
+    keys.push(clearanceKey(tenant, x.fromClubId, x.id));
+    keys.push(inboundClearanceKey(tenant, x.toClubId, x.id));
+    // The list is snapshot-stripped; the canonical's rejectSnapshot is where a rejected
+    // clearance's ID docs (and a window-closed one's pendingPlayer doc) are named.
+    const raw = (await getClearanceRaw(tenant, x.fromClubId, x.id)) ?? x;
+    objectKeys.push(...clearanceDocObjectKeys(raw));
+    const before = keys.length;
+    collectCertificateArtifacts(tenant, raw, keys, prefixes);
+    certificates += keys.length - before;
+    names.add(normName(x.playerName));
+    for (const p of [raw.rejectSnapshot?.destRow, raw.rejectSnapshot?.pendingPlayer]) {
+      if (p) people.push(p);
+    }
+  }
+  for (const r of reviews) {
+    keys.push(registrationReviewKey(tenant, r.destClubId, r.id));
+    for (const k of [
+      r.pendingPlayer?.idDocMeta?.objectKey,
+      r.pendingPlayer?.previousIdDocMeta?.objectKey,
+    ])
+      if (k) objectKeys.push(k);
+    names.add(normName(r.playerName));
+    if (r.pendingPlayer) people.push(r.pendingPlayer);
+  }
+  for (const r of vetreqs) {
+    keys.push(veteransRequestKey(tenant, r.primaryClubId, r.id));
+    keys.push(outboundVeteransRequestKey(tenant, r.veteransClubId, r.id));
+    names.add(normName(r.playerName));
+  }
+  const emails = new Set<string>();
+  const cells = new Set<string>();
+  for (const p of people) {
+    names.add(normName(`${p.firstName ?? ''} ${p.lastName ?? ''}`));
+    emails.add(normEmail(p.email));
+    cells.add(normCell(p.cell));
+  }
+  names.delete('');
+  emails.delete('');
+  cells.delete('');
+
+  // Row docs are purged by deletePlayer itself; counted here so the total is truthful.
+  const rowDocs = rows.flatMap((p) =>
+    [p.idDocMeta?.objectKey, p.previousIdDocMeta?.objectKey].filter((k): k is string => !!k),
+  );
+  const uniqueObjects = [...new Set(objectKeys)];
+
+  // ── S3 (artifacts named only by the rows about to go) ──
+  await deleteUploadObjects(uniqueObjects);
+  await deleteUploadPrefixes(prefixes);
+
+  // ── Clearance / review / request rows ──
+  const unique = uniqueKeys(keys);
+  if (unique.length) await batchDelete(unique);
+
+  // ── Captain's reports: scrub mentions in place ──
+  const nameHit = (s: string | undefined) => !!s && names.has(normName(s));
+  let captainsReportsScrubbed = 0;
+  for (const r of await listCaptainsReports(tenant)) {
+    const contact = r.recipientContact;
+    const contactHit =
+      !!contact &&
+      ((!!contact.email && emails.has(normEmail(contact.email))) ||
+        (!!contact.cell && cells.has(normCell(contact.cell))));
+    const sets: string[] = [];
+    const removes: string[] = [];
+    const values: Record<string, unknown> = {};
+    if (nameHit(r.captainName)) {
+      sets.push('captainName = :erased');
+    }
+    if (nameHit(r.recipient?.name)) sets.push('recipient.#rn = :erased');
+    if (nameHit(r.recipient?.forwardedBy?.name)) sets.push('recipient.forwardedBy.#rn = :erased');
+    if (nameHit(r.submittedBy) || (!!r.submittedBy && emails.has(normEmail(r.submittedBy)))) {
+      sets.push('submittedBy = :erased');
+    }
+    // The stored contact is the recipient's — drop it when it is this person's, or when the
+    // recipient IS this person by name.
+    if (contact && (contactHit || nameHit(r.recipient?.name))) removes.push('recipientContact');
+    if (!sets.length && !removes.length) continue;
+    if (sets.length) values[':erased'] = ERASED_NAME;
+    values[':now'] = at;
+    sets.push('updatedAt = :now');
+    const usesRn = sets.some((s) => s.includes('#rn'));
+    try {
+      await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: reportKeyOf(tenant, r),
+          UpdateExpression: `SET ${sets.join(', ')}${removes.length ? ` REMOVE ${removes.join(', ')}` : ''}`,
+          ConditionExpression: 'attribute_exists(pk)',
+          ...(usesRn ? { ExpressionAttributeNames: { '#rn': 'name' } } : {}),
+          ExpressionAttributeValues: values,
+        }),
+      );
+      captainsReportsScrubbed++;
+    } catch (err: unknown) {
+      if (!isCcf(err)) throw err; // deleted concurrently — nothing left to scrub
+    }
+  }
+
+  // ── Pending report-open markers addressed to this person's player ref ──
+  // Scrub the ref, never delete the marker: it is the retry queue that opens BOTH clubs' reports
+  // for the fixture. Without a captain ref the scoring side's report falls back to the chair.
+  const ref = medicoachRefs.player(tenant, naturalKey);
+  let reportOpenMarkers = 0;
+  for (const m of await listReportOpenMarkers(tenant)) {
+    if (m.captainRef !== ref) continue;
+    if (await scrubReportOpenMarkerCaptainRef(tenant, m.ref)) reportOpenMarkers++;
+  }
+
+  // ── PLAYER# rows last (the re-run anchor) ──
+  for (const p of rows) await deletePlayer(tenant, p);
+
+  const counts: PlayerErasureCounts = {
+    playerRows: rows.length,
+    clearances: clearances.length,
+    registrationReviews: reviews.length,
+    veteransRequests: vetreqs.length,
+    // Distinct objects across both sets: a snapshot destRow can name the same key as a live row.
+    documents: new Set([...uniqueObjects, ...rowDocs]).size,
+    certificates,
+    captainsReportsScrubbed,
+    reportOpenMarkers,
+  };
+  await putPlayerEraseLog(tenant, {
+    id: randomUUID(),
+    kind: 'player-erasure',
+    by: opts.by,
+    at,
+    counts,
+  });
+  return counts;
 }
