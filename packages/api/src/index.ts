@@ -11337,6 +11337,37 @@ app.post('/admin/export-log', async (c) => {
 });
 
 /**
+ * Tenant-wide player erasure (POPIA "right to erasure"). Admin-only via the /admin/* chain.
+ * Removes the person's rows at EVERY club in this organisation, every clearance naming them
+ * (canonical + mirror, deleted outright, with snapshot ID docs + certificate PDFs + CERT#
+ * items), registration reviews, veterans requests; scrubs captain's-report mentions; drops
+ * pending report-open markers addressed to them. See repo.erasePlayerData.
+ *
+ * 404 only when NOTHING exists in any category — a person already removed via the per-club
+ * delete (or a window-rejected-only registrant) has no player row but still has PII on
+ * clearance rows, and that must stay erasable. 409 while a clearance naming them is pending
+ * (or a row is clearance-pending), and on a lost race with a concurrent clearance. Data already
+ * exported to Medicoach is NOT recalled (no delete signal exists). Returns per-category counts.
+ */
+app.delete('/admin/players/:nk', async (c) => {
+  const ra = c.get('requestAuth')!;
+  try {
+    const counts = await repo.erasePlayerData(ra.tenant, c.req.param('nk'), {
+      by: ra.email ?? 'unknown',
+      at: now(),
+    });
+    if (!counts) throw new HttpError(404, 'player not found');
+    return c.json({ ok: true, counts });
+  } catch (err: unknown) {
+    if (err instanceof repo.PlayerErasureBlockedError) throw new HttpError(409, err.message);
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+      throw new HttpError(409, 'player is mid-transfer — refresh and try again');
+    }
+    throw err;
+  }
+});
+
+/**
  * GET /admin/insights/demographics — anonymised cohort histograms (age / gender /
  * race) for the Season Insights dashboard, plus the exact per-league split and the
  * unattributed remainder. Buckets only — no player rows leave the API (the repo

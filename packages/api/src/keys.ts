@@ -61,6 +61,24 @@ export const exportLogsListKey = (tenant: string) => ({
   skPrefix: 'EXPORT#',
 });
 
+/**
+ * Player-erasure audit item (admin `DELETE /admin/players/:nk`). Same layout and rationale as
+ * the EXPORT# items: pk `TENANT#<t>`, a fresh `PLAYERERASE#<iso>#<id>` sk per erasure. It
+ * carries NO player PII (actor + per-category counts only — never the name, natural key or
+ * contact), and sits ABOVE the `tenantErasurePrefix` sweep, so tenant erasure enumerates it
+ * explicitly (see listPlayerEraseLogKeys).
+ */
+export const playerEraseLogKey = (tenant: string, iso: string, id: string) => ({
+  pk: tenantPrefix(tenant),
+  sk: `PLAYERERASE#${iso}#${id}`,
+});
+
+/** pk + sk-prefix to query a tenant's player-erasure audit rows (and to enumerate for erasure). */
+export const playerEraseLogsListKey = (tenant: string) => ({
+  pk: tenantPrefix(tenant),
+  skPrefix: 'PLAYERERASE#',
+});
+
 /** A single club. */
 export const clubKey = (tenant: string, clubId: string) => ({
   pk: `${tenantPrefix(tenant)}#CLUB#${clubId}`,

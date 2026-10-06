@@ -638,6 +638,43 @@ export interface ExportLogEntry {
   leagues?: string[];
 }
 
+/**
+ * What one tenant-wide player erasure (`DELETE /admin/players/:nk`) removed, per category.
+ * Counts only — returned to the admin and stored on the audit row; never names the person.
+ */
+export interface PlayerErasureCounts {
+  /** PLAYER# rows deleted (one per club the person was registered at). */
+  playerRows: number;
+  /** Clearances deleted outright (canonical + mirror each count once). */
+  clearances: number;
+  /** Registration reviews (REGREVIEW#) deleted. */
+  registrationReviews: number;
+  /** Veterans squad-selection requests deleted (canonical + mirror each count once). */
+  veteransRequests: number;
+  /** Uploaded objects purged: ID documents (rows, snapshots, held reviews) + certificate PDFs. */
+  documents: number;
+  /** CERT# certificate-registry items deleted (their /verify lookups now 404). */
+  certificates: number;
+  /** Captain's reports that named the person and were scrubbed in place (not deleted). */
+  captainsReportsScrubbed: number;
+  /** Pending REPORTOPEN# markers whose captain ref was this person, deleted. */
+  reportOpenMarkers: number;
+}
+
+/**
+ * Audit row for one player erasure (`PLAYERERASE#<iso>#<id>` under the tenant pk). PII-free by
+ * design: the actor and the per-category counts only — the erased person is not identifiable
+ * from it (no name, natural key or contact).
+ */
+export interface PlayerEraseLogEntry {
+  id: string;
+  kind: 'player-erasure';
+  /** Human-readable actor (caller email), mirroring ExportLogEntry.by. */
+  by: string;
+  at: string;
+  counts: PlayerErasureCounts;
+}
+
 /** Onboard payload: a Club plus the flat chair contact fields the admin form sends. */
 export type ClubSpec = Partial<Club> & {
   chairEmail?: string;

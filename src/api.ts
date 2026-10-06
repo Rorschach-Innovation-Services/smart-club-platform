@@ -37,6 +37,7 @@ import type {
   CaptainsReportFields,
   LinkedCaptainsReport,
   SendResult,
+  PlayerErasureCounts,
   LogoUploadPost,
   TutorialUploadGrant,
   TenantOverview,
@@ -480,6 +481,14 @@ export const getPlayerIdDocViewUrl = (clubId: string, naturalKey: string) =>
 // player is mid-transfer.
 export const deletePlayer = (clubId: string, naturalKey: string) =>
   request(`/clubs/${clubId}/players/${encodeURIComponent(naturalKey)}`, { method: 'DELETE' });
+// Union admin: erase a person from EVERY club in this organisation (rows, ID documents,
+// clearances + certificates, reviews, veterans requests; captain's-report mentions scrubbed).
+// 404 when nothing names them; 409 while a clearance naming them is pending.
+export const adminErasePlayer = (naturalKey: string) =>
+  request<{ ok: true; counts: PlayerErasureCounts }>(
+    `/admin/players/${encodeURIComponent(naturalKey)}`,
+    { method: 'DELETE' },
+  );
 
 // Rep-safe {id,name} list of sibling clubs (for clearance source/destination choice).
 export const getClubDirectory = () => request<{ id: string; name: string }[]>('/clubs/directory');

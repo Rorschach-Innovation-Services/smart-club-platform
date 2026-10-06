@@ -396,6 +396,21 @@ export interface TransferWindowStatus {
 /** `rejectedBy` on a clearance auto-rejected because it arrived outside every transfer window. */
 export const TRANSFER_WINDOW_REJECTOR = 'system:transfer-window';
 
+/**
+ * What one tenant-wide player erasure (`DELETE /admin/players/:nk`) removed, per category.
+ * Mirrors packages/api/src/types.ts — counts only, never the person's identity.
+ */
+export interface PlayerErasureCounts {
+  playerRows: number;
+  clearances: number;
+  registrationReviews: number;
+  veteransRequests: number;
+  documents: number;
+  certificates: number;
+  captainsReportsScrubbed: number;
+  reportOpenMarkers: number;
+}
+
 export type FixtureReminderChannel = 'email' | 'whatsapp';
 
 /** Mirror of the API's FixtureRemindersConfig (leadDays 1..30, ≤4 entries). */

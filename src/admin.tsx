@@ -8340,7 +8340,9 @@ function playerRoleLabel(p, playerProfile: 'cricket' | 'positions' = 'cricket') 
 
 const PLAYERS_PER_PAGE = 25;
 
-export function AdminPlayersView({ clubs, leagues, toast }) {
+// `onErasePlayer(naturalKey, playerName)` (main.tsx) runs the tenant-wide erasure; it resolves on
+// success and rejects (already toasted) on failure. Absent ⇒ the detail modal shows no erase zone.
+export function AdminPlayersView({ clubs, leagues, toast, onErasePlayer = undefined }) {
   const vt = useVertical().terms;
   const list = clubs ?? [];
   const teamLabel = labelByKey(leagues ?? []);
@@ -8669,6 +8671,17 @@ export function AdminPlayersView({ clubs, leagues, toast }) {
                         queryKey: qk.players(selectedPlayer.clubId),
                       }),
                     ),
+                }
+              : undefined
+          }
+          adminErase={
+            onErasePlayer
+              ? {
+                  onErase: () =>
+                    onErasePlayer(
+                      selectedPlayer.naturalKey,
+                      `${selectedPlayer.firstName ?? ''} ${selectedPlayer.lastName ?? ''}`.trim(),
+                    ).then(() => setSelectedPlayer(null)),
                 }
               : undefined
           }

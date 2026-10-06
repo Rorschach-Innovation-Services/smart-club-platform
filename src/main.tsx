@@ -112,6 +112,7 @@ import { ResyncDialog, isResyncRequired } from './ResyncDialog';
 import { CaptainsReportView, CaptainsReportLinkPage } from './CaptainsReport';
 import { AdminCaptainsReportsView } from './AdminCaptainsReports';
 import { AdminMedicoachSyncView } from './AdminMedicoachSync';
+import { erasureSummary } from './PlayerDetailModal';
 import { useFeature, useModule, useSeasonLabel, useVertical } from './branding';
 
 /** The admin cancelled the medicoach-resync confirmation: the request is simply not sent. */
@@ -2370,6 +2371,24 @@ function Shell({
       })
       .catch(() => {});
   }
+  // Union admin erases a person from EVERY club in the organisation (POPIA). Rows at any club,
+  // clearances, reviews and veterans requests may all have changed, so refetch every roster, the
+  // club list (playerCount), demographics and every clearance/review/request list. Resolves on
+  // success (the modal closes); rejects after withToast has toasted the failure (it stays open).
+  function erasePlayerEverywhere(naturalKey, playerName) {
+    return withToast(() => api.adminErasePlayer(naturalKey), 'Could not erase player').then(
+      (res) => {
+        invalidate(qk.playersAll());
+        invalidate(qk.clubs());
+        invalidate(qk.demographics());
+        invalidate(qk.allClearances());
+        invalidate(qk.clearancesAllClubs());
+        invalidate(qk.allRegistrationReviews());
+        invalidate(qk.allVeteransRequests());
+        toastShow(`${playerName} erased — ${erasureSummary(res?.counts)}`);
+      },
+    );
+  }
   // Mint (or replace) the tenant-wide club signup link. The server revokes any
   // prior token in the same call, so the old link dies the moment this resolves.
   function generateSignupLink() {
@@ -2804,7 +2823,14 @@ function Shell({
           />
         );
       if (view === 'players')
-        return <AdminPlayersView clubs={clubs} leagues={allLeagues} toast={toastShow} />;
+        return (
+          <AdminPlayersView
+            clubs={clubs}
+            leagues={allLeagues}
+            toast={toastShow}
+            onErasePlayer={erasePlayerEverywhere}
+          />
+        );
       if (view === 'fixtures')
         return (
           <AdminFixtures

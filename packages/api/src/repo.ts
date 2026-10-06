@@ -22,6 +22,7 @@ import {
   DeleteObjectsCommand,
   ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
+import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -69,6 +70,8 @@ import {
   tenantConfigGsi1,
   tenantsListGsi1pk,
   exportLogKey,
+  playerEraseLogKey,
+  playerEraseLogsListKey,
   exportLogsListKey,
   userKey,
   userTenantMarkerKey,
@@ -103,10 +106,13 @@ import {
   captainsReportPartitionPk,
 } from './keys.js';
 import { PLATFORM_TENANT, TRANSFER_WINDOW_REJECTOR } from './types.js';
+import { refs as medicoachRefs } from './medicoach-bundle.js';
 import type {
   Club,
   ClubCommEvent,
   ExportLogEntry,
+  PlayerEraseLogEntry,
+  PlayerErasureCounts,
   League,
   SendResult,
   Series,
@@ -887,6 +893,39 @@ export async function putExportLog(tenant: string, entry: ExportLogEntry): Promi
 /** Enumerate a tenant's export-log item keys (for erasure — these sit above the pk-prefix sweep). */
 async function listExportLogKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
   const { pk, skPrefix } = exportLogsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+/** Record one player erasure (PII-free: actor + counts). A fresh item per erasure, like EXPORT#. */
+export async function putPlayerEraseLog(tenant: string, entry: PlayerEraseLogEntry): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...playerEraseLogKey(tenant, entry.at, entry.id), ...entry },
+    }),
+  );
+}
+
+/** A tenant's player-erasure audit rows, oldest first. */
+export async function listPlayerEraseLogs(tenant: string): Promise<PlayerEraseLogEntry[]> {
+  const { pk, skPrefix } = playerEraseLogsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<PlayerEraseLogEntry>(i)!);
+}
+
+/** Enumerate a tenant's player-erasure audit keys (tenant erasure — above the pk-prefix sweep). */
+async function listPlayerEraseLogKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
+  const { pk, skPrefix } = playerEraseLogsListKey(tenant);
   const items = await queryAll({
     TableName: TABLE,
     KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
@@ -7140,9 +7179,10 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   for (const r of await listSeasonRuns(tenant)) keys.push(seasonRunKey(tenant, r.id));
   for (const u of await listTenantUsers(tenant)) keys.push(userTenantMarkerKey(u.sub, tenant));
   // Export-audit items sit at pk `TENANT#<t>` (above the `TENANT#<t>#…` prefix sweep),
-  // so enumerate them explicitly like invite markers. Venues share that partition and
-  // the same exposure — miss them and a deleted tenant's ground list survives.
+  // so enumerate them explicitly like invite markers. Player-erasure audit rows, and venues,
+  // share that partition and the same exposure — miss them and they survive the tenant.
   for (const k of await listExportLogKeys(tenant)) keys.push(k);
+  for (const k of await listPlayerEraseLogKeys(tenant)) keys.push(k);
   for (const k of await listVenueKeys(tenant)) keys.push(k);
   // Medicoach sync (ADR 0016): results (may hold a captain's player ref — PII) and the
   // SYNC partition (cursor + audit rows) have no gsi1/META listing; enumerate them.
@@ -7486,4 +7526,222 @@ export async function eraseClubData(
     series,
     seriesFailed,
   };
+}
+
+// ── Tenant-wide player erasure (admin, POPIA) ──
+
+/** Thrown when a player can't be erased yet because a clearance naming them is still open. */
+export class PlayerErasureBlockedError extends Error {
+  constructor(message = 'resolve or reject the open clearance first') {
+    super(message);
+    this.name = 'PlayerErasureBlockedError';
+  }
+}
+
+/** What a scrubbed captain's-report name field reads after erasure. */
+export const ERASED_NAME = '[removed]';
+
+const normName = (s: string | undefined | null) =>
+  (s ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+const normEmail = (s: string | undefined | null) => (s ?? '').trim().toLowerCase();
+/** Last 9 digits: `082…`, `+2782…` and `2782…` spellings of one SA cell all compare equal. */
+const normCell = (s: string | undefined | null) => {
+  const d = (s ?? '').replace(/\D/g, '');
+  return d.length >= 9 ? d.slice(-9) : '';
+};
+
+/**
+ * Erase ONE person (by natural key) from every club in the tenant — the admin's POPIA "right to
+ * erasure". The same person in another tenant is untouched (every key is TENANT#-scoped).
+ *
+ * Inventory (all tenant-wide):
+ *  - PLAYER# rows at every club (`findPlayerAcrossClubs`), each removed via {@link deletePlayer}
+ *    (its ID doc(s) in S3, its VETAFFIL# record, the club's playerCount);
+ *  - every clearance naming the person (`listAllClearances`), DELETED OUTRIGHT — canonical +
+ *    mirror — with its artifacts: snapshot ID docs (incl. a window-closed auto-reject's
+ *    pendingPlayer doc, the only pointer to it), certificate PDF + CERT# registry item + the
+ *    clearance's S3 prefix. Deleting rather than scrubbing closes the re-issue gap (a retained
+ *    approved clearance could otherwise mint a fresh certificate full of PII);
+ *  - registration reviews (REGREVIEW#) + any held pendingPlayer ID doc;
+ *  - veterans requests (canonical VETREQ# + OUTBOUND_VETREQ# mirror);
+ *  - captain's reports that NAME the person (full name / email / cell match) are SCRUBBED in
+ *    place, not deleted (the report is the club's and the umpires' record too);
+ *  - pending REPORTOPEN# markers whose captain ref is this person's player ref are deleted.
+ *
+ * Gate: a pending clearance naming the person, or any `clearance-pending` row, throws
+ * {@link PlayerErasureBlockedError} BEFORE anything is touched. Returns null when nothing in any
+ * category exists (a clean 404 — and the re-run of a completed erasure).
+ *
+ * Ordering is the re-runnable invariant: S3 first (object keys are only derivable while the
+ * rows naming them exist), then the clearance/review/request rows, then the report scrub, and
+ * the PLAYER# rows LAST — while any of them survives, a re-run finds the person again and
+ * finishes the job. The PII-free audit row (actor + counts) is written once everything landed.
+ */
+export async function erasePlayerData(
+  tenant: string,
+  naturalKey: string,
+  opts: { by: string; at?: string },
+): Promise<PlayerErasureCounts | null> {
+  const at = opts.at ?? new Date().toISOString();
+  // ── Collect ──
+  const hits = await findPlayerAcrossClubs(tenant, naturalKey, '');
+  const rows = (await Promise.all(hits.map((h) => getPlayer(tenant, h.clubId, naturalKey)))).filter(
+    (p): p is PlayerRegistration => p !== null,
+  );
+  const clearances = (await listAllClearances(tenant)).filter(
+    (x) => x.playerNaturalKey === naturalKey,
+  );
+  const reviews = (await listAllReviews(tenant)).filter((r) => r.playerNaturalKey === naturalKey);
+  const vetreqs = (await listAllVeteransRequests(tenant)).filter(
+    (r) => r.playerNaturalKey === naturalKey,
+  );
+  if (!rows.length && !clearances.length && !reviews.length && !vetreqs.length) return null;
+
+  if (
+    rows.some((p) => p.status === 'clearance-pending') ||
+    clearances.some((x) => x.status === 'pending')
+  ) {
+    throw new PlayerErasureBlockedError();
+  }
+
+  const keys: Array<{ pk: string; sk: string }> = [];
+  const objectKeys: string[] = [];
+  const prefixes: string[] = [];
+  // Who to look for in captain's reports: every spelling of the person the inventory holds.
+  const people: Array<
+    Partial<Pick<PlayerRegistration, 'firstName' | 'lastName' | 'email' | 'cell'>>
+  > = [...rows];
+  const names = new Set<string>();
+
+  let certificates = 0;
+  for (const x of clearances) {
+    keys.push(clearanceKey(tenant, x.fromClubId, x.id));
+    keys.push(inboundClearanceKey(tenant, x.toClubId, x.id));
+    // The list is snapshot-stripped; the canonical's rejectSnapshot is where a rejected
+    // clearance's ID docs (and a window-closed one's pendingPlayer doc) are named.
+    const raw = (await getClearanceRaw(tenant, x.fromClubId, x.id)) ?? x;
+    objectKeys.push(...clearanceDocObjectKeys(raw));
+    const before = keys.length;
+    collectCertificateArtifacts(tenant, raw, keys, prefixes);
+    certificates += keys.length - before;
+    names.add(normName(x.playerName));
+    for (const p of [raw.rejectSnapshot?.destRow, raw.rejectSnapshot?.pendingPlayer]) {
+      if (p) people.push(p);
+    }
+  }
+  for (const r of reviews) {
+    keys.push(registrationReviewKey(tenant, r.destClubId, r.id));
+    for (const k of [
+      r.pendingPlayer?.idDocMeta?.objectKey,
+      r.pendingPlayer?.previousIdDocMeta?.objectKey,
+    ])
+      if (k) objectKeys.push(k);
+    names.add(normName(r.playerName));
+    if (r.pendingPlayer) people.push(r.pendingPlayer);
+  }
+  for (const r of vetreqs) {
+    keys.push(veteransRequestKey(tenant, r.primaryClubId, r.id));
+    keys.push(outboundVeteransRequestKey(tenant, r.veteransClubId, r.id));
+    names.add(normName(r.playerName));
+  }
+  const emails = new Set<string>();
+  const cells = new Set<string>();
+  for (const p of people) {
+    names.add(normName(`${p.firstName ?? ''} ${p.lastName ?? ''}`));
+    emails.add(normEmail(p.email));
+    cells.add(normCell(p.cell));
+  }
+  names.delete('');
+  emails.delete('');
+  cells.delete('');
+
+  // Row docs are purged by deletePlayer itself; counted here so the total is truthful.
+  const rowDocs = rows.flatMap((p) =>
+    [p.idDocMeta?.objectKey, p.previousIdDocMeta?.objectKey].filter((k): k is string => !!k),
+  );
+  const uniqueObjects = [...new Set(objectKeys)];
+
+  // ── S3 (artifacts named only by the rows about to go) ──
+  await deleteUploadObjects(uniqueObjects);
+  await deleteUploadPrefixes(prefixes);
+
+  // ── Clearance / review / request rows ──
+  const unique = uniqueKeys(keys);
+  if (unique.length) await batchDelete(unique);
+
+  // ── Captain's reports: scrub mentions in place ──
+  const nameHit = (s: string | undefined) => !!s && names.has(normName(s));
+  let captainsReportsScrubbed = 0;
+  for (const r of await listCaptainsReports(tenant)) {
+    const contact = r.recipientContact;
+    const contactHit =
+      !!contact &&
+      ((!!contact.email && emails.has(normEmail(contact.email))) ||
+        (!!contact.cell && cells.has(normCell(contact.cell))));
+    const sets: string[] = [];
+    const removes: string[] = [];
+    const values: Record<string, unknown> = {};
+    if (nameHit(r.captainName)) {
+      sets.push('captainName = :erased');
+    }
+    if (nameHit(r.recipient?.name)) sets.push('recipient.#rn = :erased');
+    if (nameHit(r.recipient?.forwardedBy?.name)) sets.push('recipient.forwardedBy.#rn = :erased');
+    if (nameHit(r.submittedBy) || (!!r.submittedBy && emails.has(normEmail(r.submittedBy)))) {
+      sets.push('submittedBy = :erased');
+    }
+    // The stored contact is the recipient's — drop it when it is this person's, or when the
+    // recipient IS this person by name.
+    if (contact && (contactHit || nameHit(r.recipient?.name))) removes.push('recipientContact');
+    if (!sets.length && !removes.length) continue;
+    if (sets.length) values[':erased'] = ERASED_NAME;
+    values[':now'] = at;
+    sets.push('updatedAt = :now');
+    const usesRn = sets.some((s) => s.includes('#rn'));
+    try {
+      await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: reportKeyOf(tenant, r),
+          UpdateExpression: `SET ${sets.join(', ')}${removes.length ? ` REMOVE ${removes.join(', ')}` : ''}`,
+          ConditionExpression: 'attribute_exists(pk)',
+          ...(usesRn ? { ExpressionAttributeNames: { '#rn': 'name' } } : {}),
+          ExpressionAttributeValues: values,
+        }),
+      );
+      captainsReportsScrubbed++;
+    } catch (err: unknown) {
+      if (!isCcf(err)) throw err; // deleted concurrently — nothing left to scrub
+    }
+  }
+
+  // ── Pending report-open markers addressed to this person's player ref ──
+  const ref = medicoachRefs.player(tenant, naturalKey);
+  let reportOpenMarkers = 0;
+  for (const m of await listReportOpenMarkers(tenant)) {
+    if (m.captainRef !== ref) continue;
+    await deleteReportOpenMarker(tenant, m.ref);
+    reportOpenMarkers++;
+  }
+
+  // ── PLAYER# rows last (the re-run anchor) ──
+  for (const p of rows) await deletePlayer(tenant, p);
+
+  const counts: PlayerErasureCounts = {
+    playerRows: rows.length,
+    clearances: clearances.length,
+    registrationReviews: reviews.length,
+    veteransRequests: vetreqs.length,
+    documents: uniqueObjects.length + rowDocs.length,
+    certificates,
+    captainsReportsScrubbed,
+    reportOpenMarkers,
+  };
+  await putPlayerEraseLog(tenant, {
+    id: randomUUID(),
+    kind: 'player-erasure',
+    by: opts.by,
+    at,
+    counts,
+  });
+  return counts;
 }
