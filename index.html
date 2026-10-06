@@ -6397,6 +6397,31 @@
   .pro-standout strong{font-family:'Montserrat',sans-serif;font-size:18px}
   .pro-standout span{font-size:12px;color:var(--muted)}
   .pro-standouts .us .pro-standout{border-left:3px solid var(--viz-squad)}
+  .pro-flow{display:flex;gap:14px;align-items:stretch;overflow-x:auto;padding:4px 0}
+  .pro-flow-col{flex:1 0 96px;max-width:180px;display:grid;grid-template-rows:150px auto 90px}
+  .pro-flow-up{display:flex;flex-direction:column;justify-content:flex-end;align-items:stretch;gap:2px}
+  .pro-flow-down{display:flex;flex-direction:column;justify-content:flex-start;align-items:stretch}
+  .pro-flow-col i{display:flex;align-items:center;justify-content:center;font-style:normal;font-size:11px;font-weight:800;color:#fff;min-height:2px;margin:0 22%}
+  .pro-flow-up i:first-of-type{border-radius:4px 4px 0 0}
+  .pro-flow-down i{border-radius:0 0 4px 4px}
+  .pro-flow-col i.squad{background:var(--viz-squad)} .pro-flow-col i.third{background:var(--viz-third)} .pro-flow-col i.risk{background:var(--viz-risk)}
+  .pro-flow-n{text-align:center;font-size:12px;font-weight:800;color:var(--ink);margin-bottom:2px}
+  .pro-flow-axis{border-top:1px solid var(--viz-ref);padding:6px 0;text-align:center;display:flex;flex-direction:column}
+  .pro-flow-axis strong{font-size:12.5px;color:var(--ink)}
+  .pro-flow-axis small{font-size:11px;color:var(--muted)}
+  .pro-flow-col.partial i{opacity:.55}
+  .pro-where{display:grid;gap:8px}
+  .pro-where-card{border:1px solid var(--line);border-left:3px solid var(--viz-context);border-radius:10px;padding:9px 12px;background:var(--white)}
+  .pro-where-card.still-playing{border-left-color:var(--viz-third)}
+  .pro-where-card.no-trace{border-left-color:var(--viz-risk)}
+  .pro-where-top{display:flex;justify-content:space-between;gap:8px;align-items:center}
+  .pro-where-top .pro-name{font-size:14px;font-weight:800;color:var(--ink)}
+  .pro-sightings{list-style:none;margin:6px 0 0;padding:0;display:grid;gap:3px;font-size:12.5px;color:var(--ink)}
+  .pro-sightings small{color:var(--muted)}
+  .pro-sightings-none{margin:6px 0 0;font-size:12.5px;color:var(--muted)}
+  .pro-careers td.pro-cell{text-align:center}
+  .pro-heat{display:inline-flex;align-items:center;justify-content:center;min-width:28px;height:24px;border-radius:6px;background:var(--viz-squad);color:#fff;font-weight:800;font-size:12px}
+  .pro-heat.empty{background:none;color:var(--muted-3)}
   @media (max-width:900px){
     .pro-lanes{grid-template-columns:1fr}
     .pro-need{grid-template-columns:1fr}

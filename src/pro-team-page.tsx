@@ -61,6 +61,7 @@ import {
 } from './pro-charts';
 import { SCOUTING_EVENTS } from './scouting-data';
 import { ProMatchView } from './pro-match';
+import { ExitsView } from './pro-exits-view';
 import type { ScoutPlayer } from './scouting-data';
 import { useWatchlist, watchKey } from './scouting-player';
 import type { PoolPlayer, PoolRole } from './scout-pool';
@@ -77,7 +78,7 @@ import {
   type Values,
 } from './pro-callups';
 
-type ProTab = 'selection' | 'squad' | 'form' | 'seasons' | 'team' | 'callups' | 'matches';
+type ProTab = 'selection' | 'squad' | 'form' | 'seasons' | 'team' | 'callups' | 'matches' | 'exits';
 const PRO_TABS: [ProTab, string][] = [
   ['selection', 'Selection'],
   ['squad', 'Squad'],
@@ -86,6 +87,7 @@ const PRO_TABS: [ProTab, string][] = [
   ['team', 'Team'],
   ['callups', 'Call-ups'],
   ['matches', 'Matches'],
+  ['exits', 'Exits'],
 ];
 
 const r0 = (v: number | null | undefined) =>
@@ -435,6 +437,9 @@ export function ProTeamPage() {
             candidates={candidates}
             tracking={tracking}
           />
+        )}
+        {tab === 'exits' && (
+          <ExitsView squad={squad} openPlayer={(name) => set({ ptab: 'form', fplayer: name })} />
         )}
         {tab === 'matches' &&
           (openMatch ? (
