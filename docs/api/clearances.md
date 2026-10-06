@@ -217,6 +217,92 @@ Comm log: rows of kind `'clearance-reminder'` on the source club, idempotency ke
 restarts the cron's 7-day cadence for that clearance (the cron reads the latest
 `'clearance-reminder'` row, whichever sent it).
 
+<a id="player-erasure"></a>
+
+### `DELETE /admin/players/:nk` — erase a person tenant-wide (admin)
+
+The union office's POPIA "right to erasure": removes one person, by natural key, from **every
+club in this tenant** in one call. Console: the "Erase player" danger zone in the admin
+player modal (`PlayerDetailModal`), where the button ("Erase player everywhere") stays disabled
+until the person's full name is typed. Implementation: `repo.erasePlayerData`.
+
+**Scope is the tenant only.** Every key is `TENANT#`-scoped, so the same person registered with
+another union (another tenant) is untouched. There is no cross-tenant erase.
+
+What it removes:
+
+| Category                      | What happens                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Player rows                   | Every `PLAYER#` row for the natural key, at every club, via `deletePlayer` (its ID document(s) in S3, its `VETAFFIL#` record, the club's `playerCount`).                                                                                                                                                                                                                                                                                        |
+| Clearances                    | Every clearance naming the person is **deleted outright**, canonical + mirror, whatever its status, with its artifacts: snapshot ID documents (including a window-closed auto-reject's `pendingPlayer` document), the certificate PDF, the `CERT#` registry item (its `/verify` lookup now 404s) and the clearance's S3 prefix. Deleting rather than scrubbing means a retained approved clearance can never re-mint a certificate full of PII. |
+| Registration reviews          | `REGREVIEW#` rows for the person, plus any held `pendingPlayer` ID document.                                                                                                                                                                                                                                                                                                                                                                    |
+| Veterans requests             | Canonical `VETREQ#` + `OUTBOUND_VETREQ#` mirror.                                                                                                                                                                                                                                                                                                                                                                                                |
+| Captain's reports             | Reports that name the person (full-name, email or cell match) are **scrubbed in place**, not deleted: matching name fields become `[removed]` and the stored recipient contact is dropped. The report also belongs to the club and the umpires.                                                                                                                                                                                                 |
+| Pending `REPORTOPEN#` markers | A marker whose `captainRef` is this person's player ref has **only that field removed**. The marker stays (see below).                                                                                                                                                                                                                                                                                                                          |
+
+Why the marker is scrubbed, not deleted: a `REPORTOPEN#` marker is the retry queue that opens
+the captain's reports for **both** clubs in a fixture. Deleting it would silently stop that
+fixture's reports from opening at all. With no `captainRef`, the retry resolves no captain, so
+the scoring side's report goes to that club's **chair**. If the report had already opened with
+the erased captain as recipient, its contact was scrubbed with the report, and the retry
+notifies the chair instead, with the chair's wording and no cc.
+
+Order matters for re-runs: S3 objects first (their keys are only derivable while the rows that
+name them exist), then clearance/review/request rows, then the report scrub, then the
+`PLAYER#` rows last. If a run dies part-way, the surviving rows let a re-run find the person and
+finish the job.
+
+Responses:
+
+- `200` — `{ ok: true, counts }`, where `counts` is:
+
+  ```json
+  {
+    "playerRows": 2,
+    "clearances": 1,
+    "registrationReviews": 1,
+    "veteransRequests": 1,
+    "documents": 3,
+    "certificates": 1,
+    "captainsReportsScrubbed": 1,
+    "reportOpenMarkers": 1
+  }
+  ```
+
+  `documents` counts S3 objects (row ID docs + clearance/review docs + certificate PDFs).
+  `reportOpenMarkers` counts markers whose captain ref was scrubbed. The console toast reads
+  `<Name> erased — 2 club registrations, 1 clearance, …` (non-zero counts only).
+
+- `404` — `player not found`, **only** when player rows, clearances, registration reviews and
+  veterans requests are **all** empty for the natural key. A person with no `PLAYER#` row left
+  anywhere but a lingering clearance (say, a window-closed auto-reject) is still erasable. A
+  re-run of a completed erasure 404s.
+- `409` — `resolve or reject the open clearance first`: a **pending** clearance names the
+  person, or any of their rows is `clearance-pending`. Nothing is touched; the gate runs before
+  the first write. Resolve it (approve, override or reject) and retry.
+- `409` — `player is mid-transfer — refresh and try again`: a clearance moved the row between
+  the inventory read and the delete (a conditional write lost the race). Refresh and retry.
+- `403` — not an admin of this tenant (the `/admin/*` middleware).
+
+**Audit.** Once everything has landed, one row is written at `TENANT#<t>` /
+`PLAYERERASE#<iso>#<id>`: `{ id, kind: 'player-erasure', by, at, counts }`. It is PII-free
+(actor email + counts only, never the natural key or name). There is **no read route yet**;
+the only reader is `repo.listPlayerEraseLogs(tenant)`.
+
+Caveats and gaps:
+
+- **Name-only matching in captain's reports.** A report field is scrubbed when it equals any
+  spelling of the person's full name the inventory holds (case- and whitespace-insensitive).
+  A different person with the same name in a captain's report will lose their name too. Email
+  and cell matches compare the person's own email and cell (last nine digits), so a bystander's
+  contact is only dropped when it is the same address or number.
+- **Not covered:**
+  - club comm-log entries from past notices (e.g. clearance notices naming the player in a
+    chair's comm log);
+  - INVITE#-keyspace idempotency markers;
+  - data already exported to Medicoach. The confirm modal says this; ask Medicoach to remove it
+    separately.
+
 ## Reject cases
 
 The reject case is decided from the **live** row state by `detectRejectCase`, never from
@@ -356,8 +442,13 @@ Per tenant with the `clearances` module on, over `listAllClearances` filtered to
 1. **Age.** Tenant days pending, counted from `reopenedAt` if set, else `requestedAt` — a
    reopen **restarts the clock**. Under 7 days (`CLEARANCE_REMINDER_AFTER_DAYS`): ignored.
 2. **Chairless (directory-source) clearances** — the source club has no record — are never
-   claimed or sent. They go into the admin digest on day 7 and every 7 days after (by their own
-   age), since only the union office can resolve them.
+   claimed or sent; only the union office can resolve them, so they go into the admin digest.
+   They follow the same rule as step 3, read from the **destination** club: included when the
+   latest `'clearance-reminder'` row for the clearance there is absent or at least 7 tenant days
+   old. Once the digest has gone out (at least one admin email `sent`), the run appends one
+   PII-free row to the destination club's comm log (kind `'clearance-reminder'`, channel
+   `email`, no `to`, key `clearance-<id>-reminder-<date>-digest`). A digest that failed to send
+   records nothing, so the next run tries again. A missed run delays the mention by a day.
 3. **Due.** Otherwise the clearance is due when the latest `'clearance-reminder'` comm-log row
    for it on the source club is absent or at least 7 tenant days old
    (`CLEARANCE_REMINDER_EVERY_DAYS`). Reading the last reminder, not a modulo of the age, makes
@@ -368,8 +459,8 @@ Per tenant with the `clearances` module on, over `listAllClearances` filtered to
    A send fault before anything went out releases the claim so tomorrow (or a manual send) can
    retry; after a send the marker stays, so a bookkeeping fault never double-sends.
 5. **Digest.** One email per admin listing the clearances nudged this run (at least one channel
-   `sent`) and the chairless ones. Nothing to list ⇒ no digest. Admin emails only, not
-   comm-logged.
+   `sent`) and the chairless ones. Nothing to list ⇒ no digest. Admin emails only; the only
+   comm-log trace is the chairless mention row from step 2.
 
 Failures are isolated per tenant and per clearance (Sentry, counted, the run moves on); only the
 tenant-registry read fails the whole run. The run logs one summary line (`clearance-reminders:

@@ -26,15 +26,15 @@ tenant-scoped CRUD (see [ADR 0004](../architecture/0004-thin-crud-client-side-co
 
 ## Resources
 
-| File                               | Routes                                                                                                                    |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| [tenant.md](tenant.md)             | `GET /tenant`, `PUT /tenant/config`, `GET/PATCH /me`                                                                      |
-| [clubs.md](clubs.md)               | `GET /clubs`, `/clubs/:id` and sub-resources (incl. veterans squad selection)                                             |
-| [signup.md](signup.md)             | public `GET/POST /club-signup`, `/admin/club-signup-link`                                                                 |
-| [series.md](series.md)             | `GET/POST /series`, `/series/:id`, duplicate                                                                              |
-| [registration.md](registration.md) | public `GET/POST /register/:clubId`; chair `POST /clubs/:id/players`, `/players/batch`, `/roster/parse`, `/roster/commit` |
-| [clearances.md](clearances.md)     | `/clubs/:id/clearances`, `/admin/clearances/*` (reject, reopen, override, reassign)                                       |
-| [users.md](users.md)               | `POST /admin/users` (invite)                                                                                              |
+| File                               | Routes                                                                                                                                    |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| [tenant.md](tenant.md)             | `GET /tenant`, `PUT /tenant/config`, `GET/PATCH /me`                                                                                      |
+| [clubs.md](clubs.md)               | `GET /clubs`, `/clubs/:id` and sub-resources (incl. veterans squad selection)                                                             |
+| [signup.md](signup.md)             | public `GET/POST /club-signup`, `/admin/club-signup-link`                                                                                 |
+| [series.md](series.md)             | `GET/POST /series`, `/series/:id`, duplicate                                                                                              |
+| [registration.md](registration.md) | public `GET/POST /register/:clubId`; chair `POST /clubs/:id/players`, `/players/batch`, `/roster/parse`, `/roster/commit`                 |
+| [clearances.md](clearances.md)     | `/clubs/:id/clearances`, `/admin/clearances/*` (reject, reopen, override, reassign, remind), `DELETE /admin/players/:nk` (player erasure) |
+| [users.md](users.md)               | `POST /admin/users` (invite)                                                                                                              |
 
 ## Authorization matrix
 
@@ -46,7 +46,8 @@ tenant-scoped CRUD (see [ADR 0004](../architecture/0004-thin-crud-client-side-co
 | `POST/GET/PATCH /clubs/:id/clearances`                                             |   —    |    own only    |   ✓   |
 | `GET/POST /clubs/:id/players`, `/players/batch`, `/roster/parse`, `/roster/commit` |   —    |    own only    |   ✓   |
 | `GET /clubs`, `/admin/club-signup-link`                                            |   —    |       —        |   ✓   |
-| `GET /admin/clearances`, override, reassign, reject, reopen                        |   —    |       —        |   ✓   |
+| `GET /admin/clearances`, override, reassign, reject, reopen, remind                |   —    |       —        |   ✓   |
+| `DELETE /admin/players/:nk` (tenant-wide player erasure)                           |   —    |       —        |   ✓   |
 | `/clubs/:id/veterans-affiliates`, `/veterans-candidates`, `/veterans-requests/*`   |   —    |    own only    |   ✓   |
 | `GET /admin/veterans-requests`, accept, decline                                    |   —    |       —        |   ✓   |
 | all `/series` writes, `/tenant/config`, `/admin/users`                             |   —    |       —        |   ✓   |
