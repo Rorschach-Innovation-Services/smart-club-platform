@@ -277,10 +277,29 @@ export function MatchLibraryPage({ toast }: { toast: Toast }) {
   );
 }
 
+/** Past this many files, start with only the ones that need a look. */
+export const PLAN_SHORT = 20;
+const needsLook = (i: PlanItem) => !OUTCOME[i.outcome].saves || i.warnings.length > 0;
+
 function PlanTable({ items }: { items: PlanItem[] }) {
+  const [all, setAll] = useState(false);
+  const short = items.length > PLAN_SHORT && !all;
+  const shown = short ? items.filter((i) => i.outcome !== 'duplicate' && needsLook(i)) : items;
   return (
     <div className="tbl-w">
-      <table className="tbl" aria-label="What each file will do">
+      {items.length > PLAN_SHORT && (
+        <div className="ml-plan-head">
+          <span>
+            {short
+              ? `${shown.length} of ${items.length} files need a look (skipped, or saved with a warning).`
+              : `All ${items.length} files.`}
+          </span>
+          <Btn tone="ghost" size="sm" onClick={() => setAll((v) => !v)}>
+            {short ? `Show all ${items.length} files` : 'Show only those that need a look'}
+          </Btn>
+        </div>
+      )}
+      <table className="tbl ml-tbl" aria-label="What each file will do">
         <thead>
           <tr>
             <th>File</th>
@@ -290,7 +309,7 @@ function PlanTable({ items }: { items: PlanItem[] }) {
           </tr>
         </thead>
         <tbody>
-          {items.map((i, k) => (
+          {shown.map((i, k) => (
             <tr key={`${i.name}-${k}`}>
               <td className="ml-file">{i.name}</td>
               <td>{KIND[i.kind]}</td>
@@ -382,7 +401,7 @@ function LibraryCard({
             onChange={(e) => setQ(e.target.value)}
           />
           <div className="tbl-w">
-            <table className="tbl" aria-label="Matches in the library">
+            <table className="tbl ml-tbl" aria-label="Matches in the library">
               <thead>
                 <tr>
                   <th>Date</th>

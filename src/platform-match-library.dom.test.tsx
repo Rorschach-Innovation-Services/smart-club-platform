@@ -9,7 +9,7 @@ import { screen, within, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import * as api from './api';
 import { planImport, readFile, type LibraryMatch } from './match-import';
-import { MatchLibraryPage, SAVE_BATCH } from './platform-match-library';
+import { MatchLibraryPage, PLAN_SHORT, SAVE_BATCH } from './platform-match-library';
 import { ballByBall, bat, card } from './pro-csv-fixtures';
 import { renderWithProviders } from './test-utils';
 
@@ -143,5 +143,26 @@ describe('Match library', () => {
         expect.anything(),
       ),
     );
+  });
+});
+
+describe('a big drop', () => {
+  it('starts with only the files that need a look', async () => {
+    const { user } = setup();
+    await screen.findByText('No matches yet');
+    const cards = Array.from({ length: PLAN_SHORT + 1 }, (_, i) => {
+      const d = new Date(Date.UTC(2025, 9, 1 + i)).toISOString().slice(0, 10);
+      return file(`card-${d}.csv`, scorecard(d, 20 + i));
+    });
+    await user.upload(screen.getByLabelText('Choose match files'), [
+      ...cards,
+      file('again.csv', scorecard('2025-10-01', 20)),
+      file('odd.csv', 'name,club\nA,B'),
+    ]);
+    const plan = await screen.findByRole('table', { name: 'What each file will do' });
+    expect(within(plan).getAllByRole('row')).toHaveLength(2); // header + the unreadable file
+    expect(screen.getByText(/1 of 23 files need a look/)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Show all 23 files' }));
+    expect(within(plan).getAllByRole('row')).toHaveLength(24);
   });
 });
