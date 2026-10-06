@@ -6322,7 +6322,7 @@
   .pv-tline.pool{stroke:var(--viz-pool)} .pv-tline.risk{stroke:var(--viz-risk)}
   .pv-tick.faint{fill:var(--muted);opacity:.75}
   .pv-dline{stroke-width:2.5;stroke-linecap:round}
-  .pv-dline.squad{stroke:var(--viz-squad)} .pv-dline.risk{stroke:var(--viz-risk)}
+  .pv-dline.context{stroke:var(--viz-context-ink)} .pv-dline.squad{stroke:var(--viz-squad)} .pv-dline.risk{stroke:var(--viz-risk)}
   .pv-tag{fill:var(--muted);font-weight:600}
   .pv-up{fill:#25336F;font-weight:800} .pv-down{fill:#8E2433;font-weight:800}
   .pro-delta{display:inline-block;margin-left:6px;font-size:11px;font-weight:800}
@@ -6380,6 +6380,23 @@
     .pro-cover{grid-template-columns:1fr}
     .pro-cover-row{grid-template-columns:minmax(0,1fr) repeat(var(--cols,4),minmax(0,1fr)) 36px;font-size:12px}
   }
+  .pv-tline.dash{stroke-dasharray:6 4}
+  .pro-match-head{background:var(--white);border:1px solid var(--line);border-radius:14px;padding:16px 18px;border-top:4px solid var(--viz-context)}
+  .pro-match-head.won{border-top-color:var(--viz-squad)} .pro-match-head.lost{border-top-color:var(--viz-risk)}
+  .pro-match-scores{display:flex;flex-wrap:wrap;gap:6px 18px;margin:8px 0 6px;font-family:'Montserrat',sans-serif;font-size:17px;font-weight:800;color:var(--muted)}
+  .pro-match-scores span.us{color:var(--ink)}
+  .pro-match-scores small{font-size:12px;font-weight:600}
+  .pro-match-result{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--ink)}
+  .pro-inn-card.us{border-left:4px solid var(--viz-squad)}
+  .pro-inn-two{margin:0}
+  .pro-card-details{margin-top:10px}
+  .pro-card-details summary{cursor:pointer;font-size:12.5px;font-weight:700;color:var(--ink)}
+  .pro-standouts{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .pro-standout{display:flex;gap:8px;align-items:baseline;width:100%;font:inherit;text-align:left;background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:6px;color:var(--ink);cursor:pointer}
+  .pro-standout:disabled{cursor:default}
+  .pro-standout strong{font-family:'Montserrat',sans-serif;font-size:18px}
+  .pro-standout span{font-size:12px;color:var(--muted)}
+  .pro-standouts .us .pro-standout{border-left:3px solid var(--viz-squad)}
   @media (max-width:900px){
     .pro-lanes{grid-template-columns:1fr}
     .pro-need{grid-template-columns:1fr}

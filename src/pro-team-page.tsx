@@ -4,7 +4,7 @@
  * risk, the squad and team pictures, and call-ups from the scouting pools — players the
  * scouting system already rates, which the professional staff can track and call up.
  */
-import { Fragment, useMemo, useState, type CSSProperties } from 'react';
+import { useMemo, useState, type CSSProperties } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Icon, Pill } from './atoms';
 import { PRO_IS_SAMPLE, PRO_MATCHES, SCOUT_POOLS } from './pro-data';
@@ -20,7 +20,6 @@ import {
   baselines,
   detectSquads,
   filterMatches,
-  isUs,
   orderContribution,
   seasonsOf,
   squadPlayers,
@@ -61,6 +60,7 @@ import {
   type Tone,
 } from './pro-charts';
 import { SCOUTING_EVENTS } from './scouting-data';
+import { ProMatchView } from './pro-match';
 import type { ScoutPlayer } from './scouting-data';
 import { useWatchlist, watchKey } from './scouting-player';
 import type { PoolPlayer, PoolRole } from './scout-pool';
@@ -317,6 +317,8 @@ export function ProTeamPage() {
 
   if (!squad) return <div className="ss-empty">No professional-team scorecards yet.</div>;
   const openPlayer = players.find((p) => p.name === open) ?? null;
+  const openMatch = squad.matches.find((m) => m.id === params.get('pmatch')) ?? null;
+  const genderBases = baselines(PRO_MATCHES.filter((m) => m.gender === squad.gender));
   const seasons = seasonsOf(squad.matches);
 
   return (
@@ -329,7 +331,7 @@ export function ProTeamPage() {
               role="tab"
               aria-selected={s.gender === squad.gender}
               className={s.gender === squad.gender ? 'on' : ''}
-              onClick={() => set({ squad: s.gender, fplayer: '' })}
+              onClick={() => set({ squad: s.gender, fplayer: '', pmatch: '' })}
             >
               {s.name}
               <small>{s.gender === 'men' ? 'Men' : 'Women'}</small>
@@ -434,7 +436,18 @@ export function ProTeamPage() {
             tracking={tracking}
           />
         )}
-        {tab === 'matches' && <MatchesView squad={squad} ms={ms} />}
+        {tab === 'matches' &&
+          (openMatch ? (
+            <ProMatchView
+              squad={squad}
+              match={openMatch}
+              bases={genderBases}
+              onBack={() => set({ pmatch: '' })}
+              openPlayer={setOpen}
+            />
+          ) : (
+            <MatchesView squad={squad} ms={ms} onOpen={(id) => set({ pmatch: id })} />
+          ))}
       </div>
 
       {openPlayer && (
@@ -576,6 +589,7 @@ function SelectionView({
               { tone: 'risk', label: `Last ${RECENT} · at risk` },
             ]}
             empty="Nobody has a big enough sample yet in this selection."
+            hint="Hover a player for the reasons · tap for their details"
             onPick={openPlayer}
           />
         </div>
@@ -2973,15 +2987,25 @@ function CandidatePanel({
 
 /* ── Matches ── */
 
-function MatchesView({ squad, ms }: { squad: Squad; ms: ProMatch[] }) {
+function MatchesView({
+  squad,
+  ms,
+  onOpen,
+}: {
+  squad: Squad;
+  ms: ProMatch[];
+  onOpen: (id: string) => void;
+}) {
   const sum = teamSummary(squad, ms);
-  const [open, setOpen] = useState<string | null>(null);
   return (
     <div className="card">
       <div className="card-head">
         <div>
           <div className="card-title">Matches</div>
-          <div className="card-sub">Newest first · tap for the scorecard</div>
+          <div className="card-sub">
+            Newest first · tap a match for the full picture — how it unfolded, partnerships,
+            batting, bowling and standouts
+          </div>
         </div>
       </div>
       <div className="tbl-w">
@@ -2998,76 +3022,23 @@ function MatchesView({ squad, ms }: { squad: Squad; ms: ProMatch[] }) {
           </thead>
           <tbody>
             {[...sum.results].reverse().map((r) => (
-              <Fragment key={r.match.id}>
-                <tr
-                  className="click"
-                  onClick={() => setOpen(open === r.match.id ? null : r.match.id)}
-                >
-                  <td>{fmtDay(r.match.date)}</td>
-                  <td>{r.match.format}</td>
-                  <td>{r.opp}</td>
-                  <td>{r.our}</td>
-                  <td>{r.their}</td>
-                  <td>
-                    <span className={`pv-res ${r.outcome}`}>
-                      {r.outcome === 'NR' ? '–' : r.outcome}
-                    </span>{' '}
-                    <span className="ump-sub">{r.match.result}</span>
-                  </td>
-                </tr>
-                {open === r.match.id && (
-                  <tr className="pro-scorecard-row">
-                    <td colSpan={6}>
-                      <Scorecard squad={squad} m={r.match} />
-                    </td>
-                  </tr>
-                )}
-              </Fragment>
+              <tr key={r.match.id} className="click" onClick={() => onOpen(r.match.id)}>
+                <td>{fmtDay(r.match.date)}</td>
+                <td>{r.match.format}</td>
+                <td>{r.opp}</td>
+                <td>{r.our}</td>
+                <td>{r.their}</td>
+                <td>
+                  <span className={`pv-res ${r.outcome}`}>
+                    {r.outcome === 'NR' ? '–' : r.outcome}
+                  </span>{' '}
+                  <span className="ump-sub">{r.match.result}</span>
+                </td>
+              </tr>
             ))}
           </tbody>
         </table>
       </div>
-    </div>
-  );
-}
-
-function Scorecard({ squad, m }: { squad: Squad; m: ProMatch }) {
-  return (
-    <div className="pro-scorecards">
-      {(m.innings ?? []).map((inn, i) => (
-        <div key={i} className={`pro-inn${isUs(squad, inn.bat) ? ' us' : ''}`}>
-          <div className="pro-inn-head">
-            <strong>{shortTeam(inn.bat)}</strong> {inn.total}/{inn.wkts} ({inn.overs} ov) · extras{' '}
-            {inn.extras}
-          </div>
-          <table className="pro-mini-tbl">
-            <tbody>
-              {inn.batting.map((b) => (
-                <tr key={b.n}>
-                  <td>{b.n}</td>
-                  <td className="ump-sub">{b.out}</td>
-                  <td>
-                    {b.r} ({b.b})
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <table className="pro-mini-tbl">
-            <tbody>
-              {inn.bowling.map((b) => (
-                <tr key={b.n}>
-                  <td>{b.n}</td>
-                  <td>
-                    {b.o}-{b.m}-{b.r}-{b.w}
-                  </td>
-                  <td className="ump-sub">econ {r1((b.r / Math.max(1, oversToBalls(b.o))) * 6)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ))}
     </div>
   );
 }

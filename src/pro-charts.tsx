@@ -35,7 +35,7 @@ function barPath(x: number, y: number, w: number, h: number, dir: 'right' | 'up'
  * stay the same size on a phone and a wide monitor. Falls back to `fallback` where there's
  * no layout (tests, first paint).
  */
-function useWidth(fallback: number) {
+export function useWidth(fallback: number) {
   const ref = useRef<HTMLDivElement>(null);
   const [w, setW] = useState(fallback);
   useLayoutEffect(() => {
@@ -1043,6 +1043,7 @@ export function Dumbbell({
   refValue = 100,
   legend,
   empty,
+  hint,
 }: {
   rows: DumbbellRow[];
   fromLabel: string;
@@ -1052,6 +1053,7 @@ export function Dumbbell({
   /** Replace the default up/down legend when rows carry their own tones. */
   legend?: { tone: Tone; label: string }[];
   empty?: string;
+  hint?: string;
 }) {
   const [hover, setHover] = useState<DumbbellRow | null>(null);
   const [box, W] = useWidth(560);
