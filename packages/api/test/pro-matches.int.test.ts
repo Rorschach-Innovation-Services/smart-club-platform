@@ -7,7 +7,7 @@ import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 
-const DDB_PORT = 4663; // next free odd port after 4661
+const DDB_PORT = 4691; // each int test owns a port: the suite runs files in parallel
 const TABLE = 'SmartClubProMatchTest';
 process.env.TABLE_NAME = TABLE;
 process.env.DYNAMO_ENDPOINT = `http://localhost:${DDB_PORT}`;
@@ -91,7 +91,11 @@ const post = (auth: string, body: unknown) =>
 before(async () => {
   const dynalite = (await import('dynalite')).default as (opts?: unknown) => Server;
   ddbServer = dynalite({ createTableMs: 0 });
-  await new Promise<void>((resolve) => ddbServer.listen(DDB_PORT, resolve));
+  // Fail fast on a port clash instead of waiting forever for a listen that never happens.
+  await new Promise<void>((resolve, reject) => {
+    ddbServer.once('error', reject);
+    ddbServer.listen(DDB_PORT, resolve);
+  });
   const { DynamoDBClient, CreateTableCommand } = await import('@aws-sdk/client-dynamodb');
   const admin = new DynamoDBClient({
     endpoint: process.env.DYNAMO_ENDPOINT,
