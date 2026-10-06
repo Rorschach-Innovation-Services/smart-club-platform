@@ -8,7 +8,7 @@
  * gridlines solid hairlines. Every chart has a hover tooltip and a legend when it has two or
  * more series.
  */
-import { useMemo, useState, type ReactNode } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 export type Tone = 'squad' | 'pool' | 'risk' | 'context' | 'third';
 export const TONE_LABEL: Record<Tone, string> = {
@@ -30,6 +30,30 @@ function barPath(x: number, y: number, w: number, h: number, dir: 'right' | 'up'
   return `M${x},${y + h}v-${h - r}a${r},${r} 0 0 1 ${r},-${r}h${w - 2 * r}a${r},${r} 0 0 1 ${r},${r}v${h - r}z`;
 }
 
+/**
+ * Draw at the width the chart is given (not a fixed box stretched to fit), so text and marks
+ * stay the same size on a phone and a wide monitor. Falls back to `fallback` where there's
+ * no layout (tests, first paint).
+ */
+function useWidth(fallback: number) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [w, setW] = useState(fallback);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const read = () => {
+      const cw = el.clientWidth;
+      if (cw > 0) setW(Math.max(280, Math.round(cw)));
+    };
+    read();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(read);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return [ref, w] as const;
+}
+
 function niceTicks(lo: number, hi: number, n = 5) {
   const span = hi - lo || 1;
   const raw = span / n;
@@ -45,7 +69,7 @@ export function Legend({ items }: { items: { tone: Tone; label?: string }[] }) {
   return (
     <div className="pv-legend" aria-hidden="true">
       {items.map((i) => (
-        <span key={i.tone}>
+        <span key={`${i.tone}-${i.label ?? ''}`}>
           <i className={`pv-key ${i.tone}`} />
           {i.label ?? TONE_LABEL[i.tone]}
         </span>
@@ -100,8 +124,9 @@ export function QuadrantMap({
   toneLabels?: Partial<Record<Tone, string>>;
 }) {
   const [hover, setHover] = useState<MapPt | null>(null);
-  const W = 640;
-  const H = height;
+  const [box, W] = useWidth(640);
+  // Keep a sensible shape: taller on wide screens, never a letterbox.
+  const H = Math.round(Math.max(height * 0.85, Math.min(height * 1.35, W * 0.55)));
   const pad = { l: 48, r: 18, t: 22, b: 44 };
   const valid = points.filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
   const xs = valid.map((p) => p.x).concat(refX);
@@ -186,7 +211,7 @@ export function QuadrantMap({
   const qx = sx(refX);
   const qy = sy(refY);
   return (
-    <div className="pv-map">
+    <div className="pv-map" ref={box}>
       <Legend items={tones.map((t) => ({ tone: t, label: toneLabels?.[t] }))} />
       <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`${yLabel} against ${xLabel}`}>
         {niceTicks(x0, x1).map((v) => (
@@ -349,16 +374,17 @@ export function RankBars({
 }) {
   const [hover, setHover] = useState<string | null>(null);
   const top = max ?? Math.max(1, ...rows.map((r) => r.value), refValue ?? 0);
+  const [box, W] = useWidth(520);
   const rowH = 26;
-  const W = 520;
-  const labW = 150;
-  const valW = 70;
+  const labW = Math.round(Math.min(280, Math.max(140, W * 0.32)));
+  const valW = Math.round(Math.min(160, Math.max(80, W * 0.18)));
+  const maxChars = Math.floor((labW - 12) / 6.4);
   const plotW = W - labW - valW;
   const H = rows.length * rowH + (refValue !== undefined ? 18 : 6);
   const sx = (v: number) => (Math.max(0, v) / top) * plotW;
   const tones = [...new Set(rows.map((r) => r.tone ?? 'squad'))];
   return (
-    <div className="pv-bars">
+    <div className="pv-bars" ref={box}>
       <Legend items={tones.map((t) => ({ tone: t }))} />
       <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Ranked bars">
         {rows.map((r, i) => {
@@ -373,7 +399,7 @@ export function RankBars({
             >
               <rect x={0} y={y - 2} width={W} height={rowH} fill="transparent" />
               <text className="pv-bar-label" x={labW - 10} y={y + 13} textAnchor="end">
-                {r.label.length > 22 ? `${r.label.slice(0, 21)}…` : r.label}
+                {r.label.length > maxChars ? `${r.label.slice(0, maxChars - 1)}…` : r.label}
               </text>
               <path
                 className={`pv-fill ${r.tone ?? 'squad'}`}
@@ -543,8 +569,8 @@ export function FormColumns({
   valueLabel: string;
 }) {
   const [hover, setHover] = useState<number | null>(null);
+  const [box, W] = useWidth(640);
   if (!points.length) return <div className="pv-empty">No innings in this selection.</div>;
-  const W = 640;
   const H = height;
   const pad = { l: 34, r: 10, t: 14, b: 22 };
   const max = Math.max(1, average ?? 0, ...points.map((p) => p.value)) * 1.08;
@@ -565,7 +591,7 @@ export function FormColumns({
       .map(([, i]) => i),
   );
   return (
-    <div className="pv-form">
+    <div className="pv-form" ref={box}>
       <div className="pv-legend" aria-hidden="true">
         <span>
           <i className="pv-key squad" />
@@ -870,7 +896,7 @@ export function TrendLines({
   domain?: [number, number];
 }) {
   const [hover, setHover] = useState<number | null>(null);
-  const W = 520;
+  const [box, W] = useWidth(520);
   const H = height;
   const pad = { l: 40, r: 70, t: 14, b: notes ? 34 : 22 };
   const vals = series.flatMap((s) => s.values.filter((v): v is number => v !== null));
@@ -912,7 +938,7 @@ export function TrendLines({
   for (let k = 1; k < ends.length; k++)
     if (ends[k].y - ends[k - 1].y < 12) ends[k].y = ends[k - 1].y + 12;
   return (
-    <div className="pv-trend">
+    <div className="pv-trend" ref={box}>
       <Legend items={series.map((s) => ({ tone: s.tone, label: s.label }))} />
       <svg
         viewBox={`0 0 ${W} ${H}`}
@@ -1003,6 +1029,10 @@ export interface DumbbellRow {
   from: number;
   to: number;
   sub?: string;
+  /** Colour of the end dot and line; by default navy when it rose, red when it fell. */
+  tone?: Tone;
+  /** Short tag after the numbers, e.g. a selection signal. */
+  tag?: string;
 }
 
 export function Dumbbell({
@@ -1011,40 +1041,50 @@ export function Dumbbell({
   toLabel,
   onPick,
   refValue = 100,
+  legend,
+  empty,
 }: {
   rows: DumbbellRow[];
   fromLabel: string;
   toLabel: string;
   onPick?: (id: string) => void;
   refValue?: number;
+  /** Replace the default up/down legend when rows carry their own tones. */
+  legend?: { tone: Tone; label: string }[];
+  empty?: string;
 }) {
   const [hover, setHover] = useState<DumbbellRow | null>(null);
-  if (!rows.length) return <div className="pv-empty">Nobody qualified in both seasons.</div>;
-  const W = 560;
-  const rowH = 24;
-  const labW = 140;
-  const valW = 96;
+  const [box, W] = useWidth(560);
+  if (!rows.length)
+    return <div className="pv-empty">{empty ?? 'Nobody qualified in both seasons.'}</div>;
+  const rowH = 26;
+  const labW = Math.round(Math.min(240, Math.max(130, W * 0.26)));
+  const valW = 120;
   const H = rows.length * rowH + 26;
   const all = rows.flatMap((r) => [r.from, r.to]).concat(refValue);
   const lo = Math.min(...all) - 8;
   const hi = Math.max(...all) + 8;
   const sx = (v: number) => labW + ((v - lo) / (hi - lo)) * (W - labW - valW);
   return (
-    <div className="pv-dumbbell">
-      <div className="pv-legend" aria-hidden="true">
-        <span>
-          <i className="pv-key context" />
-          {fromLabel}
-        </span>
-        <span>
-          <i className="pv-key squad" />
-          {toLabel}, up
-        </span>
-        <span>
-          <i className="pv-key risk" />
-          {toLabel}, down
-        </span>
-      </div>
+    <div className="pv-dumbbell" ref={box}>
+      {legend ? (
+        <Legend items={[{ tone: 'context', label: fromLabel }, ...legend]} />
+      ) : (
+        <div className="pv-legend" aria-hidden="true">
+          <span>
+            <i className="pv-key context" />
+            {fromLabel}
+          </span>
+          <span>
+            <i className="pv-key squad" />
+            {toLabel}, up
+          </span>
+          <span>
+            <i className="pv-key risk" />
+            {toLabel}, down
+          </span>
+        </div>
+      )}
       <svg
         viewBox={`0 0 ${W} ${H}`}
         role="img"
@@ -1057,7 +1097,7 @@ export function Dumbbell({
         {rows.map((r, i) => {
           const y = i * rowH + 12;
           const up = r.to >= r.from;
-          const tone = up ? 'squad' : 'risk';
+          const tone = r.tone ?? (up ? 'squad' : 'risk');
           const dir = r.to >= r.from ? 1 : -1;
           const x2 = sx(r.to) - dir * 5;
           return (
@@ -1083,6 +1123,7 @@ export function Dumbbell({
                   ({up ? '+' : ''}
                   {Math.round(r.to - r.from)})
                 </tspan>
+                {r.tag ? <tspan className="pv-tag"> {r.tag}</tspan> : null}
               </text>
             </g>
           );

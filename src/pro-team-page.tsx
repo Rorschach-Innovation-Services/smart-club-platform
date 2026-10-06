@@ -4,7 +4,7 @@
  * risk, the squad and team pictures, and call-ups from the scouting pools — players the
  * scouting system already rates, which the professional staff can track and call up.
  */
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useMemo, useState, type CSSProperties } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Icon, Pill } from './atoms';
 import { PRO_IS_SAMPLE, PRO_MATCHES, SCOUT_POOLS } from './pro-data';
@@ -65,6 +65,17 @@ import type { ScoutPlayer } from './scouting-data';
 import { useWatchlist, watchKey } from './scouting-player';
 import type { PoolPlayer, PoolRole } from './scout-pool';
 import { DISMISSAL_KINDS } from './scouting';
+import {
+  MEASURES,
+  fitScore,
+  ordinal,
+  percentiles,
+  weakest,
+  type Disc,
+  type Measure,
+  type Percentiles,
+  type Values,
+} from './pro-callups';
 
 type ProTab = 'selection' | 'squad' | 'form' | 'seasons' | 'team' | 'callups' | 'matches';
 const PRO_TABS: [ProTab, string][] = [
@@ -140,6 +151,9 @@ interface Candidate {
   note?: string;
   line: string;
   watched?: boolean;
+  /** Raw numbers on the call-up measures (pro-callups.ts), and the sample behind them. */
+  vals: { bat: Values; bowl: Values };
+  sample: { balls: number; overs: number };
 }
 
 const roleIndex = (c: Pick<Candidate, 'role' | 'batIdx' | 'bowlIdx'>) =>
@@ -165,6 +179,16 @@ function poolCandidates(gender: Squad['gender']): Candidate[] {
       impact: p.impact ?? null,
       lists: p.lists,
       note: p.note,
+      vals: {
+        bat: { idx: p.bat?.batIdx, sr: p.bat?.sr, avg: p.bat?.avg ?? null },
+        bowl: {
+          idx: p.bowl?.bowlIdx,
+          econ: p.bowl?.econ,
+          wpo: p.bowl ? p.bowl.wkts / Math.max(1 / 6, oversToBalls(p.bowl.overs) / 6) : null,
+          dot: p.bowl?.dotPct ?? null,
+        },
+      },
+      sample: { balls: p.bat?.balls ?? 0, overs: p.bowl ? oversToBalls(p.bowl.overs) / 6 : 0 },
       line: [
         p.bat ? `${p.bat.runs} runs (${p.bat.balls}b) · SR ${Math.round(p.bat.sr)}` : '',
         p.bowl ? `${p.bowl.wkts}/${p.bowl.runs} in ${p.bowl.overs} ov · econ ${p.bowl.econ}` : '',
@@ -229,6 +253,16 @@ function watchedCandidates(keys: string[]): Candidate[] {
         bowlIdx: bowl,
         impact: null,
         lists: ['Scouting watchlist'],
+        vals: {
+          bat: { idx: bat, sr: p.sr, avg: p.avg },
+          bowl: {
+            idx: bowl,
+            econ: p.econ,
+            wpo: p.ballsBowled ? (p.wkts ?? 0) / (p.ballsBowled / 6) : null,
+            dot: null,
+          },
+        },
+        sample: { balls: p.balls ?? 0, overs: (p.ballsBowled ?? 0) / 6 },
         line: [
           p.runs !== null ? `${p.runs} runs (${p.balls}b)` : '',
           p.wkts ? `${p.wkts} wkts · econ ${r1(p.econ)}` : '',
@@ -476,19 +510,19 @@ function SelectionView({
       cls: 'down',
     },
   ];
-  const pts: MapPt[] = players
+  // Season → last five, one row per player on their main discipline, best recent form first.
+  const moving = players
     .map((p) => ({ p, s: primaryIdx(p, 'idx'), r: primaryIdx(p, 'recent') }))
     .filter((x) => x.s !== null && x.r !== null && (x.p.qualifies.bat || x.p.qualifies.bowl))
+    .sort((a, b) => b.r! - a.r!)
     .map(({ p, s, r }) => ({
       id: p.name,
       label: p.name,
-      sub: `${p.role} · ${p.signal.label}`,
-      x: s!,
-      y: r!,
-      size: p.matches,
+      from: s!,
+      to: r!,
       tone: SIGNAL_TONE[p.signal.kind],
-      pin: p.signal.kind === 'promote' || p.signal.kind === 'drop',
-      tip: p.signal.reasons.slice(0, 1),
+      tag: p.signal.kind === 'hold' ? undefined : p.signal.label,
+      sub: `${p.name} · ${p.role} · ${p.signal.reasons.join(' · ')}`,
     }));
   const shortlist = candidates.filter((c) => tracking.status(c.key));
   return (
@@ -526,20 +560,22 @@ function SelectionView({
           <div>
             <div className="card-title">Form v season — who is moving</div>
             <div className="card-sub">
-              Each player on their main discipline. Across: the season so far · up: the last{' '}
-              {RECENT} innings or spells. Above the diagonal = improving.
+              Each player on their main discipline: the grey dot is the season so far, the coloured
+              dot the last {RECENT} innings or spells — the line shows which way they're heading.
+              Best current form at the top · 100 = average.
             </div>
           </div>
         </div>
         <div className="card-body">
-          <QuadrantMap
-            points={pts}
-            xLabel="Season index (100 = average)"
-            yLabel={`Last ${RECENT} index`}
-            quadrants={['In form and proven', 'Hot streak', 'Dip in form', 'Struggling']}
-            toneLabels={{ squad: 'Promote', risk: 'At risk', context: 'Hold or watch' }}
-            sizeLabel="matches played"
-            diagonal
+          <Dumbbell
+            rows={moving}
+            fromLabel="Season so far"
+            toLabel={`Last ${RECENT}`}
+            legend={[
+              { tone: 'squad', label: `Last ${RECENT} · promote` },
+              { tone: 'risk', label: `Last ${RECENT} · at risk` },
+            ]}
+            empty="Nobody has a big enough sample yet in this selection."
             onPick={openPlayer}
           />
         </div>
@@ -2196,20 +2232,373 @@ function TeamView({
           </div>
         </div>
         <div className="card-body">
-          <RankBars
-            rows={order
-              .filter((o) => o.inns)
-              .map((o) => ({
-                id: String(o.pos),
-                label: `#${o.pos} · ${o.regulars.map((r) => shortName(r.n)).join(', ')}`,
-                value: o.avg,
-                text: `${r1(o.avg)} · SR ${r0(o.sr)}`,
-                sub: `#${o.pos}: ${o.inns} innings — ${o.regulars.map((r) => `${r.n} (${r.k})`).join(', ')}`,
-              }))}
-          />
+          <BattingOrder rows={order.filter((o) => o.inns)} />
         </div>
       </div>
     </>
+  );
+}
+
+/** One row per position: who batted there (with innings), average and strike rate bars. */
+function BattingOrder({ rows }: { rows: ReturnType<typeof orderContribution> }) {
+  const maxAvg = Math.max(1, ...rows.map((r) => r.avg));
+  const maxSr = Math.max(1, ...rows.map((r) => r.sr));
+  return (
+    <div className="pro-order" role="table" aria-label="Batting order">
+      <div className="pro-order-row head" role="row">
+        <span role="columnheader">#</span>
+        <span role="columnheader">Who batted there</span>
+        <span role="columnheader">Average</span>
+        <span role="columnheader">Strike rate</span>
+      </div>
+      {rows.map((o) => (
+        <div key={o.pos} className="pro-order-row" role="row">
+          <span className="pro-order-pos" role="cell">
+            {o.pos}
+          </span>
+          <span className="pro-order-who" role="cell">
+            {o.regulars.map((r) => (
+              <span key={r.n}>
+                {r.n} <small>×{r.k}</small>
+              </span>
+            ))}
+            <small className="pro-order-inns">{o.inns} innings</small>
+          </span>
+          <span className="pro-order-bar" role="cell">
+            <i className="squad" style={{ width: `${(o.avg / maxAvg) * 100}%` }} />
+            <b>{r1(o.avg)}</b>
+          </span>
+          <span className="pro-order-bar" role="cell">
+            <i className="third" style={{ width: `${(o.sr / maxSr) * 100}%` }} />
+            <b>{r0(o.sr)}</b>
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ── Call-ups: objective cover for at-risk players ── */
+
+const MIN_SAMPLE_POOL: Record<Disc, (c: Candidate) => boolean> = {
+  bat: (c) => c.sample.balls >= 40,
+  bowl: (c) => c.sample.overs >= 6,
+};
+
+const squadVals = (p: ProPlayer, d: Disc): Values =>
+  d === 'bat'
+    ? { idx: p.idx.bat?.idx, sr: p.bat.sr, avg: p.bat.avg }
+    : {
+        idx: p.idx.bowl?.idx,
+        econ: p.bowl.econ,
+        wpo: p.bowl.balls ? p.bowl.wkts / (p.bowl.balls / 6) : null,
+        dot: p.bowl.dotPct,
+      };
+
+/** The discipline to cover: a bowler's bowling, a batter's batting, an all-rounder's weaker one. */
+const needDisc = (p: ProPlayer): Disc =>
+  p.role === 'Bowler'
+    ? 'bowl'
+    : p.role === 'All-rounder'
+      ? (p.recent.bowl?.idx ?? Infinity) < (p.recent.bat?.idx ?? Infinity)
+        ? 'bowl'
+        : 'bat'
+      : 'bat';
+
+function PctBar({
+  pct,
+  value,
+  tone,
+  strong,
+}: {
+  pct: number | null;
+  value: string;
+  tone: 'squad' | 'pool' | 'risk';
+  strong?: boolean;
+}) {
+  if (pct === null) return <span className="pro-pct none">–</span>;
+  return (
+    <span className={`pro-pct${strong ? ' strong' : ''}`} title={`${ordinal(pct)} percentile`}>
+      <span className="pro-pct-track">
+        <i className={tone} style={{ width: `${Math.max(2, pct)}%` }} />
+        <span className="pro-pct-mid" />
+      </span>
+      <b>{value}</b>
+      <small>{ordinal(pct)}</small>
+    </span>
+  );
+}
+
+function CoverNeeds({
+  needs,
+  players,
+  candidates,
+  tracking,
+  onPick,
+}: {
+  needs: ProPlayer[];
+  players: ProPlayer[];
+  candidates: Candidate[];
+  tracking: Tracking;
+  onPick: (c: Candidate) => void;
+}) {
+  return (
+    <div className="card">
+      <div className="card-head">
+        <div>
+          <div className="card-title">Where the squad needs cover</div>
+          <div className="card-sub">
+            Each player at risk or in a dip, what they're weakest at, and the best-fitting scouted
+            players on the same measures. Bars are percentiles: the squad player among the squad,
+            candidates among the scouting pool — standing within each group, not raw numbers across
+            leagues.
+          </div>
+        </div>
+      </div>
+      <div className="card-body pro-covers">
+        {needs.map((p) => {
+          const d = needDisc(p);
+          const ms: Measure[] = MEASURES[d];
+          const squadPop = players
+            .filter((q) => (d === 'bat' ? q.qualifies.bat : q.qualifies.bowl))
+            .map((q) => squadVals(q, d));
+          const mine = percentiles(squadVals(p, d), squadPop, ms);
+          const weak = weakest(mine, ms);
+          const eligible = candidates.filter((c) => MIN_SAMPLE_POOL[d](c));
+          const poolPop = eligible.map((c) => c.vals[d]);
+          const options = eligible
+            .filter((c) => ROLE_FOR[p.role].includes(c.role))
+            .map((c) => {
+              const pct = percentiles(c.vals[d], poolPop, ms);
+              return { c, pct, fit: fitScore(pct, ms, weak?.key ?? null) };
+            })
+            .filter((x): x is { c: Candidate; pct: Percentiles; fit: number } => x.fit !== null)
+            .sort((x, y) => y.fit - x.fit)
+            .slice(0, 3);
+          const group = d === 'bat' ? 'batters' : 'bowlers';
+          return (
+            <section key={p.name} className="pro-cover" aria-label={`Cover for ${p.name}`}>
+              <div className="pro-cover-who">
+                <span className={`pro-sig ${p.signal.kind}`}>{p.signal.label}</span>
+                <strong>{p.name}</strong>
+                <small>
+                  {p.role} · {d === 'bat' ? 'batting' : 'bowling'} · among the squad's{' '}
+                  {squadPop.length} {group}
+                </small>
+                {weak && mine[weak.key] !== null && (
+                  <p className="pro-cover-weak">
+                    Weakest: <b>{weak.label.toLowerCase()}</b> — {ordinal(mine[weak.key]!)}{' '}
+                    percentile
+                  </p>
+                )}
+                <div className="pro-cover-bars">
+                  {ms.map((m) => {
+                    const v = squadVals(p, d)[m.key];
+                    return (
+                      <div key={m.key} className={m.key === weak?.key ? 'weak' : ''}>
+                        <span>{m.label}</span>
+                        <PctBar
+                          pct={mine[m.key]}
+                          value={typeof v === 'number' ? m.fmt(v) : '–'}
+                          tone={p.signal.kind === 'drop' ? 'risk' : 'squad'}
+                          strong={m.key === weak?.key}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="pro-cover-opts">
+                {options.length === 0 ? (
+                  <div className="pv-empty">
+                    No scouted {group} with enough of a sample for this role.
+                  </div>
+                ) : (
+                  <div
+                    className="pro-cover-grid"
+                    role="table"
+                    aria-label={`Options for ${p.name}`}
+                    style={{ ['--cols' as string]: ms.length } as CSSProperties}
+                  >
+                    <div className="pro-cover-row head" role="row">
+                      <span role="columnheader">Scouted option</span>
+                      {ms.map((m) => (
+                        <span
+                          key={m.key}
+                          role="columnheader"
+                          className={m.key === weak?.key ? 'weak' : ''}
+                        >
+                          {m.label}
+                          {m.key === weak?.key ? ' ×2' : ''}
+                        </span>
+                      ))}
+                      <span role="columnheader">Fit</span>
+                    </div>
+                    {options.map(({ c, pct, fit }) => (
+                      <button
+                        key={c.key}
+                        type="button"
+                        className="pro-cover-row"
+                        role="row"
+                        onClick={() => onPick(c)}
+                      >
+                        <span className="pro-cover-name" role="cell">
+                          <strong>{c.name}</strong>
+                          <small>
+                            {c.club}
+                            {c.union ? ` · ${c.union}` : ''} ·{' '}
+                            {d === 'bat'
+                              ? `${c.sample.balls} balls`
+                              : `${Math.round(c.sample.overs)} overs`}
+                            {tracking.status(c.key) ? ' · tracking' : ''}
+                          </small>
+                        </span>
+                        {ms.map((m) => {
+                          const v = c.vals[d][m.key];
+                          return (
+                            <span
+                              key={m.key}
+                              role="cell"
+                              className={m.key === weak?.key ? 'weak' : ''}
+                            >
+                              <PctBar
+                                pct={pct[m.key]}
+                                value={typeof v === 'number' ? m.fmt(v) : '–'}
+                                tone="pool"
+                                strong={m.key === weak?.key}
+                              />
+                            </span>
+                          );
+                        })}
+                        <span role="cell" className="pro-fit">
+                          {fit}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** The scouting pool as maps, each against the pool's own middle. */
+function PoolMaps({
+  candidates,
+  tracking,
+  onPick,
+}: {
+  candidates: Candidate[];
+  tracking: Tracking;
+  onPick: (c: Candidate) => void;
+}) {
+  const med = (xs: number[]) => {
+    const s = [...xs].sort((a, b) => a - b);
+    return s.length ? s[Math.floor(s.length / 2)] : 0;
+  };
+  const bats = candidates.filter(
+    (c) =>
+      MIN_SAMPLE_POOL.bat(c) &&
+      typeof c.vals.bat.sr === 'number' &&
+      typeof c.vals.bat.idx === 'number',
+  );
+  const bowls = candidates.filter(
+    (c) =>
+      MIN_SAMPLE_POOL.bowl(c) &&
+      typeof c.vals.bowl.econ === 'number' &&
+      typeof c.vals.bowl.idx === 'number',
+  );
+  if (bats.length + bowls.length < 6) return null;
+  const mSr = med(bats.map((c) => c.vals.bat.sr as number));
+  const mEcon = med(bowls.map((c) => c.vals.bowl.econ as number));
+  const byKey = new Map(candidates.map((c) => [c.key, c]));
+  const top = (xs: Candidate[], f: (c: Candidate) => number) =>
+    new Set(
+      [...xs]
+        .sort((a, b) => f(b) - f(a))
+        .slice(0, 8)
+        .map((c) => c.key),
+    );
+  const topBat = top(bats, (c) => c.vals.bat.idx as number);
+  const topBowl = top(bowls, (c) => c.vals.bowl.idx as number);
+  const tone = (c: Candidate): Tone => (tracking.status(c.key) ? 'squad' : 'pool');
+  return (
+    <div className="sc-two">
+      <div className="card">
+        <div className="card-head">
+          <div>
+            <div className="card-title">Scouting pool: batters</div>
+            <div className="card-sub">
+              {bats.length} with 40+ balls · navy = you're tracking them
+            </div>
+          </div>
+        </div>
+        <div className="card-body">
+          <QuadrantMap
+            points={bats.map((c) => ({
+              id: c.key,
+              label: c.name,
+              sub: `${c.club}${c.union ? ` · ${c.union}` : ''}`,
+              x: ((c.vals.bat.sr as number) / mSr) * 100,
+              y: c.vals.bat.idx as number,
+              size: c.sample.balls,
+              tone: tone(c),
+              pin: topBat.has(c.key) || !!tracking.status(c.key),
+              tip: [c.line],
+            }))}
+            xLabel="Strike rate (100 = pool middle)"
+            yLabel="Batting index (own league)"
+            quadrants={[
+              'Fast and productive',
+              'Productive, slower',
+              'Quick, light',
+              'Below on both',
+            ]}
+            sizeLabel="balls faced"
+            toneLabels={{ pool: 'Scouted', squad: 'Tracking' }}
+            onPick={(k) => byKey.get(k) && onPick(byKey.get(k)!)}
+          />
+        </div>
+      </div>
+      <div className="card">
+        <div className="card-head">
+          <div>
+            <div className="card-title">Scouting pool: bowlers</div>
+            <div className="card-sub">{bowls.length} with 6+ overs · right = cheaper</div>
+          </div>
+        </div>
+        <div className="card-body">
+          <QuadrantMap
+            points={bowls.map((c) => ({
+              id: c.key,
+              label: c.name,
+              sub: `${c.club}${c.union ? ` · ${c.union}` : ''}`,
+              x: (mEcon / (c.vals.bowl.econ as number)) * 100,
+              y: c.vals.bowl.idx as number,
+              size: c.sample.overs,
+              tone: tone(c),
+              pin: topBowl.has(c.key) || !!tracking.status(c.key),
+              tip: [c.line],
+            }))}
+            xLabel="Economy (100 = pool middle, higher = cheaper)"
+            yLabel="Bowling index (own league)"
+            quadrants={[
+              'Tight and penetrating',
+              'Wicket-takers, expensive',
+              'Tight, fewer wickets',
+              'Below on both',
+            ]}
+            sizeLabel="overs"
+            toneLabels={{ pool: 'Scouted', squad: 'Tracking' }}
+            onPick={(k) => byKey.get(k) && onPick(byKey.get(k)!)}
+          />
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -2295,57 +2684,16 @@ function CallupsView({
   return (
     <>
       {needs.length > 0 && (
-        <div className="card">
-          <div className="card-head">
-            <div>
-              <div className="card-title">Where the squad needs cover</div>
-              <div className="card-sub">
-                Players at risk or in a dip, with the best-rated scouting options for their role
-              </div>
-            </div>
-          </div>
-          <div className="card-body pro-needs">
-            {needs.map((p) => {
-              const opts = candidates
-                .filter((c) => ROLE_FOR[p.role].includes(c.role))
-                .map((c) => ({ c, idx: roleIndex(c) }))
-                .filter((x) => x.idx !== null)
-                .sort(
-                  (a, b) =>
-                    Number(!!tracking.status(b.c.key)) - Number(!!tracking.status(a.c.key)) ||
-                    b.idx! - a.idx!,
-                )
-                .slice(0, 3);
-              return (
-                <div key={p.name} className="pro-need">
-                  <div className="pro-need-who">
-                    <span className={`pro-sig ${p.signal.kind}`}>{p.signal.label}</span>
-                    <strong>{p.name}</strong>
-                    <small>
-                      {p.role} · season index {r0(primaryIdx(p, 'idx'))}
-                    </small>
-                  </div>
-                  <div className="pro-need-opts">
-                    {opts.map(({ c, idx }) => (
-                      <button
-                        key={c.key}
-                        type="button"
-                        className="pro-opt"
-                        onClick={() => setPick(c)}
-                      >
-                        <strong>{c.name}</strong>
-                        <small>
-                          {c.club} · {c.role} · index {Math.round(idx!)}
-                        </small>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
+        <CoverNeeds
+          needs={needs}
+          players={players}
+          candidates={candidates}
+          tracking={tracking}
+          onPick={setPick}
+        />
       )}
+
+      <PoolMaps candidates={candidates} tracking={tracking} onPick={setPick} />
 
       <div className="sc-filters">
         <div className="sc-board-note">
