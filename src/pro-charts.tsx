@@ -856,6 +856,7 @@ export function TrendLines({
   refValue,
   refLabel,
   notes,
+  domain,
 }: {
   categories: string[];
   series: TrendSeries[];
@@ -865,6 +866,8 @@ export function TrendLines({
   refLabel?: string;
   /** Per category, e.g. "8 games" — shown under the axis label. */
   notes?: string[];
+  /** Fixed axis range, e.g. [0, 100] for a percentage. */
+  domain?: [number, number];
 }) {
   const [hover, setHover] = useState<number | null>(null);
   const W = 520;
@@ -875,10 +878,23 @@ export function TrendLines({
     return <div className="pv-empty">Not enough seasons yet.</div>;
   let lo = Math.min(...vals, refValue ?? Infinity);
   let hi = Math.max(...vals, refValue ?? -Infinity);
-  const span = hi - lo || Math.max(1, Math.abs(hi) * 0.2);
-  lo -= span * 0.15;
-  hi += span * 0.15;
-  if (lo > 0 && lo < span) lo = 0;
+  if (domain) {
+    lo = Math.min(domain[0], lo);
+    hi = Math.max(domain[1], hi);
+  } else {
+    // Never zoom so far in that a small wobble looks like a swing: the axis spans at least
+    // a quarter of the values' size.
+    const mid = (lo + hi) / 2;
+    const minSpan = Math.max(Math.abs(mid) * 0.25, 1);
+    if (hi - lo < minSpan) {
+      lo = mid - minSpan / 2;
+      hi = mid + minSpan / 2;
+    }
+    const span = hi - lo;
+    lo -= span * 0.12;
+    hi += span * 0.12;
+    if (lo < 0 && Math.min(...vals) >= 0) lo = 0;
+  }
   const band = (W - pad.l - pad.r) / Math.max(1, categories.length - 1 || 1);
   const sx = (i: number) => (categories.length === 1 ? (pad.l + W - pad.r) / 2 : pad.l + band * i);
   const sy = (v: number) => H - pad.b - ((v - lo) / (hi - lo)) * (H - pad.t - pad.b);

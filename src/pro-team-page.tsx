@@ -1572,6 +1572,7 @@ function SeasonsView({
     theirs?: (s: SeasonSlice) => number | null,
     fmt?: (v: number) => string,
     sub?: string,
+    domain?: [number, number],
   ) => (
     <div className="card" key={label}>
       <div className="card-head">
@@ -1585,6 +1586,7 @@ function SeasonsView({
           categories={seasons}
           notes={notes}
           fmt={fmt}
+          domain={domain}
           series={[
             { key: 'us', label: shortTeam(squad.name), tone: 'squad', values: slices.map(ours) },
             ...(theirs
@@ -1683,6 +1685,7 @@ function SeasonsView({
           undefined,
           (v) => `${Math.round(v)}%`,
           'Of games with a result',
+          [0, 100],
         )}
         {!mixed &&
           trend(
@@ -1711,6 +1714,7 @@ function SeasonsView({
           (s) => s.comps.dotPct.theirs,
           (v) => `${Math.round(v)}%`,
           'Share of balls — pressure with the ball',
+          [0, 100],
         )}
         {trend(
           'Wides + no-balls per 10 overs',
