@@ -897,6 +897,7 @@ app.post('/register/:clubId', async (c) => {
   body.firstName = body.firstName!.replace(/\s+/g, ' ').trim().slice(0, 60);
   body.lastName = body.lastName!.replace(/\s+/g, ' ').trim().slice(0, 60);
   const naturalKey = playerNaturalKey({ ...body, dob });
+  const cricketProfile = resolveVertical(cfg).playerProfile !== 'positions';
   const player: PlayerRegistration = {
     naturalKey,
     clubId: destClubId,
@@ -920,12 +921,18 @@ app.post('/register/:clubId', async (c) => {
     // Veterans second-club affiliation — name derived server-side (above), never from the client.
     veteransClub: veteransClub?.name,
     veteransClubId: veteransClub?.id,
-    battingHand: body.battingHand,
-    bowlingHand: body.bowlingHand,
-    battingType: body.battingType,
-    bowlerType: body.bowlerType,
-    isAllRounder: body.isAllRounder ?? false,
-    isWk: body.isWk ?? false,
+    // Cricket playing-profile fields only for a cricket-profile tenant; a 'positions' tenant
+    // silently drops them (like `position` on a cricket tenant) so a crafted POST can't store them.
+    ...(cricketProfile
+      ? {
+          battingHand: body.battingHand,
+          bowlingHand: body.bowlingHand,
+          battingType: body.battingType,
+          bowlerType: body.bowlerType,
+          isAllRounder: body.isAllRounder ?? false,
+          isWk: body.isWk ?? false,
+        }
+      : {}),
     ...(position ? { position } : {}),
     idDocMeta: {
       objectKey: idDocMeta.objectKey,
@@ -2470,6 +2477,7 @@ app.post('/clubs/:id/players', async (c) => {
     // Veterans second-club affiliation — name derived server-side (above), never from the client.
     veteransClub: veteransClub?.name,
     veteransClubId: veteransClub?.id,
+    // Cricket fields deliberately NOT vertical-gated here (authed caller, unlike public /register); follow-up pending.
     battingHand: body.battingHand,
     bowlingHand: body.bowlingHand,
     battingType: body.battingType,

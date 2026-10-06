@@ -470,6 +470,28 @@ describe('registration with the clearances module off (football)', () => {
     assert.equal(ok.status, 201);
     assert.equal(((await ok.json()) as { position?: string }).position, 'Goalkeeper');
   });
+
+  test('posted cricket playing-profile fields are not stored on a positions tenant', async () => {
+    const res = await register('fc-a', {
+      idNumber: 'FC009',
+      position: 'Striker',
+      battingHand: 'Left',
+      bowlingHand: 'Right',
+      battingType: 'Top order',
+      bowlerType: 'Fast',
+      isAllRounder: true,
+      isWk: true,
+    });
+    assert.equal(res.status, 201);
+    const p = await findPlayer('fc', 'fc-a', 'FC009');
+    assert.equal(p?.position, 'Striker');
+    assert.equal(p?.battingHand, undefined);
+    assert.equal(p?.bowlingHand, undefined);
+    assert.equal(p?.battingType, undefined);
+    assert.equal(p?.bowlerType, undefined);
+    assert.equal(p?.isAllRounder, undefined);
+    assert.equal(p?.isWk, undefined);
+  });
 });
 
 describe('registration with the clearances module on (cricket) is unchanged', () => {
@@ -513,5 +535,20 @@ describe('registration with the clearances module on (cricket) is unchanged', ()
     const src = await findPlayer('dolphins', 'dv-b', 'DV002');
     assert.notEqual(src?.status, 'inactive');
     assert.equal(src?.transferNote, undefined);
+  });
+
+  test('cricket playing-profile fields are still stored on a cricket tenant', async () => {
+    const res = await register('dv-a', {
+      idNumber: 'DV004',
+      battingHand: 'Left',
+      bowlerType: 'Fast',
+      isWk: true,
+    });
+    assert.equal(res.status, 201);
+    const p = await findPlayer('dolphins', 'dv-a', 'DV004');
+    assert.equal(p?.battingHand, 'Left');
+    assert.equal(p?.bowlerType, 'Fast');
+    assert.equal(p?.isWk, true);
+    assert.equal(p?.isAllRounder, false);
   });
 });
