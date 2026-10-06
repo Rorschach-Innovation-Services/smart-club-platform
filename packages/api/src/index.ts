@@ -6957,7 +6957,13 @@ app.get('/tenant/config', async (c) => {
   const { tenant } = c.get('requestAuth')!;
   const config = await repo.getTenantConfig(tenant);
   if (!config) throw new HttpError(404, 'tenant not found');
-  return c.json({
+  return c.json(tenantConfigView(config));
+});
+
+/** The tenant-member projection of a config row — the allowlist described above. Shared
+ *  by GET and PUT /tenant/config so a save never echoes fields a read holds back. */
+function tenantConfigView(config: TenantConfig) {
+  return {
     tenant: config.tenant,
     branding: config.branding,
     sport: config.sport,
@@ -6975,8 +6981,8 @@ app.get('/tenant/config', async (c) => {
     competitionDefaults: config.competitionDefaults ?? {},
     // The milestone itself is useful on the console; who stamped it is not.
     setupCompletedAt: config.setupCompletedAt,
-  });
-});
+  };
+}
 
 app.put('/tenant/config', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
@@ -6999,7 +7005,7 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   delete (patch as { sport?: unknown }).sport;
   delete (patch as { seasonLabel?: unknown }).seasonLabel;
   const next = await applyTenantConfigPatch(tenant, patch, { preserveOperatorBindings: true });
-  return c.json(next);
+  return c.json(tenantConfigView(next));
 });
 
 /**

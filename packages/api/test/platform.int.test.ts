@@ -2572,6 +2572,29 @@ describe('season calendars (ADR 0008)', () => {
     assert.ok(Array.isArray(body.requiredDocs), 'requiredDocs present for an authed admin');
   });
 
+  // A save must not echo what a read holds back — the PUT response is the GET projection.
+  test('PUT /tenant/config answers with the same projection as GET', async () => {
+    const stored = await repo.getTenantConfig(T);
+    await repo.putTenantConfig({
+      ...stored!,
+      fixtureReminders: { enabled: true } as never,
+      knownClubs: [{ id: 'k1', name: 'Known CC' }] as never,
+    });
+    const put = await app.request('/tenant/config', {
+      method: 'PUT',
+      headers: tenantHeaders(CAL_ADMIN, T),
+      body: JSON.stringify({ submissionDeadline: '2027-01-31' }),
+    });
+    assert.equal(put.status, 200);
+    const saved = (await put.json()) as Record<string, unknown>;
+    assert.equal(saved.submissionDeadline, '2027-01-31');
+    for (const held of ['fixtureReminders', 'knownClubs', 'adminCount', 'clubSignupLink']) {
+      assert.equal(saved[held], undefined, `${held} must not ride the PUT response`);
+    }
+    const get = await app.request('/tenant/config', { headers: tenantHeaders(CAL_ADMIN, T) });
+    assert.deepEqual(saved, await get.json());
+  });
+
   test('GET /tenant/config is not anonymous', async () => {
     const res = await app.request('/tenant/config', { headers: { 'x-tenant': T } });
     assert.equal(res.status, 401);
