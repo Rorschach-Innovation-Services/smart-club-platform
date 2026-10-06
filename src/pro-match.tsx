@@ -88,6 +88,15 @@ function WicketWorm({ squad, innings }: { squad: Squad; innings: ScoutInnings[] 
   const sy = (r: number) => H - pad.b - (r / (maxR * 1.05)) * (H - pad.t - pad.b);
   const stepO = maxO <= 20 ? 5 : maxO <= 50 ? 10 : 20;
   const stepR = maxR <= 200 ? 50 : maxR <= 400 ? 100 : 200;
+  // End labels: above each line's end, pushed apart when two innings finish close together.
+  const labelY: Record<number, number> = {};
+  [...series]
+    .map((s) => ({ i: s.i, y: sy(s.pts[s.pts.length - 1].runs) - 6 }))
+    .sort((a, b) => a.y - b.y)
+    .forEach((l, k, all) => {
+      const prev = k ? labelY[all[k - 1].i] : -Infinity;
+      labelY[l.i] = Math.max(l.y, prev + 14, pad.t + 10);
+    });
   return (
     <div className="pv-trend" ref={box}>
       <Legend
@@ -144,7 +153,7 @@ function WicketWorm({ squad, innings }: { squad: Squad; innings: ScoutInnings[] 
                 <text
                   className="pv-label"
                   x={Math.min(sx(last.over) + 6, W - pad.r - 40)}
-                  y={sy(last.runs) - 6}
+                  y={labelY[s.i]}
                 >
                   {last.runs}
                   {s.inn.wkts < 10 ? `/${s.inn.wkts}` : ''}

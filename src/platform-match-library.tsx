@@ -299,7 +299,7 @@ function PlanTable({ items }: { items: PlanItem[] }) {
           </Btn>
         </div>
       )}
-      <table className="tbl ml-tbl" aria-label="What each file will do">
+      <table className="tbl ml-tbl ml-plan" aria-label="What each file will do">
         <thead>
           <tr>
             <th>File</th>
