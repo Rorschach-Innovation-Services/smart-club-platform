@@ -349,7 +349,8 @@ describe('PostponementsPanel', () => {
       ],
     });
     const r = renderPanel({ inbound: [ruling] });
-    expect(r.getByText('Union ruling')).toBeInTheDocument();
+    // A ruling is decided, so it wears the DONE tone, not the neutral pending chip.
+    expect(r.getByText('Union ruling')).toHaveClass('pill-teal');
     expect(r.getAllByText(/Kingsmead/).length).toBeGreaterThan(0);
     fireEvent.click(r.getByRole('button', { name: 'Acknowledge ruling' }));
     await waitFor(() => expect(acknowledgePostponement).toHaveBeenCalledWith('home-club', 'p1', 3));

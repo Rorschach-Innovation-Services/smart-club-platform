@@ -142,9 +142,10 @@ const EMPTY_PLAYER = {
   // '' (unanswered) | '__first__' | '__other__' | a club id
   lastClubChoice: '',
   lastClub: '',
-  battingHand: 'Right',
-  bowlingHand: 'Right',
-  battingType: 'Mid Order',
+  // The playing profile is optional: '' = not answered, and nothing is sent for it.
+  battingHand: '',
+  bowlingHand: '',
+  battingType: '',
   bowlerType: '',
   isAllRounder: false,
   isWk: false,
@@ -285,9 +286,9 @@ export function RegisterPlayerForm({
             ? { position: d.position }
             : {}
           : {
-              battingHand: d.battingHand,
-              bowlingHand: d.bowlingHand,
-              battingType: d.battingType,
+              ...(d.battingHand ? { battingHand: d.battingHand } : {}),
+              ...(d.bowlingHand ? { bowlingHand: d.bowlingHand } : {}),
+              ...(d.battingType ? { battingType: d.battingType } : {}),
               ...(d.bowlerType ? { bowlerType: d.bowlerType } : {}),
               isAllRounder: d.isAllRounder,
               isWk: d.isWk,
@@ -579,6 +580,7 @@ export function RegisterPlayerForm({
                   value={d.battingHand}
                   onChange={set('battingHand')}
                 >
+                  <option value="">— Not set —</option>
                   {HANDS.map((h) => (
                     <option key={h}>{h}</option>
                   ))}
@@ -592,6 +594,7 @@ export function RegisterPlayerForm({
                   value={d.bowlingHand}
                   onChange={set('bowlingHand')}
                 >
+                  <option value="">— Not set —</option>
                   {HANDS.map((h) => (
                     <option key={h}>{h}</option>
                   ))}
@@ -605,6 +608,7 @@ export function RegisterPlayerForm({
                   value={d.battingType}
                   onChange={set('battingType')}
                 >
+                  <option value="">— Not set —</option>
                   {BATTING_TYPES.map((b) => (
                     <option key={b}>{b}</option>
                   ))}
@@ -1165,6 +1169,9 @@ export function ClubRosterUpload({
     [],
   );
   const unmapped = (parse?.ageGroupRaws ?? []).filter((a) => a.leagueKey === null);
+  // Rows the parser rejected, listed individually so the chair can find and fix them.
+  // Exceptions carry no name by design (POPIA) — sheet, row and masked ID identify the row.
+  const exceptionRows = (parse?.sheets ?? []).flatMap((s) => s.exceptions);
 
   async function runParse(map: Record<string, string>) {
     if (!file) return;
@@ -1418,6 +1425,36 @@ export function ClubRosterUpload({
               : ''}
             .
           </p>
+          {exceptionRows.length > 0 && (
+            <div className="tbl-w" style={{ marginBottom: 10 }}>
+              <table className="tbl" aria-label="Rows that can’t be registered">
+                <thead>
+                  <tr>
+                    <th>Sheet · row</th>
+                    <th>ID number</th>
+                    <th>Why it can’t be registered</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {exceptionRows.map((x) => (
+                    <tr key={`${x.sheet}:${x.rowNumber}:${x.reason}`}>
+                      <td>
+                        <span className="rost-sub">
+                          {x.sheet} · row {x.rowNumber}
+                        </span>
+                      </td>
+                      <td>
+                        <span className="rost-id">{x.maskedId || '—'}</span>
+                      </td>
+                      <td>
+                        <Pill tone="coral">{EXCEPTION_LABEL[x.reason] || x.reason}</Pill>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
           {unmapped.length > 0 && (
             <div
               style={{

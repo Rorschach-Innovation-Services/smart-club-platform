@@ -188,6 +188,27 @@ describe('RegisterPlayerForm', () => {
     );
   });
 
+  it('sends no cricket profile the chair did not fill in, and only what they picked', async () => {
+    vi.mocked(registerPlayer).mockResolvedValue(player() as never);
+    const first = renderForm();
+    fillRequired(first.getByLabelText);
+    fireEvent.click(first.getByRole('button', { name: /register player/i }));
+    await waitFor(() => expect(first.onDone).toHaveBeenCalled());
+    const untouched = vi.mocked(registerPlayer).mock.calls[0][1];
+    for (const k of ['battingHand', 'bowlingHand', 'battingType', 'bowlerType'])
+      expect(untouched).not.toHaveProperty(k);
+    first.unmount();
+
+    const second = renderForm();
+    fillRequired(second.getByLabelText);
+    fireEvent.change(second.getByLabelText('Batting hand'), { target: { value: 'Left' } });
+    fireEvent.click(second.getByRole('button', { name: /register player/i }));
+    await waitFor(() => expect(second.onDone).toHaveBeenCalled());
+    const picked = vi.mocked(registerPlayer).mock.calls[1][1];
+    expect(picked).toMatchObject({ battingHand: 'Left' });
+    expect(picked).not.toHaveProperty('battingType');
+  });
+
   it('shows a 409 inline and stays open', async () => {
     vi.mocked(registerPlayer).mockRejectedValue(
       new ApiError(409, 'a player with these details is already registered for this club'),

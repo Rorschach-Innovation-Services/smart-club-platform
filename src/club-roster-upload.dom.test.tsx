@@ -3,7 +3,7 @@
  * resume-on-failure → summary. Only `./api` is mocked.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { fireEvent, waitFor } from '@testing-library/react';
+import { fireEvent, waitFor, within } from '@testing-library/react';
 import { renderWithProviders } from './test-utils';
 
 vi.mock('./api', async (importActual) => {
@@ -41,7 +41,14 @@ function parseResponse(rows: ReturnType<typeof row>[], extra: Record<string, unk
         hasIdColumn: true,
         totalDataRows: rows.length + 1,
         rows,
-        exceptions: [{ rowNumber: 99, sheet: 'Seniors', reason: 'bad-id-checksum' as const }],
+        exceptions: [
+          {
+            rowNumber: 99,
+            sheet: 'Seniors',
+            reason: 'bad-id-checksum' as const,
+            maskedId: '90*********08',
+          },
+        ],
         unknownGenderRaw: [],
         unknownRaceRaw: [],
       },
@@ -131,6 +138,11 @@ describe('ClubRosterUpload', () => {
     expect(parseClubRoster).toHaveBeenCalledWith('alpha', file, {});
     expect(r.getByText(/4 player rows found · 1 row can’t be registered/)).toBeInTheDocument();
     expect(r.getByText(/1 ID number fails its check digit/)).toBeInTheDocument();
+    // …and each rejected row is listed so the chair can find it in the sheet.
+    const rejected = within(r.getByRole('table', { name: 'Rows that can’t be registered' }));
+    expect(rejected.getByText('Seniors · row 99')).toBeInTheDocument();
+    expect(rejected.getByText('90*********08')).toBeInTheDocument();
+    expect(rejected.getByText('ID number fails its check digit')).toBeInTheDocument();
     expect(r.getByText('New registration')).toBeInTheDocument();
     expect(r.getByText('Already on your roster')).toBeInTheDocument();
     expect(r.getByText('Will open a clearance from Beta CC')).toBeInTheDocument();

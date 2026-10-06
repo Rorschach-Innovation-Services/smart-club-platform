@@ -130,7 +130,8 @@ export function describeFixture(
 const STATUS_PILL: Record<PostponementRequest['status'], { tone: string; label: string }> = {
   open: { tone: 'gold', label: 'Open' },
   applied: { tone: 'teal', label: 'Agreed — applied' },
-  'admin-final': { tone: 'navy', label: 'Union ruling' },
+  // Decided and binding — the system's DONE tone (pill-navy reads as pending).
+  'admin-final': { tone: 'teal', label: 'Union ruling' },
   declined: { tone: 'coral', label: 'Declined' },
   withdrawn: { tone: 'muted', label: 'Withdrawn' },
 };
