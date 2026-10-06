@@ -256,9 +256,9 @@ describe('channel gate', () => {
     );
   });
 
-  test('the registry entry ships as pending (the runtime default)', async () => {
+  test('the registry entry ships as registered (approved in Meta 6 Oct 2026)', async () => {
     const { WHATSAPP_TEMPLATES } = await import('../src/notify/whatsapp-templates.js');
-    assert.equal(WHATSAPP_TEMPLATES.fixtureReminder.status, 'pending');
+    assert.equal(WHATSAPP_TEMPLATES.fixtureReminder.status, 'registered');
   });
 });
 
@@ -365,7 +365,7 @@ describe('reminder runs', () => {
   test('WhatsApp is skipped while the template is pending, and sent once registered', async () => {
     const both = { ...ENABLED, channels: ['email', 'whatsapp'] } as typeof ENABLED;
     await seedTenant('rem-wa-pending', both);
-    const pending = await run(['rem-wa-pending']);
+    const pending = await run(['rem-wa-pending'], { whatsappTemplateStatus: 'pending' });
     assert.ok(pending.sends.every((s) => s.channels.join() === 'email'));
     assert.deepEqual(
       (await commLog('rem-wa-pending', 'home')).map((e) => e.channel),

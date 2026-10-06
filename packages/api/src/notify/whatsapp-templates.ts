@@ -177,7 +177,8 @@ export const WHATSAPP_TEMPLATES = {
       'A reminder that {{2}} has fixtures on {{3}}. ' +
       'See the match details in your club portal: {{4}}\n\n' +
       'If you have any questions, please contact your union office.',
-    status: 'pending',
+    // Approved in Meta Business Manager 6 Oct 2026.
+    status: 'registered',
   },
 
   /**
