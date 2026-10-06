@@ -1,23 +1,28 @@
 /**
- * Scouting → Pathways on the invented sample, laid out like Player scouting: Overview (pyramid,
- * competitions), a competition's ladder, Leaderboards, the Performance map, Teams with a club
- * card, the Shortlist, Matches, and the filter bar narrowing all of it.
+ * Scouting → Pathways on the invented sample: the bar at each stage, outliers, benchmark
+ * players, the players who went up, a player placed on the ladder, improvers season on season
+ * with a player's detail, and the pyramid underneath.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
-vi.mock('./pathways-data', async () => {
-  const p = await vi.importActual<typeof import('./pathways')>('./pathways');
-  const s = await vi.importActual<typeof import('./pathways-sample')>('./pathways-sample');
-  return { PATHWAYS_IS_SAMPLE: true, PATH_MATCHES: p.parseResults(s.SAMPLE_RESULTS_CSV) };
+vi.mock('./scouting-data', async () => {
+  const s = await vi.importActual<typeof import('./scouting-sample')>('./scouting-sample');
+  return { SCOUTING_EVENTS: [s.SAMPLE_TOURNAMENT, s.SAMPLE_CLUB_MATCH] };
 });
 vi.mock('./pro-data', async () => {
   const s = await vi.importActual<typeof import('./pro-sample')>('./pro-sample');
   return { PRO_IS_SAMPLE: true, PRO_MATCHES: s.SAMPLE_PRO_MATCHES, SCOUT_POOLS: [s.SAMPLE_POOL] };
 });
+vi.mock('./pathways-data', async () => {
+  const p = await vi.importActual<typeof import('./pathways')>('./pathways');
+  const s = await vi.importActual<typeof import('./pathways-sample')>('./pathways-sample');
+  return { PATHWAYS_IS_SAMPLE: true, PATH_MATCHES: p.parseResults(s.SAMPLE_RESULTS_CSV) };
+});
 
+import { allLines, rateStage } from './milestones';
 import { PathwaysPage } from './pathways-page';
 import { qk } from './query';
 import { renderWithProviders } from './test-utils';
@@ -30,100 +35,83 @@ const renderPage = (q = '') =>
     { seed: [[qk.proMatches(), []]] },
   );
 
-const count = () => Number(screen.getByText(/of \d+ matches/).querySelector('b')!.textContent);
-
-beforeEach(() => localStorage.clear());
-
-describe('Pathways', () => {
-  it('opens on the overview with the sample flagged, every tier drawn and the competitions listed', () => {
+describe('Pathways → Milestones', () => {
+  it('draws the bar at each stage, from the age group to the professional game', () => {
     renderPage();
-    expect(screen.getByText(/sample data, invented names/)).toBeTruthy();
-    const pyramid = screen.getByRole('img', { name: 'The pathway, tier by tier' });
-    for (const t of [
-      'Professional',
-      'Representative',
-      'Premier league',
-      'Presidents leagues',
-      'High schools',
-      'Primary schools',
-    ])
-      expect(within(pyramid).getByText(t)).toBeTruthy();
-    expect(screen.getByRole('table', { name: 'Matches by tier and age' })).toBeTruthy();
-    expect(screen.getByRole('table', { name: 'Formats by tier' })).toBeTruthy();
-    expect(screen.getByRole('img', { name: 'Matches per week' })).toBeTruthy();
-    const comps = screen.getByRole('table', { name: 'Competitions' });
-    expect(within(comps).getByText('Sunday One 25/26')).toBeTruthy();
+    const ladder = screen.getByRole('img', { name: 'Strike rate at each stage' });
+    for (const s of ['U13', 'Scouted club', 'Professional'])
+      expect(within(ladder).getByText(s)).toBeTruthy();
+    expect(screen.getByRole('img', { name: 'Ratings at each stage' })).toBeTruthy();
+    expect(screen.getByText('The benchmark players, stage by stage')).toBeTruthy();
+    expect(screen.getAllByText(/top \d+ of \d+/i, { selector: '.pro-mini-title' })).toHaveLength(3);
+    // The sample has club players who also played franchise cricket.
+    expect(screen.getByRole('img', { name: 'Standing at each stage' })).toBeTruthy();
   });
 
-  it('the filter bar narrows every view and the count says so', async () => {
+  it('switches the measure, the discipline and the format', async () => {
     const user = userEvent.setup();
     renderPage();
-    const before = count();
-    await user.selectOptions(screen.getByLabelText('Site'), 'school');
-    const after = count();
-    expect(after).toBeLessThan(before);
-    await user.selectOptions(screen.getByLabelText('Gender'), 'women');
-    const women = count();
-    expect(women).toBeLessThan(after);
-    expect(women).toBeGreaterThan(0);
+    await user.click(screen.getByRole('tab', { name: 'Runs per innings' }));
+    expect(screen.getByRole('img', { name: 'Runs per innings at each stage' })).toBeTruthy();
+    await user.click(screen.getByRole('tab', { name: 'Bowling' }));
+    expect(screen.getByRole('img', { name: 'Economy at each stage' })).toBeTruthy();
+    await user.click(screen.getByRole('tab', { name: 'One-Day' }));
+    const ladder = screen.getByRole('img', { name: 'Economy at each stage' });
+    expect(within(ladder).getByText('Senior club')).toBeTruthy();
+    expect(within(ladder).queryByText('Scouted club')).toBeNull();
   });
 
-  it('a competition opens its ladder, strength map and how games are won', async () => {
+  it('places a searched player on the ladder', async () => {
     const user = userEvent.setup();
-    renderPage();
-    await user.click(
-      within(screen.getByRole('table', { name: 'Competitions' })).getByText('Sunday One 25/26'),
+    const sample = await vi.importActual<typeof import('./scouting-sample')>('./scouting-sample');
+    const pro = await vi.importActual<typeof import('./pro-sample')>('./pro-sample');
+    const { lines } = allLines(
+      [sample.SAMPLE_TOURNAMENT, sample.SAMPLE_CLUB_MATCH],
+      [pro.SAMPLE_POOL],
+      pro.SAMPLE_PRO_MATCHES,
     );
-    const ladder = await screen.findByRole('table', { name: 'Sunday One 25/26 ladder' });
-    expect(within(ladder).getAllByRole('row')).toHaveLength(9); // header + 8 sides
-    expect(within(ladder).getByText('Riverside CC SU1')).toBeTruthy();
-    expect(screen.getByText('Batting v bowling strength')).toBeTruthy();
-    expect(screen.getByText('Close finishes')).toBeTruthy();
-    // Shortlisting from the ladder is remembered.
-    await user.click(within(ladder).getAllByRole('button', { name: '☆ Shortlist' })[0]);
-    expect(screen.getByRole('tab', { name: 'Shortlist (1)' })).toBeTruthy();
+    const name = rateStage(lines, 'bat', 'men', 'T20', 'pro')[0].line.name;
+    renderPage();
+    await user.type(screen.getByLabelText('Place a player'), name);
+    const ladder = screen.getByRole('img', { name: 'Strike rate at each stage' });
+    expect(within(ladder).getByText(new RegExp(`^${name} \\d`))).toBeTruthy();
   });
 
-  it('leaderboards rank sides on each measure, clubs and schools too', async () => {
+  it('shows only franchise stages for girls and women, with no age-group bar invented', async () => {
     const user = userEvent.setup();
-    renderPage('&pwtab=leaders');
-    expect(screen.getByRole('tab', { name: 'Win %', selected: true })).toBeTruthy();
-    await user.click(screen.getByRole('tab', { name: 'Net run rate' }));
-    expect(screen.getByRole('tab', { name: 'Net run rate', selected: true })).toBeTruthy();
-    await user.selectOptions(screen.getByLabelText('Rank'), 'club');
-    expect(screen.getByText(/highest first/)).toBeTruthy();
+    renderPage();
+    await user.click(screen.getByRole('tab', { name: 'Girls & women' }));
+    const ladder = screen.getByRole('img', { name: 'Strike rate at each stage' });
+    expect(within(ladder).getByText('Professional')).toBeTruthy();
+    expect(within(ladder).queryByText('U13')).toBeNull();
   });
+});
 
-  it('the performance map shows sides and competitions', () => {
-    renderPage('&pwtab=map');
-    expect(screen.getByText('Batting v bowling strength')).toBeTruthy();
-    expect(screen.getByText('Where results are earned')).toBeTruthy();
-    expect(screen.getByText('Competitiveness, competition by competition')).toBeTruthy();
-  });
-
-  it('teams: the ladder grid opens a club card, and the shortlist keeps it', async () => {
+describe('Pathways → Improvers', () => {
+  it('compares seasons, lists risers and drops, and opens a player', async () => {
     const user = userEvent.setup();
-    renderPage('&pwtab=teams');
-    const grid = screen.getByRole('table', { name: 'Club or school' });
-    await user.click(within(grid).getByText('Riverside').closest('tr')!);
-    expect(await screen.findByRole('table', { name: 'Riverside sides' })).toBeTruthy();
-    expect(screen.getByText('Win rate by age rung')).toBeTruthy();
-    expect(screen.getByText('Juniors v seniors')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: '☆ Shortlist' }));
-    await user.click(screen.getByRole('tab', { name: 'Shortlist (1)' }));
-    expect(screen.getByText('Shortlisted clubs and schools')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Riverside' })).toBeTruthy();
-    expect(screen.getByText('Where to be')).toBeTruthy();
+    renderPage('&pw=improvers');
+    expect(screen.getByText('Season on season')).toBeTruthy();
+    expect(screen.getByText('The biggest improvers')).toBeTruthy();
+    expect(screen.getByText('The biggest drops')).toBeTruthy();
+    // Only the squads with whole seasons are offered.
+    const teams = within(screen.getByLabelText('Franchise'))
+      .getAllByRole('option')
+      .map((o) => o.textContent);
+    expect(teams).toEqual(['All franchises', 'Hawks']);
+    const riser = screen.getByText('The biggest improvers').closest('.card')!;
+    const first = riser.querySelector('.pv-bar-row')!;
+    await user.click(first);
+    expect(await screen.findByRole('button', { name: 'Close' })).toBeTruthy();
   });
+});
 
-  it('matches list the selection and a team search narrows it', async () => {
+describe('Pathways → Pyramid & leagues', () => {
+  it('keeps the whole pyramid with schools and clubs', async () => {
     const user = userEvent.setup();
-    renderPage('&pwtab=matches');
-    const table = screen.getByRole('table', { name: 'Results' });
-    expect(within(table).getAllByRole('row').length).toBeGreaterThan(50);
-    await user.type(screen.getByLabelText('Team or club'), 'Northgate');
-    expect(
-      within(screen.getByRole('table', { name: 'Results' })).getAllByRole('row').length,
-    ).toBeLessThan(40);
+    renderPage();
+    await user.click(screen.getByRole('tab', { name: 'Pyramid & leagues' }));
+    expect(screen.getByRole('img', { name: 'The pathway, tier by tier' })).toBeTruthy();
+    expect(screen.getByLabelText('Site')).toBeTruthy();
   });
 });

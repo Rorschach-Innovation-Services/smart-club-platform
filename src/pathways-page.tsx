@@ -1,1493 +1,603 @@
 /* ─── Scouting → Pathways ───
  *
- * The amateur and school system as one pyramid, from a union's results export, laid out the
- * way Player scouting is — Overview · Matches · Leaderboards · Performance map · Teams ·
- * Shortlist — with sides and institutions where that page has players. Everything is a graph
- * behind one filter bar; the drill-downs live in the URL and the shortlist in the browser.
+ * Developmental milestones: the bar a player has to clear at each stage of the pathway, from
+ * age-group cricket to the franchises, who the benchmark players are at each stage, the
+ * outliers well clear of their stage, the improvers season on season, and where the players
+ * who went up stood below. Then the pyramid itself (schools and club leagues from the union's
+ * results). The numbers and rules are in src/milestones.ts.
  */
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { KPI, Pill } from './atoms';
+import { KPI } from './atoms';
 import {
-  AGES,
-  FORMAT_LABEL,
-  TIER,
-  TIERS,
-  calendar,
-  competitionSummaries,
-  coverage,
-  filterMatches,
-  ladder,
-  ladderSort,
-  marginBands,
-  pipeline,
-  pyramid,
-  sideName,
-  venues,
-  type CompetitionSummary,
+  METRICS,
+  benchmarkPlayers,
+  climbers,
+  formatsWithStages,
+  improvers,
+  isOutlier,
+  metricOf,
+  allLines,
+  stageRatings,
+  stageRows,
+  stagesOf,
+  type Disc,
   type Format,
   type Gender,
-  type LadderRow,
-  type PathFilter,
-  type PathMatch,
-  type PipelineRow,
-  type Site,
-  type Tier,
-} from './pathways';
-import { PATHWAYS_IS_SAMPLE, PATH_MATCHES } from './pathways-data';
-import { Figure, HeatGrid, Pyramid, WeekColumns, type PyramidRow } from './pathways-charts';
+  type Line,
+  type Move,
+  type Rated,
+} from './milestones';
+import {
+  Figure,
+  MilestoneLadder,
+  PercentileTrack,
+  StageStrips,
+  type LadderStage,
+  type TrackLine,
+} from './pathways-charts';
+import { SCOUT_POOLS } from './pro-data';
+import { shortTeam } from './pro-scorecards';
+import { detectSquads } from './pro-team';
 import { useProMatches } from './pro-library';
-import { QuadrantMap, RankBars, Tile, type MapPt, type Tone } from './pro-charts';
+import { Dumbbell, PairBars, QuadrantMap, RankBars, type MapPt, type Tone } from './pro-charts';
+import { ResultsScouting } from './results-scouting';
+import { SCOUTING_EVENTS } from './scouting-data';
 
-type PwTab = 'overview' | 'matches' | 'leaders' | 'map' | 'teams' | 'shortlist';
-const TABS: [PwTab, string][] = [
-  ['overview', 'Overview'],
-  ['matches', 'Matches'],
-  ['leaders', 'Leaderboards'],
-  ['map', 'Performance map'],
-  ['teams', 'Teams'],
-  ['shortlist', 'Shortlist'],
+type Sub = 'milestones' | 'improvers' | 'pyramid';
+const SUBS: [Sub, string][] = [
+  ['milestones', 'Milestones'],
+  ['improvers', 'Improvers'],
+  ['pyramid', 'Pyramid & leagues'],
 ];
 
-const siteTone = (site: Site): Tone => (site === 'school' ? 'squad' : 'third');
-const tierTone = (tier: Tier, site: Site): Tone =>
-  tier === 'representative' ? 'pool' : siteTone(site);
-const pct = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `${v}%`);
-const signed = (v: number | null | undefined, d = 2) =>
-  v === null || v === undefined ? '—' : (v > 0 ? '+' : '') + v.toFixed(d);
-const fmtDay = (d: string) =>
-  new Date(`${d}T00:00:00Z`).toLocaleDateString('en-GB', {
-    day: 'numeric',
-    month: 'short',
-    timeZone: 'UTC',
-  });
-const MONTH = (d: string) =>
-  new Date(`${d}T00:00:00Z`).toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' });
-const addDays = (d: string, n: number) => {
-  const x = new Date(`${d}T00:00:00Z`);
-  x.setUTCDate(x.getUTCDate() + n);
-  return x.toISOString().slice(0, 10);
-};
+const r0 = (v: number) => Math.round(v).toString();
 
-/* ── Shortlist: institutions to follow, per browser (like the scouting watchlist) ── */
-
-const TRACK_KEY = 'smartclub.pathways.shortlist.v1';
-function readTracked(): string[] {
-  try {
-    const v = JSON.parse(localStorage.getItem(TRACK_KEY) || '[]');
-    return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
-  } catch {
-    return [];
-  }
+/** The measures behind a rating, in words, for tooltips and sub-lines. */
+function numbers(l: Line, disc: Disc) {
+  return METRICS[disc]
+    .map((m) => {
+      const v = m.value(l);
+      return v === null ? null : `${m.short} ${m.fmt(v)}`;
+    })
+    .filter(Boolean)
+    .join(' · ');
 }
-export interface Tracked {
-  keys: string[];
-  has: (clubKey: string) => boolean;
-  toggle: (clubKey: string) => void;
-}
-export function useTracked(): Tracked {
-  const [keys, setKeys] = useState<string[]>(readTracked);
-  return {
-    keys,
-    has: (k) => keys.includes(k),
-    toggle: (k) => {
-      const next = keys.includes(k) ? keys.filter((x) => x !== k) : [...keys, k];
-      setKeys(next);
-      try {
-        localStorage.setItem(TRACK_KEY, JSON.stringify(next));
-      } catch {
-        /* storage unavailable — the list still works for this visit */
-      }
-    },
-  };
-}
-
-function TrackButton({ clubKey, tracked }: { clubKey: string; tracked: Tracked }) {
-  const on = tracked.has(clubKey);
-  return (
-    <button
-      type="button"
-      className={`pw-track${on ? ' on' : ''}`}
-      aria-pressed={on}
-      onClick={(e) => {
-        e.stopPropagation();
-        tracked.toggle(clubKey);
-      }}
-    >
-      {on ? '★ Shortlisted' : '☆ Shortlist'}
-    </button>
-  );
-}
-
-/** A row of results, compact enough for a table cell; the detail is in the title. */
-function MiniStrip({ r, n }: { r: LadderRow; n: number }) {
-  return (
-    <span className="pw-strip" aria-label={`Last ${n} results`}>
-      {r.results.slice(-n).map((x) => (
-        <span
-          key={x.key}
-          className={`pv-res ${x.outcome === 'NR' ? 'D' : x.outcome}`}
-          title={x.tip}
-        >
-          {x.outcome === 'NR' ? '–' : x.outcome}
-        </span>
-      ))}
-    </span>
-  );
-}
-
-const WEEK_SERIES = [
-  { key: 'school', label: 'Schools', tone: 'squad' as Tone },
-  { key: 'club', label: 'Clubs', tone: 'third' as Tone },
-  { key: 'rep', label: 'Representative', tone: 'pool' as Tone },
-];
-const weekSeriesOf = (m: PathMatch) =>
-  m.tier === 'representative' ? 'rep' : m.site === 'school' ? 'school' : 'club';
-
-/* ── The page ── */
 
 export function PathwaysPage() {
   const [params, setParams] = useSearchParams();
   const get = (k: string) => params.get(k) ?? '';
   const set = (patch: Record<string, string | null>) => {
     const next = new URLSearchParams(params);
-    next.set('view', 'pathways');
     Object.entries(patch).forEach(([k, v]) => (v ? next.set(k, v) : next.delete(k)));
     setParams(next, { replace: true });
   };
-  const tab = (get('pwtab') as PwTab) || 'overview';
-  const filter: PathFilter = {
-    site: (get('site') as Site) || 'all',
-    gender: (get('gender') as Gender) || 'all',
-    tier: (get('tier') as Tier) || 'all',
-    age: get('age') || 'all',
-    format: (get('fmt') as Format) || 'all',
-    practice: get('practice') === '1',
-    from: get('from') || undefined,
-    to: get('to') || undefined,
-    competition: get('comp') || 'all',
-    team: get('q') || undefined,
-  };
-  const all = PATH_MATCHES;
-  const ms = useMemo(() => filterMatches(all, filter), [all, params]); // eslint-disable-line react-hooks/exhaustive-deps
-  // Charts that compare competitions ignore the competition filter; it picks the drill-down.
-  const acrossComps = useMemo(
-    () => filterMatches(all, { ...filter, competition: 'all' }),
-    [all, params], // eslint-disable-line react-hooks/exhaustive-deps
-  );
-  const club = get('club') || null;
-  const comp = get('comp') || null;
+  const sub = (get('pw') as Sub) || 'milestones';
   const pro = useProMatches();
-  const tracked = useTracked();
-  const openClub = (k: string | null) => set({ club: k, pwtab: 'teams' });
-
-  const ages = useMemo(() => AGES.filter((a) => all.some((m) => m.age === a)), [all]);
-  const formats = useMemo(
-    () => (Object.keys(FORMAT_LABEL) as Format[]).filter((f) => all.some((m) => m.format === f)),
-    [all],
+  const { lines, proBySeason } = useMemo(
+    () => allLines(SCOUTING_EVENTS, SCOUT_POOLS, pro.matches),
+    [pro.matches],
   );
-  const competitions = useMemo(() => competitionSummaries(all), [all]);
-  const span = useMemo(
-    () => (all.length ? { from: all[0].date, to: all[all.length - 1].date } : null),
-    [all],
+  // Franchises whose whole seasons are in the files; their opponents appear only in those games.
+  const squads = useMemo(
+    () => [...new Set(detectSquads(pro.matches).map((s) => shortTeam(s.name)))],
+    [pro.matches],
   );
-
-  if (!all.length) return <div className="ss-empty">No results exports yet.</div>;
+  const disc: Disc = get('disc') === 'bowl' ? 'bowl' : 'bat';
+  const gender: Gender = get('mg') === 'women' ? 'women' : 'men';
+  const formats = useMemo(() => formatsWithStages(lines, disc, gender), [lines, disc, gender]);
+  const format: Format = (formats.includes(get('mf') as Format) ? get('mf') : formats[0]) as Format;
+  const metric = metricOf(disc, get('mm') || METRICS[disc][0].key);
 
   return (
     <div className="pro pw">
-      <div className="pw-filters" role="group" aria-label="Filters">
-        <label>
-          Site
-          <select
-            className="field-select"
-            value={filter.site}
-            onChange={(e) => set({ site: e.target.value === 'all' ? null : e.target.value })}
-          >
-            <option value="all">Schools and clubs</option>
-            <option value="school">Schools</option>
-            <option value="club">Clubs</option>
-          </select>
-        </label>
-        <label>
-          Gender
-          <select
-            className="field-select"
-            value={filter.gender}
-            onChange={(e) => set({ gender: e.target.value === 'all' ? null : e.target.value })}
-          >
-            <option value="all">Everyone</option>
-            <option value="men">Boys &amp; men</option>
-            <option value="women">Girls &amp; women</option>
-          </select>
-        </label>
-        <label>
-          Tier
-          <select
-            className="field-select"
-            value={filter.tier}
-            onChange={(e) => set({ tier: e.target.value === 'all' ? null : e.target.value })}
-          >
-            <option value="all">Whole pathway</option>
-            {[...TIERS]
-              .filter((t) => all.some((m) => m.tier === t.key))
-              .reverse()
-              .map((t) => (
-                <option key={t.key} value={t.key}>
-                  {t.label}
-                </option>
-              ))}
-          </select>
-        </label>
-        <label>
-          Age
-          <select
-            className="field-select"
-            value={filter.age}
-            onChange={(e) => set({ age: e.target.value === 'all' ? null : e.target.value })}
-          >
-            <option value="all">All ages</option>
-            {ages.map((a) => (
-              <option key={a} value={a}>
-                {a}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Format
-          <select
-            className="field-select"
-            value={filter.format}
-            onChange={(e) => set({ fmt: e.target.value === 'all' ? null : e.target.value })}
-          >
-            <option value="all">All formats</option>
-            {formats.map((f) => (
-              <option key={f} value={f}>
-                {FORMAT_LABEL[f]}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Competition
-          <select
-            className="field-select"
-            value={filter.competition}
-            onChange={(e) => set({ comp: e.target.value === 'all' ? null : e.target.value })}
-          >
-            <option value="all">All competitions</option>
-            {competitions.map((c) => (
-              <option key={c.competition} value={c.competition}>
-                {c.competition}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          From
-          <input
-            className="field-input"
-            type="date"
-            value={filter.from ?? ''}
-            min={span?.from}
-            max={span?.to}
-            onChange={(e) => set({ from: e.target.value || null })}
-          />
-        </label>
-        <label>
-          To
-          <input
-            className="field-input"
-            type="date"
-            value={filter.to ?? ''}
-            min={span?.from}
-            max={span?.to}
-            onChange={(e) => set({ to: e.target.value || null })}
-          />
-        </label>
-        <label>
-          Team or club
-          <input
-            className="field-input"
-            type="search"
-            placeholder="Search…"
-            value={filter.team ?? ''}
-            onChange={(e) => set({ q: e.target.value || null })}
-          />
-        </label>
-        <label className="pw-check">
-          <input
-            type="checkbox"
-            checked={!!filter.practice}
-            onChange={(e) => set({ practice: e.target.checked ? '1' : null })}
-          />
-          Include practice games
-        </label>
-        <span className="pw-count">
-          <b>{ms.length.toLocaleString()}</b> of {all.length.toLocaleString()} matches
-          {PATHWAYS_IS_SAMPLE ? ' · sample data, invented names' : ''}
-        </span>
-      </div>
-
       <div className="sc-tabs" role="tablist" aria-label="Pathways views">
-        {TABS.map(([k, label]) => (
+        {SUBS.map(([k, label]) => (
           <button
             key={k}
             type="button"
             role="tab"
-            aria-selected={tab === k}
-            className={tab === k ? 'on' : ''}
-            onClick={() => set({ pwtab: k === 'overview' ? null : k })}
+            aria-selected={sub === k}
+            className={sub === k ? 'on' : ''}
+            onClick={() => set({ pw: k === 'milestones' ? null : k })}
           >
             {label}
-            {k === 'shortlist' && tracked.keys.length ? ` (${tracked.keys.length})` : ''}
           </button>
         ))}
       </div>
 
-      {tab === 'overview' &&
-        (comp ? (
-          <CompetitionOverview
-            comp={comp}
-            summaries={competitions}
-            ms={ms}
-            tracked={tracked}
-            openClub={openClub}
-            clear={() => set({ comp: null })}
-          />
-        ) : (
-          <OverviewView
-            ms={ms}
-            summaries={competitionSummaries(ms)}
-            proCount={pro.matches.length}
-            proSource={pro.source}
-            activeTier={filter.tier === 'all' ? null : (filter.tier as Tier)}
-            pickTier={(t) => set({ tier: filter.tier === t ? null : t })}
-            pickComp={(c) => set({ comp: c })}
-          />
-        ))}
-      {tab === 'matches' && <MatchesView ms={ms} />}
-      {tab === 'leaders' && <LeaderboardsView ms={ms} tracked={tracked} openClub={openClub} />}
-      {tab === 'map' && (
-        <PerformanceMapView
-          ms={ms}
-          acrossComps={acrossComps}
-          summaries={competitionSummaries(acrossComps)}
-          tracked={tracked}
-          openClub={openClub}
-          pickComp={(c) => set({ comp: c, pwtab: null })}
-        />
-      )}
-      {tab === 'teams' && (
-        <TeamsView ms={ms} club={club} tracked={tracked} pick={(k) => set({ club: k })} />
-      )}
-      {tab === 'shortlist' && <ShortlistView ms={all} tracked={tracked} openClub={openClub} />}
-    </div>
-  );
-}
-
-/* ── Overview ── */
-
-function OverviewView({
-  ms,
-  summaries,
-  proCount,
-  proSource,
-  activeTier,
-  pickTier,
-  pickComp,
-}: {
-  ms: PathMatch[];
-  summaries: CompetitionSummary[];
-  proCount: number;
-  proSource: string;
-  activeTier: Tier | null;
-  pickTier: (t: Tier) => void;
-  pickComp: (c: string) => void;
-}) {
-  const tiers = useMemo(() => pyramid(ms), [ms]);
-  const cov = useMemo(() => coverage(ms), [ms]);
-  const weeks = useMemo(() => calendar(ms), [ms]);
-  const byWeek = useMemo(() => {
-    const map = new Map<string, Record<string, number>>();
-    for (const m of ms) {
-      const w = weeks.find((x) => x.week <= m.date && m.date < addDays(x.week, 7))?.week;
-      if (!w) continue;
-      const row = map.get(w) ?? {};
-      const k = weekSeriesOf(m);
-      row[k] = (row[k] ?? 0) + 1;
-      map.set(w, row);
-    }
-    return map;
-  }, [ms, weeks]);
-  const decidedN = ms.filter((m) => m.result.winner !== null).length;
-  const abandoned = ms.filter(
-    (m) => m.result.kind === 'abandoned' || m.result.kind === 'no-result',
-  ).length;
-  const clubs = new Set(ms.flatMap((m) => m.sides.map((s) => s.clubKey))).size;
-  const rows: PyramidRow[] = [
-    {
-      key: 'professional',
-      label: 'Professional',
-      sub: 'Franchise cricket',
-      parts: [{ tone: 'pool', value: proCount, label: 'Matches' }],
-      text: proCount
-        ? `${proCount} matches · ${proSource === 'library' ? 'match library' : proSource}`
-        : 'No franchise matches yet',
-      hollow: true,
-    },
-    ...[...tiers]
-      .filter((t) => t.tier !== 'other')
-      .sort((a, b) => TIER[b.tier].rung - TIER[a.tier].rung)
-      .map((t) => ({
-        key: t.tier,
-        label: TIER[t.tier].label,
-        sub: TIER[t.tier].blurb,
-        parts:
-          t.tier === 'representative'
-            ? [{ tone: 'pool' as Tone, value: t.matches, label: 'Representative' }]
-            : [
-                {
-                  tone: 'squad' as Tone,
-                  value: t.competitions
-                    .filter((c) => c.site === 'school')
-                    .reduce((n, c) => n + c.matches, 0),
-                  label: 'Schools',
-                },
-                {
-                  tone: 'third' as Tone,
-                  value: t.competitions
-                    .filter((c) => c.site === 'club')
-                    .reduce((n, c) => n + c.matches, 0),
-                  label: 'Clubs',
-                },
-              ],
-        text: `${t.matches} · ${t.teams} sides · ${t.competitions.length} comp${t.competitions.length === 1 ? '' : 's'}`,
-      })),
-  ];
-  const formatsByTier = tiers.filter((t) => t.tier !== 'other');
-  const formatCols = (Object.keys(FORMAT_LABEL) as Format[]).filter((f) =>
-    formatsByTier.some((t) => (t.formats[f] ?? 0) > 0),
-  );
-  let lastMonth = '';
-  return (
-    <>
-      <div className="kpi-strip sc-kpis">
-        <KPI
-          label="Matches"
-          num={ms.length.toLocaleString()}
-          sub={`${summaries.length} competitions`}
-        />
-        <KPI
-          label="Decided"
-          num={pct(ms.length ? Math.round((decidedN / ms.length) * 100) : null)}
-          sub={`${abandoned} abandoned or no result`}
-        />
-        <KPI
-          label="Clubs & schools"
-          num={clubs}
-          sub={`${new Set(ms.flatMap((m) => m.sides.map((s) => s.side))).size} sides`}
-        />
-        <KPI
-          label="Girls & women"
-          num={pct(
-            ms.length
-              ? Math.round((ms.filter((m) => m.gender === 'women').length / ms.length) * 100)
-              : null,
-          )}
-          sub="share of matches"
-        />
-      </div>
-      <Figure
-        title="The pathway"
-        sub="Matches at every tier, bottom to top · navy schools, sky clubs, gold representative · the franchise sits above it · tap a tier to focus the page on it"
-      >
-        <Pyramid
-          rows={rows}
-          onPick={(k) => k !== 'professional' && pickTier(k as Tier)}
-          active={activeTier}
-        />
-      </Figure>
-      <div className="pw-grid-2">
-        <Figure
-          title="Where the pathway is dense, and where it thins"
-          sub="Matches by tier and age group · a pale or empty cell is a step with little cricket in it"
-        >
-          <HeatGrid
-            label="Matches by tier and age"
-            rowLabel="Tier"
-            rows={cov.tiers.map((t) => ({ key: t, label: TIER[t].label }))}
-            cols={cov.ages.map((a) => ({ key: a, label: a }))}
-            cell={(t, a) => {
-              const v = cov.cell(t as Tier, a);
-              return v ? { value: v } : null;
-            }}
-            max={cov.max}
-          />
-        </Figure>
-        <Figure
-          title="Formats by tier"
-          sub="The professional game is T20, 50-over and time cricket: where does the pathway play them?"
-        >
-          <HeatGrid
-            label="Formats by tier"
-            rowLabel="Tier"
-            rows={[...formatsByTier]
-              .sort((a, b) => TIER[b.tier].rung - TIER[a.tier].rung)
-              .map((t) => ({ key: t.tier, label: TIER[t.tier].label }))}
-            cols={formatCols.map((f) => ({ key: f, label: FORMAT_LABEL[f] }))}
-            cell={(t, f) => {
-              const v = formatsByTier.find((x) => x.tier === t)?.formats[f as Format] ?? 0;
-              return v ? { value: v } : null;
-            }}
-            max={Math.max(
-              1,
-              ...formatsByTier.flatMap((t) => Object.values(t.formats).map((v) => v ?? 0)),
-            )}
-          />
-        </Figure>
-      </div>
-      <Figure
-        title="When the pathway plays"
-        sub="Matches per week · schools, clubs and representative cricket · where they overlap, a scout has to choose"
-      >
-        <WeekColumns
-          weeks={weeks.map((w) => w.week)}
-          series={WEEK_SERIES}
-          value={(w, s) => byWeek.get(w)?.[s] ?? 0}
-          marks={(w) => {
-            const mo = MONTH(w);
-            if (mo === lastMonth) return null;
-            lastMonth = mo;
-            return mo;
-          }}
-        />
-      </Figure>
-      <Figure
-        title="Competition by competition"
-        sub="What each competition gives a scout · tap one for its ladder and strength map"
-      >
-        <div className="tbl-w">
-          <table className="tbl sc-tbl pw-ladder" aria-label="Competitions">
-            <thead>
-              <tr>
-                <th>Competition</th>
-                <th>Tier</th>
-                <th className="hide-narrow">Ages</th>
-                <th className="num">Matches</th>
-                <th className="num">Sides</th>
-                <th className="num">Close</th>
-                <th className="num">Abandoned</th>
-                <th className="num hide-narrow">Bat 1st wins</th>
-                <th className="num hide-narrow">Avg 1st inns</th>
-              </tr>
-            </thead>
-            <tbody>
-              {summaries.map((c) => (
-                <tr key={c.competition} className="pick" onClick={() => pickComp(c.competition)}>
-                  <td>
-                    <strong>{c.competition}</strong>
-                  </td>
-                  <td>
-                    <Pill
-                      tone={
-                        c.tier === 'representative' ? 'gold' : c.site === 'school' ? 'navy' : 'teal'
-                      }
-                    >
-                      {TIER[c.tier].label}
-                    </Pill>
-                  </td>
-                  <td className="hide-narrow">{c.ages.join(', ')}</td>
-                  <td className="num">{c.matches}</td>
-                  <td className="num">{c.teams}</td>
-                  <td className="num">{pct(c.closePct)}</td>
-                  <td className="num">{pct(c.abandonedPct)}</td>
-                  <td className="num hide-narrow">{pct(c.batFirstWinPct)}</td>
-                  <td className="num hide-narrow">{c.avgFirstInnings ?? '—'}</td>
-                </tr>
+      {sub === 'pyramid' ? (
+        <ResultsScouting />
+      ) : (
+        <>
+          <div className="ml-bar" role="group" aria-label="Milestone filters">
+            <div className="ml-seg" role="tablist" aria-label="Discipline">
+              {(['bat', 'bowl'] as Disc[]).map((d) => (
+                <button
+                  key={d}
+                  type="button"
+                  role="tab"
+                  aria-selected={disc === d}
+                  className={disc === d ? 'on' : ''}
+                  onClick={() => set({ disc: d === 'bat' ? null : d, mm: null })}
+                >
+                  {d === 'bat' ? 'Batting' : 'Bowling'}
+                </button>
               ))}
-            </tbody>
-          </table>
-        </div>
-      </Figure>
-    </>
-  );
-}
-
-/** The Overview with one competition chosen: its ladder, strength map and how games are won. */
-function CompetitionOverview({
-  comp,
-  summaries,
-  ms,
-  tracked,
-  openClub,
-  clear,
-}: {
-  comp: string;
-  summaries: CompetitionSummary[];
-  ms: PathMatch[];
-  tracked: Tracked;
-  openClub: (k: string) => void;
-  clear: () => void;
-}) {
-  const c = summaries.find((x) => x.competition === comp);
-  const rows = useMemo(() => ladder(ms).sort(ladderSort), [ms]);
-  const bands = useMemo(() => marginBands(ms), [ms]);
-  const rated = rows.filter((r) => r.played >= 2 && r.rrFor !== null && r.rrAgainst !== null);
-  const avgFor = rated.length ? rated.reduce((n, r) => n + (r.rrFor ?? 0), 0) / rated.length : 0;
-  const avgAg = rated.length ? rated.reduce((n, r) => n + (r.rrAgainst ?? 0), 0) / rated.length : 0;
-  const points: MapPt[] = rated.map((r) => ({
-    id: r.clubKey,
-    label: r.label,
-    sub: `${r.played} played · ${pct(r.winPct)} won`,
-    x: avgFor ? Math.round(((r.rrFor ?? 0) / avgFor) * 100) : 100,
-    y: r.rrAgainst ? Math.round((avgAg / r.rrAgainst) * 100) : 100,
-    size: r.played,
-    tone: tracked.has(r.clubKey) ? 'pool' : (r.winPct ?? 0) >= 60 ? 'squad' : 'context',
-    pin: tracked.has(r.clubKey),
-    tip: [`scores ${r.rrFor?.toFixed(1)} an over`, `concedes ${r.rrAgainst?.toFixed(1)} an over`],
-  }));
-  if (!c) return <div className="ss-empty">That competition isn’t in the files.</div>;
-  return (
-    <Figure
-      title={c.competition}
-      sub={`${TIER[c.tier].label} · ${c.ages.join(', ')} · ${c.formats.map((f) => FORMAT_LABEL[f]).join(', ')} · ${fmtDay(c.from)} – ${fmtDay(c.to)}`}
-      aside={
-        <button type="button" className="pro-link" onClick={clear}>
-          All competitions
-        </button>
-      }
-    >
-      <div className="pv-tiles">
-        <Tile label="Matches" value={c.matches} sub={`${c.completed} decided`} />
-        <Tile label="Close finishes" value={pct(c.closePct)} sub="≤10 runs or ≤2 wickets" />
-        <Tile
-          label="Batting first wins"
-          value={pct(c.batFirstWinPct)}
-          sub={c.avgFirstInnings !== null ? `avg first innings ${c.avgFirstInnings}` : undefined}
-        />
-        <Tile
-          label="Abandoned"
-          value={pct(c.abandonedPct)}
-          tone={c.abandonedPct > 25 ? 'bad' : 'good'}
-        />
-      </div>
-      <div className="pw-grid-2">
-        <div>
-          <div className="pro-mini-title">Batting v bowling strength</div>
-          {points.length < 3 ? (
-            <div className="ss-empty">
-              Overs weren’t recorded for enough games to rate the sides.
             </div>
+            <div className="ml-seg" role="tablist" aria-label="Gender">
+              {(['men', 'women'] as Gender[]).map((g) => (
+                <button
+                  key={g}
+                  type="button"
+                  role="tab"
+                  aria-selected={gender === g}
+                  className={gender === g ? 'on' : ''}
+                  onClick={() => set({ mg: g === 'men' ? null : g, mf: null })}
+                >
+                  {g === 'men' ? 'Boys & men' : 'Girls & women'}
+                </button>
+              ))}
+            </div>
+            <div className="ml-seg" role="tablist" aria-label="Format">
+              {formats.map((f) => (
+                <button
+                  key={f}
+                  type="button"
+                  role="tab"
+                  aria-selected={format === f}
+                  className={format === f ? 'on' : ''}
+                  onClick={() => set({ mf: f })}
+                >
+                  {f}
+                </button>
+              ))}
+            </div>
+            {sub === 'milestones' && (
+              <input
+                className="field-input"
+                type="search"
+                placeholder="Place a player…"
+                aria-label="Place a player"
+                value={get('mq')}
+                onChange={(e) => set({ mq: e.target.value || null })}
+                style={{ maxWidth: 220 }}
+              />
+            )}
+          </div>
+          {!format ? (
+            <div className="ss-empty">
+              No stage has enough {gender === 'women' ? "girls' or women's" : "boys' or men's"}{' '}
+              {disc === 'bat' ? 'batting' : 'bowling'} to draw yet.
+            </div>
+          ) : sub === 'milestones' ? (
+            <Milestones
+              lines={lines}
+              disc={disc}
+              gender={gender}
+              format={format}
+              metricKey={metric.key}
+              pickMetric={(k) => set({ mm: k })}
+              query={get('mq')}
+            />
           ) : (
-            <QuadrantMap
-              points={points}
-              xLabel="Scoring rate v the competition (100 = average)"
-              yLabel="Runs conceded v the competition (100 = average, higher = tighter)"
-              quadrants={[
-                'Strong both ways',
-                'Bowling carries them',
-                'Batting carries them',
-                'Struggling',
-              ]}
-              sizeLabel="games"
-              height={320}
-              toneLabels={{ squad: 'Winning 60%+', context: 'The rest', pool: 'Shortlisted' }}
-              shortLabels={false}
-              onPick={(id) => openClub(id)}
+            <Improvers
+              bySeason={proBySeason}
+              squads={squads}
+              disc={disc}
+              gender={gender}
+              format={format}
+              team={get('mt') || 'all'}
+              pickTeam={(t) => set({ mt: t === 'all' ? null : t })}
+              picked={get('mp') || null}
+              pick={(id) => set({ mp: id })}
             />
           )}
-        </div>
-        <div>
-          <div className="pro-mini-title">How games are won</div>
-          <RankBars
-            rows={[
-              ...bands.runs.map((b) => ({
-                id: `r${b.label}`,
-                label: `By ${b.label} runs`,
-                value: b.n,
-                tone: 'squad' as Tone,
-              })),
-              ...bands.wickets.map((b) => ({
-                id: `w${b.label}`,
-                label: `By ${b.label} wickets`,
-                value: b.n,
-                tone: 'third' as Tone,
-              })),
-              { id: 'tie', label: 'Tied', value: bands.ties, tone: 'pool' as Tone },
-            ]}
-          />
-        </div>
-      </div>
-      <div className="pro-mini-title">Ladder</div>
-      <LadderTable
-        rows={rows}
-        label={`${c.competition} ladder`}
-        tracked={tracked}
-        openClub={openClub}
-      />
-    </Figure>
-  );
-}
-
-function LadderTable({
-  rows,
-  label,
-  tracked,
-  openClub,
-}: {
-  rows: LadderRow[];
-  label: string;
-  tracked: Tracked;
-  openClub: (k: string) => void;
-}) {
-  return (
-    <div className="tbl-w">
-      <table className="tbl pw-ladder" aria-label={label}>
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>Side</th>
-            <th className="num">P</th>
-            <th className="num">W</th>
-            <th className="num">L</th>
-            <th className="num">T</th>
-            <th className="num">NR</th>
-            <th className="num">Win %</th>
-            <th className="num">NRR</th>
-            <th className="num">Avg</th>
-            <th>Last 5</th>
-            <th className="hide-narrow">Biggest win</th>
-            <th aria-label="Shortlist" />
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r, i) => (
-            <tr key={r.key}>
-              <td className="num">{i + 1}</td>
-              <td>
-                <button type="button" className="pro-link" onClick={() => openClub(r.clubKey)}>
-                  <strong>{r.label}</strong>
-                </button>
-                <div className="ml-sub">{r.club}</div>
-              </td>
-              <td className="num">{r.played}</td>
-              <td className="num">{r.won}</td>
-              <td className="num">{r.lost}</td>
-              <td className="num">{r.tied}</td>
-              <td className="num">{r.nr}</td>
-              <td className="num">{pct(r.winPct)}</td>
-              <td className="num">{signed(r.nrr)}</td>
-              <td className="num">{r.avgFor ?? '—'}</td>
-              <td>
-                <MiniStrip r={r} n={5} />
-              </td>
-              <td className="hide-narrow">{r.biggestWin ?? '—'}</td>
-              <td>
-                <TrackButton clubKey={r.clubKey} tracked={tracked} />
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+        </>
+      )}
     </div>
   );
 }
 
-/* ── Matches ── */
+/* ── Milestones ── */
 
-function MatchesView({ ms }: { ms: PathMatch[] }) {
-  const [limit, setLimit] = useState(120);
-  const rows = useMemo(() => [...ms].sort((a, b) => b.date.localeCompare(a.date)), [ms]);
-  const score = (m: PathMatch, i: 0 | 1) => {
-    const s = m.sides[i];
-    if (s.runs === null) return '—';
-    return s.innings.map((x) => `${x.runs}/${x.wkts}`).join(' & ');
-  };
-  return (
-    <Figure title="Results" sub={`${rows.length.toLocaleString()} matches, newest first`}>
-      <div className="tbl-w">
-        <table className="tbl pw-results" aria-label="Results">
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>Competition</th>
-              <th>Match</th>
-              <th>Result</th>
-              <th className="hide-narrow">Venue</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.slice(0, limit).map((m) => (
-              <tr key={m.id}>
-                <td className="pw-score">{m.date}</td>
-                <td>
-                  {m.competition}
-                  {m.division && <div className="ml-sub">{m.division}</div>}
-                  <div className="ml-sub">
-                    {TIER[m.tier].label} · {m.age} · {FORMAT_LABEL[m.format]}
-                  </div>
-                </td>
-                <td>
-                  <div>
-                    {m.sides[0].side} <span className="pw-score">{score(m, 0)}</span>
-                  </div>
-                  <div>
-                    {m.sides[1].side} <span className="pw-score">{score(m, 1)}</span>
-                  </div>
-                </td>
-                <td>{m.result.text || (m.status === 'ongoing' ? 'In progress' : '—')}</td>
-                <td className="hide-narrow">{m.venue || '—'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {rows.length > limit && (
-        <button
-          type="button"
-          className="btn btn-outline btn-sm pw-more"
-          onClick={() => setLimit((n) => n + 200)}
-        >
-          Show {Math.min(200, rows.length - limit)} more
-        </button>
-      )}
-    </Figure>
-  );
-}
-
-/* ── Leaderboards ── */
-
-type LeaderKey = 'winPct' | 'nrr' | 'rrFor' | 'rrAgainst' | 'avgFor' | 'closeWins';
-const LEADERS: {
-  key: LeaderKey;
-  label: string;
-  unit: string;
-  low?: boolean;
-  fmt: (r: LadderRow) => number | null;
-}[] = [
-  { key: 'winPct', label: 'Win %', unit: '%', fmt: (r) => r.winPct },
-  { key: 'nrr', label: 'Net run rate', unit: '', fmt: (r) => r.nrr },
-  { key: 'rrFor', label: 'Runs per over', unit: '', fmt: (r) => r.rrFor },
-  {
-    key: 'rrAgainst',
-    label: 'Runs conceded per over',
-    unit: '',
-    low: true,
-    fmt: (r) => r.rrAgainst,
-  },
-  { key: 'avgFor', label: 'Average score', unit: '', fmt: (r) => r.avgFor },
-  {
-    key: 'closeWins',
-    label: 'Close games won',
-    unit: '%',
-    fmt: (r) => {
-      const close = r.results.filter((x) =>
-        /won by (?:[1-9]|10) Runs?\b|won by [12] Wickets?\b|Tie/i.test(x.tip),
-      );
-      return close.length >= 2
-        ? Math.round((close.filter((x) => x.outcome === 'W').length / close.length) * 100)
-        : null;
-    },
-  },
-];
-
-function LeaderboardsView({
-  ms,
-  tracked,
-  openClub,
+function Milestones({
+  lines,
+  disc,
+  gender,
+  format,
+  metricKey,
+  pickMetric,
+  query,
 }: {
-  ms: PathMatch[];
-  tracked: Tracked;
-  openClub: (k: string) => void;
+  lines: Line[];
+  disc: Disc;
+  gender: Gender;
+  format: Format;
+  metricKey: string;
+  pickMetric: (k: string) => void;
+  query: string;
 }) {
-  const [metric, setMetric] = useState<LeaderKey>('winPct');
-  const [scope, setScope] = useState<'side' | 'club'>('side');
-  const [min, setMin] = useState(4);
-  const def = LEADERS.find((l) => l.key === metric) ?? LEADERS[0];
-  const rows = useMemo(() => ladder(ms, scope), [ms, scope]);
-  const siteOf = useMemo(() => {
-    const map = new Map<string, Site>();
-    ms.forEach((m) => m.sides.forEach((s) => map.set(s.clubKey, m.site)));
-    return map;
-  }, [ms]);
-  const ranked = rows
-    .filter((r) => r.played >= min)
-    .map((r) => ({ r, v: def.fmt(r) }))
-    .filter((x): x is { r: LadderRow; v: number } => x.v !== null && Number.isFinite(x.v))
-    .sort((a, b) => (def.low ? a.v - b.v : b.v - a.v))
-    .slice(0, 15);
-  const fmt = (v: number) =>
-    def.unit === '%'
-      ? `${Math.round(v)}%`
-      : metric === 'nrr'
-        ? signed(v)
-        : metric === 'avgFor'
-          ? Math.round(v).toString()
-          : v.toFixed(2);
-  const minNrr = Math.min(0, ...ranked.map((x) => x.v));
+  const metric = metricOf(disc, metricKey);
+  const stages = useMemo(
+    () => stagesOf(lines, disc, gender, format),
+    [lines, disc, gender, format],
+  );
+  const rows = useMemo(
+    () => stageRows(lines, disc, metric.key, gender, format),
+    [lines, disc, metric.key, gender, format],
+  );
+  const rated = useMemo(
+    () => stageRatings(lines, disc, gender, format),
+    [lines, disc, gender, format],
+  );
+  const bench = useMemo(
+    () => benchmarkPlayers(lines, disc, gender, format),
+    [lines, disc, gender, format],
+  );
+  const climbs = useMemo(() => climbers(lines, disc, gender), [lines, disc, gender]);
+  const needle = query.trim().toLowerCase();
+  const found = needle ? rated.filter((r) => r.line.name.toLowerCase().includes(needle)) : [];
+  const outliers = rated.filter((r) => isOutlier(r, disc));
+  const top = rows[rows.length - 1];
+
+  const ladder: LadderStage[] = [...rows].reverse().map((r) => {
+    const hit = found.find((f) => f.line.stage.key === r.stage.key);
+    const v = hit ? metric.value(hit.line) : null;
+    return {
+      key: r.stage.key,
+      label: r.stage.label,
+      sub: `${r.q.n} players`,
+      n: r.q.n,
+      q: r.q,
+      benchmark: r.benchmark,
+      marker: hit && v !== null ? { value: v, label: hit.line.name } : undefined,
+    };
+  });
+  const byStage = (key: string) => rated.filter((r) => r.line.stage.key === key);
+  const trackCols = [
+    ...new Map(climbs.flatMap((c) => c.steps.map((s) => [s.stage.key, s.stage] as const))).values(),
+  ]
+    .sort((a, b) => a.rung - b.rung)
+    .map((s) => ({ key: s.key, label: s.label }));
+  const track: TrackLine[] = climbs.map((c) => {
+    const per = new Map<string, { pct: number[]; tips: string[] }>();
+    for (const s of c.steps) {
+      const e = per.get(s.stage.key) ?? { pct: [], tips: [] };
+      e.pct.push(s.rated.pct);
+      e.tips.push(
+        `${s.stage.label} ${s.rated.line.format} ${s.rated.pct}th percentile (${s.team})`,
+      );
+      per.set(s.stage.key, e);
+    }
+    return {
+      id: c.id,
+      label: c.name,
+      points: [...per.entries()].map(([col, e]) => ({
+        col,
+        pct: Math.round(e.pct.reduce((a, b) => a + b, 0) / e.pct.length),
+        tip: e.tips.join(', '),
+      })),
+    };
+  });
+
   return (
-    <div className="card">
-      <div className="card-body">
-        <div className="pw-lead">
-          <div className="sc-chips" role="tablist" aria-label="Leaderboard">
-            {LEADERS.map((l) => (
+    <>
+      <p className="ml-note">
+        No dates of birth are in the sources, so a stage is a level of cricket:{' '}
+        {stages.map((s) => `${s.label} (${s.source})`).join(' · ')}. Raw numbers change with the
+        opposition, so read standing within a stage — that is what carries upward.
+      </p>
+      <div className="kpi-strip sc-kpis">
+        <KPI
+          label="Stages"
+          num={stages.length}
+          sub={`${format} · ${gender === 'men' ? 'boys & men' : 'girls & women'}`}
+        />
+        <KPI label="Players rated" num={rated.length} sub="with a fair sample" />
+        <KPI label="Outliers" num={outliers.length} sub="both measures 15%+ above their stage" />
+        <KPI
+          label={`${metric.short} — top 10% at ${top?.stage.label ?? '—'}`}
+          num={top ? metric.fmt(top.benchmark) : '—'}
+          sub={top ? `median ${metric.fmt(top.q.p50)}` : undefined}
+        />
+      </div>
+
+      <Figure
+        title="The bar at each stage"
+        sub={`${metric.label}, ${format}: the middle half, the 10th–90th percentile, the median and the top-10% mark at every stage · search to place a player`}
+        aside={
+          <div className="sc-chips" role="tablist" aria-label="Measure">
+            {METRICS[disc].map((m) => (
               <button
-                key={l.key}
+                key={m.key}
                 type="button"
                 role="tab"
-                aria-selected={metric === l.key}
-                className={`sc-chip ${metric === l.key ? 'on' : ''}`}
-                onClick={() => setMetric(l.key)}
+                aria-selected={metric.key === m.key}
+                className={`sc-chip ${metric.key === m.key ? 'on' : ''}`}
+                onClick={() => pickMetric(m.key)}
               >
-                {l.label}
+                {m.label}
               </button>
             ))}
           </div>
-          <select
-            className="field-select sc-select"
-            value={scope}
-            onChange={(e) => setScope(e.target.value as 'side' | 'club')}
-            aria-label="Rank"
-          >
-            <option value="side">Sides</option>
-            <option value="club">Clubs & schools</option>
-          </select>
-          <select
-            className="field-select sc-select"
-            value={min}
-            onChange={(e) => setMin(Number(e.target.value))}
-            aria-label="Minimum games"
-          >
-            {[2, 4, 6, 10].map((n) => (
-              <option key={n} value={n}>
-                {n}+ games
-              </option>
-            ))}
-          </select>
-        </div>
-        {!ranked.length ? (
-          <div className="ss-empty">
-            Nobody has {min}+ games with this measure in the selection.
-          </div>
-        ) : (
-          <RankBars
-            rows={ranked.map(({ r, v }) => ({
-              id: r.clubKey,
-              label: r.label,
-              value: metric === 'nrr' ? v - minNrr : v,
-              text: fmt(v),
-              tone: tracked.has(r.clubKey)
-                ? ('pool' as Tone)
-                : siteTone(siteOf.get(r.clubKey) ?? 'club'),
-              sub: `${r.played} played · ${pct(r.winPct)} won${scope === 'side' ? ` · ${r.club}` : ''}`,
-            }))}
-            max={metric === 'winPct' || metric === 'closeWins' ? 100 : undefined}
-            onPick={(id) => openClub(id)}
-          />
-        )}
-        <div className="pv-bar-sub">
-          Navy schools · sky clubs · gold shortlisted · {def.low ? 'lowest first' : 'highest first'}{' '}
-          · tap a bar for the institution
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ── Performance map ── */
-
-function PerformanceMapView({
-  ms,
-  acrossComps,
-  summaries,
-  tracked,
-  openClub,
-  pickComp,
-}: {
-  ms: PathMatch[];
-  acrossComps: PathMatch[];
-  summaries: CompetitionSummary[];
-  tracked: Tracked;
-  openClub: (k: string) => void;
-  pickComp: (c: string) => void;
-}) {
-  const [scope, setScope] = useState<'side' | 'club'>('side');
-  const rows = useMemo(() => ladder(ms, scope), [ms, scope]);
-  const siteOf = useMemo(() => {
-    const map = new Map<string, Site>();
-    ms.forEach((m) => m.sides.forEach((s) => map.set(s.clubKey, m.site)));
-    return map;
-  }, [ms]);
-  const rated = rows.filter((r) => r.played >= 3 && r.rrFor !== null && r.rrAgainst !== null);
-  const avgFor = rated.length ? rated.reduce((n, r) => n + (r.rrFor ?? 0), 0) / rated.length : 0;
-  const avgAg = rated.length ? rated.reduce((n, r) => n + (r.rrAgainst ?? 0), 0) / rated.length : 0;
-  const sides: MapPt[] = rated.map((r) => ({
-    id: r.clubKey,
-    label: r.label,
-    sub: `${r.played} played · ${pct(r.winPct)} won`,
-    x: avgFor ? Math.round(((r.rrFor ?? 0) / avgFor) * 100) : 100,
-    y: r.rrAgainst ? Math.round((avgAg / r.rrAgainst) * 100) : 100,
-    size: r.played,
-    tone: tracked.has(r.clubKey) ? 'pool' : siteTone(siteOf.get(r.clubKey) ?? 'club'),
-    pin: tracked.has(r.clubKey),
-    tip: [`scores ${r.rrFor?.toFixed(1)} an over`, `concedes ${r.rrAgainst?.toFixed(1)} an over`],
-  }));
-  const withSignal = summaries.filter(
-    (c) => c.closePct !== null && c.dominance !== null && c.matches >= 8,
-  );
-  const med = (xs: number[]) => {
-    const s = [...xs].sort((a, b) => a - b);
-    return s.length ? s[Math.floor(s.length / 2)] : 0;
-  };
-  const comps: MapPt[] = withSignal.map((c) => ({
-    id: c.competition,
-    label: sideName(c.competition),
-    sub: `${TIER[c.tier].label} · ${c.matches} matches`,
-    x: c.closePct ?? 0,
-    y: 100 - (c.dominance ?? 0),
-    size: c.matches,
-    tone: tierTone(c.tier, c.site),
-    tip: [
-      `${c.closePct}% of decided games close`,
-      `top side ${c.dominance} points above the median`,
-      `${c.abandonedPct}% abandoned`,
-    ],
-  }));
-  return (
-    <>
-      <Figure
-        title="Batting v bowling strength"
-        sub="Every side with 3+ games and overs recorded, against the selection's average (100) · bubble = games · gold = shortlisted · tap for the institution"
-        aside={
-          <select
-            className="field-select sc-select"
-            value={scope}
-            onChange={(e) => setScope(e.target.value as 'side' | 'club')}
-            aria-label="Map"
-          >
-            <option value="side">Sides</option>
-            <option value="club">Clubs & schools</option>
-          </select>
         }
       >
-        {sides.length < 3 ? (
-          <div className="ss-empty">
-            Overs weren’t recorded for enough games to rate the sides here.
-          </div>
-        ) : (
-          <QuadrantMap
-            points={sides}
-            xLabel="Scoring rate (100 = selection average)"
-            yLabel="Runs conceded (100 = average, higher = tighter)"
-            quadrants={[
-              'Strong both ways',
-              'Bowling carries them',
-              'Batting carries them',
-              'Struggling',
-            ]}
-            sizeLabel="games"
-            height={400}
-            toneLabels={{ squad: 'Schools', third: 'Clubs', pool: 'Shortlisted' }}
-            shortLabels={false}
-            onPick={(id) => openClub(id)}
+        {ladder.length ? (
+          <MilestoneLadder
+            stages={ladder}
+            better={metric.better}
+            fmt={metric.fmt}
+            unit={metric.label}
           />
+        ) : (
+          <div className="ss-empty">No stage has enough players with this measure.</div>
+        )}
+        {needle && !found.length && (
+          <div className="pv-bar-sub">No rated player matches “{query}” in this format.</div>
         )}
       </Figure>
+
       <Figure
-        title="Where results are earned"
-        sub="Each dot is a competition · right = more close finishes, up = more even ladder · the top-right is where a result says the most about a side · tap for its ladder"
+        title="Outliers at every stage"
+        sub="Every rated player, against their own stage (100 = the stage median) · gold = both measures 15%+ above it · the strongest named"
       >
-        {comps.length < 2 ? (
-          <div className="ss-empty">
-            Fewer than two competitions with enough decided games here.
-          </div>
-        ) : (
-          <QuadrantMap
-            points={comps}
-            xLabel="Close finishes (% of decided games)"
-            yLabel="Even ladder (100 − top side's lead over the median)"
-            refX={med(withSignal.map((c) => c.closePct ?? 0))}
-            refY={med(withSignal.map((c) => 100 - (c.dominance ?? 0)))}
-            quadrants={[
-              'Tight and even',
-              'Even, but games run away',
-              'Tight, one side on top',
-              'One-sided',
-            ]}
-            sizeLabel="matches"
-            onPick={(id) => pickComp(id)}
-            toneLabels={{ squad: 'Schools', third: 'Clubs', pool: 'Representative' }}
-            shortLabels={false}
-          />
-        )}
+        <StageStrips
+          rows={[...stages].reverse().map((s) => {
+            const rs = byStage(s.key);
+            return {
+              key: s.key,
+              label: s.label,
+              sub: `${rs.filter((r) => isOutlier(r, disc)).length} of ${rs.length}`,
+              points: rs.map((r) => ({
+                id: `${s.key}:${r.line.id}`,
+                label: r.line.name,
+                value: r.rating,
+                outlier: isOutlier(r, disc),
+                tip: `${r.line.name} (${r.line.team}) · ${s.label} · rating ${r0(r.rating)}, ${r.pct}th percentile · ${numbers(r.line, disc)}`,
+              })),
+            };
+          })}
+        />
       </Figure>
+
       <Figure
-        title="Competitiveness, competition by competition"
-        sub="Close finishes and abandonments · a league that loses a third of its games to the weather gives a scout a third less to go on"
+        title="The benchmark players, stage by stage"
+        sub="The top 10% of each stage on the overall rating — what the best look like at that level"
       >
-        <div className="pw-grid-2">
-          <RankBars
-            rows={summaries
-              .filter((c) => c.closePct !== null && c.matches >= 8)
-              .sort((a, b) => (b.closePct ?? 0) - (a.closePct ?? 0))
-              .slice(0, 14)
-              .map((c) => ({
-                id: c.competition,
-                label: c.competition,
-                value: c.closePct ?? 0,
-                tone: tierTone(c.tier, c.site),
-                sub: `${c.matches} matches`,
-              }))}
-            max={Math.max(30, ...summaries.map((c) => c.closePct ?? 0))}
-            unit="% close"
-            onPick={(id) => pickComp(id)}
-          />
-          <RankBars
-            rows={summaries
-              .filter((c) => c.matches >= 8)
-              .sort((a, b) => b.abandonedPct - a.abandonedPct)
-              .slice(0, 14)
-              .map((c) => ({
-                id: c.competition,
-                label: c.competition,
-                value: c.abandonedPct,
-                tone: 'risk' as Tone,
-                sub: `${c.abandoned} of ${c.matches}`,
-              }))}
-            max={Math.max(30, ...summaries.map((c) => c.abandonedPct))}
-            unit="% abandoned"
-            onPick={(id) => pickComp(id)}
-          />
+        <div className="ml-stages">
+          {[...bench].reverse().map((b) => (
+            <div key={b.stage.key}>
+              <div className="pro-mini-title">
+                {b.stage.label} · top {b.players.length} of {b.of}
+              </div>
+              <RankBars
+                rows={b.players.map((r) => ({
+                  id: r.line.id,
+                  label: r.line.name,
+                  value: r.rating,
+                  text: r0(r.rating),
+                  tone: 'squad' as Tone,
+                  sub: `${r.line.team} · ${numbers(r.line, disc)}`,
+                }))}
+                refValue={100}
+                refLabel="stage median"
+              />
+            </div>
+          ))}
         </div>
-        <div className="pv-bar-sub">
-          {acrossComps.length.toLocaleString()} matches across competitions in this selection
-        </div>
+      </Figure>
+
+      <Figure
+        title="Where the players who went up stood below"
+        sub="Players found at two stages (same name), by percentile within each stage · the gold band is the top 10%"
+      >
+        {track.length ? (
+          <>
+            <PercentileTrack cols={trackCols} lines={track} />
+            <div className="pv-bar-sub">
+              Matched by name, so check each one. Below the step, these players sat between the{' '}
+              {Math.min(...track.map((t) => t.points[0]?.pct ?? 100))}th and{' '}
+              {Math.max(...track.map((t) => t.points[0]?.pct ?? 0))}th percentile of their stage.
+            </div>
+          </>
+        ) : (
+          <div className="ss-empty">
+            No player is in the files at two stages yet. Age-group players are not matched to senior
+            names (a shared name is almost always a different person).
+          </div>
+        )}
       </Figure>
     </>
   );
 }
 
-/* ── Teams ── */
+/* ── Improvers ── */
 
-function TeamsView({
-  ms,
-  club,
-  tracked,
+function Improvers({
+  bySeason,
+  squads,
+  disc,
+  gender,
+  format,
+  team,
+  pickTeam,
+  picked,
   pick,
 }: {
-  ms: PathMatch[];
-  club: string | null;
-  tracked: Tracked;
-  pick: (c: string | null) => void;
+  bySeason: Line[];
+  /** The franchises with whole seasons in the files; others are their opponents. */
+  squads: string[];
+  disc: Disc;
+  gender: Gender;
+  format: Format;
+  team: string;
+  pickTeam: (t: string) => void;
+  picked: string | null;
+  pick: (id: string | null) => void;
 }) {
-  const rows = useMemo(() => pipeline(ms).filter((p) => p.matches >= 3), [ms]);
-  const ages = AGES.filter((a) => ms.some((m) => m.age === a));
-  const top = rows.slice(0, 28);
-  const maxCell = Math.max(1, ...top.flatMap((p) => p.rungs.map((r) => r.played)));
-  const juniors = (p: PipelineRow) =>
-    p.rungs.filter((r) => AGES.indexOf(r.age) <= AGES.indexOf('U13'));
-  const seniors = (p: PipelineRow) =>
-    p.rungs.filter((r) => AGES.indexOf(r.age) > AGES.indexOf('U13'));
-  const winOf = (rs: PipelineRow['rungs']) => {
-    const played = rs.reduce((n, r) => n + r.played, 0);
-    return played >= 5 ? Math.round((rs.reduce((n, r) => n + r.won, 0) / played) * 100) : null;
-  };
-  const points: MapPt[] = rows
-    .map((p) => ({ p, jr: winOf(juniors(p)), sr: winOf(seniors(p)) }))
-    .filter((x): x is { p: PipelineRow; jr: number; sr: number } => x.jr !== null && x.sr !== null)
-    .map(({ p, jr, sr }) => ({
-      id: p.clubKey,
-      label: p.club,
-      sub: `${p.breadth} rungs · ${p.matches} matches`,
-      x: jr,
-      y: sr,
-      size: p.matches,
-      tone: tracked.has(p.clubKey) ? 'pool' : siteTone(p.site),
-      pin: tracked.has(p.clubKey),
-    }));
-  const sel = pipeline(ms).find((p) => p.clubKey === club) ?? null;
-  const breadth4 = rows.filter((p) => p.breadth >= 4).length;
-  return (
-    <>
-      {sel && <ClubCard p={sel} ms={ms} tracked={tracked} close={() => pick(null)} />}
-      <div className="kpi-strip sc-kpis">
-        <KPI label="Clubs & schools" num={rows.length} sub="with 3+ matches" />
-        <KPI label="Fielding 4+ age rungs" num={breadth4} sub="the ladder in one place" />
-        <KPI
-          label="Rungs per institution"
-          num={
-            rows.length ? (rows.reduce((n, p) => n + p.breadth, 0) / rows.length).toFixed(1) : '—'
-          }
-          sub="average"
-        />
-        <KPI
-          label="Reach the top tiers"
-          num={rows.filter((p) => TIER[p.topTier].rung >= TIER.presidents.rung).length}
-          sub="Presidents, Premier or representative"
-        />
-      </div>
-      <Figure
-        title="Who fields the ladder"
-        sub="Games played by each club or school at each age rung · the widest ladders first · tap a row for the institution"
-      >
-        <HeatGrid
-          label="Club or school"
-          rowLabel="Club or school"
-          rows={top.map((p) => ({
-            key: p.clubKey,
-            label: p.club,
-            sub: `${p.site === 'school' ? 'School' : 'Club'} · ${TIER[p.topTier].label}`,
-          }))}
-          cols={ages.map((a) => ({ key: a, label: a }))}
-          cell={(k, a) => {
-            const r = top.find((p) => p.clubKey === k)?.rungs.find((x) => x.age === a);
-            return r
-              ? {
-                  value: r.played,
-                  text: String(r.sides),
-                  tip: `${top.find((p) => p.clubKey === k)?.club} ${a}: ${r.sides} side${r.sides === 1 ? '' : 's'} · ${r.played} played · ${pct(r.winPct)} won`,
-                }
-              : null;
-          }}
-          max={maxCell}
-          onPick={(k) => pick(k)}
-        />
-        <div className="pv-bar-sub">
-          The number is how many sides; the shade is how much cricket.
-        </div>
-      </Figure>
-      <Figure
-        title="Juniors v seniors"
-        sub="Win rate up to U13 against win rate from U14 and the senior sides · strong juniors with weak seniors is where talent leaks out of the pathway"
-      >
-        {points.length < 3 ? (
-          <div className="ss-empty">
-            Not enough institutions with 5+ games at both ends of the ladder.
-          </div>
-        ) : (
-          <QuadrantMap
-            points={points}
-            xLabel="Junior win % (U9–U13)"
-            yLabel="Senior win % (U14 and up)"
-            refX={50}
-            refY={50}
-            quadrants={[
-              'Strong all the way up',
-              'Strong seniors, thin juniors',
-              'Strong juniors — watch the step up',
-              'Developing',
-            ]}
-            sizeLabel="matches"
-            onPick={(id) => pick(id)}
-            toneLabels={{ squad: 'Schools', third: 'Clubs', pool: 'Shortlisted' }}
-            shortLabels={false}
-          />
-        )}
-      </Figure>
-    </>
-  );
-}
-
-function ClubCard({
-  p,
-  ms,
-  tracked,
-  close,
-}: {
-  p: PipelineRow;
-  ms: PathMatch[];
-  tracked: Tracked;
-  close: () => void;
-}) {
-  const mine = useMemo(
-    () => ms.filter((m) => m.sides.some((s) => s.clubKey === p.clubKey)),
-    [ms, p],
-  );
-  const sides = useMemo(
+  const all = useMemo(
     () =>
-      ladder(mine)
-        .filter((r) => r.clubKey === p.clubKey)
-        .sort((a, b) => b.played - a.played),
-    [mine, p],
+      improvers(bySeason, disc, gender, format).filter(
+        (m) => !squads.length || squads.includes(m.team),
+      ),
+    [bySeason, disc, gender, format, squads],
   );
-  const whole = useMemo(() => ladder(mine, 'club').find((r) => r.key === p.clubKey), [mine, p]);
-  const rungBars = p.rungs
-    .filter((r) => r.played >= 2)
-    .map((r) => ({
-      id: r.age,
-      label: r.age,
-      value: r.winPct ?? 0,
-      tone: (r.winPct ?? 0) >= 50 ? ('squad' as Tone) : ('context' as Tone),
-      sub: `${r.played} played · ${r.sides} side${r.sides === 1 ? '' : 's'}`,
+  const teams = [...new Set(all.map((m) => m.team))].sort();
+  const moves = team === 'all' ? all : all.filter((m) => m.team === team);
+  const up = moves.filter((m) => m.delta >= 15);
+  const down = moves.filter((m) => m.delta <= -15);
+  const sel = moves.find((m) => m.id === picked) ?? null;
+  const risers = [...moves].sort((a, b) => b.delta - a.delta).slice(0, 12);
+  const pinned = new Set(risers.slice(0, 6).map((m) => m.id));
+  const points: MapPt[] = moves.map((m) => ({
+    id: m.id,
+    label: m.name,
+    sub: `${m.team} · ${m.from} → ${m.to}`,
+    x: Math.round(m.before.rating),
+    y: Math.round(m.after.rating),
+    size: m.after.line.balls + m.after.line.bBalls,
+    tone: m.delta >= 15 ? 'pool' : m.delta <= -15 ? 'risk' : 'context',
+    pin: pinned.has(m.id) || m.id === picked,
+    tip: [
+      `${m.from}: ${r0(m.before.rating)} (${m.before.pct}th percentile)`,
+      `${m.to}: ${r0(m.after.rating)} (${m.after.pct}th percentile)`,
+      `${m.delta >= 0 ? '+' : ''}${m.delta}`,
+    ],
+  }));
+  const dumb = (ms: Move[]) =>
+    ms.map((m) => ({
+      id: m.id,
+      label: m.name,
+      from: Math.round(m.before.rating),
+      to: Math.round(m.after.rating),
+      sub: `${m.team} · ${m.from} → ${m.to}`,
+      tag: `${m.delta >= 0 ? '+' : ''}${m.delta}`,
     }));
-  return (
-    <Figure
-      title={
-        <span className="pw-club-head">
-          <h3>{p.club}</h3>
-          <Pill tone={p.site === 'school' ? 'navy' : 'teal'}>
-            {p.site === 'school' ? 'School' : 'Club'}
-          </Pill>
-          {p.tiers.map((t) => (
-            <Pill key={t} tone="muted">
-              {TIER[t].label}
-            </Pill>
-          ))}
-          <TrackButton clubKey={p.clubKey} tracked={tracked} />
-        </span>
-      }
-      sub="Grouped by name — a side with an unusual name may be listed under its own entry"
-      aside={
-        <button type="button" className="pro-link" onClick={close}>
-          Close
-        </button>
-      }
-    >
-      <div className="pv-tiles">
-        <Tile label="Matches" value={p.matches} sub={`${p.rungs.length} age rungs`} />
-        <Tile label="Won" value={pct(p.winPct)} tone={(p.winPct ?? 0) >= 50 ? 'good' : 'bad'} />
-        <Tile label="Net run rate" value={signed(whole?.nrr)} sub="where overs were recorded" />
-        <Tile label="Highest tier" value={TIER[p.topTier].label} />
-      </div>
-      <div className="pw-grid-2">
-        <div>
-          <div className="pro-mini-title">Win rate by age rung</div>
-          <RankBars rows={rungBars} max={100} unit="%" refValue={50} refLabel="even" />
-        </div>
-        <div>
-          <div className="pro-mini-title">Season so far</div>
-          {whole && <MiniStrip r={whole} n={30} />}
-          <div className="pv-bar-sub">
-            Formats: {[...new Set(mine.map((m) => FORMAT_LABEL[m.format]))].join(', ')}
-          </div>
-        </div>
-      </div>
-      <div className="pro-mini-title">Sides</div>
-      <div className="tbl-w">
-        <table className="tbl pw-ladder" aria-label={`${p.club} sides`}>
-          <thead>
-            <tr>
-              <th>Side</th>
-              <th>Competition</th>
-              <th className="num">P</th>
-              <th className="num">W</th>
-              <th className="num">L</th>
-              <th className="num">Win %</th>
-              <th>Last 5</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sides.map((r) => (
-              <tr key={r.key}>
-                <td>
-                  <strong>{r.label}</strong>
-                </td>
-                <td>{[...new Set(r.results.map((x) => x.competition))].join(', ')}</td>
-                <td className="num">{r.played}</td>
-                <td className="num">{r.won}</td>
-                <td className="num">{r.lost}</td>
-                <td className="num">{pct(r.winPct)}</td>
-                <td>
-                  <MiniStrip r={r} n={5} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </Figure>
-  );
-}
-
-/* ── Shortlist ── */
-
-function ShortlistView({
-  ms,
-  tracked,
-  openClub,
-}: {
-  ms: PathMatch[];
-  tracked: Tracked;
-  openClub: (k: string) => void;
-}) {
-  const rows = useMemo(() => pipeline(ms), [ms]);
-  const byClub = useMemo(() => ladder(ms, 'club'), [ms]);
-  const list = tracked.keys
-    .map((k) => ({ p: rows.find((p) => p.clubKey === k), r: byClub.find((r) => r.key === k) }))
-    .filter((x): x is { p: PipelineRow; r: LadderRow | undefined } => !!x.p);
-  const vs = useMemo(() => venues(ms).slice(0, 10), [ms]);
-  if (!list.length)
+  if (!all.length)
     return (
-      <div className="card">
-        <div className="card-body">
-          <div className="ss-empty">
-            Nothing shortlisted yet. Shortlist a club or school from a ladder, a leaderboard or its
-            card, and it stays here (on this browser) with its season so far.
-          </div>
-        </div>
+      <div className="ss-empty">
+        No franchise players have two qualifying seasons of {format}{' '}
+        {disc === 'bat' ? 'batting' : 'bowling'} in the files.
       </div>
     );
   return (
     <>
-      <Figure
-        title="Shortlisted clubs and schools"
-        sub="Followed across the whole season, whatever the filters · gold on every map"
-      >
-        <div className="pw-cards">
-          {list.map(({ p, r }) => (
-            <div key={p.clubKey} className="pw-card">
-              <h4>
-                <button type="button" className="pro-link" onClick={() => openClub(p.clubKey)}>
-                  {p.club}
-                </button>
-              </h4>
-              <div className="pw-card-sub">
-                {p.site === 'school' ? 'School' : 'Club'} · {TIER[p.topTier].label} · {p.breadth}{' '}
-                age rung{p.breadth === 1 ? '' : 's'}
-              </div>
-              <div className="pw-card-stats">
-                <span>
-                  <b>{p.matches}</b>matches
-                </span>
-                <span>
-                  <b>{pct(p.winPct)}</b>won
-                </span>
-                <span>
-                  <b>{signed(r?.nrr)}</b>net run rate
-                </span>
-              </div>
-              {r && <MiniStrip r={r} n={15} />}
-              <div className="pv-bar-sub">
-                {p.rungs.map((x) => `${x.age} ${pct(x.winPct)}`).join(' · ')}
-              </div>
-              <div style={{ marginTop: 8 }}>
-                <TrackButton clubKey={p.clubKey} tracked={tracked} />
-              </div>
-            </div>
+      <div className="ml-bar">
+        <label className="field-label" htmlFor="ml-team">
+          Franchise
+        </label>
+        <select
+          id="ml-team"
+          className="field-select sc-select"
+          value={team}
+          onChange={(e) => pickTeam(e.target.value)}
+        >
+          <option value="all">All franchises</option>
+          {teams.map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
           ))}
-        </div>
-      </Figure>
+        </select>
+      </div>
+      <div className="kpi-strip sc-kpis">
+        <KPI
+          label="Players with two seasons"
+          num={moves.length}
+          sub={`${format} · rated each season`}
+        />
+        <KPI label="Improved by 15+" num={up.length} sub="rating points, season on season" />
+        <KPI label="Fell by 15+" num={down.length} />
+        <KPI
+          label="Biggest rise"
+          num={risers[0] ? `+${risers[0].delta}` : '—'}
+          sub={risers[0] ? `${risers[0].name} · ${risers[0].team}` : undefined}
+        />
+      </div>
       <Figure
-        title="Where to be"
-        sub="Grounds hosting the most cricket in the current selection · gold where representative cricket is played"
+        title="Season on season"
+        sub="Each player's rating last season (across) against this season (up), both against that season's franchise average (100) · above the diagonal = improved · gold = up 15+, red = down 15+ · squad players only (opponents appear only in their games against them)"
       >
-        {vs.length ? (
-          <RankBars
-            rows={vs.map((v) => ({
-              id: v.venue,
-              label: v.venue,
-              value: v.matches,
-              tone: v.top === 'representative' ? ('pool' as Tone) : ('squad' as Tone),
-              sub: TIER[v.top].label,
-            }))}
-            unit="matches"
-          />
-        ) : (
-          <div className="ss-empty">No venues recorded.</div>
-        )}
+        <QuadrantMap
+          points={points}
+          xLabel="Rating in the earlier season"
+          yLabel="Rating in the latest season"
+          diagonal
+          quadrants={[
+            'Above average both seasons',
+            'Risen above the average',
+            'Dropped below the average',
+            'Below average both seasons',
+          ]}
+          sizeLabel="balls"
+          toneLabels={{ pool: 'Improved 15+', risk: 'Fell 15+', context: 'Within 15' }}
+          onPick={(id) => pick(id)}
+        />
       </Figure>
+      {sel && (
+        <Figure
+          title={sel.name}
+          sub={`${sel.team} · ${format} · ${sel.from} → ${sel.to} · rating ${r0(sel.before.rating)} → ${r0(sel.after.rating)}`}
+          aside={
+            <button type="button" className="pro-link" onClick={() => pick(null)}>
+              Close
+            </button>
+          }
+        >
+          <PairBars
+            rows={METRICS[disc]
+              .map((m) => {
+                const a = m.value(sel.after.line);
+                const b = m.value(sel.before.line);
+                return a === null || b === null ? null : { label: m.label, ours: a, theirs: b };
+              })
+              .filter((x): x is { label: string; ours: number; theirs: number } => !!x)}
+            ours={sel.to}
+            theirs={sel.from}
+            fmt={(v) => (v >= 10 ? Math.round(v).toString() : v.toFixed(2))}
+          />
+          <div className="pv-bar-sub">
+            {sel.from}: {numbers(sel.before.line, disc)} (
+            {disc === 'bat' ? sel.before.line.balls : sel.before.line.bBalls} balls) · {sel.to}:{' '}
+            {numbers(sel.after.line, disc)} (
+            {disc === 'bat' ? sel.after.line.balls : sel.after.line.bBalls} balls)
+            {METRICS[disc].some((m) => m.better === 'low') ? ' · economy: lower is better' : ''}
+          </div>
+        </Figure>
+      )}
+      <div className="pw-grid-2">
+        <Figure
+          title="The biggest improvers"
+          sub="Rating last season → this season · tap for the detail"
+        >
+          <Dumbbell
+            rows={dumb(risers.filter((m) => m.delta > 0))}
+            fromLabel="Earlier season"
+            toLabel="Latest season"
+            onPick={(id) => pick(id)}
+            empty="Nobody improved in this selection."
+            hint="Hover a player for both seasons · tap for the detail"
+          />
+        </Figure>
+        <Figure title="The biggest drops" sub="Worth a conversation before selection">
+          <Dumbbell
+            rows={dumb(
+              [...moves]
+                .sort((a, b) => a.delta - b.delta)
+                .slice(0, 8)
+                .filter((m) => m.delta < 0),
+            )}
+            fromLabel="Earlier season"
+            toLabel="Latest season"
+            onPick={(id) => pick(id)}
+            empty="Nobody dropped in this selection."
+            hint="Hover a player for both seasons · tap for the detail"
+          />
+        </Figure>
+      </div>
     </>
   );
 }
+
+export type { Rated };

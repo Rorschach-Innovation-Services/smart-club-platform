@@ -1,14 +1,52 @@
-# Scouting → Pathways
+# Scouting → Schools and Pathways
 
 **Status:** prototype (October 2026), on `feature/pathways` (built on `feature/season-dashboards`).
 
-The third area of the Scouting page (`?view=pathways`): a union's amateur and school cricket as
-one pyramid, from its results export, with the professional franchise above it. No player names
-are in this data — the pathway story is about competitions, clubs and schools: where the pyramid
-is dense or thin, which competitions are competitive enough for a result to mean something,
-which institutions field sides all the way up the ladder, and how strong each side is.
+The Scouting page has four areas: Player scouting · **Schools** · Professional team ·
+**Pathways**.
 
-## What the staff see
+- **Schools** (`?view=schools`): school cricket from the union's results export, laid out like
+  Player scouting (`src/results-scouting.tsx` with `site="school"`).
+- **Pathways** (`?view=pathways`): developmental milestones from age-group cricket to the
+  franchises (`src/pathways-page.tsx`, `src/milestones.ts`), and underneath, the whole school
+  and club pyramid (the same results-scouting page, schools and clubs together).
+
+## Pathways → Milestones and Improvers
+
+There are **no dates of birth** in any source, so a _stage_ is a level of cricket, not an age:
+
+| Stage                                 | Source                                                    | Notes                                                      |
+| ------------------------------------- | --------------------------------------------------------- | ---------------------------------------------------------- |
+| U13 (and any age group with an event) | Age-group events (`src/scouting-local/*.ts`)              | Juniors qualify on half the senior sample (short innings). |
+| Senior club                           | Club and university matches                               | Drawn only with 8+ qualifying players.                     |
+| Scouted club                          | The national scouting report (`pool-*.ts`)                | Its _selection_ — the top of club cricket, not all of it.  |
+| Professional                          | The match library (franchise scorecards and ball by ball) | Everyone in those games, opponents included.               |
+
+Per stage, format (T20, One-Day, Multi-day) and gender:
+
+- **The bar at each stage** — strike rate, runs per innings, boundary balls %, economy, wickets
+  per 10 overs: 10th–90th percentile, middle half, median and the **top-10% mark (the
+  benchmark)**. "Place a player" marks a searched player on their stage's row.
+- **Outliers at every stage** — every player rated against their own stage (100 = the stage
+  median; rating = √ of the two core indices, shrunk on a small sample with the national
+  report's 30/60/120 and 24/48/96 balls). Gold = both core measures 15%+ above the stage.
+- **The benchmark players** — the top 10% of each stage (at least three).
+- **Where the players who went up stood below** — players found at two stages (same name),
+  by percentile within each stage. Age-group names are never matched to senior ones (a shared
+  name is almost always a different person; on the real files one U13 shares a franchise
+  player's name). In the real files four bowlers went from the scouted club group to a
+  franchise; below the step they sat at the 66th–76th percentile.
+- **Improvers** — franchise players rated within each season, latest season against the one
+  before: a season-on-season map (above the diagonal = improved; gold up 15+, red down 15+),
+  the biggest improvers and drops, and a player's measures season against season. Only the
+  squads with whole seasons in the files (Titans, Lions); opponents appear only in their games
+  against them.
+
+**Raw numbers are not compared across stages.** The opposition gets harder going up — franchise
+T20 batters strike more slowly than the report's club batters — so standing within a stage is
+what carries to the next one.
+
+## Schools, and Pathways → Pyramid & leagues
 
 Laid out like Player scouting — Overview · Matches · Leaderboards · Performance map · Teams ·
 Shortlist — with sides and institutions where that page has players. One filter bar over
@@ -62,16 +100,18 @@ chooses.
 
 ## Charts (`src/pathways-charts.tsx`)
 
-`Pyramid` (stacked tier bars, hollow apex), `HeatGrid`, `WeekColumns`, `Figure`; the rest reuse
+`Pyramid` (stacked tier bars, hollow apex), `HeatGrid`, `WeekColumns`, `Figure`, and for the milestones `MilestoneLadder` (the spread and top-10% mark per stage), `StageStrips` (every player rated within their stage) and `PercentileTrack` (standing stage by stage); the rest reuse
 `pro-charts` (`QuadrantMap` with `shortLabels={false}`, `RankBars`, `Tile`). Navy = schools,
 sky = clubs, gold = representative, grey = context.
 
 ## Tests
 
-| File                             | What it covers                                                                                                         |
-| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `src/pathways.test.ts`           | Reading every score, overs and result wording; tiers, ages, genders, formats; club naming; ladders; summaries; sample. |
-| `src/pathways-page.dom.test.tsx` | The five views on the sample; the filter bar narrowing them; a competition's ladder; a club card; results search.      |
+| File                                | What it covers                                                                                                                                |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/pathways.test.ts`              | Reading every score, overs and result wording; tiers, ages, genders, formats; club naming; ladders; summaries; sample.                        |
+| `src/results-scouting.dom.test.tsx` | The six views on the sample; the filter bar; a competition's ladder; leaderboards; a club card; the shortlist; Schools locked to schools.     |
+| `src/milestones.test.ts`            | Reading scorecards and pools into lines; quantiles; junior samples; ratings, outliers, benchmarks; improvers; matching players across stages. |
+| `src/pathways-page.dom.test.tsx`    | Milestones (stages, measures, formats, placing a player, girls and women), Improvers, the pyramid underneath.                                 |
 
 ## Open points
 

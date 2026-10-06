@@ -321,3 +321,363 @@ export function Figure({
     </div>
   );
 }
+
+/* ── Milestones: the spread of a measure at each stage of the pathway ── */
+
+export interface LadderStage {
+  key: string;
+  label: string;
+  sub?: string;
+  n: number;
+  q: { p10: number; p25: number; p50: number; p75: number; p90: number };
+  /** The top-10% mark (p90, or p10 where lower is better). */
+  benchmark: number;
+  /** A player to place on this stage's row. */
+  marker?: { value: number; label: string };
+}
+
+/**
+ * One row per stage, the top of the pathway first: 10th–90th percentile (line), the middle half
+ * (box), the median (tick) and the top-10% mark (gold diamond, labelled).
+ */
+export function MilestoneLadder({
+  stages,
+  better,
+  fmt,
+  unit,
+}: {
+  stages: LadderStage[];
+  better: 'high' | 'low';
+  fmt: (v: number) => string;
+  unit: string;
+}) {
+  const [hover, setHover] = useState<string | null>(null);
+  const [box, W] = useWidth(640);
+  const labelW = Math.min(170, Math.max(110, W * 0.24));
+  const pad = { r: 54, t: 18, b: 30 };
+  const rowH = 54;
+  const H = pad.t + stages.length * rowH + pad.b;
+  const vals = stages.flatMap((s) => [s.q.p10, s.q.p90, s.benchmark, s.marker?.value ?? s.q.p50]);
+  const lo0 = Math.min(...vals);
+  const hi0 = Math.max(...vals);
+  const span = hi0 - lo0 || 1;
+  const lo = Math.max(0, lo0 - span * 0.06);
+  const hi = hi0 + span * 0.06;
+  const sx = (v: number) => labelW + ((v - lo) / (hi - lo)) * (W - labelW - pad.r);
+  const ticks = (() => {
+    const raw = (hi - lo) / 5;
+    const mag = Math.pow(10, Math.floor(Math.log10(raw || 1)));
+    const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => (hi - lo) / s <= 6) ?? mag * 10;
+    const out: number[] = [];
+    for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) out.push(+v.toFixed(6));
+    return out;
+  })();
+  return (
+    <div className="pv-trend" ref={box}>
+      <div className="pv-legend" aria-hidden="true">
+        <span>
+          <i className="pv-key squad" />
+          Middle half of the stage
+        </span>
+        <span>
+          <i className="pv-key context" />
+          10th–90th percentile
+        </span>
+        <span>
+          <i className="pv-key pool" />
+          Top 10% mark — the benchmark
+        </span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`${unit} at each stage`}>
+        {ticks.map((v) => (
+          <g key={v}>
+            <line className="pv-grid" x1={sx(v)} x2={sx(v)} y1={pad.t - 6} y2={H - pad.b} />
+            <text className="pv-tick" x={sx(v)} y={H - pad.b + 16} textAnchor="middle">
+              {fmt(v)}
+            </text>
+          </g>
+        ))}
+        <text className="pv-axis" x={(labelW + W - pad.r) / 2} y={H - 2} textAnchor="middle">
+          {unit}
+          {better === 'low' ? ' (lower is better)' : ''}
+        </text>
+        {stages.map((s, i) => {
+          const y = pad.t + i * rowH + rowH / 2;
+          const below = stages[i + 1];
+          const change = below ? ((s.q.p50 - below.q.p50) / (below.q.p50 || 1)) * 100 : null;
+          const tip = `${s.label} · ${s.n} players · median ${fmt(s.q.p50)} · middle half ${fmt(s.q.p25)}–${fmt(s.q.p75)} · top 10% ${better === 'high' ? 'from' : 'at or under'} ${fmt(s.benchmark)}`;
+          return (
+            <g key={s.key} onMouseEnter={() => setHover(tip)} onMouseLeave={() => setHover(null)}>
+              <rect x={0} y={y - rowH / 2} width={W} height={rowH} fill="transparent" />
+              <text className="pv-label" x={labelW - 10} y={y - 2} textAnchor="end">
+                {s.label}
+              </text>
+              <text className="pv-tick" x={labelW - 10} y={y + 12} textAnchor="end">
+                {s.sub ?? `${s.n} players`}
+              </text>
+              <line className="ml-whisker" x1={sx(s.q.p10)} x2={sx(s.q.p90)} y1={y} y2={y} />
+              <rect
+                className="pv-fill squad"
+                x={sx(s.q.p25)}
+                y={y - 9}
+                width={Math.max(2, sx(s.q.p75) - sx(s.q.p25))}
+                height={18}
+                rx={4}
+              />
+              <line
+                className="ml-median"
+                x1={sx(s.q.p50)}
+                x2={sx(s.q.p50)}
+                y1={y - 12}
+                y2={y + 12}
+              />
+              <path className="ml-bench" d={`M${sx(s.benchmark)},${y - 8}l7,8l-7,8l-7,-8z`} />
+              <text className="pv-label" x={sx(s.benchmark)} y={y - 13} textAnchor="middle">
+                {fmt(s.benchmark)}
+              </text>
+              {s.marker && (
+                <g>
+                  <circle className="pv-dot risk" cx={sx(s.marker.value)} cy={y + 15} r={5} />
+                  <text className="pv-tick" x={sx(s.marker.value) + 8} y={y + 19}>
+                    {s.marker.label} {fmt(s.marker.value)}
+                  </text>
+                </g>
+              )}
+              {change !== null && (
+                <text className="pv-tick" x={W - pad.r + 6} y={y + 4}>
+                  {change >= 0 ? '+' : ''}
+                  {Math.round(change)}%
+                </text>
+              )}
+            </g>
+          );
+        })}
+      </svg>
+      <div className="pv-bar-sub">
+        {hover ??
+          'Right-hand figures: the median against the stage below · hover a stage for its numbers'}
+      </div>
+    </div>
+  );
+}
+
+export interface StripRow {
+  key: string;
+  label: string;
+  sub?: string;
+  points: { id: string; label: string; value: number; outlier: boolean; tip: string }[];
+}
+
+/** Every player at each stage as a dot on their rating (100 = their stage's median). */
+export function StageStrips({
+  rows,
+  onPick,
+  labelTop = 3,
+}: {
+  rows: StripRow[];
+  onPick?: (id: string) => void;
+  /** Name this many outliers per row. */
+  labelTop?: number;
+}) {
+  const [hover, setHover] = useState<string | null>(null);
+  const [box, W] = useWidth(640);
+  const labelW = Math.min(150, Math.max(100, W * 0.2));
+  const pad = { r: 16, t: 10, b: 30 };
+  const rowH = 70;
+  const H = pad.t + rows.length * rowH + pad.b;
+  const lo = 40;
+  const hi = 220;
+  const sx = (v: number) =>
+    labelW + ((Math.min(hi, Math.max(lo, v)) - lo) / (hi - lo)) * (W - labelW - pad.r);
+  return (
+    <div className="pv-trend" ref={box}>
+      <div className="pv-legend" aria-hidden="true">
+        <span>
+          <i className="pv-key pool" />
+          Outlier — both measures 15%+ above the stage
+        </span>
+        <span>
+          <i className="pv-key context" />
+          Everyone else
+        </span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Ratings at each stage">
+        {[50, 100, 150, 200].map((v) => (
+          <g key={v}>
+            <line
+              className={v === 100 ? 'pv-ref' : 'pv-grid'}
+              x1={sx(v)}
+              x2={sx(v)}
+              y1={pad.t}
+              y2={H - pad.b}
+            />
+            <text className="pv-tick" x={sx(v)} y={H - pad.b + 16} textAnchor="middle">
+              {v}
+            </text>
+          </g>
+        ))}
+        <text className="pv-axis" x={(labelW + W - pad.r) / 2} y={H - 2} textAnchor="middle">
+          Rating within the stage (100 = the stage median)
+        </text>
+        {rows.map((r, i) => {
+          const y0 = pad.t + i * rowH;
+          const named = new Set(
+            [...r.points]
+              .filter((p) => p.outlier)
+              .sort((a, b) => b.value - a.value)
+              .slice(0, labelTop)
+              .map((p) => p.id),
+          );
+          return (
+            <g key={r.key}>
+              <text className="pv-label" x={labelW - 10} y={y0 + rowH / 2} textAnchor="end">
+                {r.label}
+              </text>
+              {r.sub && (
+                <text className="pv-tick" x={labelW - 10} y={y0 + rowH / 2 + 14} textAnchor="end">
+                  {r.sub}
+                </text>
+              )}
+              {r.points.map((p, k) => {
+                // A fixed spread inside the row, so dots at one rating don't sit on each other.
+                const jitter = ((k * 37) % 23) / 22 - 0.5;
+                const cy = y0 + rowH / 2 + jitter * (rowH - 26);
+                const cx = sx(p.value);
+                return (
+                  <g
+                    key={p.id}
+                    className={onPick ? 'pw-pick' : ''}
+                    onMouseEnter={() => setHover(p.tip)}
+                    onMouseLeave={() => setHover(null)}
+                    onClick={() => onPick?.(p.id)}
+                  >
+                    <circle cx={cx} cy={cy} r={9} fill="transparent" />
+                    <circle
+                      className={`pv-dot ${p.outlier ? 'pool' : 'context'}`}
+                      cx={cx}
+                      cy={cy}
+                      r={p.outlier ? 5 : 3.5}
+                    />
+                    {named.has(p.id) && (
+                      <text
+                        className="pv-label"
+                        x={Math.min(cx + 7, W - pad.r - 4)}
+                        y={cy - 6}
+                        textAnchor={cx > W - 120 ? 'end' : 'start'}
+                      >
+                        {p.label}
+                      </text>
+                    )}
+                  </g>
+                );
+              })}
+            </g>
+          );
+        })}
+      </svg>
+      <div className="pv-bar-sub">
+        {hover ?? 'Hover a dot for the player · beyond 220 is drawn at the edge'}
+      </div>
+    </div>
+  );
+}
+
+export interface TrackLine {
+  id: string;
+  label: string;
+  /** Percentile within each stage, keyed by the stage's column. */
+  points: { col: string; pct: number; tip: string }[];
+}
+
+/** Percentile within each stage, stage by stage: where players who went up stood below. */
+export function PercentileTrack({
+  cols,
+  lines,
+}: {
+  cols: { key: string; label: string }[];
+  lines: TrackLine[];
+}) {
+  const [hover, setHover] = useState<string | null>(null);
+  const [box, W] = useWidth(640);
+  const H = 260;
+  const pad = { l: 40, r: 120, t: 14, b: 34 };
+  const step = (W - pad.l - pad.r) / Math.max(1, cols.length - 1);
+  const sx = (col: string) => pad.l + cols.findIndex((c) => c.key === col) * step;
+  const sy = (p: number) => pad.t + (1 - p / 100) * (H - pad.t - pad.b);
+  return (
+    <div className="pv-trend" ref={box}>
+      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Standing at each stage">
+        <rect
+          className="ml-band"
+          x={pad.l}
+          y={sy(100)}
+          width={W - pad.l - pad.r}
+          height={sy(90) - sy(100)}
+        />
+        <text className="pv-tick" x={W - pad.r + 6} y={sy(95) + 4}>
+          Top 10%
+        </text>
+        {[0, 25, 50, 75, 100].map((v) => (
+          <g key={v}>
+            <line
+              className={v === 50 ? 'pv-ref' : 'pv-grid'}
+              x1={pad.l}
+              x2={W - pad.r}
+              y1={sy(v)}
+              y2={sy(v)}
+            />
+            <text className="pv-tick" x={pad.l - 6} y={sy(v) + 4} textAnchor="end">
+              {v}
+            </text>
+          </g>
+        ))}
+        {cols.map((c) => (
+          <text
+            key={c.key}
+            className="pv-label"
+            x={sx(c.key)}
+            y={H - pad.b + 18}
+            textAnchor="middle"
+          >
+            {c.label}
+          </text>
+        ))}
+        {lines.map((l) => {
+          const pts = l.points.filter((p) => cols.some((c) => c.key === p.col));
+          const last = pts[pts.length - 1];
+          const on = hover === l.id;
+          return (
+            <g key={l.id} onMouseEnter={() => setHover(l.id)} onMouseLeave={() => setHover(null)}>
+              <path
+                className={`pv-tline ${on ? 'squad' : 'context'}`}
+                d={pts.map((p, k) => `${k ? 'L' : 'M'}${sx(p.col)},${sy(p.pct)}`).join('')}
+              />
+              {pts.map((p) => (
+                <circle
+                  key={p.col}
+                  className={`pv-dot ${on ? 'squad' : 'context'}`}
+                  cx={sx(p.col)}
+                  cy={sy(p.pct)}
+                  r={5}
+                />
+              ))}
+              {last && (
+                <text className="pv-label" x={sx(last.col) + 8} y={sy(last.pct) + 4}>
+                  {l.label}
+                </text>
+              )}
+            </g>
+          );
+        })}
+      </svg>
+      <div className="pv-bar-sub">
+        {(() => {
+          const l = lines.find((x) => x.id === hover);
+          return l
+            ? `${l.label}: ${l.points.map((p) => p.tip).join(' → ')}`
+            : 'Percentile within each stage (100 = best) · hover a line for the player';
+        })()}
+      </div>
+    </div>
+  );
+}

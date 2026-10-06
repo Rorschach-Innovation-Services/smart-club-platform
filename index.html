@@ -6610,6 +6610,17 @@
   .pw-results td{vertical-align:top}
   .pw-results .pw-score{white-space:nowrap;font-variant-numeric:tabular-nums}
   .pw-more{margin-top:10px}
+  .ml-whisker{stroke:var(--viz-context);stroke-width:6;stroke-linecap:round}
+  .ml-median{stroke:var(--ink);stroke-width:2.5}
+  .ml-bench{fill:var(--viz-pool);stroke:#fff;stroke-width:1.5}
+  .ml-band{fill:var(--viz-pool);opacity:.14}
+  .pw-pick{cursor:pointer}
+  .ml-bar{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;margin:0 0 14px}
+  .ml-seg{display:inline-flex;gap:2px;padding:3px;background:var(--paper2);border-radius:10px}
+  .ml-seg button{font:inherit;font-size:13px;font-weight:700;color:var(--muted);background:none;border:0;border-radius:8px;padding:6px 12px;cursor:pointer}
+  .ml-seg button.on{background:var(--white);color:var(--ink);box-shadow:0 1px 2px rgba(10,15,20,.08)}
+  .ml-note{font-size:12.5px;color:var(--muted);margin:0 0 12px;max-width:900px}
+  .ml-stages{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
   .pw-track{font:inherit;font-size:12px;font-weight:700;border:1px solid var(--line2);background:var(--white);border-radius:999px;padding:4px 10px;cursor:pointer;color:var(--ink)}
   .pw-track.on{background:var(--viz-pool);border-color:var(--viz-pool);color:var(--ink)}
   .pw-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
