@@ -9387,4 +9387,97 @@ app.onError((err, c) => {
 // returns a 500 response, so route errors never propagate out to wrapHandler.
 export const handler = Sentry.wrapHandler(handle(app));
 // Exported so the local dev server (src/local/server.ts) can serve the same app.
+
+/* ─── Platform match library (professional scorecards and ball-by-ball) ───
+ * The operator uploads; every union's admins read. Files are read and checked in the browser
+ * (src/match-import.ts: format detection, scorecard ↔ ball-by-ball pairing, duplicates and
+ * conflicts) and arrive here as standard matches; this layer re-checks the shape and size and
+ * stores one item per match. */
+
+const PRO_KEY_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}_[a-z0-9-]{1,100}_(men|women)(_[0-9]{1,2})?$/;
+const PRO_FORMATS = new Set(['T20', 'One-Day', 'Multi-day']);
+
+function storedProMatch(raw: unknown, by: string): repo.StoredProMatch {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+    throw new HttpError(400, 'each match must be an object');
+  const m = raw as Record<string, unknown>;
+  const str = (k: string) => (typeof m[k] === 'string' ? (m[k] as string) : '');
+  const key = str('key');
+  if (!PRO_KEY_RE.test(key))
+    throw new HttpError(400, `invalid match key "${key.slice(0, 60)}"`, { code: 'invalid_key' });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(str('date')) || !key.startsWith(str('date')))
+    throw new HttpError(400, `${key}: date missing or not the key's date`);
+  if (!str('home') || !str('away')) throw new HttpError(400, `${key}: both teams are required`);
+  if (!['men', 'women'].includes(str('gender')))
+    throw new HttpError(400, `${key}: gender must be men or women`);
+  if (!PRO_FORMATS.has(str('format')))
+    throw new HttpError(400, `${key}: format must be T20, One-Day or Multi-day`);
+  if (!Array.isArray(m.innings) || m.innings.length === 0 || m.innings.length > 4)
+    throw new HttpError(400, `${key}: one to four innings`);
+  const sources = Array.isArray(m.sources)
+    ? (m.sources as unknown[])
+        .filter((x): x is { kind: string; name: string } => !!x && typeof x === 'object')
+        .map((x) => ({ kind: String(x.kind).slice(0, 20), name: String(x.name).slice(0, 200) }))
+    : [];
+  const json = JSON.stringify(m);
+  if (Buffer.byteLength(json) > repo.PRO_MATCH_MAX_BYTES)
+    throw new HttpError(
+      413,
+      `${key}: too large to store (${Math.round(Buffer.byteLength(json) / 1000)} KB)`,
+      {
+        code: 'too_large',
+      },
+    );
+  return {
+    key,
+    date: str('date'),
+    home: str('home').slice(0, 120),
+    away: str('away').slice(0, 120),
+    gender: str('gender'),
+    format: str('format'),
+    competition: str('competition').slice(0, 160) || undefined,
+    hasBalls: m.hasBalls === true,
+    sources,
+    updatedAt: new Date().toISOString(),
+    updatedBy: by,
+    json,
+  };
+}
+
+const pageOfMatches = async (cursor?: string) => {
+  const { items, next } = await repo.listProMatches(cursor);
+  return { matches: items.map((i) => JSON.parse(i.json)), next };
+};
+
+/** Union admins read the library a page at a time (full matches, ball-by-ball included). */
+app.get('/admin/pro/matches', async (c) =>
+  c.json(await pageOfMatches(c.req.query('cursor') || undefined)),
+);
+
+/** The operator's view: full pages, or ?summary=1 for every match's summary line. */
+app.get('/platform/pro/matches', async (c) => {
+  if (c.req.query('summary')) return c.json({ summaries: await repo.listProMatchSummaries() });
+  return c.json(await pageOfMatches(c.req.query('cursor') || undefined));
+});
+
+/** Save up to 25 standard matches (new, or replacing the same key). */
+app.post('/platform/pro/matches', async (c) => {
+  // Operator routes carry the signed-in user as `auth` (no tenant membership).
+  const who = c.get('auth');
+  const body = (await c.req.json().catch(() => null)) as { matches?: unknown } | null;
+  const list = Array.isArray(body?.matches) ? body!.matches : null;
+  if (!list || list.length === 0) throw new HttpError(400, 'send { matches: [...] }');
+  if (list.length > 25) throw new HttpError(400, 'at most 25 matches per request');
+  const stored = list.map((m) => storedProMatch(m, who?.email ?? 'operator'));
+  for (const m of stored) await repo.putProMatch(m);
+  return c.json({ saved: stored.map((m) => m.key) });
+});
+
+app.delete('/platform/pro/matches/:key', async (c) => {
+  const key = c.req.param('key');
+  if (!PRO_KEY_RE.test(key)) throw new HttpError(400, 'invalid match key');
+  await repo.deleteProMatch(key);
+  return c.json({ deleted: key });
+});
+
 export { app };

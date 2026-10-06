@@ -7,7 +7,8 @@ import { useMemo, useState } from 'react';
 import { useQueries, useQuery } from '@tanstack/react-query';
 import * as api from './api';
 import { qk } from './query';
-import { PRO_MATCHES, SCOUT_POOLS } from './pro-data';
+import { SCOUT_POOLS } from './pro-data';
+import { useAllProMatches } from './pro-library';
 import { SCOUTING_EVENTS } from './scouting-data';
 import {
   ACTIVE_MISSED,
@@ -91,15 +92,16 @@ export function ExitsView({
     [clearQ.data],
   );
   const registerFailed = clubsQ.isError || playersQ.some((r) => r.isError);
+  const all = useAllProMatches();
   const report = useMemo(
     () =>
-      exitReport(squad, PRO_MATCHES, {
+      exitReport(squad, all, {
         pools: SCOUT_POOLS,
         events: SCOUTING_EVENTS,
         register,
         clearances,
       }),
-    [squad, register, clearances],
+    [squad, all, register, clearances],
   );
   const { rows, flow, seasons, asOf } = report;
   const gone = rows.filter((r) => r.status !== 'active');

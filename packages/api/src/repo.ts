@@ -75,6 +75,8 @@ import {
   captainReportsListKey,
   captainReportGsi1,
   captainReportsListGsi1pk,
+  PRO_MATCH_PK,
+  proMatchKey,
 } from './keys.js';
 import { PLATFORM_TENANT } from './types.js';
 import type {
@@ -5626,4 +5628,72 @@ export async function eraseClubData(
     series,
     seriesFailed,
   };
+}
+
+// ── Platform match library ──
+
+/** A library match as stored: summary fields for listing, the standard match as JSON. */
+export interface StoredProMatch {
+  key: string;
+  date: string;
+  home: string;
+  away: string;
+  gender: string;
+  format: string;
+  competition?: string;
+  hasBalls: boolean;
+  sources: { kind: string; name: string }[];
+  updatedAt: string;
+  updatedBy: string;
+  /** The standard match (src/match-import.ts), JSON. */
+  json: string;
+}
+
+/** DynamoDB's item limit is 400 KB; leave room for the summary fields and keys. */
+export const PRO_MATCH_MAX_BYTES = 380_000;
+
+/** A page of the library, oldest first; `next` continues it. */
+export async function listProMatches(
+  cursor?: string,
+  limit = 15,
+): Promise<{ items: StoredProMatch[]; next?: string }> {
+  const startKey = cursor
+    ? JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
+    : undefined;
+  const res = await ddb.send(
+    new QueryCommand({
+      TableName: TABLE,
+      KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+      ExpressionAttributeValues: { ':p': PRO_MATCH_PK, ':s': 'PROMATCH#' },
+      Limit: limit,
+      ExclusiveStartKey: startKey,
+    }),
+  );
+  return {
+    items: (res.Items ?? []).map((i) => stripKeys<StoredProMatch>(i)!),
+    next: res.LastEvaluatedKey
+      ? Buffer.from(JSON.stringify(res.LastEvaluatedKey)).toString('base64url')
+      : undefined,
+  };
+}
+
+/** Every key in the library with its summary (no match bodies) — for the operator's list. */
+export async function listProMatchSummaries(): Promise<Omit<StoredProMatch, 'json'>[]> {
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': PRO_MATCH_PK, ':s': 'PROMATCH#' },
+    ProjectionExpression:
+      '#k, #d, home, away, gender, #f, competition, hasBalls, sources, updatedAt, updatedBy',
+    ExpressionAttributeNames: { '#k': 'key', '#d': 'date', '#f': 'format' },
+  });
+  return items as Omit<StoredProMatch, 'json'>[];
+}
+
+export async function putProMatch(m: StoredProMatch): Promise<void> {
+  await ddb.send(new PutCommand({ TableName: TABLE, Item: { ...proMatchKey(m.key), ...m } }));
+}
+
+export async function deleteProMatch(key: string): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: TABLE, Key: proMatchKey(key) }));
 }

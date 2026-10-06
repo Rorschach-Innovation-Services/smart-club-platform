@@ -1,10 +1,13 @@
 /**
- * Where the professional-team data comes from. The franchise's scorecard CSVs and the scouting
- * pools are confidential and live in src/scouting-local/ (git-ignored): scorecards as the
- * export's own CSV files in scouting-local/pro/, pools as scouting-local/pool-*.ts. With none
- * present (CI, deploys, a fresh clone) the invented sample is used.
+ * Where the professional-team data comes from when the platform's match library is empty. The
+ * franchise's exports and the scouting pools are confidential and live in src/scouting-local/
+ * (git-ignored): scorecards and ball-by-ball as the exports' own CSV files in
+ * scouting-local/pro/ (read and paired exactly as an upload would be, src/match-import.ts),
+ * pools as scouting-local/pool-*.ts. With none present (CI, deploys, a fresh clone) the
+ * invented sample is used.
  */
-import { parseScorecards, type ProMatch } from './pro-scorecards';
+import { planImport, readFile } from './match-import';
+import type { ProMatch } from './pro-scorecards';
 import { SAMPLE_POOL, SAMPLE_PRO_MATCHES } from './pro-sample';
 import type { ScoutPool } from './scout-pool';
 
@@ -13,9 +16,10 @@ const csvFiles = import.meta.glob<string>('./scouting-local/pro/*.csv', {
   import: 'default',
   eager: true,
 });
-const localMatches = parseScorecards(
-  Object.entries(csvFiles).map(([path, text]) => ({ name: path.split('/').pop() ?? path, text })),
-);
+const localMatches: ProMatch[] = planImport(
+  [],
+  Object.entries(csvFiles).map(([path, text]) => readFile(path.split('/').pop() ?? path, text)),
+).save.sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
 
 const poolFiles = import.meta.glob<{ default: ScoutPool }>(
   ['./scouting-local/pool-*.ts', '!./scouting-local/*.test.ts'],

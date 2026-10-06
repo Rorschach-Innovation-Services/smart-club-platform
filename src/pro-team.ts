@@ -788,6 +788,63 @@ export function wicketsByPhase(squad: Squad, ms: ProMatch[], format: ProFormat) 
   }));
 }
 
+export interface PhaseRates {
+  /** Runs per over. */
+  rate: number;
+  /** Share of legal balls nothing was scored off, %. */
+  dot: number;
+  /** Share of legal balls hit for 4 or 6, %. */
+  boundary: number;
+  /** Wickets per innings. */
+  wkts: number;
+  balls: number;
+}
+
+/**
+ * Scoring by phase from the deliveries (ball-by-ball innings only): our batting and theirs
+ * (what we conceded). `innings` says how many innings it rests on, so a thin sample shows.
+ */
+export function scoringByPhase(squad: Squad, ms: ProMatch[], format: ProFormat) {
+  const phases = PHASES[format];
+  const blank = () => phases.map(() => ({ runs: 0, legal: 0, dots: 0, bnd: 0, wkts: 0 }));
+  const acc = { ours: blank(), theirs: blank() };
+  const innings = { ours: 0, theirs: 0 };
+  for (const m of ms.filter((x) => x.format === format))
+    for (const inn of m.innings ?? []) {
+      if (!inn.balls?.length) continue;
+      const side = isUs(squad, inn.bat) ? 'ours' : 'theirs';
+      innings[side]++;
+      for (const [over, , , , bat, extra, extraRuns, wicket] of inn.balls) {
+        const i = phases.findIndex((p) => over >= p.from && over <= p.to);
+        if (i < 0) continue;
+        const a = acc[side][i];
+        const legal = extra !== 'wd' && extra !== 'nb';
+        a.runs += bat + extraRuns;
+        a.wkts += wicket;
+        if (!legal) continue;
+        a.legal++;
+        if (bat + extraRuns === 0) a.dots++;
+        if (bat === 4 || bat === 6) a.bnd++;
+      }
+    }
+  const rates = (side: 'ours' | 'theirs') =>
+    acc[side].map(
+      (a): PhaseRates => ({
+        rate: a.legal ? (a.runs / a.legal) * 6 : 0,
+        dot: a.legal ? (a.dots / a.legal) * 100 : 0,
+        boundary: a.legal ? (a.bnd / a.legal) * 100 : 0,
+        wkts: innings[side] ? a.wkts / innings[side] : 0,
+        balls: a.legal,
+      }),
+    );
+  const ours = rates('ours');
+  const theirs = rates('theirs');
+  return {
+    innings,
+    rows: phases.map((p, i) => ({ phase: p.label, ours: ours[i], theirs: theirs[i] })),
+  };
+}
+
 /** Our innings and theirs, split, for the team-level comparisons. */
 export function inningsSplit(squad: Squad, ms: ProMatch[]) {
   const ours: ScoutInnings[] = [];

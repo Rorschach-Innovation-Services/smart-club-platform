@@ -7,7 +7,8 @@
 import { useMemo, useState, type CSSProperties } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Icon, Pill } from './atoms';
-import { PRO_IS_SAMPLE, PRO_MATCHES, SCOUT_POOLS } from './pro-data';
+import { SCOUT_POOLS } from './pro-data';
+import { ProMatchesProvider, useAllProMatches, useProMatches, type ProData } from './pro-library';
 import {
   PRO_FORMATS,
   oversToBalls,
@@ -26,6 +27,7 @@ import {
   teamComparisons,
   teamSummary,
   wicketsByPhase,
+  scoringByPhase,
   RECENT,
   batSplits,
   bowlSplits,
@@ -281,8 +283,25 @@ function watchedCandidates(keys: string[]): Candidate[] {
 /* ── The page ── */
 
 export function ProTeamPage() {
+  const data = useProMatches();
+  if (data.loading) return <div className="ss-empty">Loading the match library…</div>;
+  return (
+    <ProMatchesProvider value={data.matches}>
+      <ProTeamView data={data} />
+    </ProMatchesProvider>
+  );
+}
+
+const SOURCE_NOTE: Record<ProData['source'], string> = {
+  library: 'Match library',
+  local: 'Local files',
+  sample: 'Sample data · invented names',
+};
+
+function ProTeamView({ data }: { data: ProData }) {
+  const all = data.matches;
   const [params, setParams] = useSearchParams();
-  const squads = useMemo(() => detectSquads(PRO_MATCHES), []);
+  const squads = useMemo(() => detectSquads(all), [all]);
   const gender = (params.get('squad') as Squad['gender']) || squads[0]?.gender || 'men';
   const squad = squads.find((s) => s.gender === gender) ?? squads[0];
   const tab = (params.get('ptab') as ProTab) || 'selection';
@@ -302,15 +321,15 @@ export function ProTeamPage() {
   const watch = useWatchlist();
 
   const players = useMemo(
-    () => (squad ? squadPlayers(squad, filter, PRO_MATCHES) : []),
+    () => (squad ? squadPlayers(squad, filter, all) : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [squad, format, season],
   );
   const ms = useMemo(() => (squad ? filterMatches(squad, filter) : []), [squad, format, season]); // eslint-disable-line react-hooks/exhaustive-deps
   // Season on season in the chosen format (the season filter doesn't narrow this).
   const slices = useMemo(
-    () => (squad ? seasonSlices(squad, format, PRO_MATCHES) : []),
-    [squad, format],
+    () => (squad ? seasonSlices(squad, format, all) : []),
+    [squad, format, all],
   );
   const candidates = useMemo(
     () => (squad ? [...watchedCandidates(watch.keys), ...poolCandidates(squad.gender)] : []),
@@ -320,7 +339,7 @@ export function ProTeamPage() {
   if (!squad) return <div className="ss-empty">No professional-team scorecards yet.</div>;
   const openPlayer = players.find((p) => p.name === open) ?? null;
   const openMatch = squad.matches.find((m) => m.id === params.get('pmatch')) ?? null;
-  const genderBases = baselines(PRO_MATCHES.filter((m) => m.gender === squad.gender));
+  const genderBases = baselines(all.filter((m) => m.gender === squad.gender));
   const seasons = seasonsOf(squad.matches);
 
   return (
@@ -370,7 +389,10 @@ export function ProTeamPage() {
         </div>
       </div>
       <div className="pro-note">
-        {PRO_IS_SAMPLE && <Pill tone="muted">Sample data · invented names</Pill>}
+        <Pill tone="muted">
+          {SOURCE_NOTE[data.source]} · {data.matches.length} matches
+          {data.withBalls ? `, ${data.withBalls} ball by ball` : ''}
+        </Pill>
         <span>
           {ms.length} matches · from scorecards (batting, bowling, fall of wickets). No ball-by-ball
           in these files, so phases come from when wickets fell; every rating is 100 = the average
@@ -1002,9 +1024,10 @@ function FormView({
   const [q, setQ] = useState('');
   const [suggest, setSuggest] = useState(false);
   // Averages from this squad's gender only: a women's T20 is rated against women's T20.
+  const all = useAllProMatches();
   const bases = useMemo(
-    () => baselines(PRO_MATCHES.filter((m) => m.gender === squad.gender)),
-    [squad.gender],
+    () => baselines(all.filter((m) => m.gender === squad.gender)),
+    [all, squad.gender],
   );
   const needle = q.trim().toLowerCase();
   const matches = needle ? players.filter((p) => p.name.toLowerCase().includes(needle)) : [];
@@ -2190,6 +2213,8 @@ function TeamView({
         </div>
       </div>
 
+      <PhaseScoring squad={squad} ms={ms} fmts={fmts} />
+
       <div className="sc-two">
         <div className="card">
           <div className="card-head">
@@ -3061,9 +3086,10 @@ function ProPlayerPanel({
   format: ProFormat | 'all';
   onClose: () => void;
 }) {
+  const all = useAllProMatches();
   const bases = useMemo(
-    () => baselines(PRO_MATCHES.filter((m) => m.gender === squad.gender)),
-    [squad.gender],
+    () => baselines(all.filter((m) => m.gender === squad.gender)),
+    [all, squad.gender],
   );
   const kinds = DISMISSAL_KINDS;
   const entry = p.bat.lines.filter((l) => l.pos >= 3);
@@ -3209,6 +3235,63 @@ function ProPlayerPanel({
           )}
         </div>
       </aside>
+    </div>
+  );
+}
+
+/** Run rate, dot balls and boundaries by phase, from the ball-by-ball innings. */
+function PhaseScoring({ squad, ms, fmts }: { squad: Squad; ms: ProMatch[]; fmts: ProFormat[] }) {
+  const blocks = fmts
+    .map((f) => ({ f, ...scoringByPhase(squad, ms, f) }))
+    .filter((b) => b.innings.ours + b.innings.theirs > 0);
+  const measures = [
+    { key: 'rate', label: 'Run rate', fmt: (v: number) => v.toFixed(1) },
+    { key: 'dot', label: 'Dot balls %', fmt: (v: number) => `${Math.round(v)}%` },
+    { key: 'boundary', label: 'Boundary balls %', fmt: (v: number) => `${Math.round(v)}%` },
+  ] as const;
+  return (
+    <div className="card">
+      <div className="card-head">
+        <div>
+          <div className="card-title">Scoring by phase</div>
+          <div className="card-sub">
+            From the ball by ball · our batting v the opposition&rsquo;s batting against us
+          </div>
+        </div>
+      </div>
+      <div className="card-body">
+        {!blocks.length ? (
+          <div className="ss-empty">
+            No ball-by-ball for these matches yet — upload it to the match library.
+          </div>
+        ) : (
+          blocks.map((b) => (
+            <div key={b.f} className="pro-phase-block">
+              <div className="pro-mini-title">
+                {b.f} · {b.innings.ours} of our innings, {b.innings.theirs} of theirs
+              </div>
+              <div className="pro-phase-grid">
+                {measures.map((m) => (
+                  <div key={m.key}>
+                    <div className="pro-mini-sub">{m.label}</div>
+                    <PairBars
+                      rows={b.rows.map((r) => ({
+                        label: r.phase,
+                        ours: r.ours[m.key],
+                        theirs: r.theirs[m.key],
+                      }))}
+                      ours={shortTeam(squad.name)}
+                      theirs="Opponents"
+                      fmt={m.fmt}
+                      shared
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
     </div>
   );
 }

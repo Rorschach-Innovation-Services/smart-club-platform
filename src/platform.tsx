@@ -6,8 +6,8 @@
  * (isOperator in routing.ts, mirroring requirePlatformOperator on the API).
  * Three screens: client list → per-client settings (identity, branding, copy,
  * color tokens, feature flags, districts, league catalogue, deadline, admins,
- * setup hand-off) → a create-client wizard. All writes go through the
- * /platform/* client in api.ts.
+ * setup hand-off) → a create-client wizard; plus the professional match library
+ * (platform-match-library.tsx). All writes go through the /platform/* client in api.ts.
  */
 import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
@@ -38,6 +38,7 @@ import { StructureIntakeWizard } from './platform-structure-intake';
 import { RosterIntakeWizard } from './platform-roster-intake';
 import { RepsPage } from './platform-reps';
 import { OnboardingPage, buildOnboardingSteps } from './platform-onboarding';
+import { MatchLibraryPage } from './platform-match-library';
 import type {
   TenantConfig,
   TenantSummary,
@@ -460,6 +461,15 @@ export function PlatformPortal({
               </span>
               <span className="ni-label">New client</span>
             </button>
+            <button
+              className={`nav-item ${path === '/platform/matches' ? 'active' : ''}`}
+              onClick={() => navigate('/platform/matches')}
+            >
+              <span className="ni-icon">
+                <Icon.Chart />
+              </span>
+              <span className="ni-label">Match library</span>
+            </button>
 
             {hasTenantConsole && (
               <>
@@ -490,6 +500,7 @@ export function PlatformPortal({
             <Routes>
               <Route path="/platform" element={<TenantListPage />} />
               <Route path="/platform/new" element={<CreateTenantWizard toast={toastShow} />} />
+              <Route path="/platform/matches" element={<MatchLibraryPage toast={toastShow} />} />
               <Route
                 path="/platform/tenants/:slug"
                 element={<TenantEditPage toast={toastShow} />}

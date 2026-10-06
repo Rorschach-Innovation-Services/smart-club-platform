@@ -1,9 +1,10 @@
 /* ─── Professional team → one match in depth ───
  *
- * Built from what the scorecard records: the score at every wicket (so the worm runs through
- * real points, straight between wickets), partnerships, how each batter used the balls they
- * faced, every bowler's figures, the standouts and the full scorecards. No ball-by-ball, so
- * nothing here is invented between wickets.
+ * Built from what the records hold. With the ball by ball: the score after every over and at
+ * every wicket, and the runs in each over. From the scorecard alone: the score at every wicket
+ * (the worm runs straight between wickets — nothing is invented in between). Either way:
+ * partnerships, how each batter used the balls they faced, every bowler's figures, the
+ * standouts and the full scorecards.
  */
 import { useState } from 'react';
 import { partnerships } from './scouting';
@@ -13,6 +14,7 @@ import { isUs, type Baseline, type Squad } from './pro-team';
 import type { ProFormat } from './pro-scorecards';
 import {
   BallUseBars,
+  barPath,
   Legend,
   PairBars,
   RankBars,
@@ -33,11 +35,33 @@ const fmtDay = (d: string) =>
   });
 const ordinalInn = (n: number) => ['1st', '2nd', '3rd', '4th'][n] ?? `${n + 1}th`;
 
+type WormPt = { over: number; runs: number; wkt: number | null; batter?: string };
+
+/** With the deliveries: the score after every over and at every wicket. */
+function wormFromBalls(inn: ScoutInnings): WormPt[] {
+  const pts: WormPt[] = [{ over: 0, runs: 0, wkt: null }];
+  let runs = 0;
+  let legal = 0;
+  let wkts = 0;
+  let over = 0;
+  for (const [o, , , , bat, extra, extraRuns, wicket] of inn.balls ?? []) {
+    if (o !== over && legal) pts.push({ over: legal / 6, runs, wkt: null });
+    over = o;
+    runs += bat + extraRuns;
+    if (extra !== 'wd' && extra !== 'nb') legal++;
+    if (wicket) {
+      wkts++;
+      pts.push({ over: legal / 6, runs, wkt: wkts, batter: inn.fow[wkts - 1]?.batter });
+    }
+  }
+  pts.push({ over: legal / 6, runs, wkt: null });
+  return pts;
+}
+
 /** The score at each wicket and at the close, as (over, runs) points. */
-function wormPoints(inn: ScoutInnings) {
-  const pts: { over: number; runs: number; wkt: number | null; batter?: string }[] = [
-    { over: 0, runs: 0, wkt: null },
-  ];
+function wormPoints(inn: ScoutInnings): WormPt[] {
+  if (inn.balls?.length) return wormFromBalls(inn);
+  const pts: WormPt[] = [{ over: 0, runs: 0, wkt: null }];
   inn.fow.forEach((f) =>
     pts.push({ over: oversToBalls(f.over) / 6, runs: f.score, wkt: f.wkt, batter: f.batter }),
   );
@@ -122,7 +146,7 @@ function WicketWorm({ squad, innings }: { squad: Squad; innings: ScoutInnings[] 
                   x={Math.min(sx(last.over) + 6, W - pad.r - 40)}
                   y={sy(last.runs) - 6}
                 >
-                  {s.inn.total}
+                  {last.runs}
                   {s.inn.wkts < 10 ? `/${s.inn.wkts}` : ''}
                 </text>
               );
@@ -132,7 +156,9 @@ function WicketWorm({ squad, innings }: { squad: Squad; innings: ScoutInnings[] 
       </svg>
       <div className="pv-bar-sub">
         {hover ??
-          'Each dot is a wicket · the line runs straight between wickets (the scorecard records the score only when a wicket falls)'}
+          (innings.every((i) => i.balls?.length)
+            ? 'Each dot is a wicket · the line is the score after every over'
+            : 'Each dot is a wicket · the line runs straight between wickets (the scorecard records the score only when a wicket falls)')}
       </div>
     </div>
   );
@@ -265,6 +291,91 @@ function InningsCard({
   );
 }
 
+/** Runs in each over, innings side by side; a mark over the bar for each wicket. */
+function RunsPerOver({ squad, innings }: { squad: Squad; innings: ScoutInnings[] }) {
+  const [hover, setHover] = useState<string | null>(null);
+  const [box, W] = useWidth(640);
+  const H = 220;
+  const pad = { l: 34, r: 10, t: 16, b: 30 };
+  const series = innings.map((inn, i) => ({
+    inn,
+    i,
+    tone: (isUs(squad, inn.bat) ? 'squad' : 'context') as Tone,
+  }));
+  const overs = Math.max(1, ...innings.flatMap((i) => i.perOver.map(([o]) => o)));
+  const maxR = Math.max(6, ...innings.flatMap((i) => i.perOver.map(([, r]) => r)));
+  const slot = (W - pad.l - pad.r) / overs;
+  const gap = Math.min(2, slot * 0.15);
+  const bw = Math.max(1, (slot - gap * (series.length + 1)) / series.length);
+  const sy = (r: number) => H - pad.b - (r / (maxR * 1.1)) * (H - pad.t - pad.b);
+  const step = maxR <= 12 ? 4 : maxR <= 24 ? 6 : 10;
+  const oStep = overs <= 20 ? 5 : 10;
+  return (
+    <div className="pv-trend" ref={box}>
+      <Legend
+        items={series.map((s) => ({ tone: s.tone, label: `${shortTeam(s.inn.bat)} innings` }))}
+      />
+      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Runs in each over">
+        {Array.from({ length: Math.floor(maxR / step) + 1 }, (_, k) => k * step).map((v) => (
+          <g key={`r${v}`}>
+            <line className="pv-grid" x1={pad.l} x2={W - pad.r} y1={sy(v)} y2={sy(v)} />
+            <text className="pv-tick" x={pad.l - 6} y={sy(v) + 4} textAnchor="end">
+              {v}
+            </text>
+          </g>
+        ))}
+        {Array.from({ length: Math.floor(overs / oStep) }, (_, k) => (k + 1) * oStep).map((o) => (
+          <text
+            key={`o${o}`}
+            className="pv-tick"
+            x={pad.l + (o - 0.5) * slot}
+            y={H - pad.b + 16}
+            textAnchor="middle"
+          >
+            {o}
+          </text>
+        ))}
+        <text className="pv-axis" x={(pad.l + W - pad.r) / 2} y={H - 2} textAnchor="middle">
+          Over
+        </text>
+        {series.flatMap((s) =>
+          s.inn.perOver.map(([o, r, w]) => {
+            const x = pad.l + (o - 1) * slot + gap + s.i * (bw + gap);
+            const y = sy(r);
+            const tip = `${shortTeam(s.inn.bat)}, over ${o}: ${r} run${r === 1 ? '' : 's'}${w ? `, ${w} wicket${w === 1 ? '' : 's'}` : ''}`;
+            return (
+              <g
+                key={`${s.i}-${o}`}
+                onMouseEnter={() => setHover(tip)}
+                onMouseLeave={() => setHover(null)}
+              >
+                <rect
+                  x={x - gap / 2}
+                  y={pad.t}
+                  width={bw + gap}
+                  height={H - pad.b - pad.t}
+                  fill="transparent"
+                />
+                <path className={`pv-fill ${s.tone}`} d={barPath(x, y, bw, H - pad.b - y, 'up')} />
+                {Array.from({ length: w }, (_, k) => (
+                  <circle
+                    key={k}
+                    className={`pv-dot ${s.tone}`}
+                    cx={x + bw / 2}
+                    cy={y - 5 - k * 7}
+                    r={Math.max(2.5, Math.min(4, bw / 2))}
+                  />
+                ))}
+              </g>
+            );
+          }),
+        )}
+      </svg>
+      <div className="pv-bar-sub">{hover ?? 'Each dot above a bar is a wicket in that over'}</div>
+    </div>
+  );
+}
+
 export function ProMatchView({
   squad,
   match: m,
@@ -369,7 +480,10 @@ export function ProMatchView({
           <div>
             <div className="card-title">How the game unfolded</div>
             <div className="card-sub">
-              Score at every wicket, by over · navy {shortTeam(squad.name)}, grey {opp}
+              {inns.length && inns.every((i) => i.balls?.length)
+                ? 'Score after every over and at each wicket'
+                : 'Score at every wicket, by over'}{' '}
+              · navy {shortTeam(squad.name)}, grey {opp}
               {inns.length > 2 ? ' · dashed = second innings' : ''}
             </div>
           </div>
@@ -378,6 +492,22 @@ export function ProMatchView({
           <WicketWorm squad={squad} innings={inns} />
         </div>
       </div>
+
+      {m.format !== 'Multi-day' && inns.length > 0 && inns.every((i) => i.perOver.length) && (
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">Runs in each over</div>
+              <div className="card-sub">
+                From the ball by ball · navy {shortTeam(squad.name)}, grey {opp}
+              </div>
+            </div>
+          </div>
+          <div className="card-body">
+            <RunsPerOver squad={squad} innings={inns} />
+          </div>
+        </div>
+      )}
 
       <div className="sc-two">
         <div className="card">

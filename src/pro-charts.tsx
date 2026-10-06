@@ -20,7 +20,7 @@ export const TONE_LABEL: Record<Tone, string> = {
 };
 
 /** A bar with a 4px rounded data end and a square baseline. */
-function barPath(x: number, y: number, w: number, h: number, dir: 'right' | 'up' | 'left') {
+export function barPath(x: number, y: number, w: number, h: number, dir: 'right' | 'up' | 'left') {
   const r = Math.min(4, dir === 'up' ? w / 2 : h / 2, dir === 'up' ? h : w);
   if (w <= 0 || h <= 0) return '';
   if (dir === 'right')

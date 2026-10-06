@@ -4,7 +4,7 @@
  * and the squad and the scouting pool are never drawn on one scale.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -15,12 +15,17 @@ vi.mock('./pro-data', async () => {
 vi.mock('./scouting-data', () => ({ SCOUTING_EVENTS: [] }));
 
 import { ProTeamPage } from './pro-team-page';
+import { qk } from './query';
+import { renderWithProviders } from './test-utils';
 
+// The platform library is empty, so the page falls back to the (mocked) sample.
+const EMPTY_LIBRARY: [readonly unknown[], unknown][] = [[qk.proMatches(), []]];
 const renderPage = (q = '') =>
-  render(
+  renderWithProviders(
     <MemoryRouter initialEntries={[`/admin/scouting?view=pro${q}`]}>
       <ProTeamPage />
     </MemoryRouter>,
+    { seed: EMPTY_LIBRARY },
   );
 
 beforeEach(() => localStorage.clear());
@@ -170,12 +175,7 @@ describe('Exits', () => {
     const api = await import('./api');
     vi.spyOn(api, 'getClubs').mockRejectedValue(new Error('no'));
     vi.spyOn(api, 'getAllClearances').mockResolvedValue([]);
-    const { renderWithProviders } = await import('./test-utils');
-    renderWithProviders(
-      <MemoryRouter initialEntries={['/admin/scouting?view=pro&ptab=exits']}>
-        <ProTeamPage />
-      </MemoryRouter>,
-    );
+    renderPage('&ptab=exits');
     expect(screen.getByText('Squad flow, season by season')).toBeTruthy();
     expect(screen.getByRole('table', { name: 'Careers in the squad' })).toBeTruthy();
     expect(screen.getByText('Players used')).toBeTruthy();
