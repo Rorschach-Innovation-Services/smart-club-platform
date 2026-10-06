@@ -153,6 +153,23 @@ const CATALOGUES: Record<string, RequiredDoc[]> = {
       accepts: [...OFFICE],
       matchHints: ['lease', 'mou', 'facility', 'field agreement', 'field use', 'agreement'],
     },
+    {
+      // Added for the Oct 2026 top-up drop (TUT + Pretoria East), which carried
+      // safeguarding-awareness and coaching certificates — one of them a phone photo
+      // (.jpg), which no other titans key accepts. A NEW key, deliberately not a revival
+      // of the archived `safeguarding` key above: that one's minFiles: 2 would flip every
+      // existing club non-compliant. `optional` keeps it out of completion counts, so
+      // adding it changes no club's compliance state.
+      key: 'safeguardingCoaching',
+      name: 'Safeguarding & coaching certificates',
+      desc: 'Safeguarding awareness and coaching certificates for club staff/coaches',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 10,
+      optional: true,
+      accepts: [...OFFICE, ...IMAGE],
+      matchHints: ['safeguarding', 'safe guarding', 'coaching certificate', 'coach evidence'],
+    },
   ],
 
   /**
@@ -448,6 +465,42 @@ const CATALOGUES: Record<string, RequiredDoc[]> = {
   ],
 };
 
+/**
+ * Full-definition diff, per key: added, removed, and — for keys on both sides — every
+ * attribute whose value differs (`attr: <current> → <next>`), plus keys whose ORDER
+ * moved. This script REPLACES the stored catalogue wholesale, so any edit an operator
+ * made in the portal since it was last run (a raised maxFiles, a new accepted format, a
+ * reworded name) is silently reverted by --confirm unless it shows up here first. The
+ * keys-only current/next lines can't show that. Pure — exported for tests.
+ */
+function catalogueDiff(current: RequiredDoc[], next: RequiredDoc[]): string[] {
+  const lines: string[] = [];
+  const curByKey = new Map(current.map((d) => [d.key, d]));
+  const nextByKey = new Map(next.map((d) => [d.key, d]));
+  const fmt = (v: unknown) => (v === undefined ? '(unset)' : JSON.stringify(v));
+  for (const d of next) {
+    const cur = curByKey.get(d.key);
+    if (!cur) {
+      lines.push(`+ ${d.key}: ${JSON.stringify(d)}`);
+      continue;
+    }
+    const before = cur as unknown as Record<string, unknown>;
+    const after = d as unknown as Record<string, unknown>;
+    const changed: string[] = [];
+    for (const a of [...new Set([...Object.keys(before), ...Object.keys(after)])].sort()) {
+      if (JSON.stringify(before[a]) !== JSON.stringify(after[a]))
+        changed.push(`${a}: ${fmt(before[a])} → ${fmt(after[a])}`);
+    }
+    if (changed.length) lines.push(`~ ${d.key}: ${changed.join('; ')}`);
+  }
+  for (const d of current) if (!nextByKey.has(d.key)) lines.push(`- ${d.key}`);
+  const commonCur = current.filter((d) => nextByKey.has(d.key)).map((d) => d.key);
+  const commonNext = next.filter((d) => curByKey.has(d.key)).map((d) => d.key);
+  if (commonCur.join(',') !== commonNext.join(','))
+    lines.push(`order: ${commonCur.join(', ')} → ${commonNext.join(', ')}`);
+  return lines;
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const confirm = args.includes('--confirm');
@@ -475,6 +528,12 @@ async function main(): Promise<void> {
   );
   console.log(`   current: ${current.map((d) => d.key).join(', ')}`);
   console.log(`   next:    ${next.map((d) => d.key).join(', ')}`);
+  const diff = catalogueDiff(current, next);
+  console.log(
+    `\n── full-definition diff (current → next; --confirm REPLACES the stored catalogue)`,
+  );
+  if (diff.length === 0) console.log('   (identical — no-op)');
+  for (const line of diff) console.log(`   ${line}`);
 
   // Removing a key any club still holds data for is what the operator route 409s on;
   // surface the same information here rather than discovering it after the write.
@@ -514,4 +573,4 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   });
 }
 
-export { CATALOGUES };
+export { CATALOGUES, catalogueDiff };

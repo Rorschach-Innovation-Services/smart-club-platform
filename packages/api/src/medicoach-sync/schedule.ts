@@ -944,17 +944,8 @@ export function notifyConflictByEmail(
     const sendSyncConflictEmail =
       opts.send ?? (await import('../notify/email.js')).sendSyncConflictEmail;
     const { orgCopy } = await import('../branding.js');
-    const { PLATFORM_TENANT } = await import('../types.js');
-    const users = await repo.listTenantUsers(tenant);
-    const emails = new Set<string>();
-    for (const u of users) {
-      const profile = await repo.getUser(u.sub);
-      const isAdmin = profile?.memberships.some((m) => m.tenantId === tenant && m.role === 'admin');
-      const isOperator = profile?.memberships.some(
-        (m) => m.tenantId === PLATFORM_TENANT && m.role === 'operator',
-      );
-      if (isAdmin && !isOperator && u.email) emails.add(u.email);
-    }
+    const { listTenantAdminEmails } = await import('../notify/admin-emails.js');
+    const emails = await listTenantAdminEmails(repo, tenant);
     const orgName = config ? orgCopy(config).name : tenant;
     for (const to of emails)
       await sendSyncConflictEmail({

@@ -6302,7 +6302,9 @@ export function ClubClearancesView({
                         ? `Their registration is now at ${club.name}`
                         : req.rejectOutcome === 'stays-at-destination'
                           ? `Stays registered at ${req.toClubName} — ${club.name} was not on the system when this was rejected`
-                          : `Remains registered at ${club.name}`}
+                          : req.rejectOutcome === 'not-registered'
+                            ? `Not registered at ${req.toClubName} — the registration arrived outside the transfer window`
+                            : `Remains registered at ${club.name}`}
                     </div>
                     {req.rejectReason && <div className="clr-note">"{req.rejectReason}"</div>}
                   </div>
@@ -6379,7 +6381,9 @@ export function ClubClearancesView({
                       <div className="clr-meta">
                         {req.rejectOutcome === 'stays-at-destination'
                           ? `The move was cancelled — ${req.fromClubName} is not on the system, so the player stays registered with your club`
-                          : `The move was cancelled — the player is registered at ${req.fromClubName}`}
+                          : req.rejectOutcome === 'not-registered'
+                            ? 'Not registered — the registration arrived outside the transfer window'
+                            : `The move was cancelled — the player is registered at ${req.fromClubName}`}
                       </div>
                     )}
                     {req.status === 'rejected' && req.rejectReason && (

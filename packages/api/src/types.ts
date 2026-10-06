@@ -374,6 +374,36 @@ export interface TenantConfig {
    * validateFixtureReminders), and GET /tenant/config does not project it.
    */
   fixtureReminders?: FixtureRemindersConfig;
+  /**
+   * Transfer windows: inclusive tenant wall-clock date ranges (ADR 0008) in which a clearance may
+   * be opened. Absent OR empty ⇒ no restriction (an empty list must never lock a tenant out).
+   * Outside every window a rep-initiated request 409s and a public registration that would open
+   * a clearance records it auto-rejected instead (see transfer-windows.ts). Operator-only:
+   * PUT /tenant/config strips it, only PUT /platform/tenants/:slug writes it (validated by
+   * validateTransferWindows, sorted by start). Served on GET /tenant and GET /tenant/config
+   * together with a server-computed `transferWindowStatus`.
+   */
+  transferWindows?: TransferWindow[];
+}
+
+/** `rejectedBy` on a clearance created already rejected because no transfer window was open. */
+export const TRANSFER_WINDOW_REJECTOR = 'system:transfer-window';
+
+/** One transfer window (see TenantConfig.transferWindows). Dates are YYYY-MM-DD, inclusive. */
+export interface TransferWindow {
+  label: string;
+  start: string;
+  end: string;
+}
+
+/**
+ * Whether transfers are open on a given tenant day: `current` is the window containing it,
+ * `next` the earliest window starting after it. Served only when windows are configured.
+ */
+export interface TransferWindowStatus {
+  open: boolean;
+  current?: TransferWindow;
+  next?: TransferWindow;
 }
 
 /** Channels a fixture reminder may go out on. */
@@ -559,7 +589,13 @@ export interface ClubCommEvent {
     | 'postponement-withdrawn'
     // Scheduled fixture reminder to the chair (FixtureReminders cron), one row per channel,
     // idempotency-keyed `fixture-reminder-<targetDate>-<channel>`.
-    | 'fixture-reminder';
+    | 'fixture-reminder'
+    // Destination chair's heads-up that a clearance opened INTO the club (recorded on the
+    // destination). A separate kind so it never counts toward the source-club daily cap.
+    | 'clearance-inbound'
+    // Pending-clearance nudge to the source chair (admin "Send reminder" or the ClearanceReminders
+    // cron), keyed `clearance-<id>-reminder-<date>-<channel>`. Bypasses the daily cap.
+    | 'clearance-reminder';
   /** Aggregate, PII-free outcome for a broadcast send, e.g. "8 sent · 2 skipped" (sent · skipped · failed; zero parts omitted). */
   summary?: string;
 }
@@ -600,6 +636,46 @@ export interface ExportLogEntry {
   counts?: Record<string, number>;
   /** League keys the export covered (medicoach-export only). */
   leagues?: string[];
+}
+
+/**
+ * What one tenant-wide player erasure (`DELETE /admin/players/:nk`) removed, per category.
+ * Counts only — returned to the admin and stored on the audit row; never names the person.
+ */
+export interface PlayerErasureCounts {
+  /** PLAYER# rows deleted (one per club the person was registered at). */
+  playerRows: number;
+  /** Clearances deleted outright (canonical + mirror each count once). */
+  clearances: number;
+  /** Registration reviews (REGREVIEW#) deleted. */
+  registrationReviews: number;
+  /** Veterans squad-selection requests deleted (canonical + mirror each count once). */
+  veteransRequests: number;
+  /** Uploaded objects purged: ID documents (rows, snapshots, held reviews) + certificate PDFs. */
+  documents: number;
+  /** CERT# certificate-registry items deleted (their /verify lookups now 404). */
+  certificates: number;
+  /** Captain's reports that named the person and were scrubbed in place (not deleted). */
+  captainsReportsScrubbed: number;
+  /**
+   * Pending REPORTOPEN# markers whose captain ref was this person: the ref is scrubbed, the
+   * marker kept (its retry then addresses the scoring side's chair instead).
+   */
+  reportOpenMarkers: number;
+}
+
+/**
+ * Audit row for one player erasure (`PLAYERERASE#<iso>#<id>` under the tenant pk). PII-free by
+ * design: the actor and the per-category counts only — the erased person is not identifiable
+ * from it (no name, natural key or contact).
+ */
+export interface PlayerEraseLogEntry {
+  id: string;
+  kind: 'player-erasure';
+  /** Human-readable actor (caller email), mirroring ExportLogEntry.by. */
+  by: string;
+  at: string;
+  counts: PlayerErasureCounts;
 }
 
 /** Onboard payload: a Club plus the flat chair contact fields the admin form sends. */
@@ -902,8 +978,14 @@ export type ClearanceStatus = 'pending' | 'approved' | 'admin-override' | 'rejec
  *   request/dest-deleted → 'source-reactivated' (the move is cancelled; player at the source club)
  *   moved-over-placeholder/moved-to-source → 'moved-to-source' (the registration moved to the source club)
  *   dest-activated → 'stays-at-destination' (source is off-system; player stays at the destination)
+ *   window-closed → 'not-registered' (registration outside a transfer window; no row was ever
+ *     written, so the player remains unregistered / at their current club)
  */
-export type RejectOutcome = 'source-reactivated' | 'moved-to-source' | 'stays-at-destination';
+export type RejectOutcome =
+  | 'source-reactivated'
+  | 'moved-to-source'
+  | 'stays-at-destination'
+  | 'not-registered';
 
 /**
  * How a reject was actually applied, derived from the LIVE row state at reject time (never from
@@ -914,13 +996,16 @@ export type RejectOutcome = 'source-reactivated' | 'moved-to-source' | 'stays-at
  *   moved-over-placeholder— the source held only a placeholder; the real registration replaces it (B″)
  *   moved-to-source      — the source club exists but held no row; the registration is moved there (C)
  *   dest-activated       — the source is an off-system directory entry; the player stays at the destination (D)
+ *   window-closed        — a registration outside every transfer window, created ALREADY rejected
+ *                          (repo.createAutoRejectedClearance); never produced by detectRejectCase
  */
 export type RejectCase =
   | 'request'
   | 'dest-deleted'
   | 'moved-over-placeholder'
   | 'moved-to-source'
-  | 'dest-activated';
+  | 'dest-activated'
+  | 'window-closed';
 
 /**
  * The pre-reject row state a Reopen restores. CANONICAL ONLY — never mirrored, never returned
@@ -936,6 +1021,12 @@ export interface RejectSnapshot {
   destRow?: PlayerRegistration;
   placeholderRow?: PlayerRegistration;
   sourceReactivated?: boolean;
+  /**
+   * window-closed only: the destination row the registration WOULD have written (status
+   * 'clearance-pending', incl. idDocMeta). Never written as a player row; Reopen puts it at the
+   * destination. Its ID-doc keys are collected by repo.clearanceDocObjectKeys (POPIA).
+   */
+  pendingPlayer?: PlayerRegistration;
 }
 
 /**
