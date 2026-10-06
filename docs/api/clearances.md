@@ -201,21 +201,25 @@ feature is on. Bypasses the creation daily cap.
 At most **one reminder per clearance per tenant day**. The route claims the INVITE#-keyspace
 marker `clearance-reminder:<clearanceId>:<YYYY-MM-DD>` under the source club, the same key the
 [ClearanceReminders cron](#clearancereminders-cron) claims. A second click, from any tab, gets
-409, and so does that day's cron run (it counts the clearance as skipped). The claim is released
-if the send throws before anything goes out; once a send ran, the marker stays even when every
-channel came back `skipped` (no chair contact on file).
+409, and so does that day's cron run (it counts the clearance as skipped). The claim holds only
+once something was delivered: it is released if the send throws, and also when every channel
+came back `skipped` (no usable chair contact) or `failed`, so fixing the chair's details and
+retrying the same day works.
 
 - `400` — `fromClubId required`.
 - `404` — `clearance not found`.
 - `409` — `clearance already resolved` (anything but `pending`); `already reminded today`.
 - `422` — `source club has no chair on file`: the source is an off-system directory entry with
   no club record. Only the union office can resolve those; the cron lists them in its digest.
-- `200` — `{ results: SendResult[] }`, one per channel.
+- `200` — `{ results: SendResult[], reminded: boolean }`, one result per channel. `reminded` is
+  true when at least one channel was `sent`; false means nothing was delivered and the claim
+  was released.
 
 Comm log: rows of kind `'clearance-reminder'` on the source club, idempotency key
 `clearance-<id>-reminder-<date>-<channel>`, `by` the admin's email. A manual reminder also
-restarts the cron's 7-day cadence for that clearance (the cron reads the latest
-`'clearance-reminder'` row, whichever sent it).
+restarts the cron's 7-day cadence for that clearance (the cron reads the latest `sent`
+`'clearance-reminder'` row, whichever sent it). Skipped and failed rows are kept for the audit
+trail but never count toward the cadence.
 
 <a id="player-erasure"></a>
 
@@ -443,28 +447,37 @@ Per tenant with the `clearances` module on, over `listAllClearances` filtered to
    reopen **restarts the clock**. Under 7 days (`CLEARANCE_REMINDER_AFTER_DAYS`): ignored.
 2. **Chairless (directory-source) clearances** — the source club has no record — are never
    claimed or sent; only the union office can resolve them, so they go into the admin digest.
-   They follow the same rule as step 3, read from the **destination** club: included when the
+   They follow the same rule as step 4, read from the **destination** club: included when the
    latest `'clearance-reminder'` row for the clearance there is absent or at least 7 tenant days
    old. Once the digest has gone out (at least one admin email `sent`), the run appends one
    PII-free row to the destination club's comm log (kind `'clearance-reminder'`, channel
    `email`, no `to`, key `clearance-<id>-reminder-<date>-digest`). A digest that failed to send
    records nothing, so the next run tries again. A missed run delays the mention by a day.
-3. **Due.** Otherwise the clearance is due when the latest `'clearance-reminder'` comm-log row
-   for it on the source club is absent or at least 7 tenant days old
+3. **No usable chair contact.** A source club on the system whose chair has no valid email
+   (and, when WhatsApp is a channel, no valid cell) is handled like step 2: never claimed or
+   sent, carried in the digest's own "no usable chair contact" section, with the digest mention
+   row written on the **source** club. Its digest cadence reads only `-digest` mention rows;
+   the chair cadence in step 4 ignores them, so a fixed contact gets the chair reminded on the
+   next run.
+4. **Due.** Otherwise the clearance is due when the latest `sent` chair `'clearance-reminder'`
+   comm-log row for it on the source club is absent or at least 7 tenant days old
    (`CLEARANCE_REMINDER_EVERY_DAYS`). Reading the last reminder, not a modulo of the age, makes
    the cadence missed-run robust: a failed run delays a reminder by a day, not a week.
-4. **Claim → send → complete.** Claim INVITE# `clearance-reminder:<id>:<today>` under the source
+5. **Claim → send → complete.** Claim INVITE# `clearance-reminder:<id>:<today>` under the source
    club (the same key as the manual route — a replay counts as `skipped`), send to the source
    chair, complete the marker and append the comm-log rows with `by: 'system:clearance-reminders'`.
    A send fault before anything went out releases the claim so tomorrow (or a manual send) can
-   retry; after a send the marker stays, so a bookkeeping fault never double-sends.
-5. **Digest.** One email per admin listing the clearances nudged this run (at least one channel
-   `sent`) and the chairless ones. Nothing to list ⇒ no digest. Admin emails only; the only
-   comm-log trace is the chairless mention row from step 2.
+   retry. A send where every channel came back `skipped` or `failed` also releases the claim
+   (counted as `skipped`; its rows are written but do not start the cadence). Once something
+   was delivered the marker stays, so a bookkeeping fault never double-sends.
+6. **Digest.** One email per admin listing the clearances nudged this run (at least one channel
+   `sent`), the chairless ones, and the ones with no usable chair contact. Nothing to list ⇒ no
+   digest. Admin emails only; the only comm-log trace is the digest mention rows from steps 2
+   and 3.
 
 Failures are isolated per tenant and per clearance (Sentry, counted, the run moves on); only the
 tenant-registry read fails the whole run. The run logs one summary line (`clearance-reminders:
-run complete`, with `tenants`, `reminded`, `skipped`, `chairless`, `digests`, `errors`,
+run complete`, with `tenants`, `reminded`, `skipped`, `chairless`, `noContact`, `digests`, `errors`,
 `dryRun`).
 
 **Dry runs.** `NOTIFY_DRY_RUN=1` is honoured by the senders, but markers and comm-log rows are
@@ -536,7 +549,9 @@ directory-source registrant **active** at the destination.
 identity into the same destination (`findWindowRejectedClearances`, destination mirror
 partition) rejected within the **current closed stretch** (from the day after the latest window
 that ended). If found, the existing record is returned (`repeat`): nothing is written, nobody is
-re-notified, and the 201 is identical. A reopened clearance no longer matches (reopen clears
+re-notified, and the 201 is identical. The ID document the form just uploaded for the
+resubmission is referenced by nothing, so it is deleted best-effort (only a public-link
+`reg-<uuid>-id.<ext>` key, and never one the earlier record's snapshot still names). A reopened clearance no longer matches (reopen clears
 `rejectedBy`), and a registration once a window opens is unblocked by construction — no player
 row exists for the duplicate-pending guards to see.
 

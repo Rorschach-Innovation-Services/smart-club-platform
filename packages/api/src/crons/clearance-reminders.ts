@@ -6,9 +6,11 @@
  *
  *   listTenants → skip unless the `clearances` module is on → listAllClearances (pending only) →
  *   eligible when pending ≥ CLEARANCE_REMINDER_AFTER_DAYS (counted from `reopenedAt`, else
- *   `requestedAt` — a reopen restarts the clock) AND the latest `clearance-reminder` comm-log row
- *   for it on the source club is none or ≥ CLEARANCE_REMINDER_EVERY_DAYS old → claim the
- *   `clearance-reminder:<id>:<today>` marker → send → complete marker → comm log.
+ *   `requestedAt` — a reopen restarts the clock) AND the latest SENT chair `clearance-reminder`
+ *   comm-log row for it on the source club is none or ≥ CLEARANCE_REMINDER_EVERY_DAYS old →
+ *   claim the `clearance-reminder:<id>:<today>` marker → send → complete marker → comm log.
+ *   A send where every channel skipped or failed delivered nothing: its marker is released (so
+ *   a same-day manual retry works) and its rows never start the cadence.
  *
  * Missed-run robust: eligibility reads the last reminder, not a modulo of the age, so a failed run
  * only delays a reminder by a day. The INVITE# day-claim (shared with the admin "Send reminder"
@@ -19,6 +21,11 @@
  * them. They follow the same rule (pending ≥ 7 days AND last mention ≥ 7 days old); the mention is
  * a PII-free `clearance-reminder` comm-log row on the DESTINATION club, written only once the
  * digest has actually gone out. No eligible clearance in a tenant ⇒ no digest.
+ *
+ * A source club that IS on the system but has no usable chair contact for the run's channels is
+ * handled the same way (digest-only, never claimed), its mention logged on the SOURCE club. Its
+ * digest cadence reads only digest mentions, and the chair cadence only chair sends, so fixing
+ * the chair's details gets the chair reminded on the next run.
  *
  * WhatsApp goes to the source chair only when the `whatsappInvites` feature is on AND the
  * `club_clearance_pending` registry entry is "registered". Admins get email only.
@@ -33,7 +40,11 @@ import '../instrument.js'; // MUST be first — inits Sentry before any client i
 import { Sentry } from '../instrument.js';
 import * as repoModule from '../repo.js';
 import { chairContactOf } from '../notify/contacts.js';
-import { sendClearanceNotice, sendClearanceReminderDigest } from '../notify/index.js';
+import {
+  hasUsableChairContact,
+  sendClearanceNotice,
+  sendClearanceReminderDigest,
+} from '../notify/index.js';
 import type { ClearanceReminderDigestLine } from '../notify/email.js';
 import { listTenantAdminEmails } from '../notify/admin-emails.js';
 import {
@@ -88,10 +99,13 @@ export interface ClearanceRemindersSummary {
   tenants: number;
   /** Clearances whose source chair was sent a reminder on at least one channel. */
   reminded: number;
-  /** Eligible clearances not sent: already reminded today (marker replay) or no usable contact. */
+  /** Eligible clearances not delivered: already reminded today (marker replay), or every
+   *  channel skipped/failed. */
   skipped: number;
   /** Eligible clearances whose source club is not on the system (digest only). */
   chairless: number;
+  /** Eligible clearances whose source club has no usable chair contact (digest only). */
+  noContact: number;
   /** Admin digest emails sent. */
   digests: number;
   /** Per-tenant and per-clearance failures (each captured to Sentry). */
@@ -165,6 +179,7 @@ export async function runClearanceReminders(
     reminded: 0,
     skipped: 0,
     chairless: 0,
+    noContact: 0,
     digests: 0,
     errors: 0,
     dryRun: process.env.NOTIFY_DRY_RUN === '1',
@@ -190,8 +205,9 @@ export async function runClearanceReminders(
       };
       const nudged: ClearanceReminderDigestLine[] = [];
       const chairless: ClearanceReminderDigestLine[] = [];
-      /** Chairless clearances in this digest; their mention is logged on the destination club. */
-      const chairlessMentions: Array<{ clearance: PlayerClearance; toClubId: string }> = [];
+      const noContact: ClearanceReminderDigestLine[] = [];
+      /** Digest-only clearances in this digest, with the club their mention is logged on. */
+      const digestMentions: Array<{ clearance: PlayerClearance; clubId: string }> = [];
 
       for (const clearance of pending) {
         let claimed = false;
@@ -208,14 +224,26 @@ export async function runClearanceReminders(
             if (!isReminderDue(clearance, today, lastMention)) continue;
             summary.chairless++;
             chairless.push(digestLine(clearance, today));
-            if (toClub) chairlessMentions.push({ clearance, toClubId: toClub.id });
+            if (toClub) digestMentions.push({ clearance, clubId: toClub.id });
+            continue;
+          }
+          const chair = chairContactOf(fromClub);
+          if (!hasUsableChairContact(chair, channels)) {
+            // On-system club, but nobody to send to: claiming + sending would only write
+            // skipped rows and hide the clearance from both digest lists. Digest it instead,
+            // on its own mention cadence (logged on the source club).
+            const lastMention = lastClearanceReminderAt(fromClub.commLog, clearance.id, 'digest');
+            if (!isReminderDue(clearance, today, lastMention)) continue;
+            summary.noContact++;
+            noContact.push(digestLine(clearance, today));
+            digestMentions.push({ clearance, clubId: fromClub.id });
             continue;
           }
           if (
             !isReminderDue(
               clearance,
               today,
-              lastClearanceReminderAt(fromClub.commLog, clearance.id),
+              lastClearanceReminderAt(fromClub.commLog, clearance.id, 'chair'),
             )
           ) {
             continue;
@@ -233,7 +261,7 @@ export async function runClearanceReminders(
           }
           claimed = true;
           const { results } = await deps.send({
-            chair: chairContactOf(fromClub),
+            chair,
             fromClubName: fromClub.name,
             playerName: clearance.playerName,
             toClubName: clearance.toClubName,
@@ -243,10 +271,12 @@ export async function runClearanceReminders(
           if (results.some((r) => r.status === 'sent')) {
             summary.reminded++;
             nudged.push(digestLine(clearance, today));
+            await repo.completeInviteSend(tenant, fromClub.id, key, results);
           } else {
+            // Nothing delivered: free the day's key so a manual retry (or tomorrow) can send.
             summary.skipped++;
+            await repo.releaseInviteClaim(tenant, fromClub.id, key);
           }
-          await repo.completeInviteSend(tenant, fromClub.id, key, results);
           await repo.appendClubCommEvents(
             tenant,
             fromClub.id,
@@ -279,7 +309,7 @@ export async function runClearanceReminders(
         }
       }
 
-      if (nudged.length + chairless.length === 0) continue;
+      if (nudged.length + chairless.length + noContact.length === 0) continue;
       const admins = await listTenantAdminEmails(repo, tenant);
       if (admins.length === 0) continue;
       const { results } = await deps.sendDigest({
@@ -287,15 +317,16 @@ export async function runClearanceReminders(
         orgName: orgCopy(cfg).name,
         nudged,
         chairless,
+        noContact,
       });
       const sentCount = results.filter((r) => r.status === 'sent').length;
       summary.digests += sentCount;
       // Only a digest that actually went out counts as a mention; otherwise tomorrow retries.
       if (sentCount > 0) {
         const mentionAt = deps.now().toISOString();
-        for (const { clearance, toClubId } of chairlessMentions) {
+        for (const { clearance, clubId } of digestMentions) {
           await repo
-            .appendClubCommEvents(tenant, toClubId, [
+            .appendClubCommEvents(tenant, clubId, [
               clearanceDigestMentionEvent(clearance, today, mentionAt, CLEARANCE_REMINDER_ACTOR),
             ])
             .catch((err: unknown) => {

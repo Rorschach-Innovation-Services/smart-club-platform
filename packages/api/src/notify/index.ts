@@ -334,6 +334,19 @@ async function sendClearanceWhatsAppChannel(
 }
 
 /**
+ * Whether {@link sendClearanceNotice} could deliver on at least one of `channels` — the exact
+ * per-channel validation it applies (a valid email, or a cell that converts to E.164 when
+ * WhatsApp is a channel). False ⇒ every channel would come back `skipped`.
+ */
+export function hasUsableChairContact(
+  chair: { email?: string; cell?: string },
+  channels: Channel[],
+): boolean {
+  if (channels.includes('email') && EMAIL_RE.test((chair.email ?? '').trim())) return true;
+  return channels.includes('whatsapp') && !!toE164((chair.cell ?? '').trim());
+}
+
+/**
  * Tell the FROM-club chairman a clearance now awaits the club's decision, over email
  * and/or WhatsApp. Non-throwing per channel (a bad/blank chair contact becomes a
  * `skipped`/`failed` result, never sinking the other channel). The caller owns the
@@ -626,10 +639,11 @@ export async function sendClearanceReminderDigest(args: {
   orgName: string;
   nudged: ClearanceReminderDigestLine[];
   chairless: ClearanceReminderDigestLine[];
+  noContact?: ClearanceReminderDigestLine[];
 }): Promise<{ results: SendResult[] }> {
-  const { to, orgName, nudged, chairless } = args;
+  const { to, orgName, nudged, chairless, noContact = [] } = args;
   return sendAdminEmails(to, (address) =>
-    sendClearanceReminderDigestEmail({ to: address, orgName, nudged, chairless }),
+    sendClearanceReminderDigestEmail({ to: address, orgName, nudged, chairless, noContact }),
   );
 }
 

@@ -377,6 +377,108 @@ describe('enforcement while closed', () => {
     assert.equal(autoRejectAdminEmails().length, 0);
   });
 
+  test("a resubmission's fresh ID upload is deleted; the earlier record's document is kept", async () => {
+    const { mkdtemp, mkdir, writeFile, access, rm } = await import('node:fs/promises');
+    const path = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const { randomUUID } = await import('node:crypto');
+    const dir = await mkdtemp(path.join(tmpdir(), 'window-repeat-'));
+    const prevDir = process.env.LOCAL_UPLOADS_DIR;
+    process.env.LOCAL_UPLOADS_DIR = dir; // local-disk upload sink (STAGE=local is set above)
+    try {
+      const { src, dst } = await seedPair('orphan');
+      const id = identity();
+      await rosterAt(src, id);
+      const upload = async () => {
+        const objectKey = `local/${TENANT}/${dst}/reg-${randomUUID()}-id.png`;
+        const onDisk = path.join(dir, objectKey.slice('local/'.length));
+        await mkdir(path.dirname(onDisk), { recursive: true });
+        await writeFile(onDisk, 'png');
+        return { objectKey, onDisk };
+      };
+      const exists = (p: string) =>
+        access(p).then(
+          () => true,
+          () => false,
+        );
+      const doc = (objectKey: string) => ({
+        idDocMeta: { objectKey, size: 100, contentType: 'image/png' },
+      });
+
+      const first = await upload();
+      assert.equal(
+        (await register(dst, id, { lastClubId: src, ...doc(first.objectKey) })).status,
+        201,
+      );
+      const second = await upload();
+      const again = await register(dst, id, { lastClubId: src, ...doc(second.objectKey) });
+      assert.equal(again.status, 201);
+      assert.equal(
+        ((await again.json()) as { transferWindow?: { closed: boolean } }).transferWindow?.closed,
+        true,
+      );
+
+      assert.equal(await exists(second.onDisk), false, 'the unreferenced fresh upload is gone');
+      assert.equal(await exists(first.onDisk), true, "the earlier record's document is kept");
+      const [x] = await inbound(dst);
+      const raw = (await repo.getClearanceRaw(TENANT, src, x.id))!;
+      assert.deepEqual(repo.clearanceDocObjectKeys(raw), [first.objectKey]);
+
+      // Resubmitting the very key the earlier snapshot holds never deletes it.
+      assert.equal(
+        (await register(dst, id, { lastClubId: src, ...doc(first.objectKey) })).status,
+        201,
+      );
+      assert.equal(await exists(first.onDisk), true);
+    } finally {
+      if (prevDir === undefined) delete process.env.LOCAL_UPLOADS_DIR;
+      else process.env.LOCAL_UPLOADS_DIR = prevDir;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a player already mid-transfer elsewhere gets the in-flight 409, not a spurious auto-reject', async () => {
+    // Pending A→B opened while a window was open (the rep request flips A's row clearance-pending).
+    await setWindows(openWindows());
+    const { src, dst } = await seedPair('inflight');
+    await repo.createClub(TENANT, mkClub('inflight-c', 'inflight C CC'));
+    await repo.putToken('tok-inflight-c', TENANT, 'inflight-c', '2026-06-01T00:00:00.000Z');
+    const id = identity();
+    const nk = await rosterAt(src, id);
+    const open = await app.request(`/clubs/${dst}/clearances`, {
+      method: 'POST',
+      headers: headers(repOf(dst)),
+      body: JSON.stringify({ fromClubId: src, playerNaturalKey: nk }),
+    });
+    assert.equal(open.status, 201, await open.clone().text());
+    assert.equal((await repo.getPlayer(TENANT, src, nk))?.status, 'clearance-pending');
+
+    // Windows close; the same person registers to club C naming A.
+    await setWindows(closedWindows());
+    const commBefore = async (clubId: string) =>
+      ((await repo.getClub(TENANT, clubId))?.commLog ?? []).length;
+    const before = {
+      src: await commBefore(src),
+      dst: await commBefore(dst),
+      c: await commBefore('inflight-c'),
+    };
+    logged = [];
+    const res = await register('inflight-c', id, { lastClubId: src });
+    assert.equal(res.status, 409);
+    assert.match(
+      ((await res.json()) as { error: string }).error,
+      /already registered or a transfer is already in progress/,
+    );
+    // Nothing new: only the original A→B clearance exists, nobody was notified.
+    assert.equal((await repo.listClearancesForSource(TENANT, src)).length, 1);
+    assert.equal((await repo.listInboundForDest(TENANT, 'inflight-c')).length, 0);
+    assert.equal(await repo.getPlayer(TENANT, 'inflight-c', nk), null);
+    assert.equal(await commBefore(src), before.src);
+    assert.equal(await commBefore(dst), before.dst);
+    assert.equal(await commBefore('inflight-c'), before.c);
+    assert.equal(autoRejectAdminEmails().length, 0);
+  });
+
   test('a declared on-system previous club with no roster row is also auto-rejected', async () => {
     const { src, dst } = await seedPair('srcless');
     const id = identity();

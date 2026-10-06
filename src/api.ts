@@ -626,9 +626,10 @@ export const reopenClearance = (clearanceId: string, body: unknown) =>
   request<PlayerClearance>(`/admin/clearances/${clearanceId}/reopen`, { method: 'POST', body });
 // Union "Send reminder" to a pending clearance's source chair (email + WhatsApp). 409 when it
 // was already reminded today (manually or by the daily cron) or is no longer pending; 422 when
-// the source club is not on the system.
+// the source club is not on the system. `reminded: false` ⇒ nothing was delivered (no usable
+// chair contact, or every channel failed); the day's claim was released, so a retry may follow.
 export const remindClearance = (clearanceId: string, fromClubId: string) =>
-  request<{ results: SendResult[] }>(
+  request<{ results: SendResult[]; reminded: boolean }>(
     `/admin/clearances/${encodeURIComponent(clearanceId)}/remind`,
     { method: 'POST', body: { fromClubId } },
   );

@@ -11751,6 +11751,10 @@ app.post('/admin/clearances/:cid/reopen', async (c) => {
  * ClearanceReminders cron uses (see clearance-reminder.ts), so a second click — from any tab — or
  * that day's cron run gets 409. 404 unknown; 409 not pending; 422 when the source club is not on
  * the system (a directory source has no chair to remind).
+ *
+ * `reminded` is false when every channel skipped (no usable chair contact) or failed: nothing was
+ * delivered, so the day's claim is released — fix the chair's details and retry the same day —
+ * and the comm-log rows (kept for the audit trail) never count toward the reminder cadence.
  */
 app.post('/admin/clearances/:cid/remind', async (c) => {
   const ra = c.get('requestAuth')!;
@@ -11791,13 +11795,18 @@ app.post('/admin/clearances/:cid/remind', async (c) => {
     });
     throw err;
   }
-  await repo.completeInviteSend(ra.tenant, fromClub.id, key, results);
+  const reminded = results.some((r) => r.status === 'sent');
+  if (reminded) {
+    await repo.completeInviteSend(ra.tenant, fromClub.id, key, results);
+  } else {
+    await repo.releaseInviteClaim(ra.tenant, fromClub.id, key);
+  }
   await repo.appendClubCommEvents(
     ra.tenant,
     fromClub.id,
     clearanceReminderCommEvents(clearance, results, today, now(), ra.email),
   );
-  return c.json({ results });
+  return c.json({ results, reminded });
 });
 
 // ───────────────────── Admin: registration reviews ─────────────────────

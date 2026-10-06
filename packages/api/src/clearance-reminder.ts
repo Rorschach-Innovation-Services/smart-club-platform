@@ -43,8 +43,10 @@ export function clearanceReminderCommEvents(
 }
 
 /**
- * The comm-log row (DESTINATION club) recording that a chairless clearance — source club off the
- * system — was carried in the admin reminder digest on tenant day `date`. One PII-free summary row
+ * The comm-log row recording that a clearance nobody could be nudged about was carried in the
+ * admin reminder digest on tenant day `date`: on the DESTINATION club for a chairless clearance
+ * (source club off the system), on the SOURCE club when it exists but has no usable chair
+ * contact. One PII-free summary row
  * (admins are not named); it shares the reminder key prefix so {@link lastClearanceReminderAt}
  * drives the digest cadence exactly as it drives chair reminders.
  */
@@ -65,19 +67,32 @@ export function clearanceDigestMentionEvent(
   };
 }
 
+/** Whether a `clearance-reminder` comm-log row is an admin-digest mention (not a chair send). */
+const isDigestMention = (e: ClubCommEvent): boolean => e.idempotencyKey.endsWith('-digest');
+
 /**
  * When the clearance was last reminded: the latest `clearance-reminder` comm-log row for it in
- * `commLog` — the source club's (chair reminders) or, for a chairless clearance, the destination
- * club's (digest mentions) — or null when never.
+ * `commLog` — the source club's (chair reminders, plus digest mentions for a source club with no
+ * usable chair contact) or, for a chairless clearance, the destination club's (digest mentions)
+ * — or null when never.
+ *
+ * Only rows with status `sent` count: a skipped (no contact) or failed channel delivered nothing,
+ * so it must not start the cadence. Digest mentions are written as `sent`, and only once the
+ * digest actually went out. `only` narrows to chair sends (`chair`) or digest mentions
+ * (`digest`) — the chair cadence ignores digest mentions so a chair contact fixed the day after
+ * a digest is reminded straight away.
  */
 export function lastClearanceReminderAt(
   commLog: ClubCommEvent[] | undefined,
   clearanceId: string,
+  only?: 'chair' | 'digest',
 ): string | null {
   const prefix = clearanceReminderKeyPrefix(clearanceId);
   let latest: string | null = null;
   for (const e of commLog ?? []) {
     if (e.kind !== 'clearance-reminder' || !e.idempotencyKey?.startsWith(prefix)) continue;
+    if (e.status !== 'sent') continue;
+    if (only && (only === 'digest') !== isDigestMention(e)) continue;
     if (!latest || e.at > latest) latest = e.at;
   }
   return latest;

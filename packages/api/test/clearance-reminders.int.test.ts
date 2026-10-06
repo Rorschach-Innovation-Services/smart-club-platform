@@ -4,7 +4,8 @@
  * eligibility (pending ≥ 7 tenant days, last reminder ≥ 7 days old, a reopen restarts the clock),
  * missed-run catch-up, the shared INVITE# day-claim (a manual reminder suppresses the cron),
  * release-on-failure, the WhatsApp template/feature gate, the clearances-module gate, and the admin
- * digest (nudged + chairless off-system clearances; nothing eligible ⇒ no digest).
+ * digest (nudged + chairless off-system clearances + on-system sources with no usable chair
+ * contact; nothing eligible ⇒ no digest), and that only DELIVERED reminders start the cadence.
  *
  * Run with the API package's test runner (tsx --test).
  */
@@ -119,10 +120,17 @@ const mkClearance = (
 async function seedTenant(
   tenant: string,
   requestedAt: string,
-  opts: { config?: Partial<TenantConfig>; clearance?: Partial<PlayerClearance> } = {},
+  opts: {
+    config?: Partial<TenantConfig>;
+    clearance?: Partial<PlayerClearance>;
+    srcExco?: Club['exco'];
+  } = {},
 ) {
   await repo.putTenantConfig(mkConfig(tenant, opts.config));
-  await repo.createClub(tenant, mkClub('src', 'Source CC'));
+  await repo.createClub(tenant, {
+    ...mkClub('src', 'Source CC'),
+    ...(opts.srcExco ? { exco: opts.srcExco } : {}),
+  } as Club);
   await repo.createClub(tenant, mkClub('dst', 'Dest CC'));
   await repo.putUser({
     sub: `admin-${tenant}`,
@@ -297,6 +305,7 @@ describe('reminder runs', () => {
         reminded: 1,
         skipped: 0,
         chairless: 0,
+        noContact: 0,
         digests: 1,
         errors: 0,
         dryRun: undefined,
@@ -332,6 +341,7 @@ describe('reminder runs', () => {
       },
     ]);
     assert.deepEqual(digests[0].chairless, []);
+    assert.deepEqual(digests[0].noContact, []);
   });
 
   test('6 days pending: nothing sent and no digest', async () => {
@@ -496,6 +506,92 @@ describe('reminder runs', () => {
     assert.equal((await reminderRows('cr-chairless-fail', 'dst')).length, 0);
     assert.equal((await run(['cr-chairless-fail'], '2026-10-21')).digests.length, 1);
     assert.equal((await reminderRows('cr-chairless-fail', 'dst')).length, 1);
+  });
+
+  /** Whether the day's INVITE# key is free (claims it to find out, then releases it again). */
+  const claimFree = async (tenant: string, clubId: string, clearanceId: string, date: string) => {
+    const { clearanceReminderClaimKey } = await import('../src/clearance-reminder.js');
+    const key = clearanceReminderClaimKey(clearanceId, date);
+    const replay = await repo.claimInviteSend(tenant, clubId, key, ['email'], 'clearance-reminder');
+    if (replay) return false;
+    await repo.releaseInviteClaim(tenant, clubId, key);
+    return true;
+  };
+
+  test('a source club with no usable chair contact is digested, never claimed, and stays due', async () => {
+    const clearance = await seedTenant('cr-nocontact', '2026-10-13T08:00:00Z', {
+      srcExco: { chair: { name: 'Nobody', email: 'not-an-email', cell: '' } } as Club['exco'],
+    });
+    const { summary, sends, digests } = await run(['cr-nocontact'], TODAY);
+    assert.equal(sends.length, 0, 'nothing to send to — no claim, no send');
+    assert.equal(summary.noContact, 1);
+    assert.equal(summary.skipped, 0);
+    assert.equal(summary.reminded, 0);
+    assert.equal(digests.length, 1);
+    assert.deepEqual(digests[0].nudged, []);
+    assert.deepEqual(digests[0].chairless, []);
+    assert.deepEqual(digests[0].noContact, [
+      {
+        playerName: clearance.playerName,
+        fromClubName: 'src name',
+        toClubName: 'dst name',
+        daysPending: 7,
+      },
+    ]);
+    assert.ok(await claimFree('cr-nocontact', 'src', clearance.id, TODAY), 'day key never burned');
+    // One PII-free digest mention on the SOURCE club; no skipped chair rows.
+    const rows = await reminderRows('cr-nocontact');
+    assert.deepEqual(
+      rows.map((r) => `${r.idempotencyKey}/${r.status}`),
+      [`clearance-${clearance.id}-reminder-${TODAY}-digest/sent`],
+    );
+    assert.equal(rows[0].to, undefined);
+
+    // Weekly digest cadence while the contact stays broken.
+    assert.equal((await run(['cr-nocontact'], '2026-10-21')).digests.length, 0);
+    assert.equal((await run(['cr-nocontact'], '2026-10-27')).digests[0]?.noContact?.length, 1);
+
+    // Contact fixed: the chair is reminded on the very next run — the digest mention never
+    // started the CHAIR cadence.
+    await repo.updateClub(
+      'cr-nocontact',
+      'src',
+      { exco: { chair: { name: 'Fixed', email: 'fixed@src.test', cell: '' } } } as Partial<Club>,
+      'test',
+      new Date().toISOString(),
+    );
+    const fixed = await run(['cr-nocontact'], '2026-10-28');
+    assert.equal(fixed.sends.length, 1);
+    assert.equal(fixed.sends[0].chair.email, 'fixed@src.test');
+    assert.equal(fixed.summary.reminded, 1);
+    assert.equal(fixed.digests[0]?.nudged.length, 1);
+    assert.deepEqual(fixed.digests[0]?.noContact, []);
+  });
+
+  test('a send where every channel fails releases the claim and does not start the cadence', async () => {
+    const clearance = await seedTenant('cr-allfail', '2026-10-13T08:00:00Z');
+    const failing = await run(['cr-allfail'], TODAY, {
+      send: async (args) => ({
+        results: args.channels.map((channel) => ({
+          channel,
+          status: 'failed' as const,
+          to: 'x',
+          error: 'provider down',
+        })),
+      }),
+    });
+    assert.equal(failing.summary.skipped, 1);
+    assert.equal(failing.summary.reminded, 0);
+    assert.equal(failing.digests.length, 0);
+    // Rows kept for the audit trail, but the day key is free and the clearance still due.
+    assert.deepEqual(
+      (await reminderRows('cr-allfail')).map((r) => r.status),
+      ['failed', 'failed'],
+    );
+    assert.ok(await claimFree('cr-allfail', 'src', clearance.id, TODAY));
+    const retry = await run(['cr-allfail'], TODAY);
+    assert.equal(retry.sends.length, 1);
+    assert.equal(retry.summary.reminded, 1);
   });
 
   test('a failing tenant does not stop the others', async () => {

@@ -170,17 +170,30 @@ const ddb = DynamoDBDocumentClient.from(
 
 const s3 = new S3Client({});
 const UPLOADS_BUCKET = process.env.UPLOADS_BUCKET;
+/** Charset screen for a `local/` key before it is joined onto LOCAL_UPLOADS_DIR. */
+const LOCAL_KEY_RE = /^[A-Za-z0-9._/-]+$/;
 
 /**
  * Best-effort delete of stored upload objects (compliance PDFs, player ID docs) during
  * tenant/cohort erasure — so a POPIA "right to erasure" actually removes the files, not
- * just the DynamoDB rows. Skips local-dev keys and never throws: a failed object delete is
- * logged (recoverable via a bucket lifecycle rule) and must not abort the erase.
+ * just the DynamoDB rows. Never throws: a failed object delete is logged (recoverable via a
+ * bucket lifecycle rule) and must not abort the erase. `local/` keys are the no-S3 dev
+ * sentinel: skipped, except under dev:local / tests (STAGE=local + LOCAL_UPLOADS_DIR), which
+ * remove the on-disk twin — like deleteUploadPrefixes.
  */
-async function deleteUploadObjects(objectKeys: string[]): Promise<void> {
-  if (!UPLOADS_BUCKET) return;
+export async function deleteUploadObjects(objectKeys: string[]): Promise<void> {
+  const localDir = process.env.STAGE === 'local' ? process.env.LOCAL_UPLOADS_DIR : undefined;
   for (const key of objectKeys) {
-    if (!key || key.startsWith('local/')) continue;
+    if (!key) continue;
+    if (key.startsWith('local/')) {
+      const rel = key.slice('local/'.length);
+      if (!localDir || rel.includes('..') || !LOCAL_KEY_RE.test(rel)) continue;
+      await rm(path.join(localDir, rel), { force: true }).catch((err: unknown) => {
+        console.warn(`erase: failed to delete local upload ${key}`, err);
+      });
+      continue;
+    }
+    if (!UPLOADS_BUCKET) continue;
     try {
       await s3.send(new DeleteObjectCommand({ Bucket: UPLOADS_BUCKET, Key: key }));
     } catch (err) {

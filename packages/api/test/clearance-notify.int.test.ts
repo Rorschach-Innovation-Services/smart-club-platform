@@ -393,6 +393,43 @@ describe('POST /admin/clearances/:cid/remind', () => {
     assert.ok(creationEmails.every((e) => e.status === 'sent'));
   });
 
+  test('an all-skipped send releases the day claim, so a same-day retry after fixing the chair succeeds', async () => {
+    const { src, dst, player } = await seedPair('remskip', {
+      exco: { chair: { name: 'Nobody', email: '', cell: '' } },
+    } as Partial<Club>);
+    const clearance = (await (await openClearance(src, dst, player)).json()) as PlayerClearance;
+
+    const skipped = await remind(clearance.id, src);
+    assert.equal(skipped.status, 200);
+    const first = (await skipped.json()) as {
+      results: Array<{ channel: string; status: string }>;
+      reminded: boolean;
+    };
+    assert.equal(first.reminded, false);
+    assert.ok(first.results.every((r) => r.status === 'skipped'));
+
+    await repo.updateClub(
+      TENANT,
+      src,
+      {
+        exco: { chair: { name: 'Fixed', email: 'fixed@remskip.test', cell: '' } },
+      } as Partial<Club>,
+      'test',
+      new Date().toISOString(),
+    );
+    const retry = await remind(clearance.id, src);
+    assert.equal(retry.status, 200, await retry.clone().text());
+    const second = (await retry.json()) as {
+      results: Array<{ channel: string; status: string; to?: string }>;
+      reminded: boolean;
+    };
+    assert.equal(second.reminded, true);
+    assert.ok(second.results.some((r) => r.status === 'sent' && r.to === 'fixed@remskip.test'));
+
+    // Delivered now, so the claim holds for the rest of the day.
+    assert.equal((await remind(clearance.id, src)).status, 409);
+  });
+
   test('404 unknown, 409 resolved, 422 off-system source, 400 missing fromClubId, 403 for a rep', async () => {
     const { src, dst, player } = await seedPair('remerr');
     const clearance = (await (await openClearance(src, dst, player)).json()) as PlayerClearance;

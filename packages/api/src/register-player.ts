@@ -359,6 +359,7 @@ async function gateClosedWindow(
     await repo.findWindowRejectedClearances(tenant, player.clubId, player.naturalKey)
   ).find((x) => !since || (x.rejectedAt ? tenantToday(new Date(x.rejectedAt)) : '') >= since);
   if (earlier) {
+    await discardRepeatUploads(tenant, player, earlier);
     return { kind: 'auto-rejected', clearance: earlier, nextWindow, repeat: true };
   }
   const rejected = await repo.createAutoRejectedClearance(tenant, player, {
@@ -371,6 +372,38 @@ async function gateClosedWindow(
   });
   await opts.windowClosed.notify(tenant, rejected);
   return { kind: 'auto-rejected', clearance: rejected, nextWindow, repeat: false };
+}
+
+/** The basename shape of a public-link ID upload (POST /register/:clubId/id-doc/upload-url). */
+const PUBLIC_REG_UPLOAD_RE = /\/reg-[0-9a-f-]{36}-id\.(pdf|jpg|png)$/;
+
+/**
+ * A closed-window RESUBMISSION reuses the earlier auto-rejected record, so the ID document the
+ * public form just presign-uploaded for it is referenced by nothing — no row, no snapshot — and
+ * no erasure path could ever find it. Delete it now. Only keys shaped like a public-link upload
+ * are touched (the objectKey is caller-supplied on an anonymous route, so this must never become
+ * a delete-anything primitive), and never one the earlier record's snapshot still names. Best
+ * effort: never throws — a failure costs only an orphaned object, never the response.
+ */
+async function discardRepeatUploads(
+  tenant: string,
+  player: PlayerRegistration,
+  earlier: PlayerClearance,
+): Promise<void> {
+  try {
+    const fresh = [player.idDocMeta?.objectKey, player.previousIdDocMeta?.objectKey].filter(
+      (k): k is string => !!k && PUBLIC_REG_UPLOAD_RE.test(k),
+    );
+    if (fresh.length === 0) return;
+    // The listing mirror carries no snapshot: read the canonical for the keys it still holds.
+    const raw = await repo.getClearanceRaw(tenant, earlier.fromClubId, earlier.id);
+    if (!raw) return; // can't prove the keys are unreferenced — leave them
+    const kept = new Set(repo.clearanceDocObjectKeys(raw));
+    const orphaned = [...new Set(fresh)].filter((k) => !kept.has(k));
+    if (orphaned.length) await repo.deleteUploadObjects(orphaned);
+  } catch (err) {
+    console.warn('closed-window resubmission: could not discard the fresh ID upload', err);
+  }
 }
 
 /** The write half of registerPlayerForClub (mutates `player`). Returns the clearance it opened

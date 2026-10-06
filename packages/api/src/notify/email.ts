@@ -723,14 +723,16 @@ export interface ClearanceReminderDigestEmailInput {
   nudged: ClearanceReminderDigestLine[];
   /** Stale clearances whose source club is not on the system — only the union can resolve them. */
   chairless: ClearanceReminderDigestLine[];
+  /** Stale clearances whose source club is on the system but has no usable chair contact. */
+  noContact?: ClearanceReminderDigestLine[];
 }
 
 /** The ClearanceReminders cron's per-tenant admin digest. Pure — exported for tests. */
 export function clearanceReminderDigestEmailContent(
   input: Omit<ClearanceReminderDigestEmailInput, 'to'>,
 ): { subject: string; text: string; html: string } {
-  const { orgName, nudged, chairless } = input;
-  const total = nudged.length + chairless.length;
+  const { orgName, nudged, chairless, noContact = [] } = input;
+  const total = nudged.length + chairless.length + noContact.length;
   const subject = `${orgName}: ${total} clearance${total === 1 ? '' : 's'} still pending`;
   const line = (l: ClearanceReminderDigestLine) =>
     `${l.playerName}: ${l.fromClubName} → ${l.toClubName} (${l.daysPending} days)`;
@@ -739,6 +741,10 @@ export function clearanceReminderDigestEmailContent(
     {
       title: 'Source club not on the system — the union office must resolve these',
       lines: chairless,
+    },
+    {
+      title: "Source club has no usable chair contact on file — update the club's chair details",
+      lines: noContact,
     },
   ].filter((s) => s.lines.length > 0);
   const text =
