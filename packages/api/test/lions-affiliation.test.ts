@@ -9,10 +9,17 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import ExcelJS from 'exceljs';
 
-const { parseAffiliationWorkbook, detectHeaders, normalizeCell, normalizeEmail, parseDivisions } =
-  await import('../src/lions-affiliation-parse.js');
+const {
+  parseAffiliationWorkbook,
+  detectHeaders,
+  normalizeCell,
+  normalizeEmail,
+  parseDivisions,
+  text,
+} = await import('../src/lions-affiliation-parse.js');
 const {
   CLUB_MAP,
+  clubNameKey,
   buildAliasIndex,
   normalizeDistrict,
   resolveClubName,
@@ -313,6 +320,21 @@ describe('normalisers', () => {
       'SA 3',
     ]);
     assert.deepEqual(parseDivisions(' Ladies Promotion').tokens, ['LADIES PROMOTION']);
+  });
+
+  test('invisible marks: every zero-width/bidi code point is stripped, nothing else', () => {
+    // U+200B–U+200F, U+202A–U+202E, U+2066–U+2069, U+FEFF — each range end plus a middle one.
+    const marks = [
+      0x200b, 0x200d, 0x200f, 0x202a, 0x202c, 0x202e, 0x2066, 0x2068, 0x2069, 0xfeff,
+    ].map((cp) => String.fromCodePoint(cp));
+    for (const m of marks) {
+      const cp = m.codePointAt(0)!.toString(16);
+      assert.equal(text(`${m}+27 82${m} 000${m}`), '+27 82 000', `text() U+${cp}`);
+      assert.equal(clubNameKey(`${m}PAV Soweto CC${m}`), 'pav soweto cc', `clubNameKey U+${cp}`);
+    }
+    // Just outside the class: U+2010 (hyphen) and U+2065 (unassigned) are kept.
+    assert.equal(text('a\u2010b'), 'a\u2010b');
+    assert.equal(clubNameKey('a\u2065b'), 'a\u2065b');
   });
 });
 

@@ -495,7 +495,7 @@ export const NON_CLUB_FIXTURE_NAME = /^macrocomm round [1-4]$/i;
  *  whitespace, lowercases. Never strips words — "Marks Park" ≠ "Marks Park Thistles". */
 export function clubNameKey(raw: string): string {
   return raw
-    .replace(/[​-‏‪-‮⁦-⁩﻿]/g, '')
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, '')
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
@@ -699,8 +699,10 @@ export const DOC_RULES: Array<[RegExp, string]> = [
   [/agm|annual\s*general|minut|miute|agenda/i, 'agmMinutes'],
   [/\bb-?b?bee\b|\bbee\b/i, 'beeCert'],
   // NPO / CIPC / CoR39 (Randfontein's company registration), "Club Verification - NPO"
-  // (Old Vaal's NPO attestation), "Non profit registration" (Old Parks).
-  [/\bnpo|cipc|cor\s*39|registration|club\s*verification|non\s*profit/i, 'orgRegistration'],
+  // (Old Vaal's NPO attestation), "Non profit registration" (Old Parks). A bare
+  // "registration" is deliberately NOT matched: "Player Registration Form.xlsx" must fall to
+  // unclassified (fail closed) rather than be filed as the club's legal registration.
+  [/\bnpo|cipc|cor\s*39|registration\s*cert|club\s*verification|non\s*profit/i, 'orgRegistration'],
   // Executive / office-bearer / officials lists. "contact details" is Old Vaal's memo of
   // its office-bearers with their contact details.
   [/exec|office\s*bearers|committee|officials|contact\s*details/i, 'committee'],

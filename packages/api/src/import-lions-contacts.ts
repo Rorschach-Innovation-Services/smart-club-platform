@@ -836,6 +836,20 @@ export function effectiveInviteChannels(person: PersonPlan): { channels: Channel
   return { channels, cell: channels.includes('whatsapp') ? person.cell : '' };
 }
 
+/** Where runConfirm/runRevert write progress. Defaults to the console (the CLI); tests pass a
+ * no-op so production logging never reaches the node:test runner's IPC pipe. */
+export interface ImportLog {
+  log: (...args: unknown[]) => void;
+  warn: (...args: unknown[]) => void;
+  error: (...args: unknown[]) => void;
+}
+
+const CONSOLE_LOG: ImportLog = {
+  log: (...a) => console.log(...a),
+  warn: (...a) => console.warn(...a),
+  error: (...a) => console.error(...a),
+};
+
 /**
  * Exco merge for one club against a FRESHLY-READ record. Only `set` slots write (a `keep`
  * slot is left entirely untouched — it may carry governance fields); a slot that is no
@@ -844,6 +858,7 @@ export function effectiveInviteChannels(person: PersonPlan): { channels: Channel
 export function computeClubWrites(
   club: { id: string; exco?: Record<string, unknown> },
   roles: ClubRolePlan[],
+  warn: (line: string) => void = console.warn,
 ): { nextExco: Record<string, unknown>; excoWrites: ExcoWrite[] } {
   const nextExco: Record<string, unknown> = { ...(club.exco ?? {}) };
   const excoWrites: ExcoWrite[] = [];
@@ -851,7 +866,7 @@ export function computeClubWrites(
     if (role.exco.action !== 'set') continue;
     const nowEmail = slotEmail(club.exco, role.exco.slot);
     if (nowEmail) {
-      console.warn(
+      warn(
         `  ⚠ ${role.contact.email}: exco slot "${EXCO_LABEL[role.exco.slot]}" on ${club.id} filled since planning (now ${nowEmail}) — skipping this slot`,
       );
       continue;
@@ -939,6 +954,7 @@ export async function runConfirm(
   plan: ContactPlan,
   args: Args,
   deps?: ConfirmDeps,
+  log: ImportLog = CONSOLE_LOG,
 ): Promise<void> {
   const { grantClubRep, getUserSubByEmail, sendStaffInvite, orgCopy, dryRun } =
     deps ?? (await loadConfirmDeps());
@@ -953,7 +969,7 @@ export async function runConfirm(
     );
   }
   if (refusals.length) {
-    console.warn(
+    log.warn(
       '\n' +
         '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n' +
         '!! --allow-dry-run-sends: NO REAL INVITES WILL GO OUT on the channel(s) below.\n' +
@@ -963,7 +979,7 @@ export async function runConfirm(
     );
   }
   if (args.resend) {
-    console.log(
+    log.log(
       '· --resend: claiming fresh send keys (…#resend) — every invite-planned person is re-sent, ' +
         'ignoring completed markers from earlier runs.',
     );
@@ -975,7 +991,7 @@ export async function runConfirm(
   );
   const clubs = await repo.listClubs(TENANT);
   await writeFile(backupPath, JSON.stringify(clubs, null, 2));
-  console.log(`Backup written: ${backupPath} (${clubs.length} lions club(s))`);
+  log.log(`Backup written: ${backupPath} (${clubs.length} lions club(s))`);
 
   const cfg = await repo.getTenantConfig(TENANT);
   const orgName = orgCopy(cfg ?? { tenant: TENANT }).name;
@@ -1037,11 +1053,11 @@ export async function runConfirm(
         if (!roles.some((r) => r.exco.action === 'set')) continue;
         let club = await repo.getClub(TENANT, clubId);
         if (!club) {
-          console.warn(`  ⚠ ${person.email}: club ${clubId} not found at write time — skipping`);
+          log.warn(`  ⚠ ${person.email}: club ${clubId} not found at write time — skipping`);
           continue;
         }
         for (let attempt = 0; ; attempt++) {
-          const writes = computeClubWrites(club, roles);
+          const writes = computeClubWrites(club, roles, log.warn);
           if (!writes.excoWrites.length) break;
           try {
             await repo.updateClub(
@@ -1056,12 +1072,12 @@ export async function runConfirm(
             break;
           } catch (err: unknown) {
             if (err instanceof Error && err.name === 'VersionConflictError' && attempt === 0) {
-              console.warn(
+              log.warn(
                 `  ⚠ ${person.email}: ${club.name} changed concurrently — re-reading + retrying once`,
               );
               const reread = await repo.getClub(TENANT, clubId);
               if (!reread) {
-                console.warn(`  ⚠ ${person.email}: club ${clubId} gone on re-read — skipping`);
+                log.warn(`  ⚠ ${person.email}: club ${clubId} gone on re-read — skipping`);
                 break;
               }
               club = reread;
@@ -1094,7 +1110,7 @@ export async function runConfirm(
         const { channels: effectiveChannels, cell: sendCell } = effectiveInviteChannels(person);
         if (effectiveChannels.length === 0) {
           noChannels++;
-          console.log(
+          log.log(
             `  · ${person.email}: no channels to send (all planned channels skipped) — account granted, no invite sent`,
           );
         } else {
@@ -1107,7 +1123,7 @@ export async function runConfirm(
           );
           if (replay) {
             sentPreviously++;
-            console.log(`  · ${person.email}: send already recorded (replay) — skipped`);
+            log.log(`  · ${person.email}: send already recorded (replay) — skipped`);
           } else {
             claimedFor = markerClub;
             const { results } = await sendStaffInvite({
@@ -1125,7 +1141,7 @@ export async function runConfirm(
               await repo.releaseInviteClaim(TENANT, markerClub, key);
               const detail = results.map((r) => `${r.channel}:${r.status}`).join(', ');
               failures.push(`${person.email}: all channels failed (${detail})`);
-              console.error(
+              log.error(
                 `  ✗ ${person.email}: all channels failed (${detail}) — claim released for re-run`,
               );
             }
@@ -1159,25 +1175,25 @@ export async function runConfirm(
         try {
           await repo.releaseInviteClaim(TENANT, claimedFor, entry.idempotencyKey);
         } catch (releaseErr) {
-          console.warn(`  ⚠ ${person.email}: failed to release invite claim:`, releaseErr);
+          log.warn(`  ⚠ ${person.email}: failed to release invite claim:`, releaseErr);
         }
       }
       const message = err instanceof Error ? err.message : String(err);
       failures.push(`${person.email}: ${message}`);
-      console.error(`  ✗ ${person.email}: ${message}`);
+      log.error(`  ✗ ${person.email}: ${message}`);
       await persist(entry);
     }
   }
 
-  console.log(
+  log.log(
     `\n· granted ${granted} rep account(s), ${excoWritten} exco slot write(s), ${sent} invite(s) sent, ` +
       `${sentPreviously} already-sent (replay), ${noChannels} granted-without-channels` +
       `${plan.dataOnly ? ' (--data-only: no sends attempted)' : ''}.`,
   );
-  console.log(`· manifest: ${args.manifest} (${manifestByEmail.size} person entr(y/ies))`);
+  log.log(`· manifest: ${args.manifest} (${manifestByEmail.size} person entr(y/ies))`);
   if (failures.length) {
-    console.error(`\n✗ ${failures.length} per-person failure(s):`);
-    for (const f of failures) console.error(`   ${f}`);
+    log.error(`\n✗ ${failures.length} per-person failure(s):`);
+    for (const f of failures) log.error(`   ${f}`);
     process.exitCode = 1;
   }
 }
@@ -1188,11 +1204,16 @@ export interface RevertDeps {
   restoreMembership: typeof import('./tenant-admin.js').restoreMembership;
 }
 
-export async function runRevert(repo: RepoModule, args: Args, deps?: RevertDeps): Promise<void> {
+export async function runRevert(
+  repo: RepoModule,
+  args: Args,
+  deps?: RevertDeps,
+  log: ImportLog = CONSOLE_LOG,
+): Promise<void> {
   const { restoreMembership } = deps ?? (await import('./tenant-admin.js'));
   const entries = await readManifest(args.manifest);
-  console.log(`Reverting ${entries.length} person entr(y/ies) from ${args.manifest}`);
-  console.log(
+  log.log(`Reverting ${entries.length} person entr(y/ies) from ${args.manifest}`);
+  log.log(
     '(Cognito accounts are left in place — a dormant passwordless OTP user with no membership ' +
       'has no access and is harmless. Sent messages cannot be unsent.)',
   );
@@ -1210,7 +1231,7 @@ export async function runRevert(repo: RepoModule, args: Args, deps?: RevertDeps)
       for (const [clubId, excoWrites] of excoByClub) {
         let club = await repo.getClub(TENANT, clubId);
         if (!club) {
-          console.warn(`  ⚠ ${entry.email}: club ${clubId} gone — cannot restore its exco`);
+          log.warn(`  ⚠ ${entry.email}: club ${clubId} gone — cannot restore its exco`);
           continue;
         }
         for (let attempt = 0; ; attempt++) {
@@ -1221,7 +1242,7 @@ export async function runRevert(repo: RepoModule, args: Args, deps?: RevertDeps)
             const currentEmail =
               typeof current?.email === 'string' ? current.email.trim().toLowerCase() : '';
             if (currentEmail !== emailLc) {
-              console.warn(
+              log.warn(
                 `  ⚠ ${entry.email}: exco slot "${w.slot}" on ${club.name} changed since import — leaving as-is`,
               );
               continue;
@@ -1243,12 +1264,12 @@ export async function runRevert(repo: RepoModule, args: Args, deps?: RevertDeps)
             break;
           } catch (err: unknown) {
             if (err instanceof Error && err.name === 'VersionConflictError' && attempt === 0) {
-              console.warn(
+              log.warn(
                 `  ⚠ ${entry.email}: ${club.name} changed concurrently during revert — re-reading + retrying once`,
               );
               const reread = await repo.getClub(TENANT, clubId);
               if (!reread) {
-                console.warn(`  ⚠ ${entry.email}: club ${clubId} gone on re-read — skipping`);
+                log.warn(`  ⚠ ${entry.email}: club ${clubId} gone on re-read — skipping`);
                 break;
               }
               club = reread;
@@ -1264,25 +1285,25 @@ export async function runRevert(repo: RepoModule, args: Args, deps?: RevertDeps)
       if (entry.granted && entry.sub) {
         const result = await restoreMembership(entry.sub, TENANT, entry.priorMembership);
         if (result.offboarded)
-          console.log(
+          log.log(
             `  · ${entry.email}: membership removed (user had no other memberships — offboarded)`,
           );
         else if (entry.priorMembership)
-          console.log(`  · ${entry.email}: membership restored to its pre-import snapshot`);
-        else console.log(`  · ${entry.email}: import membership removed`);
+          log.log(`  · ${entry.email}: membership restored to its pre-import snapshot`);
+        else log.log(`  · ${entry.email}: import membership removed`);
         restored++;
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       failures.push(`${entry.email}: ${message}`);
-      console.error(`  ✗ ${entry.email}: ${message}`);
+      log.error(`  ✗ ${entry.email}: ${message}`);
     }
   }
 
-  console.log(`\n· reverted ${restored} membership(s), ${excoRestored} club exco write(s).`);
+  log.log(`\n· reverted ${restored} membership(s), ${excoRestored} club exco write(s).`);
   if (failures.length) {
-    console.error(`\n✗ ${failures.length} revert failure(s):`);
-    for (const f of failures) console.error(`   ${f}`);
+    log.error(`\n✗ ${failures.length} revert failure(s):`);
+    for (const f of failures) log.error(`   ${f}`);
     process.exitCode = 1;
   }
 }

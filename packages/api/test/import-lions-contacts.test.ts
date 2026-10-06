@@ -393,6 +393,10 @@ function fakeWorld() {
   return { clubs, repo, confirmDeps, revertDeps, sends, grants, restores };
 }
 
+/** Keeps the importers' progress logging out of the node:test runner's IPC pipe (un-captured
+ * output there intermittently broke multi-file runs with "Unable to deserialize cloned data"). */
+const SILENT = { log: () => {}, warn: () => {}, error: () => {} };
+
 function args(manifest: string, over: Partial<Args> = {}): Args {
   return {
     file: '',
@@ -425,7 +429,7 @@ describe('runConfirm / runRevert — manifest round-trip', () => {
         }),
       );
       assert.deepEqual(plan.blockers, []);
-      await runConfirm(w.repo, {} as never, 'pool', plan, args(manifest), w.confirmDeps);
+      await runConfirm(w.repo, {} as never, 'pool', plan, args(manifest), w.confirmDeps, SILENT);
 
       assert.deepEqual(Object.keys(w.clubs.get(A.id)!.exco).sort(), ['chair', 'sec']);
       assert.deepEqual(w.clubs.get(A.id)!.exco.chair, {
@@ -459,7 +463,7 @@ describe('runConfirm / runRevert — manifest round-trip', () => {
         ],
       );
 
-      await runRevert(w.repo, args(manifest, { revert: true }), w.revertDeps);
+      await runRevert(w.repo, args(manifest, { revert: true }), w.revertDeps, SILENT);
       assert.deepEqual(w.clubs.get(A.id)!.exco, {}, 'both slots removed (prior was empty)');
       assert.deepEqual(
         w.clubs.get(B.id)!.exco,
@@ -497,12 +501,13 @@ describe('runConfirm / runRevert — manifest round-trip', () => {
         plan,
         args(manifest, { dataOnly: true }),
         w.confirmDeps,
+        SILENT,
       );
       assert.equal(w.sends.length, 0);
       assert.equal(w.grants.length, 2);
       assert.ok(w.clubs.get(A.id)!.exco.chair);
 
-      await runRevert(w.repo, args(manifest, { revert: true }), w.revertDeps);
+      await runRevert(w.repo, args(manifest, { revert: true }), w.revertDeps, SILENT);
       assert.equal(w.restores.length, 2);
       assert.deepEqual(w.clubs.get(A.id)!.exco, {});
     } finally {
@@ -519,7 +524,15 @@ describe('runConfirm / runRevert — manifest round-trip', () => {
         inputs({ records: [rec(A, ADA(), BEN())], liveClubs: [...w.clubs.values()] }),
       );
       await assert.rejects(
-        runConfirm(w.repo, {} as never, 'pool', plan, args(join(tmp, 'm.json')), w.confirmDeps),
+        runConfirm(
+          w.repo,
+          {} as never,
+          'pool',
+          plan,
+          args(join(tmp, 'm.json')),
+          w.confirmDeps,
+          SILENT,
+        ),
         /email channel is in notify dry-run/,
       );
       assert.equal(w.grants.length, 0);

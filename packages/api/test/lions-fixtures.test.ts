@@ -20,6 +20,7 @@ const {
   t20Inputs,
   parseArgs,
   KNOWN_SLUGS,
+  storedDraftDrift,
 } = await import('../src/import-lions-fixtures.js');
 const {
   LEAGUE_SHEETS,
@@ -550,6 +551,80 @@ describe('CLI flags', () => {
   test('--revert takes only --all/--confirm', () => {
     assert.equal(parseArgs(['--revert', '--all']).mode, 'revert');
     assert.throws(() => parseArgs(['--revert', '--parse-only']));
+  });
+  test('--include-released is a --revert-only flag', () => {
+    assert.equal(parseArgs(['--revert']).includeReleased, false);
+    assert.equal(parseArgs(['--revert', '--include-released', '--confirm']).includeReleased, true);
+    assert.throws(() => parseArgs(['--include-released']), /--include-released is a --revert flag/);
+    assert.throws(
+      () => parseArgs(['--include-released', '--confirm']),
+      /--include-released is a --revert flag/,
+    );
+  });
+});
+
+describe('storedDraftDrift — what a re-import would overwrite', () => {
+  const fx = (id: string, over: Record<string, unknown> = {}) => ({
+    id,
+    round: 1,
+    date: '2026-10-10',
+    time: '10:00',
+    home: 'a',
+    away: 'b',
+    venueId: 'v1',
+    venueName: 'Ground 1',
+    ...over,
+  });
+  const series = (fixtures: unknown[], over: Record<string, unknown> = {}) =>
+    ({
+      id: 's-lions-premier-a',
+      name: 'Premier A',
+      teams: ['a', 'b'],
+      fixtures,
+      ...over,
+    }) as unknown as Series;
+
+  test('identical stored copy → no notes', () => {
+    const built = series([fx('f1'), fx('f2')]);
+    assert.deepEqual(storedDraftDrift(built, series([fx('f1'), fx('f2')])), []);
+  });
+
+  test('absent vs null optional fields are not drift', () => {
+    const built = series([fx('f1', { venueOverride: null })]);
+    assert.deepEqual(storedDraftDrift(built, series([fx('f1')])), []);
+  });
+
+  test('a console-edited fixture is listed with the changed fields', () => {
+    const built = series([fx('f1'), fx('f2')]);
+    const stored = series([fx('f1'), fx('f2', { date: '2026-10-17', venueId: 'v9' })]);
+    assert.deepEqual(storedDraftDrift(built, stored), ['1 fixture(s) edited: f2 (date, venueId)']);
+  });
+
+  test('added and removed fixtures are counted', () => {
+    const built = series([fx('f1'), fx('f2'), fx('f3')]);
+    const stored = series([fx('f1'), fx('f4')]);
+    assert.deepEqual(storedDraftDrift(built, stored), [
+      '2 fixture(s) not in the stored copy',
+      '1 stored fixture(s) the sheet no longer has',
+    ]);
+  });
+
+  test('a renamed series and a changed team list are reported', () => {
+    const built = series([fx('f1')]);
+    const stored = series([fx('f1')], { name: 'Premier A (edited)', teams: ['a', 'c'] });
+    assert.deepEqual(storedDraftDrift(built, stored), [
+      'name "Premier A (edited)" → "Premier A"',
+      'team list differs',
+    ]);
+  });
+
+  test('more than five edited fixtures are truncated with an ellipsis', () => {
+    const ids = ['f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7'];
+    const built = series(ids.map((id) => fx(id)));
+    const stored = series(ids.map((id) => fx(id, { time: '13:00' })));
+    const [note] = storedDraftDrift(built, stored);
+    assert.match(note, /^7 fixture\(s\) edited: f1 \(time\); .*f5 \(time\); …$/);
+    assert.doesNotMatch(note, /f6/);
   });
 });
 

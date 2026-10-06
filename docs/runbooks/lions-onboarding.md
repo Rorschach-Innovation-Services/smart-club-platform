@@ -266,10 +266,11 @@ to revert first.
 - **Contacts** restores each person's lions membership from its pre-image, removes ones that
   didn't exist, and empties officer slots it filled that still hold that person. It leaves
   Cognito users in place and can't unsend messages.
-- **Compliance** deletes only the S3 objects and doc entries this import wrote.
-- **Fixtures** backs up, then deletes the 19 series. A released series is deleted too (with a
-  loud warning) and disappears from club portals immediately. Leagues, registry and aliases
-  stay.
+- **Compliance** deletes only the S3 objects and doc entries this import wrote. A multi-file
+  doc that also holds a rep's uploads keeps those files; only the import's entries go.
+- **Fixtures** backs up, then deletes the 19 series. A released series in scope makes
+  `--confirm` refuse unless you pass `--include-released`, because deleting it pulls it from
+  club portals immediately. Leagues, registry and aliases stay.
 - **Affiliation** needs its stage-scoped manifest
   (`lions-affiliation-created-clubs.<stage>.json`). Without it, nothing is deleted. It never
   deletes a club it only merged into.

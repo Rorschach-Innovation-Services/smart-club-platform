@@ -155,7 +155,7 @@ export function detectHeaders(headerCells: string[]): HeaderMap {
 // ───────────────────────── Cell normalisation ─────────────────────────
 
 /** Bidi/zero-width marks a phone app pastes around numbers ("‪+27 82 …‬"). */
-const INVISIBLE = /[​-‏‪-‮⁦-⁩﻿]/g;
+const INVISIBLE = /[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
 
 /** A cell → trimmed, whitespace-collapsed text with invisible marks removed. */
 export function text(v: unknown): string {
@@ -271,17 +271,18 @@ export function countOf(v: unknown): number | null {
   if (typeof v === 'number' && Number.isInteger(v) && v >= 0) return v;
   const s = text(v).toLowerCase();
   if (/^\d+$/.test(s)) return Number(s);
-  const words: Record<string, number> = {
-    none: 0,
-    zero: 0,
-    one: 1,
-    two: 2,
-    three: 3,
-    four: 4,
-    five: 5,
-    six: 6,
-  };
-  return words[s] ?? null;
+  // A Map, not an object literal, so "constructor"/"toString" can't resolve to prototype members.
+  const words = new Map<string, number>([
+    ['none', 0],
+    ['zero', 0],
+    ['one', 1],
+    ['two', 2],
+    ['three', 3],
+    ['four', 4],
+    ['five', 5],
+    ['six', 6],
+  ]);
+  return words.get(s) ?? null;
 }
 
 // ───────────────────────── League / division tokens ─────────────────────────

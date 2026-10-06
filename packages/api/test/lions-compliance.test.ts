@@ -29,6 +29,7 @@ const {
   catalogueCoverageProblems,
   contentAddressedKey,
   isImportObjectKey,
+  stripImportDocs,
   revertManifestGate,
   revertAction,
   createdClubsManifestPath,
@@ -381,6 +382,10 @@ describe('DOC_RULES on the tricky filenames', () => {
   test('an unrecognised filename is unclassified, never guessed', () => {
     assert.equal(classifyRel('Jeppe CC/mystery.pdf').kind, 'unclassified');
   });
+
+  test('a bare "registration" (player forms) is not claimed as the club registration', () => {
+    assert.equal(classifyRel('Jeppe CC/Player Registration Form.xlsx').kind, 'unclassified');
+  });
 });
 
 describe('skip rules and _root-unique routing', () => {
@@ -556,5 +561,83 @@ describe('keys, manifest, revert, club building', () => {
     assert.equal(club.chair, '');
     assert.deepEqual(club.leagues, []);
     assert.deepEqual(Object.keys(club.docs), LIONS_DOC_KEYS);
+  });
+});
+
+describe('revert strip — import files only, never a rep upload', () => {
+  const id = idOf('Jeppe');
+  const imp = (docKey: string, c: string) => ({
+    objectKey: contentAddressedKey(id, docKey, c.repeat(64), 'pdf'),
+    size: 1,
+    uploadedAt: '2026-10-01T00:00:00.000Z',
+  });
+  const rep = (docKey: string, n: number) => ({
+    objectKey: `lions/${id}/${docKey}-rep-${n}.pdf`,
+    size: 1,
+    uploadedAt: '2026-10-02T00:00:00.000Z',
+  });
+  const defs = (min: number) =>
+    new Map([['financials', { key: 'financials', multiFile: true, minFiles: min }]]) as never;
+
+  test('a mixed multi-file key keeps only the rep files; import objects are queued for delete', () => {
+    const a = imp('financials', 'a');
+    const b = imp('financials', 'b');
+    const r1 = rep('financials', 1);
+    const out = stripImportDocs(
+      {
+        id,
+        docs: { financials: true },
+        docMeta: { financials: { files: [a, r1, b], markedCompliant: true, at: 'T' } },
+      },
+      defs(1),
+    );
+    assert.equal(out.stripped, 1);
+    assert.deepEqual(out.objectKeysToDelete, [a.objectKey, b.objectKey]);
+    assert.deepEqual(out.docMeta.financials, { files: [r1], markedCompliant: true, at: 'T' });
+    assert.equal(out.docs.financials, true);
+  });
+
+  test('the docs flag is recomputed against minFiles once import files are gone', () => {
+    const out = stripImportDocs(
+      {
+        id,
+        docs: { financials: true },
+        docMeta: { financials: { files: [imp('financials', 'a'), rep('financials', 1)] } },
+      },
+      defs(2),
+    );
+    assert.deepEqual(out.docMeta.financials, { files: [rep('financials', 1)] });
+    assert.equal(out.docs.financials, false, 'one rep file left, two required');
+  });
+
+  test('an all-import key is removed outright; a rep-only key and a rep single upload are untouched', () => {
+    const a = imp('financials', 'a');
+    const single = imp('constitution', 'c');
+    const repSingle = rep('beeCert', 1);
+    const repMulti = { files: [rep('agmMinutes', 1)] };
+    const out = stripImportDocs(
+      {
+        id,
+        docs: { financials: true, constitution: true, beeCert: true, agmMinutes: true },
+        docMeta: {
+          financials: { files: [a] },
+          constitution: single,
+          beeCert: repSingle,
+          agmMinutes: repMulti,
+        },
+      },
+      defs(1),
+    );
+    assert.equal(out.stripped, 2);
+    assert.deepEqual(out.objectKeysToDelete.sort(), [a.objectKey, single.objectKey].sort());
+    assert.deepEqual(Object.keys(out.docMeta).sort(), ['agmMinutes', 'beeCert']);
+    assert.deepEqual(out.docMeta.beeCert, repSingle);
+    assert.deepEqual(out.docMeta.agmMinutes, repMulti);
+    assert.deepEqual(out.docs, {
+      financials: false,
+      constitution: false,
+      beeCert: true,
+      agmMinutes: true,
+    });
   });
 });

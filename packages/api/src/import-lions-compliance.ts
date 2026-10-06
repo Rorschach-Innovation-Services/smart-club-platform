@@ -1090,6 +1090,61 @@ export function revertAction(input: {
   return 'strip';
 }
 
+/**
+ * The revert-strip for one club: remove every import-authored file, never a rep's upload.
+ * A key holding only import files (single `objectKey` or a `files` array) is deleted and its
+ * `docs` flag cleared. A `files` array MIXING import and rep-uploaded entries keeps the key
+ * with just the rep's files, its markedCompliant/course/unavailable state carried through
+ * `docMetaValue`, and its `docs` flag recomputed exactly as the write path computes it.
+ * Returns the S3 keys of the removed import files for the caller to delete AFTER the
+ * record write lands. PURE.
+ */
+function stripImportDocs(
+  club: Pick<Club, 'id' | 'docs' | 'docMeta'>,
+  defByKey: Map<string, RequiredDoc>,
+): {
+  docs: Record<string, boolean>;
+  docMeta: Record<string, unknown>;
+  stripped: number;
+  objectKeysToDelete: string[];
+} {
+  const docMeta: Record<string, unknown> = { ...(club.docMeta ?? {}) };
+  const docs: Record<string, boolean> = { ...club.docs };
+  let stripped = 0;
+  const objectKeysToDelete: string[] = [];
+  for (const [key, value] of Object.entries(docMeta)) {
+    const m = value as { objectKey?: string; files?: DocFileEntry[] } | null;
+    if (m?.objectKey && !Array.isArray(m.files)) {
+      if (!isImportObjectKey(m.objectKey, club.id, key)) continue;
+      objectKeysToDelete.push(m.objectKey);
+      delete docMeta[key];
+      docs[key] = false;
+      stripped++;
+      continue;
+    }
+    if (!m?.files?.length) continue;
+    const imported = m.files.filter((f) => isImportObjectKey(f.objectKey, club.id, key));
+    if (!imported.length) continue;
+    for (const f of imported) objectKeysToDelete.push(f.objectKey);
+    stripped++;
+    const remaining = m.files.filter((f) => !isImportObjectKey(f.objectKey, club.id, key));
+    if (!remaining.length) {
+      delete docMeta[key];
+      docs[key] = false;
+      continue;
+    }
+    const norm = normalizeDocMeta(m);
+    const def = defByKey.get(key);
+    docMeta[key] = docMetaValue(remaining, norm.markedCompliant, norm.at, norm);
+    docs[key] =
+      norm.markedCompliant ||
+      norm.courseBooked ||
+      unavailableDeclared(norm, def) ||
+      remaining.length >= multiFileLimits(def).min;
+  }
+  return { docs, docMeta, stripped, objectKeysToDelete };
+}
+
 async function runRevert(repo: RepoModule, args: Args): Promise<void> {
   const clubs = await repo.listClubs(TENANT);
   console.log(`· created-clubs manifest: ${createdClubsManifestPath()}`);
@@ -1123,6 +1178,11 @@ async function runRevert(repo: RepoModule, args: Args): Promise<void> {
     s3 = new mod.S3Client({});
   }
 
+  // The catalogue decides whether a partly-stripped multi-file key still satisfies its doc.
+  const defByKey = new Map(
+    activeRequiredDocs(await repo.getTenantConfig(TENANT)).map((d) => [d.key, d]),
+  );
+
   let deletedClubs = 0;
   let strippedClubs = 0;
   let deletedObjects = 0;
@@ -1154,29 +1214,13 @@ async function runRevert(repo: RepoModule, args: Args): Promise<void> {
       continue;
     }
 
-    // Not eligible for full delete: strip only import-marked doc keys, and delete the S3
-    // objects those keys reference (no lifecycle rule would ever clean them up).
-    const docMeta = { ...(club.docMeta ?? {}) };
-    const docs = { ...club.docs };
-    let stripped = 0;
-    const objectKeysToDelete: string[] = [];
-    for (const [key, value] of Object.entries(docMeta)) {
-      const m = value as { objectKey?: string; files?: { objectKey: string }[] } | null;
-      const isImportSingle = m?.objectKey ? isImportObjectKey(m.objectKey, club.id, key) : false;
-      const isImportMulti =
-        m?.files?.length && m.files.every((f) => isImportObjectKey(f.objectKey, club.id, key));
-      if (isImportSingle) objectKeysToDelete.push(m!.objectKey!);
-      if (isImportMulti) for (const f of m!.files!) objectKeysToDelete.push(f.objectKey);
-      if (isImportSingle || isImportMulti) {
-        delete docMeta[key];
-        docs[key] = false;
-        stripped++;
-      }
-    }
+    // Not eligible for full delete: strip only import-authored doc files, and delete the S3
+    // objects they reference (no lifecycle rule would ever clean them up).
+    const { docs, docMeta, stripped, objectKeysToDelete } = stripImportDocs(club, defByKey);
     if (stripped > 0) {
       console.log(
         `${args.confirm ? 'strip' : '[dry-run] would strip'}  ${club.id}  (${club.name}) — ` +
-          `${stripped} import-marked doc key(s), ${objectKeysToDelete.length} S3 object(s)`,
+          `${stripped} doc key(s) with import files, ${objectKeysToDelete.length} S3 object(s)`,
       );
       if (args.confirm) {
         // Record FIRST, delete after — deleting first and then failing the write would
@@ -1295,6 +1339,7 @@ export {
   buildClub,
   isPristine,
   isImportObjectKey,
+  stripImportDocs,
   contentAddressedKey,
   normalizeDocMeta,
   unionDocFiles,

@@ -265,18 +265,22 @@ npx sst shell --stage <stage> -- npm --prefix packages/api run import-lions-fixt
 … import-lions-fixtures -- --revert
 … import-lions-fixtures -- --revert --confirm
 … import-lions-fixtures -- --revert --all --confirm             # every s-lions-* series
+… import-lions-fixtures -- --revert --include-released --confirm # also delete RELEASED series
 ```
 
 `--parse-only` exits non-zero today because of the one Lens Tech 1 clash. That's the gate
 working, not a parse failure: every count and assert above it is green.
 
 Flag rules: `--parse-only` and `--confirm` are mutually exclusive, `--all` is revert-only,
-and `--revert` takes only `--all` and `--confirm`.
+`--include-released` is revert-only, and `--revert` takes only `--all`, `--include-released`
+and `--confirm`.
 
 ## What a write does
 
 - **Drafts only.** New series land unapproved and unreleased. Re-importing over an existing
-  draft keeps its `approved` state and bumps its version.
+  draft keeps its `approved` state and bumps its version, but replaces its fixtures
+  wholesale: console edits are discarded. The dry run flags each stored series that
+  "differs from stored draft" and lists the edited fixtures, so check it before `--confirm`.
 - **Released series are never overwritten.** An existing released `s-lions-*` series in the
   selection aborts the run. Recall it in the console first, or leave it out with `--only`.
 - **Backup**: `packages/api/lions-fixtures-backup-<ts>.json`, a snapshot of every existing
@@ -308,8 +312,9 @@ and `--revert` takes only `--all` and `--confirm`.
 ## Revert
 
 `--revert` deletes the manifest's 19 series (`--all`: every `s-lions-*` series). It backs up
-first and warns loudly for any released series, since deleting one pulls it from club
-portals immediately. It leaves the leagues, venue registry, aliases and the club-league sync
+first. A released series in scope makes `--revert --confirm` refuse (nothing deleted), since
+deleting one pulls it from club portals immediately. Recall it first, or pass
+`--include-released` to delete it anyway. It leaves the leagues, venue registry, aliases and the club-league sync
 in place. Those are harmless without fixtures and reused on the next import.
 
 In the full rollback order, fixtures come after contacts and compliance and before

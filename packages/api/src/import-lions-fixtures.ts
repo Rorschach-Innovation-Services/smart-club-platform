@@ -7,7 +7,7 @@
  *   npx sst shell --stage dev -- npx tsx src/import-lions-fixtures.ts           # dry-run
  *   … [--only <slug>[,…]]                                                       # dry-run limited to those series
  *   … --confirm                                                                 # write (backup first)
- *   … --revert [--all] [--confirm]                                              # delete imported series
+ *   … --revert [--all] [--include-released] [--confirm]                         # delete imported series
  *
  * Inputs default to the prepared files under ~/Downloads/Lions (override with --file,
  * --sunday-grounds, --saturday-grounds, --affiliation). The grounds sheets + affiliation
@@ -498,6 +498,61 @@ export function buildAllSeries(inputs: SeriesInput[], ctx: BuildContext): BuildO
   return outcome;
 }
 
+// ───────────────────────── Stored-draft drift ─────────────────────────
+
+/** The fixture fields a console edit can change and a re-import would overwrite. */
+const DRIFT_FIELDS = [
+  'round',
+  'date',
+  'time',
+  'home',
+  'away',
+  'venueId',
+  'venueName',
+  'venueOverride',
+  'venueStatus',
+  'venueLocked',
+] as const;
+
+/**
+ * How a stored (draft/approved) series differs from what this run would write over it —
+ * empty when identical. A re-run of --confirm replaces the stored series wholesale, so any
+ * console-made fixture edit would be silently discarded; the dry run lists this per series
+ * so the overwrite is visible before confirm. Fixture ids are deterministic (`f1`…`fN`), so
+ * fixtures pair by id. PURE.
+ */
+export function storedDraftDrift(built: Series, stored: Series): string[] {
+  const notes: string[] = [];
+  if (stored.name !== built.name) notes.push(`name "${stored.name}" → "${built.name}"`);
+  const teamsOf = (s: Series) => [...((s.teams as string[] | undefined) ?? [])].sort().join(',');
+  if (teamsOf(stored) !== teamsOf(built)) notes.push('team list differs');
+  const storedFx = new Map(
+    ((stored.fixtures as WrittenFixture[] | undefined) ?? []).map((f) => [String(f.id), f]),
+  );
+  const builtFx = (built.fixtures as WrittenFixture[] | undefined) ?? [];
+  const builtIds = new Set(builtFx.map((f) => String(f.id)));
+  const changed: string[] = [];
+  let added = 0;
+  for (const f of builtFx) {
+    const s = storedFx.get(String(f.id));
+    if (!s) {
+      added++;
+      continue;
+    }
+    const rec = (x: WrittenFixture) => x as unknown as Record<string, unknown>;
+    const fields = DRIFT_FIELDS.filter((k) => (rec(s)[k] ?? null) !== (rec(f)[k] ?? null));
+    if (fields.length) changed.push(`${String(f.id)} (${fields.join(', ')})`);
+  }
+  const removed = [...storedFx.keys()].filter((id) => !builtIds.has(id)).length;
+  if (changed.length)
+    notes.push(
+      `${changed.length} fixture(s) edited: ${changed.slice(0, 5).join('; ')}${changed.length > 5 ? '; …' : ''}`,
+    );
+  if (added) notes.push(`${added} fixture(s) not in the stored copy`);
+  if (removed) notes.push(`${removed} stored fixture(s) the sheet no longer has`);
+  return notes;
+}
+
 // ───────────────────────── Clash scan ─────────────────────────
 
 export interface ScanClash extends Clash {
@@ -816,6 +871,8 @@ export interface Args {
   only: string[];
   questionsOut: string;
   noClubSync: boolean;
+  /** --revert only: required to delete a RELEASED series (mirrors the write path's refusal). */
+  includeReleased: boolean;
 }
 
 export function parseArgs(argv: string[]): Args {
@@ -828,6 +885,7 @@ export function parseArgs(argv: string[]): Args {
     only: [],
     questionsOut: '',
     noClubSync: false,
+    includeReleased: false,
   };
   const need = (i: number, flag: string) => {
     const v = argv[i];
@@ -846,6 +904,7 @@ export function parseArgs(argv: string[]): Args {
     else if (a === '--revert') args.mode = 'revert';
     else if (a === '--all') args.all = true;
     else if (a === '--no-club-sync') args.noClubSync = true;
+    else if (a === '--include-released') args.includeReleased = true;
     else if (a === '--only')
       args.only = need(++i, a)
         .split(',')
@@ -854,8 +913,10 @@ export function parseArgs(argv: string[]): Args {
     else throw new Error(`unknown flag ${a}`);
   }
   if (args.mode === 'revert' && (args.parseOnly || args.only.length || args.questionsOut))
-    throw new Error('--revert takes only --all and --confirm');
+    throw new Error('--revert takes only --all, --include-released and --confirm');
   if (args.all && args.mode !== 'revert') throw new Error('--all is a --revert flag');
+  if (args.includeReleased && args.mode !== 'revert')
+    throw new Error('--include-released is a --revert flag');
   if (args.parseOnly && args.confirm)
     throw new Error('--parse-only and --confirm are mutually exclusive');
   for (const slug of args.only)
@@ -1119,6 +1180,24 @@ async function runImport(args: Args) {
   console.log(
     `\n${builtSeries.length} series to write (${totalFixtures} fixtures), all as DRAFTS unless already approved.`,
   );
+  // A write replaces a stored draft/approved series WHOLESALE — surface any console edits it
+  // would discard (released series were refused above, so every match here is overwritable).
+  const drifted: Array<[string, string[]]> = [];
+  for (const s of builtSeries) {
+    const existing = existingSeries.find((e) => e.id === s.id);
+    if (!existing) continue;
+    const notes = storedDraftDrift(s, existing);
+    if (notes.length) drifted.push([String(s.id), notes]);
+  }
+  if (drifted.length) {
+    console.warn(
+      `\n⚠ ${drifted.length} stored series differ from the stored draft and WILL BE OVERWRITTEN by --confirm (console edits are discarded):`,
+    );
+    for (const [id, notes] of drifted) {
+      console.warn(`    ${id}: differs from stored draft`);
+      for (const n of notes) console.warn(`      · ${n}`);
+    }
+  }
   if (!args.confirm) {
     console.log('[dry-run] nothing written. Re-run with --confirm to import.');
     if (!args.noClubSync) {
@@ -1192,6 +1271,23 @@ async function runRevert(args: Args) {
       console.log(
         `(${extra} other ${LIONS_SERIES_PREFIX}* series not in this manifest kept — pass --all to include them)`,
       );
+  }
+  // Mirrors the write path's released-series refusal: deleting a RELEASED series pulls it
+  // from club portals immediately, so it needs an explicit --include-released.
+  const released = mine.filter((s) => s.released);
+  if (released.length && !args.includeReleased) {
+    const list = released.map((s) => `   ${s.id} (${s.name})`).join('\n');
+    if (args.confirm) {
+      console.error(
+        `\n✗ Refusing to revert — ${released.length} RELEASED series in scope (deleting pulls them from club portals immediately):\n${list}\n` +
+          'Recall them in the console first, or re-run with --include-released to delete them anyway. Nothing deleted.',
+      );
+      process.exitCode = 1;
+      return;
+    }
+    console.warn(
+      `\n⚠ ${released.length} RELEASED series in scope — --confirm will refuse unless --include-released is passed:\n${list}`,
+    );
   }
   if (args.confirm) await backupLionsSeries(repo);
   for (const s of mine) {
