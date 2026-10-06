@@ -135,6 +135,67 @@ export function bowlerPoints(players: ScoutPlayer[]) {
     .map((p) => ({ player: p, x: p.econ as number, y: ballsPerWicket(p) as number }));
 }
 
+/**
+ * Index ratings within one competition, as in the national scouting report: 100 = the
+ * competition's average; small samples are blended with that average as if the player had
+ * faced 30 more balls (bowled 24) at the average rate; batting index = √(runs-per-innings
+ * index × strike-rate index), bowling index = √(economy index × wicket-rate index).
+ * Runs per innings uses matches batted in (these events are one innings a side).
+ */
+export interface EventIndex {
+  player: ScoutPlayer;
+  bat: { rpiIdx: number; srIdx: number; idx: number } | null;
+  bowl: { econIdx: number; wktIdx: number; idx: number } | null;
+  qualifiesBat: boolean;
+  qualifiesBowl: boolean;
+}
+
+export function eventIndices(players: ScoutPlayer[]): EventIndex[] {
+  const batters = players.filter((p) => (p.balls ?? 0) > 0 && p.runs !== null);
+  const bowlers = players.filter((p) => (p.ballsBowled ?? 0) > 0 && p.runsConceded !== null);
+  const sum = (xs: ScoutPlayer[], f: (p: ScoutPlayer) => number | null) =>
+    xs.reduce((n, p) => n + (f(p) ?? 0), 0);
+  const lgRuns = sum(batters, (p) => p.runs);
+  const lgBalls = sum(batters, (p) => p.balls);
+  const lgInns = sum(batters, (p) => p.m);
+  const lgSR = lgBalls ? (lgRuns / lgBalls) * 100 : 0;
+  const lgRPI = lgInns ? lgRuns / lgInns : 0;
+  const lgBallsPerInns = lgInns ? lgBalls / lgInns : 1;
+  const lgBowlBalls = sum(bowlers, (p) => p.ballsBowled);
+  const lgEcon = lgBowlBalls ? (sum(bowlers, (p) => p.runsConceded) / lgBowlBalls) * 6 : 0;
+  const lgWkts = sum(bowlers, (p) => p.wkts);
+  const lgBPW = lgWkts ? lgBowlBalls / lgWkts : 0;
+  const K_BAT = 30;
+  const K_BOWL = 24;
+  return players.map((p) => {
+    let bat: EventIndex['bat'] = null;
+    if ((p.balls ?? 0) > 0 && p.runs !== null && lgSR && lgRPI) {
+      const sr = ((p.runs + (K_BAT * lgSR) / 100) / (p.balls! + K_BAT)) * 100;
+      const kInns = K_BAT / lgBallsPerInns;
+      const rpi = (p.runs + kInns * lgRPI) / (Math.max(1, p.m) + kInns);
+      const rpiIdx = (rpi / lgRPI) * 100;
+      const srIdx = (sr / lgSR) * 100;
+      bat = { rpiIdx, srIdx, idx: Math.sqrt(rpiIdx * srIdx) };
+    }
+    let bowl: EventIndex['bowl'] = null;
+    if ((p.ballsBowled ?? 0) > 0 && p.runsConceded !== null && lgEcon && lgBPW) {
+      const b = p.ballsBowled!;
+      const econ = ((p.runsConceded + (K_BOWL * lgEcon) / 6) / (b + K_BOWL)) * 6;
+      const wpb = ((p.wkts ?? 0) + K_BOWL / lgBPW) / (b + K_BOWL);
+      const econIdx = (lgEcon / econ) * 100;
+      const wktIdx = wpb * lgBPW * 100;
+      bowl = { econIdx, wktIdx, idx: Math.sqrt(econIdx * wktIdx) };
+    }
+    return {
+      player: p,
+      bat,
+      bowl,
+      qualifiesBat: (p.balls ?? 0) >= MIN_BALLS_FACED,
+      qualifiesBowl: (p.ballsBowled ?? 0) >= MIN_BALLS_BOWLED,
+    };
+  });
+}
+
 export function teamName(event: ScoutingEvent, code: string) {
   return event.teams.find((t) => t.code === code)?.name ?? code;
 }

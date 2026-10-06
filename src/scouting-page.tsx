@@ -8,15 +8,17 @@ import { PlayerPanel, WatchlistCard, WatchButton, useWatchlist, REC_TONE } from 
 import type { Watchlist } from './scouting-player';
 import { MatchDashboard } from './scouting-match';
 import { TeamDetail } from './scouting-team';
+import { ProTeamPage } from './pro-team-page';
+import { QuadrantMap, type MapPt, type Tone } from './pro-charts';
 import { SCOUTING_EVENTS } from './scouting-data';
 import type { ScoutPlayer, ScoutingEvent, ScoutProfile } from './scouting-data';
 import {
   LEADERS,
   leaderDef,
   leaderboard,
-  batterPoints,
-  bowlerPoints,
-  median,
+  eventIndices,
+  MIN_BALLS_FACED,
+  MIN_BALLS_BOWLED,
   oversOf,
   roleOf,
   contribution,
@@ -375,228 +377,96 @@ function Leaderboards({
   );
 }
 
-/* ── Performance map (scatter: grey context, highlighted team, median guides) ── */
-
-interface MapPoint {
-  player: ScoutPlayer;
-  x: number;
-  y: number;
-}
-
-function Scatter({
-  points,
-  xLabel,
-  yLabel,
-  invertX,
-  invertY,
-  highlight,
-  labelTop,
-  fmtX,
-  fmtY,
-  openPlayer,
-}: {
-  points: MapPoint[];
-  xLabel: string;
-  yLabel: string;
-  invertX?: boolean;
-  invertY?: boolean;
-  highlight: string;
-  labelTop: Set<string>;
-  fmtX: (v: number) => string;
-  fmtY: (v: number) => string;
-  openPlayer: (p: ScoutPlayer) => void;
-}) {
-  const [hover, setHover] = useState<MapPoint | null>(null);
-  const W = 560;
-  const H = 340;
-  const pad = { l: 46, r: 16, t: 14, b: 40 };
-  const xs = points.map((p) => p.x);
-  const ys = points.map((p) => p.y);
-  const nice = (lo: number, hi: number) => {
-    const span = hi - lo || 1;
-    return [lo - span * 0.08, hi + span * 0.08];
-  };
-  const [x0, x1] = nice(Math.min(...xs), Math.max(...xs));
-  // A lone extreme value (e.g. 96 balls per wicket) would squash everyone else into a
-  // band, so cap the y-range at 1.5× the 90th percentile; points beyond it are drawn
-  // pinned to the edge as hollow markers with their value in the label.
-  const ySorted = [...ys].sort((a, b) => a - b);
-  const yCap = ySorted.length > 5 ? ySorted[Math.floor(ySorted.length * 0.9)] * 1.5 : Infinity;
-  const [y0, y1] = nice(Math.min(...ys), Math.min(Math.max(...ys), yCap));
-  const clampY = (v: number) => Math.min(v, y1);
-  const sx = (v: number) => {
-    const t = (v - x0) / (x1 - x0);
-    return pad.l + (invertX ? 1 - t : t) * (W - pad.l - pad.r);
-  };
-  const sy = (v: number) => {
-    const t = (v - y0) / (y1 - y0);
-    return H - pad.b - (invertY ? 1 - t : t) * (H - pad.t - pad.b);
-  };
-  const ticks = (lo: number, hi: number) => {
-    const step = Math.pow(10, Math.floor(Math.log10((hi - lo) / 4)));
-    const m = (hi - lo) / step > 20 ? step * 5 : (hi - lo) / step > 8 ? step * 2 : step;
-    const out: number[] = [];
-    for (let v = Math.ceil(lo / m) * m; v <= hi; v += m) out.push(+v.toFixed(6));
-    return out;
-  };
-  const mx = median(xs);
-  const my = median(ys);
-  // Draw context first so highlighted points sit on top.
-  const ordered = [...points].sort(
-    (a, b) => Number(a.player.hub === highlight) - Number(b.player.hub === highlight),
-  );
-
-  // Greedy label placement: keep a label only if its box clears every label already
-  // placed (the rest stay reachable through the hover tooltip).
-  const placed: { x: number; y: number; w: number }[] = [];
-  const shown = new Set<string>();
-  ordered
-    .filter(
-      (p) =>
-        (!highlight || p.player.hub === highlight) && (labelTop.has(p.player.name) || p.y > y1),
-    )
-    .sort(
-      (a, b) =>
-        (b.player.runs ?? 0) +
-        20 * (b.player.wkts ?? 0) -
-        ((a.player.runs ?? 0) + 20 * (a.player.wkts ?? 0)),
-    )
-    .forEach((p) => {
-      const x = sx(p.x) + 9;
-      const y = sy(clampY(p.y)) - 7;
-      const w = labelText(p).length * 5.6;
-      const clash = placed.some((b) => x < b.x + b.w && x + w > b.x && Math.abs(y - b.y) < 12);
-      if (!clash && x + w <= W) {
-        placed.push({ x, y, w });
-        shown.add(p.player.name);
-      }
-    });
-  function labelText(p: MapPoint) {
-    const last = p.player.name.split(' ').slice(-1)[0];
-    return p.y > y1 ? `${last} (${fmtY(p.y)}) ${invertY ? '↓' : '↑'}` : last;
-  }
-
-  return (
-    <div className="sc-scatter">
-      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`${yLabel} against ${xLabel}`}>
-        {ticks(x0, x1).map((v) => (
-          <g key={`x${v}`}>
-            <line className="sc-grid" x1={sx(v)} x2={sx(v)} y1={pad.t} y2={H - pad.b} />
-            <text className="sc-tick" x={sx(v)} y={H - pad.b + 16} textAnchor="middle">
-              {fmtX(v)}
-            </text>
-          </g>
-        ))}
-        {ticks(y0, y1).map((v) => (
-          <g key={`y${v}`}>
-            <line className="sc-grid" x1={pad.l} x2={W - pad.r} y1={sy(v)} y2={sy(v)} />
-            <text className="sc-tick" x={pad.l - 8} y={sy(v) + 4} textAnchor="end">
-              {fmtY(v)}
-            </text>
-          </g>
-        ))}
-        <line className="sc-median" x1={sx(mx)} x2={sx(mx)} y1={pad.t} y2={H - pad.b} />
-        <line className="sc-median" x1={pad.l} x2={W - pad.r} y1={sy(my)} y2={sy(my)} />
-        <text className="sc-axis" x={(pad.l + W - pad.r) / 2} y={H - 6} textAnchor="middle">
-          {xLabel}
-        </text>
-        <text
-          className="sc-axis"
-          transform={`translate(12 ${(pad.t + H - pad.b) / 2}) rotate(-90)`}
-          textAnchor="middle"
-        >
-          {yLabel}
-        </text>
-        {ordered.map((p) => {
-          const on = !highlight || p.player.hub === highlight;
-          const cx = sx(p.x);
-          const off = p.y > y1;
-          const cy = sy(clampY(p.y));
-          return (
-            <g
-              key={p.player.name}
-              className="sc-pt"
-              onMouseEnter={() => setHover(p)}
-              onMouseLeave={() => setHover(null)}
-              onClick={() => openPlayer(p.player)}
-            >
-              <circle cx={cx} cy={cy} r={12} fill="transparent" />
-              <circle
-                className={`sc-dot${on ? ' on' : ''}${off ? ' off' : ''}`}
-                cx={cx}
-                cy={cy}
-                r={on ? 6 : 5}
-              />
-              {shown.has(p.player.name) && (
-                <text className="sc-pt-label" x={cx + 9} y={cy - 7}>
-                  {labelText(p)}
-                </text>
-              )}
-            </g>
-          );
-        })}
-      </svg>
-      {hover && (
-        <div
-          className="sc-tip"
-          style={{
-            left: `${(sx(hover.x) / W) * 100}%`,
-            top: `${(sy(clampY(hover.y)) / H) * 100}%`,
-          }}
-        >
-          <strong>{hover.player.name}</strong>
-          <span>{hover.player.hub}</span>
-          <span>
-            {xLabel.split(' (')[0]}: {fmtX(hover.x)}
-          </span>
-          <span>
-            {yLabel.split(' (')[0]}: {fmtY(hover.y)}
-          </span>
-        </div>
-      )}
-    </div>
-  );
-}
+/* ── Performance map (index quadrants, after the national scouting report) ── */
 
 function PerformanceMap({
   event,
+  watch,
   openPlayer,
 }: {
   event: ScoutingEvent;
+  watch: Watchlist;
   openPlayer: (p: ScoutPlayer) => void;
 }) {
   const [hub, setHub] = useState('');
-  const bats = batterPoints(event.players);
-  const bowls = bowlerPoints(event.players);
-  // Name the strongest few on each map so the eye has anchors without labelling every dot.
-  const batLabels = new Set(
-    [...bats]
-      .sort((a, b) => (b.player.runs ?? 0) - (a.player.runs ?? 0))
-      .slice(0, 6)
-      .map((p) => p.player.name),
-  );
-  const bowlLabels = new Set(
-    [...bowls]
-      .sort((a, b) => (b.player.wkts ?? 0) - (a.player.wkts ?? 0))
-      .slice(0, 6)
-      .map((p) => p.player.name),
-  );
-  const labelsFor = (pts: MapPoint[], base: Set<string>) =>
-    hub ? new Set(pts.filter((p) => p.player.hub === hub).map((p) => p.player.name)) : base;
+  const rows = useMemo(() => eventIndices(event.players), [event]);
+  const byId = new Map(rows.map((r) => [`${r.player.name}|${r.player.hub}`, r.player]));
+  const pick = (id: string) => {
+    const p = byId.get(id);
+    if (p) openPlayer(p);
+  };
+  // Three colours at most on a map: the highlighted team, the watchlist, everyone else.
+  const tone = (p: ScoutPlayer): Tone =>
+    watch.has(p) ? 'pool' : hub ? (p.hub === hub ? 'squad' : 'context') : 'squad';
+  const label = (p: ScoutPlayer) => `${p.name}`;
+  const pinned = (p: ScoutPlayer, rank: number) => watch.has(p) || (hub ? p.hub === hub : rank < 8);
+  const bats = rows.filter((r) => r.qualifiesBat && r.bat).sort((a, b) => b.bat!.idx - a.bat!.idx);
+  const bowls = rows
+    .filter((r) => r.qualifiesBowl && r.bowl)
+    .sort((a, b) => b.bowl!.idx - a.bowl!.idx);
+  const ars = rows
+    .filter((r) => r.qualifiesBat && r.qualifiesBowl && r.bat && r.bowl)
+    .sort((a, b) => Math.sqrt(b.bat!.idx * b.bowl!.idx) - Math.sqrt(a.bat!.idx * a.bowl!.idx));
+  const sub = (p: ScoutPlayer) => `${teamName(event, p.hub)}`;
+  const legend = {
+    squad: hub ? teamName(event, hub) : 'Players',
+    context: 'Other teams',
+    pool: 'Your watchlist',
+  };
+  const batPts: MapPt[] = bats.map((r, i) => ({
+    id: `${r.player.name}|${r.player.hub}`,
+    label: label(r.player),
+    sub: sub(r.player),
+    x: r.bat!.srIdx,
+    y: r.bat!.rpiIdx,
+    size: r.player.balls ?? 0,
+    tone: tone(r.player),
+    pin: pinned(r.player, i),
+    tip: [
+      `${r.player.runs} runs off ${r.player.balls} · SR ${r.player.sr?.toFixed(0)}`,
+      `Batting index ${Math.round(r.bat!.idx)}`,
+    ],
+  }));
+  const bowlPts: MapPt[] = bowls.map((r, i) => ({
+    id: `${r.player.name}|${r.player.hub}`,
+    label: label(r.player),
+    sub: sub(r.player),
+    x: r.bowl!.econIdx,
+    y: r.bowl!.wktIdx,
+    size: r.player.ballsBowled ?? 0,
+    tone: tone(r.player),
+    pin: pinned(r.player, i),
+    tip: [
+      `${r.player.wkts ?? 0} wkts in ${oversOf(r.player.ballsBowled)} ov · econ ${r.player.econ?.toFixed(1)}`,
+      `Bowling index ${Math.round(r.bowl!.idx)}`,
+    ],
+  }));
+  const arPts: MapPt[] = ars.map((r, i) => ({
+    id: `${r.player.name}|${r.player.hub}`,
+    label: label(r.player),
+    sub: sub(r.player),
+    x: r.bat!.idx,
+    y: r.bowl!.idx,
+    size: (r.player.balls ?? 0) + (r.player.ballsBowled ?? 0),
+    tone: tone(r.player),
+    pin: pinned(r.player, i),
+    tip: [`All-rounder index ${Math.round(Math.sqrt(r.bat!.idx * r.bowl!.idx))}`],
+  }));
 
   return (
     <>
       <div className="sc-filters">
         <div className="sc-board-note">
-          Dashed lines mark the medians · top-right is the target quadrant · tap a dot for the
-          player
+          Every axis is an index: 100 = this competition's average · top-right is better on both ·
+          bubble size = balls · gold = your watchlist · tap a bubble for the player
         </div>
         <select
           className="field-select sc-select"
           value={hub}
           onChange={(e) => setHub(e.target.value)}
+          aria-label="Highlight a team"
         >
-          <option value="">Highlight a team…</option>
+          <option value="">All teams</option>
           {event.teams.map((t) => (
             <option key={t.code} value={t.code}>
               {t.name}
@@ -608,46 +478,72 @@ function PerformanceMap({
         <div className="card">
           <div className="card-head">
             <div>
-              <div className="card-title">Batters: scoring speed v reliability</div>
-              <div className="card-sub">{bats.length} batters with 40+ balls faced</div>
+              <div className="card-title">Batters: how fast, how many</div>
+              <div className="card-sub">
+                {batPts.length} batters with {MIN_BALLS_FACED}+ balls faced
+              </div>
             </div>
           </div>
           <div className="card-body">
-            <Scatter
-              points={bats}
-              xLabel="Strike rate"
-              yLabel="Average (runs if never out)"
-              highlight={hub}
-              labelTop={labelsFor(bats, batLabels)}
-              fmtX={(v) => v.toFixed(0)}
-              fmtY={(v) => v.toFixed(0)}
-              openPlayer={openPlayer}
+            <QuadrantMap
+              points={batPts}
+              xLabel="Strike-rate index"
+              yLabel="Runs-per-innings index"
+              quadrants={['Fast and heavy', 'Heavy, slower', 'Quick cameos', 'Below on both']}
+              sizeLabel="balls faced"
+              onPick={pick}
+              toneLabels={legend}
             />
           </div>
         </div>
         <div className="card">
           <div className="card-head">
             <div>
-              <div className="card-title">Bowlers: control v wicket-taking</div>
-              <div className="card-sub">{bowls.length} bowlers with 8+ overs and a wicket</div>
+              <div className="card-title">Bowlers: control v wickets</div>
+              <div className="card-sub">
+                {bowlPts.length} bowlers with {MIN_BALLS_BOWLED / 6}+ overs · right = cheaper
+              </div>
             </div>
           </div>
           <div className="card-body">
-            <Scatter
-              points={bowls}
-              xLabel="Economy (better to the right)"
-              yLabel="Balls per wicket (better higher)"
-              invertX
-              invertY
-              highlight={hub}
-              labelTop={labelsFor(bowls, bowlLabels)}
-              fmtX={(v) => v.toFixed(1)}
-              fmtY={(v) => v.toFixed(0)}
-              openPlayer={openPlayer}
+            <QuadrantMap
+              points={bowlPts}
+              xLabel="Economy index (higher = cheaper)"
+              yLabel="Wicket-rate index"
+              quadrants={[
+                'Better on both',
+                'Wicket-takers, expensive',
+                'Tight, few wickets',
+                'Below on both',
+              ]}
+              sizeLabel="balls bowled"
+              onPick={pick}
+              toneLabels={legend}
             />
           </div>
         </div>
       </div>
+      {arPts.length >= 3 && (
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">All-rounders: batting v bowling</div>
+              <div className="card-sub">{arPts.length} players qualifying with bat and ball</div>
+            </div>
+          </div>
+          <div className="card-body">
+            <QuadrantMap
+              points={arPts}
+              xLabel="Batting index"
+              yLabel="Bowling index"
+              quadrants={['Better on both', 'Bowling first', 'Batting first', 'Below on both']}
+              sizeLabel="balls faced + bowled"
+              onPick={pick}
+              toneLabels={legend}
+            />
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -1022,6 +918,9 @@ export function AdminScoutingPage({ orgName }: { orgName: string }) {
     window.scrollTo({ top: 0 });
   };
   const back = () => window.history.back();
+  // Player scouting (competitions) or the professional team built on it (?view=pro).
+  const view = params.get('view') === 'pro' ? 'pro' : 'scouting';
+  const pickView = (v: 'pro' | 'scouting') => setParams(v === 'pro' ? { view: 'pro' } : {});
 
   return (
     <div>
@@ -1029,36 +928,70 @@ export function AdminScoutingPage({ orgName }: { orgName: string }) {
         <div className="ph-left">
           <div className="ph-crumb">{orgName} · Talent identification</div>
           <h1 className="ph-title">
-            Player <em>Scouting</em>
+            {view === 'pro' ? (
+              <>
+                Professional <em>Team</em>
+              </>
+            ) : (
+              <>
+                Player <em>Scouting</em>
+              </>
+            )}
           </h1>
           <p className="ph-desc">
-            Performance across leagues and tournaments — leaderboards, performance maps, team
-            profiles and the selection shortlist.
+            {view === 'pro'
+              ? 'The franchise squads from their scorecards — who to promote, who is at risk, the squad and team pictures, and call-ups from the scouting pools.'
+              : 'Performance across leagues and tournaments — leaderboards, performance maps, team profiles and the selection shortlist.'}
           </p>
         </div>
-        <div className="ph-actions sc-event">
-          <label className="field-label" htmlFor="sc-event">
-            Competition
-          </label>
-          <select
-            id="sc-event"
-            className="field-select sc-select"
-            value={eventId}
-            onChange={(e) => {
-              setParams({ event: e.target.value });
-              setTab('overview');
-            }}
-          >
-            {SCOUTING_EVENTS.map((e) => (
-              <option key={e.id} value={e.id}>
-                {e.name}
-              </option>
-            ))}
-          </select>
-        </div>
+        {view === 'scouting' && (
+          <div className="ph-actions sc-event">
+            <label className="field-label" htmlFor="sc-event">
+              Competition
+            </label>
+            <select
+              id="sc-event"
+              className="field-select sc-select"
+              value={eventId}
+              onChange={(e) => {
+                setParams({ event: e.target.value });
+                setTab('overview');
+              }}
+            >
+              {SCOUTING_EVENTS.map((e) => (
+                <option key={e.id} value={e.id}>
+                  {e.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
       </div>
 
-      {!event ? (
+      <div className="pro-switch" role="tablist" aria-label="Scouting area">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === 'scouting'}
+          className={view === 'scouting' ? 'on' : ''}
+          onClick={() => pickView('scouting')}
+        >
+          Player scouting
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === 'pro'}
+          className={view === 'pro' ? 'on' : ''}
+          onClick={() => pickView('pro')}
+        >
+          Professional team
+        </button>
+      </div>
+
+      {view === 'pro' ? (
+        <ProTeamPage />
+      ) : !event ? (
         <div className="ss-empty">No scouting data yet.</div>
       ) : (
         <>
@@ -1125,7 +1058,9 @@ export function AdminScoutingPage({ orgName }: { orgName: string }) {
                 {tab === 'leaders' && (
                   <Leaderboards event={event} shortlisted={shortlisted} openPlayer={setPlayer} />
                 )}
-                {tab === 'map' && <PerformanceMap event={event} openPlayer={setPlayer} />}
+                {tab === 'map' && (
+                  <PerformanceMap event={event} watch={watch} openPlayer={setPlayer} />
+                )}
                 {tab === 'teams' && <Teams event={event} openTeam={openTeam} />}
                 {tab === 'shortlist' && (
                   <Shortlist

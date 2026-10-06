@@ -147,7 +147,8 @@ export interface ScoutingEvent {
 const local = Object.values(
   // Data modules only — never the local test files (they import vitest).
   import.meta.glob<{ default: ScoutingEvent }>(
-    ['./scouting-local/*.ts', '!./scouting-local/*.test.ts'],
+    // Scouting pools (pool-*.ts) are a different shape: pro-data.ts loads them.
+    ['./scouting-local/*.ts', '!./scouting-local/*.test.ts', '!./scouting-local/pool-*.ts'],
     { eager: true },
   ),
 )

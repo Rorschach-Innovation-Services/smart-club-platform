@@ -90,3 +90,22 @@ describe('helpers', () => {
     expect(median([])).toBe(0);
   });
 });
+
+describe('competition indices (Performance map)', () => {
+  it('centres the field on 100 and shrinks small samples towards it', async () => {
+    const { eventIndices } = await import('./scouting');
+    const rows = eventIndices(ev.players);
+    const bats = rows.filter((r) => r.qualifiesBat && r.bat);
+    const mean = bats.reduce((n, r) => n + r.bat!.srIdx, 0) / bats.length;
+    expect(mean).toBeGreaterThan(80);
+    expect(mean).toBeLessThan(130);
+    // A short innings at a high strike rate never reads like a long one at the same rate.
+    const fast = rows.filter(
+      (r) => r.bat && (r.player.balls ?? 0) < 15 && (r.player.sr ?? 0) > 150,
+    );
+    for (const r of fast) expect(r.bat!.srIdx).toBeLessThan(((r.player.sr ?? 0) / 100) * 100);
+    const bowls = rows.filter((r) => r.qualifiesBowl && r.bowl);
+    expect(bowls.length).toBeGreaterThan(5);
+    expect(bowls.every((r) => r.bowl!.idx > 0)).toBe(true);
+  });
+});

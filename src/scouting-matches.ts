@@ -9,6 +9,8 @@ export interface ScoutBatRow {
   f6: number;
   /** Dismissal as scored, e.g. "c Name b Name", "b Name", "run out", "not out". */
   out: string;
+  /** Dot balls faced, when the scorecard records them. */
+  dots?: number;
 }
 export interface ScoutBowlRow {
   n: string;
