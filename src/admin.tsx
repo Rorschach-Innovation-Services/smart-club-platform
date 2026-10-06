@@ -84,8 +84,10 @@ import {
 } from '../packages/engine/src/venues';
 import { isSlotRef, slotRefLabel } from '../packages/engine/src/formats';
 import { resolveCompetitionDefaults } from '../packages/engine/src/defaults';
+import { TRANSFER_WINDOW_REJECTOR } from './types';
 import type {
   AdminClearanceView,
+  TransferWindowStatus,
   Club,
   League,
   PlayerRegistration,
@@ -7137,6 +7139,36 @@ export function AdminTeamAccessView({
   );
 }
 
+/**
+ * Transfer-window status line for the clearances console. `status` is the SERVER-computed one
+ * from the tenant payload (absent ⇒ no windows configured ⇒ nothing to say).
+ */
+export function TransferWindowBanner({ status }: { status?: TransferWindowStatus }) {
+  if (!status) return null;
+  const text = status.open
+    ? `Transfers open${status.current ? ` — ${status.current.label} until ${formatDayYear(status.current.end)}` : ''}`
+    : status.next
+      ? `Transfers closed — next window: ${status.next.label} from ${formatDayYear(status.next.start)}`
+      : 'Transfers closed — no upcoming window';
+  return (
+    <div
+      role="status"
+      style={{
+        marginTop: 14,
+        padding: '8px 12px',
+        borderRadius: 8,
+        fontSize: 12.5,
+        background: status.open ? 'var(--green-soft, #E6F4EA)' : 'var(--coral-soft, #FDECEA)',
+        color: status.open ? 'var(--green, #1E7B3A)' : 'var(--coral, #C0392B)',
+      }}
+    >
+      {text}
+      {!status.open &&
+        '. Clubs cannot request clearances; registrations naming another club are auto-rejected.'}
+    </div>
+  );
+}
+
 /* ─── AdminClearances — oversight of every clearance across the cohort ─── */
 export function AdminClearances({
   clearances,
@@ -7149,6 +7181,7 @@ export function AdminClearances({
   onRemind = undefined,
   onRevokeCertificate,
   onCertificateViewed = undefined,
+  transferWindowStatus = undefined,
   busyId,
   busyAction,
 }) {
@@ -7217,6 +7250,8 @@ export function AdminClearances({
           </Btn>
         </div>
       </div>
+
+      <TransferWindowBanner status={transferWindowStatus} />
 
       <div className="players-stats">
         <div className="players-stat">
@@ -7510,7 +7545,11 @@ export function AdminClearances({
 
               {req.status !== 'pending' && (
                 <div className="clr-resolved-bar">
-                  {req.status === 'rejected' ? (
+                  {req.status === 'rejected' && req.rejectedBy === TRANSFER_WINDOW_REJECTOR ? (
+                    <Pill tone="coral" dot>
+                      Auto-rejected — window closed
+                    </Pill>
+                  ) : req.status === 'rejected' ? (
                     <Pill tone="coral" dot>
                       Rejected{req.rejectedBy ? ` · ${req.rejectedBy}` : ''}
                     </Pill>
@@ -7531,6 +7570,11 @@ export function AdminClearances({
                   {req.status === 'rejected' && req.rejectOutcome === 'stays-at-destination' && (
                     <span style={{ fontSize: 11, color: 'var(--muted)' }}>
                       Stays at {req.toClubName}
+                    </span>
+                  )}
+                  {req.status === 'rejected' && req.rejectOutcome === 'not-registered' && (
+                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+                      Not registered at {req.toClubName}
                     </span>
                   )}
                   {req.status === 'rejected' && req.rejectReason && (
@@ -7577,7 +7621,10 @@ export function AdminClearances({
                           kind: 'reopen',
                           title: 'Reopen this clearance?',
                           req,
-                          body: `${req.playerName}'s registration goes back to how it was before the rejection, and ${req.fromClubName}'s chair is notified again. It can be rejected again afterwards.`,
+                          body:
+                            req.rejectOutcome === 'not-registered'
+                              ? `${req.playerName} is placed on ${req.toClubName}'s roster as clearance pending, and ${req.fromClubName}'s chair is asked to decide. It can be rejected again afterwards.`
+                              : `${req.playerName}'s registration goes back to how it was before the rejection, and ${req.fromClubName}'s chair is notified again. It can be rejected again afterwards.`,
                           // Keep the dialog open until the request settles; close on success and
                           // on 'conflict' (already refetched), stay open only on 'failed'.
                           onYes: async () => {

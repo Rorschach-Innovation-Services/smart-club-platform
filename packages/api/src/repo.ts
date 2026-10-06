@@ -102,7 +102,7 @@ import {
   whatsappMessageKey,
   captainsReportPartitionPk,
 } from './keys.js';
-import { PLATFORM_TENANT } from './types.js';
+import { PLATFORM_TENANT, TRANSFER_WINDOW_REJECTOR } from './types.js';
 import type {
   Club,
   ClubCommEvent,
@@ -4305,6 +4305,97 @@ export async function createPlayerWithSourcelessClearance(
 }
 
 /**
+ * Record a registration that arrived OUTSIDE every transfer window: the clearance is created
+ * already rejected (`rejectedBy: 'system:transfer-window'`, outcome 'not-registered'), with the
+ * would-be destination row kept ONLY on the canonical's snapshot (`{case:'window-closed',
+ * pendingPlayer}`) for a later Reopen.
+ *
+ * Writes ONLY the canonical + mirror clearance items — no player rows, no status flips, no
+ * playerCount changes. That is the whole point: create-then-reject would run rejectClearance,
+ * whose case D (off-system source) leaves the player ACTIVE at the destination, admitting every
+ * player who names a directory club. Because no player row exists, the duplicate-pending guards
+ * (which key on player rows) never see this record, so re-registering once a window opens is
+ * unblocked by construction; the caller's same-nk→destination short-circuit
+ * (findWindowRejectedClearances) is what stops resubmissions during the closed stretch.
+ *
+ * Guards: the destination-club existence check (never write a mirror into a club mid-delete)
+ * and attribute_not_exists on the canonical (a replayed id never double-writes). The dynalite
+ * path has no TransactWriteItems → existence pre-read, canonical first, then the mirror.
+ */
+export async function createAutoRejectedClearance(
+  tenant: string,
+  player: PlayerRegistration,
+  c: PlayerClearance,
+): Promise<PlayerClearance> {
+  const rejected: PlayerClearance = {
+    ...c,
+    rejectSnapshot: { case: 'window-closed', pendingPlayer: player },
+  };
+  const { canonical, mirror } = clearanceItems(tenant, rejected);
+  const canonicalPut = {
+    TableName: TABLE,
+    Item: canonical,
+    ConditionExpression: 'attribute_not_exists(sk)',
+  };
+  try {
+    if (localEndpoint) {
+      if (!(await getClub(tenant, c.toClubId))) throw new DestinationClubGoneError();
+      await ddb.send(new PutCommand(canonicalPut));
+      await ddb.send(new PutCommand({ TableName: TABLE, Item: mirror }));
+    } else {
+      await ddb.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              // Same rationale as createClearance: never create INTO a club mid-delete.
+              ConditionCheck: {
+                TableName: TABLE,
+                Key: clubKey(tenant, c.toClubId),
+                ConditionExpression: 'attribute_exists(pk)',
+              },
+            },
+            { Put: canonicalPut },
+            { Put: { TableName: TABLE, Item: mirror } },
+          ],
+        }),
+      );
+    }
+  } catch (err: unknown) {
+    if (err instanceof DestinationClubGoneError) throw err;
+    const name = (err as { name?: string }).name;
+    if (name === 'TransactionCanceledException') {
+      const reasons = (err as { CancellationReasons?: Array<{ Code?: string }> })
+        .CancellationReasons;
+      if (reasons?.[0]?.Code === 'ConditionalCheckFailed') throw new DestinationClubGoneError();
+      throw new DuplicatePendingClearanceError();
+    }
+    if (name === 'ConditionalCheckFailedException') throw new DuplicatePendingClearanceError();
+    throw err;
+  }
+  return publicClearance(rejected);
+}
+
+/**
+ * Window-closed auto-rejected clearances INTO `toClubId` for this identity, newest first — read
+ * from the destination's own mirror partition (no tenant-wide scan). A reopened one no longer
+ * qualifies (reopen clears rejectedBy).
+ */
+export async function findWindowRejectedClearances(
+  tenant: string,
+  toClubId: string,
+  naturalKey: string,
+): Promise<PlayerClearance[]> {
+  return (await listInboundForDest(tenant, toClubId))
+    .filter(
+      (x) =>
+        x.playerNaturalKey === naturalKey &&
+        x.status === 'rejected' &&
+        x.rejectedBy === TRANSFER_WINDOW_REJECTOR,
+    )
+    .sort((a, b) => (b.rejectedAt ?? '').localeCompare(a.rejectedAt ?? ''));
+}
+
+/**
  * Toggle the source club's fees/misconduct confirmations on a still-pending clearance.
  * Version-guarded (OCC); touches only the canonical item — the mirror tracks `status`,
  * which doesn't change until approval. A lost race throws VersionConflictError (→ 409).
@@ -4530,6 +4621,8 @@ function outcomeForCase(rc: RejectCase): RejectOutcome {
       return 'moved-to-source';
     case 'dest-activated':
       return 'stays-at-destination';
+    case 'window-closed':
+      return 'not-registered';
   }
 }
 
@@ -4544,9 +4637,14 @@ function outcomeForCase(rc: RejectCase): RejectOutcome {
  */
 export function clearanceDocObjectKeys(c: PlayerClearance): string[] {
   const d = c.rejectSnapshot?.destRow;
+  // A window-closed auto-reject never wrote a player row: its snapshot's pendingPlayer is the
+  // ONLY pointer to the registrant's uploaded ID document.
+  const p = c.rejectSnapshot?.pendingPlayer;
   return [
     d?.idDocMeta?.objectKey,
     d?.previousIdDocMeta?.objectKey,
+    p?.idDocMeta?.objectKey,
+    p?.previousIdDocMeta?.objectKey,
     c.certificateMeta?.objectKey,
   ].filter((k): k is string => !!k);
 }
@@ -4972,9 +5070,19 @@ export async function rejectClearance(
       // B″ — keep the placeholder the real registration replaced; reopen puts it back.
       rejectSnapshot = { case: rc, placeholderRow: sourceRow! };
       break;
-    default:
-      // request / moved-to-source / dest-activated — reopen moves the LIVE row, no row snapshot.
+    case 'request':
+    case 'moved-to-source':
+    case 'dest-activated':
+      // Reopen moves the LIVE row, no row snapshot.
       rejectSnapshot = { case: rc };
+      break;
+    case 'window-closed':
+      // Creation-time only (createAutoRejectedClearance) — detectRejectCase never yields it.
+      throw new Error('window-closed is not a reject case for a pending clearance');
+    default: {
+      const _exhaustive: never = rc;
+      throw new Error(`unhandled reject case ${String(_exhaustive)}`);
+    }
   }
   const next: PlayerClearance = {
     ...current,
@@ -5824,6 +5932,103 @@ export async function reopenClearance(
           sourceGuard: 2,
           sourceGuardMsg: 'player no longer available at the destination club',
         });
+      }
+      break;
+    }
+
+    case 'window-closed': {
+      // The auto-reject wrote no player rows; reopen materialises the registration it recorded
+      // as a normal registration-origin pending clearance. Check, never skip (cf. case B′): the
+      // player may have re-registered or transferred since, and registration-origin approve
+      // activates the destination even with no source row, so any row for this identity other
+      // than an ACTIVE one at the source would end up double-active. That one source row is the
+      // expected shape (createPlayerWithClearance's) and is flipped to clearance-pending here.
+      const pending = snap.pendingPlayer;
+      if (!pending)
+        throw new ClearanceReopenBlockedError('the auto-rejected registration was not kept');
+      const nk = current.playerNaturalKey;
+      const hits = await findPlayerAcrossClubs(tenant, nk, '');
+      const sourceActive = hits.some((h) => h.clubId === fromClubId && h.status === 'active');
+      if (hits.some((h) => !(h.clubId === fromClubId && h.status === 'active'))) {
+        throw new ClearanceReopenBlockedError(
+          'the player has registered or transferred since this was auto-rejected',
+        );
+      }
+      const destRow: PlayerRegistration = {
+        ...pending,
+        clubId: current.toClubId,
+        status: 'clearance-pending',
+      };
+      const destPut = {
+        TableName: TABLE,
+        Item: { ...destKey, ...destRow },
+        ConditionExpression: 'attribute_not_exists(sk)',
+      };
+      const sourceActiveToPending = {
+        TableName: TABLE,
+        Key: sourceKey,
+        UpdateExpression: 'SET #s = :pending ADD version :one',
+        ConditionExpression: 'attribute_exists(sk) AND #s = :active',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: {
+          ':pending': 'clearance-pending',
+          ':active': 'active',
+          ':one': 1,
+        },
+      };
+      if (localEndpoint) {
+        await putCanonicalReopen();
+        try {
+          await ddb.send(new PutCommand(destPut));
+        } catch (err) {
+          if (isCcf(err)) {
+            await restoreCanonical(tenant, current);
+            throw new PlayerExistsAtDestinationError();
+          }
+          throw err;
+        }
+        if (sourceActive) {
+          try {
+            await ddb.send(new UpdateCommand(sourceActiveToPending));
+          } catch (err) {
+            if (isCcf(err)) {
+              await undoDestRestore(destRow.version ?? 0);
+              await restoreCanonical(tenant, current);
+              throw new ClearanceReopenBlockedError('player no longer active at the source club');
+            }
+            throw err;
+          }
+        }
+        await swallowCcf(() => ddb.send(new UpdateCommand(destClubInc)));
+        await ddb.send(new PutCommand(mirrorPut));
+      } else {
+        // No source row at read time ⇒ require it still absent, so a row landing in between
+        // can't be left beside an activating destination.
+        const sourceOp = sourceActive
+          ? { Update: sourceActiveToPending }
+          : {
+              ConditionCheck: {
+                TableName: TABLE,
+                Key: sourceKey,
+                ConditionExpression: 'attribute_not_exists(sk)',
+              },
+            };
+        // [0] canonical [1] mirror [2] dest put [3] source (flip / absent check) [4] dest count +1
+        await sendReopen(
+          [
+            { Put: canonicalPut },
+            { Put: mirrorPut },
+            { Put: destPut },
+            sourceOp,
+            { Update: destClubInc },
+          ],
+          {
+            destPut: 2,
+            sourceGuard: 3,
+            sourceGuardMsg: 'the source club record changed; refetch and try again',
+            destCount: 4,
+          },
+        );
       }
       break;
     }

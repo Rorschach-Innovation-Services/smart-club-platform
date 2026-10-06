@@ -175,6 +175,7 @@ import {
   sendClearanceReopenedNotice,
   sendClearanceDestNotice,
   sendClearanceAdminNotice,
+  sendClearanceAutoRejectedAdminNotice,
   sendVeteransRequestNotice,
   sendVeteransRequestResolvedNotice,
   notifyPostponementOpened,
@@ -278,6 +279,13 @@ import { activeVerifyKeys, certSigner, type VerifyKey } from './certificates/sig
 import { validateCertTemplate, validateOrgContact } from './certificates/config.js';
 import { validateFixtureReminders } from './fixture-reminders-config.js';
 import { TENANT_UTC_OFFSET_MINUTES, tenantDate } from './tenant-time.js';
+import {
+  TRANSFER_WINDOW_REJECTOR,
+  closedTransferWindow,
+  servedTransferWindowStatus,
+  transfersClosedMessage,
+  validateTransferWindows,
+} from './transfer-windows.js';
 import { listTenantAdminEmails } from './notify/admin-emails.js';
 import { clearanceReminderClaimKey, clearanceReminderCommEvents } from './clearance-reminder.js';
 
@@ -616,6 +624,11 @@ app.get('/tenant', async (c) => {
     // (matchFormats/matchDays/timeSlots) reverted to built-ins, and the two that survive —
     // travel cost and venue aliases — are operational detail nobody on a public page reads,
     // so they stay on the authenticated GET /tenant/config.
+    // Transfer windows are published union dates (no personal data). The STATUS is computed
+    // here, on the tenant's calendar day, so the public form never trusts the device clock at
+    // a window boundary. Absent status ⇔ no windows ⇔ unrestricted.
+    transferWindows: config.transferWindows ?? [],
+    transferWindowStatus: servedTransferWindowStatus(config),
     // Structures are deliberately NOT here. They are only needed by the authenticated
     // "Start a season" flow, and GET /tenant is unauthenticated and hit on every public
     // page load — serving up to 50 structures × 20 stages of competition configuration
@@ -1034,6 +1047,9 @@ app.post('/register/:clubId', async (c) => {
       linkClub: { id: clubId, name: regClub.name },
       directory: directoryClubs(cfg),
       notifyClearanceOpened,
+      // An anonymous submission outside every transfer window must not vanish: it is recorded
+      // as an auto-rejected clearance the union office can reopen.
+      windowClosed: { mode: 'auto-reject', notify: notifyClearanceAutoRejected },
     });
   } catch (err: unknown) {
     if (err instanceof repo.DestinationClubGoneError) throw new HttpError(409, err.message);
@@ -1055,6 +1071,20 @@ app.post('/register/:clubId', async (c) => {
         .catch((err) => console.error('source-club counter bump failed', err));
     }
     return c.json({ ok: true, clearance: { fromClubName: result.clearance.fromClubName } }, 201);
+  }
+  if (result.outcome === 'clearance-auto-rejected') {
+    // Recorded, not registered. A same-stretch resubmission (`repeat`) gets the identical
+    // answer. No source-club quota charge — nothing landed in its queue to act on.
+    return c.json(
+      {
+        ok: true,
+        transferWindow: {
+          closed: true,
+          ...(result.nextWindow ? { nextWindow: result.nextWindow } : {}),
+        },
+      },
+      201,
+    );
   }
 
   // Plain-active outcome (no clearance was opened): the player row is live on the joining
@@ -1576,6 +1606,57 @@ async function notifyClearanceResolved(
     await Promise.all([notifyClub(fromClub), notifyClub(toClub)]);
   } catch (err) {
     console.error('clearance resolved notice failed', err);
+  }
+}
+
+/**
+ * Notices for a registration auto-rejected outside the transfer window: both chairs via
+ * notifyClearanceResolved ('rejected' with the 'not-registered' copy; an off-system source is
+ * skipped as usual) and every tenant admin by email. Never throws.
+ *
+ * Unlike an admin resolution this fires from the ANONYMOUS register route, so it is capped.
+ * The primary guard is upstream — a resubmission in the same closed stretch reuses the existing
+ * record and never reaches here — and this per-destination-club daily cap (counting today's
+ * window auto-reject email rows, the same read-then-append bound as notifyClearanceOpened) is
+ * the backstop against many distinct fabricated identities. Admin emails share the gate.
+ */
+async function notifyClearanceAutoRejected(
+  tenant: string,
+  clearance: PlayerClearance,
+): Promise<void> {
+  try {
+    const toClub = await repo.getClub(tenant, clearance.toClubId);
+    const today = now().slice(0, 10);
+    const sentToday = (toClub?.commLog ?? []).filter(
+      (e) =>
+        e.kind === 'clearance-rejected' &&
+        e.channel === 'email' &&
+        e.by === TRANSFER_WINDOW_REJECTOR &&
+        e.at.slice(0, 10) === today,
+    ).length;
+    if (sentToday >= CLEARANCE_NOTICES_PER_DAY) {
+      console.warn(
+        `transfer-window auto-reject notices for ${tenant}/${clearance.toClubId}: ${CAP_REACHED}`,
+      );
+      return;
+    }
+  } catch (err) {
+    console.error('transfer-window auto-reject cap check failed', err);
+  }
+  await notifyClearanceResolved(tenant, clearance, 'rejected', TRANSFER_WINDOW_REJECTOR);
+  try {
+    const admins = await listTenantAdminEmails(repo, tenant);
+    if (admins.length > 0) {
+      await sendClearanceAutoRejectedAdminNotice({
+        to: admins,
+        fromClubName: clearance.fromClubName,
+        playerName: clearance.playerName,
+        toClubName: clearance.toClubName,
+        reason: clearance.rejectReason ?? '',
+      });
+    }
+  } catch (err) {
+    console.error('transfer-window auto-reject admin notice failed', err);
   }
 }
 
@@ -2311,6 +2392,10 @@ app.post('/clubs/:id/players', async (c) => {
   if (result.outcome === 'clearance-already-open') {
     throw new HttpError(409, 'a clearance for this player is already in progress');
   }
+  if (result.outcome === 'clearance-auto-rejected') {
+    // Unreachable: without `windowClosed` the core refuses (409) instead of auto-rejecting.
+    throw new HttpError(409, 'transfers are closed');
+  }
   const player = result.player;
   // Only an ACTIVE row materializes the veterans affiliation now (write-on-activation); a
   // clearance-pending row gets it when the clearance resolves (repo hooks). Best-effort.
@@ -2451,6 +2536,9 @@ async function registerChairRows(
         results.push({ ...base, outcome: 'clearance-already-open', naturalKey });
       } else if (r.outcome === 'duplicate') {
         results.push({ ...base, outcome: 'skipped-duplicate', naturalKey });
+      } else if (r.outcome === 'clearance-auto-rejected') {
+        // Unreachable: without `windowClosed` the core refuses (409 → per-row error) instead.
+        results.push({ ...base, outcome: 'error', naturalKey, error: 'transfers are closed' });
       } else {
         results.push({ ...base, outcome: 'created', naturalKey });
       }
@@ -3452,6 +3540,11 @@ app.post('/clubs/:id/clearances', async (c) => {
   }
   if (body.fromClubId === toClubId)
     throw new HttpError(400, 'source and destination are the same club');
+  // Outside every transfer window a rep request is refused outright — the rep is present to
+  // read why. (A public registration instead records an auto-rejected clearance: an anonymous
+  // submission must not vanish. See transfer-windows.ts.)
+  const closed = closedTransferWindow(await getTenantConfigCached(c, ra.tenant));
+  if (closed) throw new HttpError(409, transfersClosedMessage(closed.next));
   const [fromClub, toClub] = await Promise.all([
     repo.getClub(ra.tenant, body.fromClubId),
     repo.getClub(ra.tenant, toClubId),
@@ -7829,6 +7922,8 @@ async function applyTenantConfigPatch(
   // `liveUrl` is response-only (GET /tenant/config derives it from the slug) — never
   // persist it, so a console echoing the row back can't write it onto the stored config.
   delete (patch as { liveUrl?: unknown }).liveUrl;
+  // Same for the server-computed transfer-window status (GET /tenant, GET /tenant/config).
+  delete (patch as { transferWindowStatus?: unknown }).transferWindowStatus;
   // Table/index keys are derived at the repo write choke point — strip them here
   // too so a malicious patch can't even attempt to retarget another tenant's row
   // or corrupt the platform registry index.
@@ -8382,6 +8477,8 @@ function tenantConfigView(config: TenantConfig) {
     tutorials: tutorialsFor(config),
     features: config.features ?? {},
     calendars: config.calendars ?? [],
+    transferWindows: config.transferWindows ?? [],
+    transferWindowStatus: servedTransferWindowStatus(config),
     // The reason this route exists.
     structures: config.structures ?? [],
     // All of it, aliases and travel included: admin-level setup data (ADR 0014).
@@ -8409,6 +8506,7 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   delete (patch as { clearanceCertTemplate?: unknown }).clearanceCertTemplate;
   delete (patch as { orgContact?: unknown }).orgContact;
   delete (patch as { fixtureReminders?: unknown }).fixtureReminders;
+  delete (patch as { transferWindows?: unknown }).transferWindows;
   delete (patch as { sport?: unknown }).sport;
   delete (patch as { seasonLabel?: unknown }).seasonLabel;
   delete (patch as { integrations?: unknown }).integrations;
@@ -9001,6 +9099,10 @@ app.put('/platform/tenants/:slug', async (c) => {
     patch.fixtureReminders = validateFixtureReminders(body.fixtureReminders);
   }
   if (body.integrations !== undefined) patch.integrations = validateIntegrations(body.integrations);
+  // Whole-key write (the card sends the full list); normalised: labels trimmed, sorted by start.
+  if (body.transferWindows !== undefined) {
+    patch.transferWindows = validateTransferWindows(body.transferWindows);
+  }
   // Calendars, structures and the league setups binding them go through the shared
   // operator write (validation, version minting, referrer guards, calendar-edit warnings).
   if (body.calendars !== undefined) patch.calendars = body.calendars;

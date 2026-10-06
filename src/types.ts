@@ -367,7 +367,34 @@ export interface TenantConfig {
    * not projected by GET /tenant/config, so only the operator portal sees it.
    */
   fixtureReminders?: FixtureRemindersConfig;
+  /**
+   * Transfer windows (inclusive YYYY-MM-DD ranges). Absent or empty ⇒ no restriction.
+   * Operator-only to write; served on GET /tenant and GET /tenant/config.
+   */
+  transferWindows?: TransferWindow[];
+  /**
+   * Server-computed status for TODAY (tenant wall-clock) — present only when windows are
+   * configured. Read-only; UI copy must use this, never the device clock.
+   */
+  transferWindowStatus?: TransferWindowStatus;
 }
+
+/** Mirror of the API's TransferWindow. */
+export interface TransferWindow {
+  label: string;
+  start: string;
+  end: string;
+}
+
+/** Mirror of the API's TransferWindowStatus. */
+export interface TransferWindowStatus {
+  open: boolean;
+  current?: TransferWindow;
+  next?: TransferWindow;
+}
+
+/** `rejectedBy` on a clearance auto-rejected because it arrived outside every transfer window. */
+export const TRANSFER_WINDOW_REJECTOR = 'system:transfer-window';
 
 export type FixtureReminderChannel = 'email' | 'whatsapp';
 
@@ -915,8 +942,14 @@ export type ClearanceStatus = 'pending' | 'approved' | 'admin-override' | 'rejec
  *   source-reactivated  — the move is cancelled; the player is (or returns to) active at the source.
  *   moved-to-source     — the registration (details + ID doc) is moved to the source club.
  *   stays-at-destination — the source is not on the system, so the player stays at the destination.
+ *   not-registered      — auto-rejected outside a transfer window; the registration was never
+ *                         completed, so the player remains unregistered / at their current club.
  */
-export type RejectOutcome = 'source-reactivated' | 'moved-to-source' | 'stays-at-destination';
+export type RejectOutcome =
+  | 'source-reactivated'
+  | 'moved-to-source'
+  | 'stays-at-destination'
+  | 'not-registered';
 
 /** An inter-club transfer/clearance request. */
 export interface PlayerClearance {

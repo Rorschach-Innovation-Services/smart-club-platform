@@ -16,6 +16,7 @@ import {
   sendClearanceReopenedDestEmail,
   sendClearanceOpenedDestEmail,
   sendClearanceOpenedAdminEmail,
+  sendClearanceAutoRejectedAdminEmail,
   sendClearanceReminderDigestEmail,
   sendVeteransRequestEmail,
   sendVeteransRequestResolvedEmail,
@@ -602,6 +603,20 @@ export async function sendClearanceAdminNotice(args: {
   const { to, fromClubName, playerName, toClubName } = args;
   return sendAdminEmails(to, (address) =>
     sendClearanceOpenedAdminEmail({ to: address, fromClubName, playerName, toClubName }),
+  );
+}
+
+/** Tell each tenant admin a registration was auto-rejected outside the transfer window. Email only. */
+export async function sendClearanceAutoRejectedAdminNotice(args: {
+  to: string[];
+  fromClubName: string;
+  playerName: string;
+  toClubName: string;
+  reason: string;
+}): Promise<{ results: SendResult[] }> {
+  const { to, ...copy } = args;
+  return sendAdminEmails(to, (address) =>
+    sendClearanceAutoRejectedAdminEmail({ to: address, ...copy }),
   );
 }
 

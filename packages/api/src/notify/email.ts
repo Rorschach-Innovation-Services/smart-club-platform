@@ -336,7 +336,10 @@ export function clearanceResolvedEmailContent(input: ClearanceResolvedEmailInput
         `${toClubName}'s roster.`
       : rejectOutcome === 'stays-at-destination'
         ? `${fromClubName} is not on the system, so their registration stays at ${toClubName}.`
-        : `The move is cancelled and they remain registered at ${fromClubName}.`;
+        : rejectOutcome === 'not-registered'
+          ? `The registration with ${toClubName} was not completed; the player remains ` +
+            `unregistered there and stays at their current club, if any.`
+          : `The move is cancelled and they remain registered at ${fromClubName}.`;
   const rejectedBody =
     `${rejectedLead} ${rejectedDetail} ` +
     `The union office can reopen this clearance if it was rejected in error.`;
@@ -656,6 +659,52 @@ export async function sendClearanceOpenedAdminEmail(
     input.to,
     clearanceOpenedAdminEmailContent(input),
     `clearance-opened (admin) notice for ${input.fromClubName} → ${input.toClubName}`,
+  );
+}
+
+export interface ClearanceAutoRejectedAdminEmailInput {
+  to: string;
+  fromClubName: string;
+  playerName: string;
+  toClubName: string;
+  reason: string;
+}
+
+/**
+ * Union-office (tenant admin) notice that a registration arrived outside every transfer window
+ * and was recorded as an auto-rejected clearance. Pure — exported for tests.
+ */
+export function clearanceAutoRejectedAdminEmailContent(
+  input: Omit<ClearanceAutoRejectedAdminEmailInput, 'to'>,
+): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { fromClubName, playerName, toClubName, reason } = input;
+  const subject = `Clearance auto-rejected — ${playerName.replace(/\s+/g, ' ').trim()}`;
+  const body =
+    `${playerName} registered with ${toClubName} naming ${fromClubName} as their previous club, ` +
+    `but transfers are closed, so the clearance was recorded as rejected and the player was not ` +
+    `registered. It is listed under Clearances in the admin console, where it can be reopened.`;
+  const text = `Hello,\n\n${body}\n\nReason: ${reason}\n\nThe union office platform`;
+  const html =
+    EMAIL_WRAP_OPEN +
+    `<p>Hello,</p>` +
+    `<p>${escapeHtml(body)}</p>` +
+    `<p><strong>Reason:</strong> ${escapeHtml(reason)}</p>` +
+    `<p>The union office platform</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+export async function sendClearanceAutoRejectedAdminEmail(
+  input: ClearanceAutoRejectedAdminEmailInput,
+): Promise<{ messageId: string }> {
+  return sendSesEmail(
+    input.to,
+    clearanceAutoRejectedAdminEmailContent(input),
+    `clearance-auto-rejected (admin) notice for ${input.fromClubName} → ${input.toClubName}`,
   );
 }
 

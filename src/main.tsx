@@ -2066,7 +2066,9 @@ function Shell({
                 ? `${req.playerName}'s clearance rejected — their registration moved back to ${req.fromClubName}`
                 : outcome === 'stays-at-destination'
                   ? `${req.playerName}'s clearance rejected — ${req.fromClubName} is not on the system, so they stay at ${req.toClubName}`
-                  : `${req.playerName}'s clearance rejected`,
+                  : outcome === 'not-registered'
+                    ? `${req.playerName}'s clearance rejected — they are not registered at ${req.toClubName}`
+                    : `${req.playerName}'s clearance rejected`,
           );
           return 'ok';
         })
@@ -2913,6 +2915,7 @@ function Shell({
             onRemind={remindClearanceReq}
             onRevokeCertificate={revokeClearanceCertificateReq}
             onCertificateViewed={() => invalidate(qk.allClearances())}
+            transferWindowStatus={tenantConfig?.transferWindowStatus}
             busyId={busyClearanceId}
             busyAction={busyClearanceAction}
           />

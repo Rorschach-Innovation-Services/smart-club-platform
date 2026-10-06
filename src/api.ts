@@ -14,6 +14,7 @@ import { Sentry } from './sentry';
 import { devAuthHeader } from './devAuth';
 import type {
   TenantConfig,
+  TransferWindow,
   TenantBranding,
   TenantSummary,
   TutorialVideo,
@@ -1208,12 +1209,14 @@ export const getRegistration = (clubId: string, token: string) =>
   }>(`/register/${clubId}`, { auth: false, query: { t: token } });
 // `clearance` present ⇔ the registration opened a transfer from the named previous club
 // (the player lands on the joining club's roster as clearance-pending until that club or
-// the union office approves). Body may include `currentClubId` to register into a club
+// the union office approves). `transferWindow` present ⇔ it arrived outside every transfer
+// window: recorded as an auto-rejected clearance, the player is NOT registered. Body may include `currentClubId` to register into a club
 // other than the one whose link was used — no consent from that club is required.
 export const submitRegistration = (clubId: string, token: string, body: unknown) =>
   request<{
     ok: boolean;
     clearance?: { fromClubName: string };
+    transferWindow?: { closed: true; nextWindow?: TransferWindow };
   }>(`/register/${clubId}`, {
     method: 'POST',
     auth: false,
