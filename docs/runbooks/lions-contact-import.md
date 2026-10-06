@@ -104,7 +104,8 @@ Revert restores each granted person's lions membership from its pre-image throug
 was their only membership. It also empties officer slots this import filled, but only those
 still holding that person. It leaves Cognito users in place and cannot unsend messages. In the
 revert order (roster → contacts → compliance → fixtures → affiliation), contacts come before
-affiliation.
+affiliation. The affiliation revert enforces this: it refuses to delete any club a lions
+membership still references.
 
 ## POPIA
 

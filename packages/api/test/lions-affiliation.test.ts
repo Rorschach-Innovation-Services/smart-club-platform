@@ -26,8 +26,14 @@ const {
   requireClubName,
   resolveLionsDistricts,
 } = await import('../src/lions-import-map.js');
-const { buildClubPlan, mergePatch, buildClub, renderSignoffMarkdown } =
-  await import('../src/import-lions-affiliation.js');
+const {
+  buildClubPlan,
+  mergePatch,
+  buildClub,
+  renderSignoffMarkdown,
+  clubMembershipRefs,
+  isPristine,
+} = await import('../src/import-lions-affiliation.js');
 
 // ───────────────────────── Workbook fixture (synthetic, no real PII) ─────────────────────────
 
@@ -482,5 +488,43 @@ describe('import-lions-affiliation — plan cross-checks', () => {
     assert.match(md, /\| Jeppe Cricket Club \|/);
     assert.match(md, /PAV Soweto Cricket Club \*\(district assumed\)\* ⚑/);
     assert.match(md, /Macrocomm Round 1/);
+  });
+});
+
+describe('import-lions-affiliation — revert membership guard', () => {
+  const rep = (
+    email: string,
+    tenantId: string,
+    clubIds: string[],
+    role: 'admin' | 'rep' = 'rep',
+  ) => ({
+    email,
+    memberships: [{ tenantId, role, clubIds }],
+  });
+
+  test('a club still in a lions membership is refused, every referencing email listed', () => {
+    const refs = clubMembershipRefs([
+      rep('b.chair@example.com', 'lions', ['jeppe-cc']),
+      rep('a.sec@example.com', 'lions', ['jeppe-cc', 'other-cc']),
+    ]);
+    assert.deepEqual(refs.get('jeppe-cc'), ['a.sec@example.com', 'b.chair@example.com']);
+    assert.deepEqual(refs.get('other-cc'), ['a.sec@example.com']);
+  });
+
+  test('an unreferenced pristine club stays deletable', () => {
+    const refs = clubMembershipRefs([rep('a@example.com', 'lions', ['other-cc'])]);
+    assert.equal(refs.get('jeppe-cc'), undefined);
+    const club = { affiliation: 'not_started', docs: { constitution: false } } as never;
+    assert.equal(isPristine(club), true);
+  });
+
+  test('a membership in a different tenant is ignored', () => {
+    const refs = clubMembershipRefs([rep('t@example.com', 'titans', ['jeppe-cc'])]);
+    assert.equal(refs.size, 0);
+  });
+
+  test('an admin membership with empty clubIds blocks nothing', () => {
+    const refs = clubMembershipRefs([rep('admin@example.com', 'lions', [], 'admin')]);
+    assert.equal(refs.size, 0);
   });
 });

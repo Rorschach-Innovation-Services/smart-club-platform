@@ -29,7 +29,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import ExcelJS from 'exceljs';
-import type { Club, RequiredDoc } from './types.js';
+import type { Club, RequiredDoc, UserProfile } from './types.js';
 import { activeRequiredDocs, resolveDistricts } from './catalogue.js';
 import {
   CLUB_MAP,
@@ -681,6 +681,42 @@ export function isPristine(club: Club): boolean {
   return true;
 }
 
+/**
+ * clubId → emails of users whose `tenant` membership still scopes them to that club. Built
+ * from LIVE user profiles so revert can refuse to delete a club a membership still points
+ * at (repo.eraseClubData does not clean USER# clubIds, so deleting it would leave a dangling
+ * reference). Memberships in other tenants are ignored; an admin with empty clubIds never
+ * blocks anything. Emails are sorted and de-duplicated per club.
+ */
+export function clubMembershipRefs(
+  users: ReadonlyArray<Pick<UserProfile, 'email' | 'memberships'>>,
+  tenant: string = TENANT,
+): Map<string, string[]> {
+  const refs = new Map<string, Set<string>>();
+  for (const user of users) {
+    for (const m of user.memberships ?? []) {
+      if (m.tenantId !== tenant) continue;
+      for (const clubId of m.clubIds ?? []) {
+        let emails = refs.get(clubId);
+        if (!emails) refs.set(clubId, (emails = new Set()));
+        emails.add(user.email);
+      }
+    }
+  }
+  return new Map([...refs].map(([id, emails]) => [id, [...emails].sort()]));
+}
+
+/** Load every lions user's profile (sequentially — ~100 users) and index their club refs. */
+async function loadClubMembershipRefs(repo: RepoModule): Promise<Map<string, string[]>> {
+  const subs = [...new Set((await repo.listTenantUsers(TENANT)).map((u) => u.sub))];
+  const profiles: UserProfile[] = [];
+  for (const sub of subs) {
+    const profile = await repo.getUser(sub);
+    if (profile) profiles.push(profile);
+  }
+  return clubMembershipRefs(profiles, TENANT);
+}
+
 async function runRevert(repo: RepoModule, args: Args): Promise<void> {
   const manifestResult = await readCreatedClubsManifest();
   if (manifestResult.kind !== 'ok') {
@@ -695,13 +731,25 @@ async function runRevert(repo: RepoModule, args: Args): Promise<void> {
     console.log('Nothing to revert.');
     return;
   }
+  const membershipRefs = await loadClubMembershipRefs(repo);
   let deleted = 0;
+  let refused = 0;
   for (const club of clubs) {
     const players = (await repo.listPlayers(TENANT, club.id)).length;
     if (players > 0 || !isPristine(club)) {
       console.log(
         `  skip: ${club.id} (${club.name}) — has ${players} player(s) / documents / affiliation progress; ` +
           'revert later importers (roster → contacts → compliance → fixtures) first.',
+      );
+      continue;
+    }
+    const emails = membershipRefs.get(club.id) ?? [];
+    if (emails.length) {
+      refused++;
+      console.log(
+        `  refuse: ${club.id} (${club.name}) — still referenced by ${emails.length} user membership(s) ` +
+          `[${emails.join(', ')}]; run the contacts import's --revert first ` +
+          '(docs/runbooks/lions-contact-import.md), then re-run this revert.',
       );
       continue;
     }
@@ -716,6 +764,12 @@ async function runRevert(repo: RepoModule, args: Args): Promise<void> {
   console.log(
     args.confirm ? `Reverted: ${deleted} club(s) deleted.` : 'Re-run with --confirm to apply.',
   );
+  if (refused > 0) {
+    console.log(
+      `${refused} club(s) refused: still referenced by user memberships (see "refuse:" lines above).`,
+    );
+    process.exitCode = 1;
+  }
 }
 
 // ───────────────────────── Main ─────────────────────────

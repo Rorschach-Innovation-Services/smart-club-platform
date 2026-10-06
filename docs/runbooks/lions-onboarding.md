@@ -273,7 +273,8 @@ to revert first.
   club portals immediately. Leagues, registry and aliases stay.
 - **Affiliation** needs its stage-scoped manifest
   (`lions-affiliation-created-clubs.<stage>.json`). Without it, nothing is deleted. It never
-  deletes a club it only merged into.
+  deletes a club it only merged into. It also refuses any club a lions user membership still
+  scopes to (it lists the emails and exits non-zero), so revert contacts first.
 
 The bootstrap and `configure-tenant-docs` have no revert. Their writes are additive config
 and harmless on their own.
