@@ -40,10 +40,10 @@
  *   "pending"    — NOT yet created/approved in Meta. The sender exists; a real send
  *      is rejected on the missing template until it is created under this name.
  * `status` is documentation, not a runtime gate — nothing here can verify Meta's
- * state, and the send path fails open (attempts the send) for every entry. The two
+ * state, and the send path fails open (attempts the send) for every entry. The three
  * exceptions are `fixtureReminder` (the FixtureReminders cron skips WhatsApp until it is
- * "registered") and `captainsReportDue` (its sender skips the channel as template-pending
- * until it is "registered") — see those entries.
+ * "registered"), and `captainsReportDue` / `captainsReportOpsDigest` (their senders skip the
+ * channel as template-pending until it is "registered") — see those entries.
  */
 
 export type WhatsAppTemplateDefinition = {
@@ -213,6 +213,29 @@ export const WHATSAPP_TEMPLATES = {
       urlTemplate: 'https://platform.club.medicoach.co.za/r/{{1}}',
       suffix: 'signed report token',
     },
+  },
+
+  /**
+   * Captain's-report ops digest: ONE status line to a union-admin cell (the `OpsDigestCell`
+   * secret) after a medicoach sync run that produced report activity — new results, reports
+   * opened, notices sent or failed. Body-only Utility template (no button); {{2}} is a
+   * one-line count summary ("Dolphins: 3 new results, 6 reports opened, 6 notices sent,
+   * 0 failed") with no player, club-contact or link detail.
+   *
+   * NOT yet created in Meta. Like `captainsReportDue`, this status IS read at runtime: the
+   * sender throws `WhatsAppTemplatePendingError` until it is "registered", and the sync run
+   * skips the digest silently. Create it under this name with the body below, then flip.
+   */
+  captainsReportOpsDigest: {
+    name: 'captains_report_ops_digest',
+    lang: 'en',
+    paramCount: 2,
+    params: ['recipient name', 'run summary'],
+    bodyText:
+      'Hello {{1}},\n\n' +
+      "Captain's report run update: {{2}}.\n\n" +
+      'Automated status message for union administrators.',
+    status: 'pending',
   },
 } as const satisfies Record<string, WhatsAppTemplateDefinition>;
 

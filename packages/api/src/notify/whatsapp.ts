@@ -15,7 +15,7 @@
  * Dry-run: NOTIFY_DRY_RUN=1 or missing token/phone-id → log + synthetic id.
  */
 import { randomUUID } from 'node:crypto';
-import { WHATSAPP_TEMPLATES } from './whatsapp-templates.js';
+import { WHATSAPP_TEMPLATES, type WhatsAppTemplateDefinition } from './whatsapp-templates.js';
 
 const TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
@@ -384,6 +384,47 @@ export async function sendCaptainsReportDueWhatsApp(
     captainsReportDueParams(input),
     `captain's report link for ${input.clubName}`,
     input.token,
+  );
+}
+
+export interface CaptainsReportOpsDigestWhatsAppInput {
+  to: string; // already E.164 (see toE164)
+  recipientName: string;
+  /** "Dolphins: 3 new results, 6 reports opened, 6 notices sent, 0 failed" */
+  summary: string;
+}
+
+/**
+ * Build the two body params for `captains_report_ops_digest`, in order: {{1}} recipient
+ * name (fallback 'there'), {{2}} the one-line run summary (bounded at 300 chars).
+ */
+export function captainsReportOpsDigestParams(
+  input: Pick<CaptainsReportOpsDigestWhatsAppInput, 'recipientName' | 'summary'>,
+): TemplateParam[] {
+  return [
+    { type: 'text', text: cleanParam(input.recipientName || 'there') },
+    { type: 'text', text: cleanParam(input.summary, 300) },
+  ];
+}
+
+/**
+ * The sync run's ops digest to the union-admin cell (body-only, no button). Throws
+ * `WhatsAppTemplatePendingError` while the registry entry is not `registered`.
+ */
+export async function sendCaptainsReportOpsDigestWhatsApp(
+  input: CaptainsReportOpsDigestWhatsAppInput,
+): Promise<{ messageId: string }> {
+  const { name, lang } = WHATSAPP_TEMPLATES.captainsReportOpsDigest;
+  // Widened: the `as const` literal would make the gate a type error while it is 'pending'.
+  const status = WHATSAPP_TEMPLATES.captainsReportOpsDigest
+    .status as WhatsAppTemplateDefinition['status'];
+  if (status !== 'registered') throw new WhatsAppTemplatePendingError();
+  return sendTemplate(
+    input.to,
+    name,
+    lang,
+    captainsReportOpsDigestParams(input),
+    "captain's report ops digest",
   );
 }
 

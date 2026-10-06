@@ -436,6 +436,12 @@ export interface CaptainsReportDeps {
   linkSecret?: () => string;
   linkBase?: () => string;
   log?: (line: string) => void;
+  /**
+   * Told the report ids of every opening that got as far as the notices (pull hook and
+   * retry alike), just before it returns or throws — the sync run tallies these for its ops
+   * digest. Observation only: it never changes the outcome or the retry.
+   */
+  onOpenOutcome?: (o: { opened: string[]; notified: string[]; failed: string[] }) => void;
 }
 
 export interface OpenOutcome {
@@ -645,6 +651,7 @@ export async function openCaptainReports(
   // throwing keeps the REPORTOPEN# marker, so the next run re-sends it (bounded by
   // REPORT_OPEN_MAX_ATTEMPTS). Both sides were handled first, so one side's failure never
   // stops the other side's report from opening.
+  deps.onOpenOutcome?.({ opened: out.opened, notified: out.notified, failed: failedNotices });
   if (failedNotices.length)
     throw new Error(`${NOTICE_FAILED_ERROR} (${failedNotices.length} report(s))`);
   return out;

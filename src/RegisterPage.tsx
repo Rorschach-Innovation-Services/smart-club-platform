@@ -29,7 +29,13 @@ import {
   type DobError,
 } from './data';
 import { leagueOptionsForDistrict } from '../packages/engine/src/leagues';
-import { useModule, useSeasonLabel, useTransferWindowStatus, useVertical } from './branding';
+import {
+  useModule,
+  useSeasonLabel,
+  useTenantSettled,
+  useTransferWindowStatus,
+  useVertical,
+} from './branding';
 import { formatDayYear } from './dates';
 import type { TransferWindow } from './types';
 
@@ -57,8 +63,8 @@ const EMPTY = {
   // the player's previous club differs from the link club (see showCurrentClub below).
   currentClubChoice: '',
   // Veterans second-club affiliation (capture-only): '' (unanswered) | 'no' | 'yes'. When
-  // 'yes', `vetsClubId` names the club this player plays veterans cricket for — it must be a
-  // club other than their chosen current club. Optional; a blank pick sends nothing.
+  // 'yes', `vetsClubId` names the club this player plays veterans (in the tenant's sport) for —
+  // it must be a club other than their chosen current club. Optional; a blank pick sends nothing.
   vetsChoice: '',
   vetsClubId: '',
   // Cricket playing profile is optional: '' = not answered, and nothing is sent for it.
@@ -118,6 +124,9 @@ export function RegisterPage() {
   // Server-computed (never the device clock): closed ⇒ a transfer can't complete right now.
   const windowStatus = useTransferWindowStatus();
   const transfersClosed = clearancesOn && !!windowStatus && !windowStatus.open;
+  // Until GET /tenant settles, useVertical() falls back to cricket — gate the first paint on
+  // it so a football tenant never flashes cricket fields / cricket copy.
+  const tenantSettled = useTenantSettled();
 
   useEffect(() => {
     let live = true;
@@ -172,7 +181,7 @@ export function RegisterPage() {
   const currentClubId = showCurrentClub ? d.currentClubChoice || clubId : clubId;
   // Veterans-club options: sibling clubs on the system (directory entries excluded — a club not
   // on the system can't be a veterans club), minus the chosen CURRENT club (you can't play
-  // veterans cricket "for" your own club). The API's `clubs` payload excludes the link club, so
+  // veterans "for" your own club). The API's `clubs` payload excludes the link club, so
   // re-add it as an option when the current club isn't the link club (same recombination trick
   // as the current-club picker above).
   const vetsClubOptions = [
@@ -341,7 +350,9 @@ export function RegisterPage() {
     }
   }
 
-  if (state === 'loading') {
+  // Gates BOTH the loading and the invalid screens: a missing token sets 'invalid'
+  // synchronously, and that screen renders vertical copy too.
+  if (!tenantSettled || state === 'loading') {
     return <CenterCard>Checking your registration link…</CenterCard>;
   }
   if (state === 'invalid') {
@@ -401,16 +412,16 @@ export function RegisterPage() {
             {fromDirectory ? (
               <>
                 Because you were last registered at <strong>{clearanceFrom}</strong>, a clearance
-                request has been raised for the Union office to review. You&apos;ll appear on{' '}
-                {joiningClubName}&apos;s roster as <em>clearance pending</em> until the Union office
+                request has been raised for the {t.office} to review. You&apos;ll appear on{' '}
+                {joiningClubName}&apos;s roster as <em>clearance pending</em> until the {t.office}{' '}
                 approves the transfer.
               </>
             ) : (
               <>
                 Because you were last registered at <strong>{clearanceFrom}</strong>, a clearance
                 request has been sent to them. You&apos;ll appear on {joiningClubName}&apos;s roster
-                as <em>clearance pending</em> until {clearanceFrom} (or the Union office) approves
-                the transfer.
+                as <em>clearance pending</em> until {clearanceFrom} (or the {t.office}) approves the
+                transfer.
               </>
             )}
           </p>
@@ -654,16 +665,16 @@ export function RegisterPage() {
               // Older backend (no club list in the link context) — legacy free text.
               <Field
                 span
-                label="Club for which last registered"
+                label={`${t.Club} for which last registered`}
                 value={d.lastClub}
                 onChange={set('lastClub')}
-                placeholder="Previous club, or — if first registration"
+                placeholder={`Previous ${t.club}, or — if first registration`}
               />
             ) : (
               <>
                 <Select
                   span
-                  label="Club for which last registered"
+                  label={`${t.Club} for which last registered`}
                   value={d.lastClubChoice}
                   onChange={(e) =>
                     // Leaving 'Other' clears the typed name so it can't ride along with
@@ -683,21 +694,23 @@ export function RegisterPage() {
                   <option value="__first__">None (first registration)</option>
                   {/* The link club itself — for a player re-registering at the same club.
                     Picking it keeps the current club as the link club (no transfer). */}
-                  <option value={clubId}>{clubName} (this club)</option>
+                  <option value={clubId}>
+                    {clubName} (this {t.club})
+                  </option>
                   {clubs.map((cl) => (
                     <option key={cl.id} value={cl.id}>
                       {cl.name}
                     </option>
                   ))}
-                  <option value="__other__">Other club (type below)</option>
+                  <option value="__other__">Other {t.club} (type below)</option>
                 </Select>
                 {d.lastClubChoice === '__other__' && (
                   <Field
                     span
-                    label="Previous club name"
+                    label={`Previous ${t.club} name`}
                     value={d.lastClub}
                     onChange={set('lastClub')}
-                    placeholder="Name of the club you last registered for"
+                    placeholder={`Name of the ${t.club} you last registered for`}
                   />
                 )}
                 {typedOtherOnSystem && (
@@ -705,8 +718,8 @@ export function RegisterPage() {
                     className="reg-span"
                     style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}
                   >
-                    {typedOtherOnSystem.name} is in the club list — select it from the dropdown
-                    above instead of typing it, so your registration links to that club.
+                    {typedOtherOnSystem.name} is in the {t.club} list — select it from the dropdown
+                    above instead of typing it, so your registration links to that {t.club}.
                   </div>
                 )}
                 {!!d.lastClubChoice &&
@@ -718,8 +731,8 @@ export function RegisterPage() {
                       style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}
                     >
                       {clubs.find((cl) => cl.id === d.lastClubChoice)?.directory
-                        ? 'A clearance request will be raised for the Union office to review before you join your current club.'
-                        : 'If you’re still registered there under this ID number, a clearance request will be sent to that club — they (or the Union office) must approve it before you join your current club.'}
+                        ? `A clearance request will be raised for the ${t.office} to review before you join your current ${t.club}.`
+                        : `If you’re still registered there under this ID number, a clearance request will be sent to that ${t.club} — they (or the ${t.office}) must approve it before you join your current ${t.club}.`}
                     </div>
                   )}
                 {d.lastClubChoice === clubId && (
@@ -734,7 +747,7 @@ export function RegisterPage() {
                   <>
                     <Select
                       span
-                      label="Current club"
+                      label={`Current ${t.club}`}
                       value={d.currentClubChoice || clubId}
                       onChange={(e) => setD((f) => ({ ...f, currentClubChoice: e.target.value }))}
                     >
@@ -750,9 +763,9 @@ export function RegisterPage() {
                         className="reg-span"
                         style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}
                       >
-                        You&apos;re registering with a club other than the one whose link you used,
-                        so your registration will be sent to that club to approve before you appear
-                        on their roster.
+                        You&apos;re registering with a {t.club} other than the one whose link you
+                        used, so your registration will be sent to that {t.club} to approve before
+                        you appear on their roster.
                       </div>
                     )}
                   </>
@@ -766,7 +779,7 @@ export function RegisterPage() {
                   be reused for this). "Yes" reveals a club picker, excluding the chosen current
                   club. No answer sends nothing. */}
                 <div className="reg-span">
-                  <Label label="Are you playing veterans cricket for another club?" />
+                  <Label label={`Are you playing veterans ${t.sport} for another ${t.club}?`} />
                   <div className="seg">
                     {[
                       { v: 'yes', l: 'Yes' },
@@ -793,10 +806,10 @@ export function RegisterPage() {
                 {d.vetsChoice === 'yes' && (
                   <Select
                     span
-                    label="Veterans club"
+                    label={`Veterans ${t.club}`}
                     value={d.vetsClubId}
                     onChange={(e) => setVal('vetsClubId', e.target.value)}
-                    placeholder="Select the club you play veterans cricket for"
+                    placeholder={`Select the ${t.club} you play veterans ${t.sport} for`}
                   >
                     {vetsClubOptions.map((cl) => (
                       <option key={cl.id} value={cl.id}>

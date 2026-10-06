@@ -17,6 +17,9 @@ const {
   clearanceParams,
   fixtureReminderParams,
   captainsReportDueParams,
+  captainsReportOpsDigestParams,
+  sendCaptainsReportOpsDigestWhatsApp,
+  WhatsAppTemplatePendingError,
   urlButtonComponent,
 } = await import('../src/notify/whatsapp.js');
 const { WHATSAPP_TEMPLATES } = await import('../src/notify/whatsapp-templates.js');
@@ -57,6 +60,13 @@ const BUILDERS = [
       recipientName: 'Sanele Mthembu',
       orgName: 'KZN Dolphins',
       match: 'Umzinto v African Warriors on Sun 4 Oct 2026',
+    }),
+  },
+  {
+    key: 'captainsReportOpsDigest' as const,
+    params: captainsReportOpsDigestParams({
+      recipientName: 'Union admin',
+      summary: 'Dolphins: 3 new results, 6 reports opened, 6 notices sent, 0 failed',
     }),
   },
   {
@@ -165,10 +175,58 @@ describe("captain's report template (v2 copy, edited in place in Meta 4 Oct 2026
     assert.doesNotMatch(due.bodyText, /'s captain's report/);
   });
 
-  test("there is exactly one captain's-report template in the registry", () => {
+  test("there is exactly one captain's-report LINK template in the registry", () => {
+    // The ops digest (below) is a separate, button-less status template.
     const names = Object.values(WHATSAPP_TEMPLATES)
       .map((d) => d.name)
       .filter((n) => n.startsWith('captains_report'));
-    assert.deepEqual(names, ['captains_report_due']);
+    assert.deepEqual(names, ['captains_report_due', 'captains_report_ops_digest']);
+    const linked = Object.values(WHATSAPP_TEMPLATES).filter(
+      (d) => d.name.startsWith('captains_report') && 'urlButton' in d,
+    );
+    assert.deepEqual(
+      linked.map((d) => d.name),
+      ['captains_report_due'],
+    );
+  });
+});
+
+describe("captain's report ops digest template", () => {
+  const digest = WHATSAPP_TEMPLATES.captainsReportOpsDigest;
+
+  test('two body params, no URL button, pending until Meta approves it', () => {
+    assert.equal(digest.name, 'captains_report_ops_digest');
+    assert.equal(digest.lang, 'en');
+    assert.equal(digest.status, 'pending');
+    assert.equal(digest.paramCount, 2);
+    assert.deepEqual(digest.params, ['recipient name', 'run summary']);
+    assert.ok(!('urlButton' in digest));
+    assert.equal(
+      digest.bodyText,
+      'Hello {{1}},\n\n' +
+        "Captain's report run update: {{2}}.\n\n" +
+        'Automated status message for union administrators.',
+    );
+  });
+
+  test('the summary is bounded at 300 chars and collapsed to one line', () => {
+    const [name, summary] = captainsReportOpsDigestParams({
+      recipientName: '',
+      summary: `Dolphins:\n${'x'.repeat(400)}`,
+    });
+    assert.equal(name.text, 'there');
+    assert.equal(summary.text.length, 300);
+    assert.doesNotMatch(summary.text, /\n/);
+  });
+
+  test('the sender refuses to send while the template is pending', async () => {
+    await assert.rejects(
+      sendCaptainsReportOpsDigestWhatsApp({
+        to: '+27000000000',
+        recipientName: 'Union admin',
+        summary: 'x',
+      }),
+      WhatsAppTemplatePendingError,
+    );
   });
 });
