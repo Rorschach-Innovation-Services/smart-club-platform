@@ -419,9 +419,10 @@ export function IndexMeter({
   if (value === null || value === undefined || !Number.isFinite(value))
     return <span className="pv-idx none">–</span>;
   const v = Math.round(value);
-  const clamp = Math.max(40, Math.min(200, v));
-  const left = clamp < 100 ? ((clamp - 40) / 160) * 100 : 37.5;
-  const width = (Math.abs(clamp - 100) / 160) * 100;
+  // Centred on 100; 50 and 150 are the ends (beyond is pinned to the end).
+  const clamp = Math.max(50, Math.min(150, v));
+  const left = clamp < 100 ? ((clamp - 50) / 100) * 100 : 50;
+  const width = (Math.abs(clamp - 100) / 100) * 100;
   return (
     <span className={`pv-idx${small ? ' small' : ''}`} title={`Index ${v} (100 = average)`}>
       <span className="pv-idx-track">

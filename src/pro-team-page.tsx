@@ -991,7 +991,7 @@ function FormView({
                   >
                     <strong>{p.name}</strong>
                     <small>
-                      {p.role} · {p.matches} games
+                      {p.role} · {p.matches} game{p.matches === 1 ? '' : 's'}
                     </small>
                   </button>
                 </li>
@@ -1224,7 +1224,7 @@ function PlayerDeepDive({
               sub={`boundaries ${r0(p.bat.boundaryPct)}% of runs`}
             />
             {p.bat.dotPct !== null && (
-              <Tile label="Dot balls" value={`${r0(p.bat.dotPct)}%`} sub="of balls faced" />
+              <Tile label="Dots faced" value={`${r0(p.bat.dotPct)}%`} sub="of balls faced" />
             )}
           </>
         )}
@@ -1241,7 +1241,7 @@ function PlayerDeepDive({
               sub={`average ${r1(p.bowl.avg)} · SR ${r1(p.bowl.sr)}`}
             />
             <Tile
-              label="Dot balls"
+              label="Dots bowled"
               value={`${r0(p.bowl.dotPct)}%`}
               sub={`${p.bowl.wd} wides · ${p.bowl.nb} no-balls`}
             />
