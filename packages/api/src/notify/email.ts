@@ -1633,3 +1633,117 @@ export async function sendSyncConflictEmail(
   );
   return { messageId: res.MessageId ?? '' };
 }
+
+// ───────────────────────── Scorecard confirmation ─────────────────────────
+
+export interface ScorecardConfirmEmailInput {
+  to: string;
+  chairName: string;
+  clubName: string;
+  /** "5–11 Oct 2026" */
+  weekLabel: string;
+  /** How many of the club's matches the digest lists. */
+  matchCount: number;
+  /** When the link stops working, "Sunday, 25 Oct" (23:59 SAST that day). */
+  expiresText: string;
+  /** The digest link. NEVER logged. */
+  link: string;
+  orgName: string;
+}
+
+/** Build the chair's Monday scorecard digest email. Pure — exported so tests can assert it. */
+export function buildScorecardConfirmEmail(input: Omit<ScorecardConfirmEmailInput, 'to'>): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const greet = input.chairName.trim().split(/\s+/)[0] || 'there';
+  const matches = input.matchCount === 1 ? '1 match' : `${input.matchCount} matches`;
+  const subject = `Please confirm ${input.clubName}'s scorecards (${input.weekLabel})`;
+  const lead =
+    `${input.clubName} played ${matches} in the week of ${input.weekLabel}. ` +
+    'Please check each scorecard and either confirm it is correct or request a correction.';
+  const terms = `Each match is answered once. Link expires ${input.expiresText}.`;
+  const text =
+    `Hi ${greet},\n\n${lead}\n\n` +
+    `Open the scorecards here (no sign-in needed):\n\n${input.link}\n\n` +
+    `${terms}\n\n` +
+    `Thank you,\nThe ${input.orgName} office`;
+  const e = escapeHtml;
+  const html =
+    EMAIL_WRAP_OPEN +
+    `<p>Hi ${e(greet)},</p>` +
+    `<p>${e(lead)}</p>` +
+    `<p><a href="${e(input.link)}" style="color:#1D9E75;font-weight:600">Review the scorecards</a> (no sign-in needed)</p>` +
+    `<p>${e(terms)}</p>` +
+    `<p>Thank you,<br/>The ${e(input.orgName)} office</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+/** Send the chair's scorecard digest email (the link rides in the body; never logged). */
+export async function sendScorecardConfirmEmail(
+  input: ScorecardConfirmEmailInput,
+): Promise<{ messageId: string }> {
+  return sendSesEmail(
+    input.to,
+    buildScorecardConfirmEmail(input),
+    `scorecard confirmation digest for ${input.clubName}`,
+  );
+}
+
+export interface ScorecardCorrectionEmailInput {
+  to: string;
+  /** The tenant's display name ("KZN Dolphins"). */
+  tenantName: string;
+  clubName: string;
+  /** "SC-2026-0001" */
+  ref: string;
+  /** "Umzinto CC v African Warriors (Premier T20), Sun 4 Oct 2026" */
+  fixtureLine: string;
+  /** The chair's feedback, verbatim. */
+  feedback: string;
+  /** The operator console (omitted when the stage has no known console host). */
+  consoleLink?: string;
+}
+
+/**
+ * Build the PLATFORM-OPERATOR notice of a chair's scorecard correction request. Operators
+ * only — never tenant admins. Pure — exported so tests can assert the copy.
+ */
+export function buildScorecardCorrectionEmail(input: Omit<ScorecardCorrectionEmailInput, 'to'>): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const subject = `Scorecard correction requested: ${input.clubName} (${input.ref})`;
+  const intro = `${input.clubName} (${input.tenantName}) requested a scorecard correction.`;
+  const text =
+    `${intro}\n\n` +
+    `Reference: ${input.ref}\nMatch: ${input.fixtureLine}\n\n` +
+    `Feedback:\n${input.feedback}\n\n` +
+    (input.consoleLink ? `Open the operator console: ${input.consoleLink}\n` : '');
+  const e = escapeHtml;
+  const html =
+    EMAIL_WRAP_OPEN +
+    `<p>${e(intro)}</p>` +
+    `<p>Reference: <strong>${e(input.ref)}</strong><br/>Match: ${e(input.fixtureLine)}</p>` +
+    `<p>Feedback:</p>` +
+    `<blockquote style="margin:0 0 1em;padding:8px 12px;border-left:3px solid #1D9E75;white-space:pre-wrap">${e(input.feedback)}</blockquote>` +
+    (input.consoleLink
+      ? `<p><a href="${e(input.consoleLink)}" style="color:#1D9E75;font-weight:600">Open the operator console</a></p>`
+      : '') +
+    `</div>`;
+  return { subject, text, html };
+}
+
+/** Email one platform operator about a scorecard correction request. */
+export async function sendScorecardCorrectionEmail(
+  input: ScorecardCorrectionEmailInput,
+): Promise<{ messageId: string }> {
+  return sendSesEmail(
+    input.to,
+    buildScorecardCorrectionEmail(input),
+    `scorecard correction notice (${input.ref})`,
+  );
+}

@@ -65,7 +65,8 @@ const SKIP_LABEL: Record<NonNullable<CaptainsReportDelivery['reason']>, string> 
   'send-failed': 'failed',
 };
 
-function chipFor(d: CaptainsReportDelivery): { label: string; tone: string } {
+/** One delivery row as a notice chip (shared with the operator scorecard-confirmation console). */
+export function chipFor(d: CaptainsReportDelivery): { label: string; tone: string } {
   const ch = CHANNEL[d.channel];
   if (d.status === 'sent') {
     if (d.providerStatus === 'failed')

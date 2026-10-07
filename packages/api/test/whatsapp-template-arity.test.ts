@@ -19,7 +19,9 @@ const {
   fixtureReminderParams,
   captainsReportDueParams,
   captainsReportOpsDigestParams,
+  scorecardConfirmDueParams,
   sendCaptainsReportOpsDigestWhatsApp,
+  sendScorecardConfirmDueWhatsApp,
   urlButtonComponent,
 } = await import('../src/notify/whatsapp.js');
 const { WHATSAPP_TEMPLATES } = await import('../src/notify/whatsapp-templates.js');
@@ -67,6 +69,14 @@ const BUILDERS = [
     params: captainsReportOpsDigestParams({
       recipientName: 'Union admin',
       summary: 'Dolphins: 3 new results, 6 reports opened, 6 notices sent, 0 failed',
+    }),
+  },
+  {
+    key: 'scorecardConfirmDue' as const,
+    params: scorecardConfirmDueParams({
+      chairName: 'Thandi Nkosi',
+      clubName: 'Adelaar CC',
+      weekLabel: '5–11 Oct 2026',
     }),
   },
   {
@@ -274,5 +284,40 @@ describe('clearance-pending template (v2 only; v1 retired in code 7 Oct 2026)', 
     assert.match(v2.bodyText, /Review it here: \{\{5\}\}/);
     assert.match(v2.bodyText, /contact your union office/);
     assert.doesNotMatch(v2.bodyText, /\{\{\d+\}\}\s*$/);
+  });
+});
+
+describe('scorecard confirmation digest template', () => {
+  const due = WHATSAPP_TEMPLATES.scorecardConfirmDue;
+
+  test('three body params (chair first name, club, week) and the /sc/ URL button', () => {
+    assert.equal(due.name, 'scorecard_confirm_due');
+    assert.equal(due.lang, 'en');
+    assert.equal(due.paramCount, 3);
+    assert.equal(due.urlButton.urlTemplate, 'https://platform.club.medicoach.co.za/sc/{{1}}');
+    assert.deepEqual(
+      scorecardConfirmDueParams({
+        chairName: '  Thandi  Nkosi ',
+        clubName: 'Adelaar CC',
+        weekLabel: '5–11 Oct 2026',
+      }).map((p) => p.text),
+      ['Thandi', 'Adelaar CC', '5–11 Oct 2026'],
+    );
+    assert.equal(
+      scorecardConfirmDueParams({ chairName: '', clubName: 'A', weekLabel: 'w' })[0].text,
+      'there',
+    );
+  });
+
+  test('the sender sends once registered (dry-run without credentials)', async () => {
+    assert.equal(due.status, 'registered');
+    const { messageId } = await sendScorecardConfirmDueWhatsApp({
+      to: '+27000000000',
+      chairName: 'A',
+      clubName: 'B',
+      weekLabel: 'C',
+      token: 'tok.sig',
+    });
+    assert.match(messageId, /^dry-run-/);
   });
 });

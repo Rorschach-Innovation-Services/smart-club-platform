@@ -82,6 +82,8 @@ import {
   OPERATORS_GSI1PK,
   fixtureResultKey,
   fixtureResultsListKey,
+  fixtureScorecardKey,
+  fixtureScorecardsListKey,
   syncCursorKey,
   syncHealthKey,
   syncLogKey,
@@ -104,6 +106,11 @@ import {
   captainsReportNotifyKey,
   whatsappMessageKey,
   captainsReportPartitionPk,
+  scorecardConfirmPartitionPk,
+  scorecardConfirmKey,
+  scorecardConfirmsListKey,
+  scorecardConfirmCounterKey,
+  scorecardConfirmNotifyKey,
 } from './keys.js';
 import { PLATFORM_TENANT, TRANSFER_WINDOW_REJECTOR } from './types.js';
 import { refs as medicoachRefs } from './medicoach-bundle.js';
@@ -135,6 +142,7 @@ import type {
   RegistrationReview,
   RegistrationReviewResolution,
   StoredFixtureResult,
+  StoredFixtureScorecard,
   SyncHealth,
   SyncLogEntry,
   SyncConflict,
@@ -145,6 +153,8 @@ import type {
   FixtureOfficialsRecord,
   CaptainsReport,
   CaptainsReportDelivery,
+  ScorecardConfirmation,
+  ScorecardConfirmEntry,
 } from './types.js';
 
 import { tableName } from './env.js';
@@ -1144,6 +1154,97 @@ export async function removeFixtureResultCaptainRef(
 
 async function listFixtureResultKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
   const { pk, skPrefix } = fixtureResultsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+// ── Medicoach sync: fixture scorecards (FIXSCORECARD#) ──
+
+/** Store (replace) a fixture's scorecard row — the latest fetch always wins. */
+export async function putFixtureScorecard(
+  tenant: string,
+  scorecard: StoredFixtureScorecard,
+): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...scorecard,
+        ...fixtureScorecardKey(tenant, scorecard.seriesId, scorecard.fixtureId),
+      },
+    }),
+  );
+}
+
+/**
+ * A re-fetch found no card (404 / `available: false`) while an AVAILABLE card is stored:
+ * keep the card and only note when it was last checked. Conditional on the row still being
+ * the card fetched at `fetchedAt` — a concurrent fetch that stored a newer one wins.
+ */
+export async function touchFixtureScorecardCheckedAt(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+  fetchedAt: string,
+  checkedAt: string,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: fixtureScorecardKey(tenant, seriesId, fixtureId),
+        UpdateExpression: 'SET lastCheckedAt = :c',
+        ConditionExpression: 'fetchedAt = :f',
+        ExpressionAttributeValues: { ':c': checkedAt, ':f': fetchedAt },
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
+export async function getFixtureScorecard(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+): Promise<StoredFixtureScorecard | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: fixtureScorecardKey(tenant, seriesId, fixtureId) }),
+  );
+  return stripKeys<StoredFixtureScorecard>(res.Item);
+}
+
+/** Every stored scorecard for a tenant — one Query on one partition. */
+export async function listFixtureScorecards(tenant: string): Promise<StoredFixtureScorecard[]> {
+  const { pk, skPrefix } = fixtureScorecardsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<StoredFixtureScorecard>(i)!);
+}
+
+/** Delete a fixture's scorecard row (idempotent — a missing row is fine). */
+export async function deleteFixtureScorecard(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+): Promise<void> {
+  await ddb.send(
+    new DeleteCommand({ TableName: TABLE, Key: fixtureScorecardKey(tenant, seriesId, fixtureId) }),
+  );
+}
+
+async function listFixtureScorecardKeys(
+  tenant: string,
+): Promise<Array<{ pk: string; sk: string }>> {
+  const { pk, skPrefix } = fixtureScorecardsListKey(tenant);
   const items = await queryAll({
     TableName: TABLE,
     KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
@@ -2249,9 +2350,9 @@ async function listCaptainsReportNotifyKeys(
 }
 
 /**
- * A deleted series' medicoach-sync state (ADR 0016): its FIXRESULT# results, the outbox rows
- * (PENDINGSYNC#), held conflicts (SYNCCONFLICT#) and report-open markers (REPORTOPEN#) of its
- * fixtures are deleted, and its still-PENDING captain's reports are voided (their links die;
+ * A deleted series' medicoach-sync state (ADR 0016): its FIXRESULT# results and FIXSCORECARD#
+ * scorecards, the outbox rows (PENDINGSYNC#), held conflicts (SYNCCONFLICT#) and report-open
+ * markers (REPORTOPEN#) of its fixtures are deleted, and its still-PENDING captain's reports are voided (their links die;
  * submitted ones are kept as filed). Idempotent.
  */
 export async function deleteSeriesSyncState(
@@ -2270,6 +2371,17 @@ export async function deleteSeriesSyncState(
       ProjectionExpression: 'pk, sk',
     })
   ).map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+  const scorecards = fixtureScorecardsListKey(tenant);
+  for (const i of await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: {
+      ':p': scorecards.pk,
+      ':s': `${scorecards.skPrefix}${seriesId}#`,
+    },
+    ProjectionExpression: 'pk, sk',
+  }))
+    keys.push({ pk: i.pk as string, sk: i.sk as string });
   const [pending, conflicts, markers, reports] = await Promise.all([
     listPendingSync(tenant),
     listSyncConflicts(tenant),
@@ -2295,6 +2407,448 @@ async function listCaptainsReportPartitionKeys(
     TableName: TABLE,
     KeyConditionExpression: 'pk = :p',
     ExpressionAttributeValues: { ':p': captainsReportPartitionPk(tenant) },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+// ── Chair scorecard confirmations (SCORECONF#) ──
+// One tenant partition: the weekly digests, the SC-YYYY-NNNN counters and the NOTIFY# ledger.
+
+/**
+ * Why a scorecard-confirmation write was refused. `code` picks the HTTP answer:
+ * `not_found` (no digest) / `unknown_entry` → 404, `entry_closed` (already answered or void)
+ * → 409, `link_revoked` (the digest's memberId was rotated) → 410.
+ */
+export class ScorecardConfirmStateError extends Error {
+  constructor(
+    readonly code: 'not_found' | 'unknown_entry' | 'entry_closed' | 'link_revoked',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ScorecardConfirmStateError';
+  }
+}
+
+export async function getScorecardConfirmation(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+): Promise<ScorecardConfirmation | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: scorecardConfirmKey(tenant, weekKey, clubId) }),
+  );
+  return stripKeys<ScorecardConfirmation>(res.Item);
+}
+
+/** A tenant's digests — every week, or one week (`weekKey`). One Query on one partition. */
+export async function listScorecardConfirmations(
+  tenant: string,
+  weekKey?: string,
+): Promise<ScorecardConfirmation[]> {
+  const { pk, skPrefix } = scorecardConfirmsListKey(tenant, weekKey);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<ScorecardConfirmation>(i)!);
+}
+
+/** Store a NEW digest; false when one already exists for that club + week. */
+export async function createScorecardConfirmation(
+  tenant: string,
+  record: ScorecardConfirmation,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { ...record, ...scorecardConfirmKey(tenant, record.weekKey, record.clubId) },
+        ConditionExpression: 'attribute_not_exists(pk)',
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/**
+ * Add fixtures to an existing digest (a result that arrived after it was created). Each entry
+ * is written only when the digest lacks it — or holds it VOID (a cleared result re-recorded):
+ * an open or answered entry is never overwritten. Returns the keys actually added.
+ */
+export async function topUpScorecardConfirmEntries(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+  entries: Record<string, ScorecardConfirmEntry>,
+): Promise<string[]> {
+  const added: string[] = [];
+  for (const [k, entry] of Object.entries(entries)) {
+    try {
+      await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: scorecardConfirmKey(tenant, weekKey, clubId),
+          UpdateExpression: 'SET entries.#k = :e, updatedAt = :at',
+          ConditionExpression:
+            'attribute_exists(pk) AND (attribute_not_exists(entries.#k) OR entries.#k.#st = :void)',
+          ExpressionAttributeNames: { '#k': k, '#st': 'status' },
+          ExpressionAttributeValues: {
+            ':e': entry,
+            ':void': 'void',
+            ':at': new Date().toISOString(),
+          },
+        }),
+      );
+      added.push(k);
+    } catch (err) {
+      if (!isCcf(err)) throw err;
+    }
+  }
+  return added;
+}
+
+/**
+ * Answer one entry — FIRST SUBMIT WINS. Succeeds only while the entry is `pending` and (link
+ * path) the digest is still addressed to `memberId`. A refusal is re-read to say why
+ * (ScorecardConfirmStateError: not_found / unknown_entry / entry_closed / link_revoked).
+ */
+export async function submitScorecardConfirmEntry(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+  entryKey: string,
+  answer: {
+    status: 'confirmed' | 'correction';
+    feedback?: string;
+    confirmedAgainstFetchedAt?: string;
+    memberId: string;
+  },
+): Promise<ScorecardConfirmation> {
+  const at = new Date().toISOString();
+  const sets = [
+    'entries.#k.#st = :status',
+    'entries.#k.submittedAt = :at',
+    'entries.#k.submittedVia = :via',
+    'updatedAt = :at',
+  ];
+  const values: Record<string, unknown> = {
+    ':status': answer.status,
+    ':at': at,
+    ':via': 'link',
+    ':pending': 'pending',
+    ':m': answer.memberId,
+  };
+  if (answer.feedback) {
+    sets.push('entries.#k.feedback = :fb');
+    values[':fb'] = answer.feedback;
+  }
+  if (answer.confirmedAgainstFetchedAt) {
+    sets.push('entries.#k.confirmedAgainstFetchedAt = :cf');
+    values[':cf'] = answer.confirmedAgainstFetchedAt;
+  }
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: scorecardConfirmKey(tenant, weekKey, clubId),
+        UpdateExpression: `SET ${sets.join(', ')}`,
+        ConditionExpression:
+          'attribute_exists(pk) AND memberId = :m AND attribute_exists(entries.#k) AND entries.#k.#st = :pending',
+        ExpressionAttributeNames: { '#k': entryKey, '#st': 'status' },
+        ExpressionAttributeValues: values,
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return stripKeys<ScorecardConfirmation>(res.Attributes)!;
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+  const fresh = await getScorecardConfirmation(tenant, weekKey, clubId);
+  if (!fresh) throw new ScorecardConfirmStateError('not_found', 'not found');
+  if (fresh.memberId !== answer.memberId)
+    throw new ScorecardConfirmStateError('link_revoked', 'this link is no longer valid');
+  if (!fresh.entries?.[entryKey])
+    throw new ScorecardConfirmStateError('unknown_entry', 'that match is not in this digest');
+  throw new ScorecardConfirmStateError('entry_closed', 'this match has already been answered');
+}
+
+/** A cleared result: its entry becomes `void` (whatever its state). False when absent/void. */
+export async function voidScorecardConfirmEntry(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+  entryKey: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: scorecardConfirmKey(tenant, weekKey, clubId),
+        UpdateExpression: 'SET entries.#k.#st = :void, updatedAt = :at',
+        ConditionExpression: 'attribute_exists(entries.#k) AND entries.#k.#st <> :void',
+        ExpressionAttributeNames: { '#k': entryKey, '#st': 'status' },
+        ExpressionAttributeValues: { ':void': 'void', ':at': new Date().toISOString() },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/**
+ * A result re-recorded after a clear: a `void` entry goes back to `pending`, with any answer
+ * it carried before the clear removed (the chair answers the new result afresh). Only a void
+ * entry is touched. False when the entry is absent or not void.
+ */
+export async function restoreScorecardConfirmEntry(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+  entryKey: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: scorecardConfirmKey(tenant, weekKey, clubId),
+        UpdateExpression:
+          'SET entries.#k.#st = :pending, updatedAt = :at ' +
+          'REMOVE entries.#k.feedback, entries.#k.submittedAt, entries.#k.submittedVia, ' +
+          'entries.#k.confirmedAgainstFetchedAt, entries.#k.staleConfirmation',
+        ConditionExpression: 'attribute_exists(entries.#k) AND entries.#k.#st = :void',
+        ExpressionAttributeNames: { '#k': entryKey, '#st': 'status' },
+        ExpressionAttributeValues: {
+          ':pending': 'pending',
+          ':void': 'void',
+          ':at': new Date().toISOString(),
+        },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/**
+ * A newer scorecard (fetched at `fetchedAt`) arrived for an ANSWERED entry: flag it stale so
+ * the operator console shows the answer may predate the card. Only an entry answered against
+ * an older card is flagged — its `confirmedAgainstFetchedAt` when recorded, else its
+ * `submittedAt`. False when nothing changed.
+ */
+export async function flagScorecardEntryStale(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+  entryKey: string,
+  fetchedAt: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: scorecardConfirmKey(tenant, weekKey, clubId),
+        UpdateExpression: 'SET entries.#k.staleConfirmation = :t, updatedAt = :at',
+        ConditionExpression:
+          'attribute_exists(entries.#k) AND entries.#k.#st IN (:c, :x) AND (' +
+          '(attribute_exists(entries.#k.confirmedAgainstFetchedAt) AND entries.#k.confirmedAgainstFetchedAt < :f) OR ' +
+          '(attribute_not_exists(entries.#k.confirmedAgainstFetchedAt) AND entries.#k.submittedAt < :f))',
+        ExpressionAttributeNames: { '#k': entryKey, '#st': 'status' },
+        ExpressionAttributeValues: {
+          ':t': true,
+          ':c': 'confirmed',
+          ':x': 'correction',
+          ':f': fetchedAt,
+          ':at': new Date().toISOString(),
+        },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/** The next `SC-YYYY-NNNN` for a tenant/year — an atomic ADD on the counter item. */
+export async function nextScorecardConfirmRef(tenant: string, year: string): Promise<string> {
+  const res = await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: scorecardConfirmCounterKey(tenant, year),
+      UpdateExpression: 'ADD n :one',
+      ExpressionAttributeValues: { ':one': 1 },
+      ReturnValues: 'UPDATED_NEW',
+    }),
+  );
+  const n = Number(res.Attributes?.n ?? 0);
+  return `SC-${year}-${String(n).padStart(4, '0')}`;
+}
+
+/** Append notice outcomes to a digest; `notifiedAt` is set the first time a channel sent. */
+export async function recordScorecardConfirmDeliveries(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+  deliveries: CaptainsReportDelivery[],
+  opts: { notifiedAt?: string } = {},
+): Promise<void> {
+  const sets = [
+    'deliveries = list_append(if_not_exists(deliveries, :empty), :d)',
+    'updatedAt = :at',
+  ];
+  const values: Record<string, unknown> = {
+    ':d': deliveries,
+    ':empty': [],
+    ':at': new Date().toISOString(),
+  };
+  if (opts.notifiedAt) {
+    sets.push('notifiedAt = if_not_exists(notifiedAt, :n)');
+    values[':n'] = opts.notifiedAt;
+  }
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: scorecardConfirmKey(tenant, weekKey, clubId),
+        UpdateExpression: `SET ${sets.join(', ')}`,
+        ConditionExpression: 'attribute_exists(pk)',
+        ExpressionAttributeValues: values,
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err; // erased meanwhile: nothing to record on
+  }
+}
+
+/** Revoke a digest's link: a new memberId, so every token minted for the old one 410s. */
+export async function rotateScorecardConfirmMemberId(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+): Promise<string> {
+  const memberId = randomUUID();
+  await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: scorecardConfirmKey(tenant, weekKey, clubId),
+      UpdateExpression: 'SET memberId = :m, updatedAt = :at',
+      ConditionExpression: 'attribute_exists(pk)',
+      ExpressionAttributeValues: { ':m': memberId, ':at': new Date().toISOString() },
+    }),
+  );
+  return memberId;
+}
+
+/** How long an `in_progress` digest-send claim holds before a later run may take it over. */
+export const SCORECARD_CLAIM_LEASE_MS = 15 * 60_000;
+
+/**
+ * Claim the right to send a club's digest for a week. Returns the claim's `startedAt` ⇒ the
+ * caller sends (and passes it back to {@link releaseScorecardConfirmNotify}); null ⇒ a send was
+ * already claimed (a re-run, the operator "Run now") and nothing must go out again.
+ *
+ * Lease takeover: an `in_progress` claim older than {@link SCORECARD_CLAIM_LEASE_MS} is a run
+ * that crashed between claim and complete/release — it is re-claimed, so it cannot block the
+ * week's send for the ledger's whole TTL. A `completed` claim is never taken over.
+ */
+export async function claimScorecardConfirmNotify(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+  opts: { now?: Date } = {},
+): Promise<string | null> {
+  const now = opts.now ?? new Date();
+  const startedAt = now.toISOString();
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: {
+          ...scorecardConfirmNotifyKey(tenant, weekKey, clubId),
+          status: 'in_progress',
+          startedAt,
+          expiresAt: Math.floor(now.getTime() / 1000) + NOTIFY_LEDGER_TTL_SECONDS,
+        },
+        ConditionExpression: 'attribute_not_exists(pk) OR (#s = :ip AND startedAt < :stale)',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: {
+          ':ip': 'in_progress',
+          ':stale': new Date(now.getTime() - SCORECARD_CLAIM_LEASE_MS).toISOString(),
+        },
+      }),
+    );
+    return startedAt;
+  } catch (err) {
+    if (isCcf(err)) return null;
+    throw err;
+  }
+}
+
+/** Record a claimed digest send's per-channel outcome (status only — no addresses). */
+export async function completeScorecardConfirmNotify(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+  results: Array<{ channel: string; status: string; error?: string }>,
+): Promise<void> {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: scorecardConfirmNotifyKey(tenant, weekKey, clubId),
+      UpdateExpression: 'SET #s = :done, #res = :r, completedAt = :at',
+      ExpressionAttributeNames: { '#s': 'status', '#res': 'results' },
+      ExpressionAttributeValues: {
+        ':done': 'completed',
+        ':r': results,
+        ':at': new Date().toISOString(),
+      },
+    }),
+  );
+}
+
+/**
+ * Release a claimed digest send that reached nobody, so the next run may try again. Only the
+ * caller's OWN claim is released (`claimedAt` = the `startedAt` its claim returned): a run that
+ * lost its claim to a lease takeover leaves the newer holder's claim in place (a no-op).
+ */
+export async function releaseScorecardConfirmNotify(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+  claimedAt: string,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new DeleteCommand({
+        TableName: TABLE,
+        Key: scorecardConfirmNotifyKey(tenant, weekKey, clubId),
+        ConditionExpression: '#s = :p AND startedAt = :mine',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':p': 'in_progress', ':mine': claimedAt },
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
+/** Every key in the scorecard-confirmation partition (digests, counters, ledger) — erasure. */
+async function listScorecardConfirmPartitionKeys(
+  tenant: string,
+): Promise<Array<{ pk: string; sk: string }>> {
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p',
+    ExpressionAttributeValues: { ':p': scorecardConfirmPartitionPk(tenant) },
     ProjectionExpression: 'pk, sk',
   });
   return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
@@ -7226,6 +7780,8 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   // Medicoach sync (ADR 0016): results (may hold a captain's player ref — PII) and the
   // SYNC partition (cursor + audit rows) have no gsi1/META listing; enumerate them.
   for (const k of await listFixtureResultKeys(tenant)) keys.push(k);
+  // Scorecards (FIXSCORECARD#) carry player names and hang off the same results.
+  for (const k of await listFixtureScorecardKeys(tenant)) keys.push(k);
   for (const k of await listSyncPartitionKeys(tenant)) keys.push(k);
   // Umpires carry contact details; officials are per-fixture rows. Neither is in a club
   // partition or the series listing, so enumerate both explicitly.
@@ -7233,6 +7789,9 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   // Captain's reports carry names and ratings; the partition also holds the counters and the
   // NOTIFY# ledger. No gsi1/META listing — enumerate the partition.
   for (const k of await listCaptainsReportPartitionKeys(tenant)) keys.push(k);
+  // Scorecard confirmations carry club names and chairs' free-text feedback (+ counters and
+  // the NOTIFY# ledger). No gsi1/META listing — enumerate the partition.
+  for (const k of await listScorecardConfirmPartitionKeys(tenant)) keys.push(k);
 
   const unique = uniqueKeys(keys);
   await batchDelete(unique);
@@ -7302,6 +7861,8 @@ export async function clearCohort(tenant: string): Promise<number> {
   // Results belong to the series being cleared (and may hold a player ref — PII). The SYNC
   // partition goes too: a surviving cursor would stop the next pull re-fetching the results.
   for (const k of await listFixtureResultKeys(tenant)) keys.push(k);
+  // Scorecards (FIXSCORECARD#) carry player names and hang off the same results.
+  for (const k of await listFixtureScorecardKeys(tenant)) keys.push(k);
   for (const k of await listSyncPartitionKeys(tenant)) keys.push(k);
   // Officials hang off the series being cleared; the umpire registry itself is union data,
   // not cohort data, so it stays.
@@ -7310,6 +7871,8 @@ export async function clearCohort(tenant: string): Promise<number> {
 
   // Captain's reports hang off the fixtures being cleared (reports, counters, ledger).
   for (const k of await listCaptainsReportPartitionKeys(tenant)) keys.push(k);
+  // Scorecard confirmations hang off the same fixtures (digests, counters, ledger).
+  for (const k of await listScorecardConfirmPartitionKeys(tenant)) keys.push(k);
 
   // Safety: never delete the tenant config or any user record.
   for (const k of keys) {
@@ -7471,6 +8034,14 @@ export async function eraseClubData(
     keys.push(...(await listCaptainsReportNotifyKeys(tenant, r.id)));
   }
 
+  // This club's scorecard-confirmation digests (club name + the chair's feedback) and their
+  // NOTIFY# send claims.
+  for (const r of await listScorecardConfirmations(tenant)) {
+    if (r.clubId !== club.id) continue;
+    keys.push(scorecardConfirmKey(tenant, r.weekKey, r.clubId));
+    keys.push(scorecardConfirmNotifyKey(tenant, r.weekKey, r.clubId));
+  }
+
   // Veterans affiliations WHERE THIS CLUB IS THE VETERANS CLUB (its affiliates). The pointing
   // player rows live in OTHER (primary) clubs; scrub their veteransClub/veteransClubId BEFORE
   // deleting the VETAFFIL rows, because these records are the ONLY index back to those rows —
@@ -7577,8 +8148,26 @@ export class PlayerErasureBlockedError extends Error {
   }
 }
 
-/** What a scrubbed captain's-report name field reads after erasure. */
+/** What a scrubbed name (captain's report, scorecard, digest feedback) reads after erasure. */
 export const ERASED_NAME = '[removed]';
+
+/**
+ * Player erasure could not scrub a cached scorecard (FIXSCORECARD#) or a digest's feedback
+ * (SCORECONF#) because the row kept changing underneath it (3 contested conditional writes in a
+ * row). Thrown BEFORE anything destructive has run, so the erasure is aborted with every row and
+ * artifact intact and can simply be retried.
+ */
+export class ScorecardScrubContentionError extends Error {
+  readonly code = 'SCORECARD_SCRUB_CONTENTION';
+  constructor(readonly target: 'scorecard' | 'feedback') {
+    super(
+      target === 'scorecard'
+        ? 'a match scorecard changed during erasure — try again'
+        : 'a scorecard confirmation changed during erasure — try again',
+    );
+    this.name = 'ScorecardScrubContentionError';
+  }
+}
 
 const normName = (s: string | undefined | null) =>
   (s ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
@@ -7588,6 +8177,30 @@ const normCell = (s: string | undefined | null) => {
   const d = (s ?? '').replace(/\D/g, '');
   return d.length >= 9 ? d.slice(-9) : '';
 };
+
+/**
+ * A copy of `card` with every batter / bowler / fall-of-wicket name matching `hit` replaced by
+ * {@link ERASED_NAME}, or null when no name matched (nothing to write).
+ */
+function scrubScorecardNames(
+  card: StoredFixtureScorecard,
+  hit: (name: string | undefined) => boolean,
+): StoredFixtureScorecard | null {
+  if (!card.innings?.length) return null;
+  let changed = false;
+  const swap = (name: string) => {
+    if (!hit(name)) return name;
+    changed = true;
+    return ERASED_NAME;
+  };
+  const innings = card.innings.map((inn) => ({
+    ...inn,
+    batters: inn.batters.map((b) => ({ ...b, name: swap(b.name) })),
+    bowlers: inn.bowlers.map((b) => ({ ...b, name: swap(b.name) })),
+    fallOfWickets: inn.fallOfWickets.map((f) => ({ ...f, batterName: swap(f.batterName) })),
+  }));
+  return changed ? { ...card, innings } : null;
+}
 
 /**
  * Erase ONE person (by natural key) from every club in the tenant — the admin's POPIA "right to
@@ -7607,16 +8220,27 @@ const normCell = (s: string | undefined | null) => {
  *    place, not deleted (the report is the club's and the umpires' record too);
  *  - pending REPORTOPEN# markers whose captain ref is this person's player ref have that ref
  *    REMOVED (the marker stays — it is the retry queue for both clubs' reports; with no captain
- *    ref the scoring side's report goes to the club chair).
+ *    ref the scoring side's report goes to the club chair);
+ *  - cached medicoach scorecards (FIXSCORECARD#): batter / bowler / fall-of-wicket names that
+ *    match the person are SCRUBBED in place, and a scrubbed card is marked `terminal` so the
+ *    sweep never re-fetches the name from medicoach;
+ *  - scorecard digests (SCORECONF#): the person's name inside a chair's correction `feedback`
+ *    is replaced (case-insensitive, whole words) — the digest itself is the club's record.
  *
  * Gate: a pending clearance naming the person, or any `clearance-pending` row, throws
  * {@link PlayerErasureBlockedError} BEFORE anything is touched. Returns null when nothing in any
  * category exists (a clean 404 — and the re-run of a completed erasure).
  *
- * Ordering is the re-runnable invariant: S3 first (object keys are only derivable while the
- * rows naming them exist), then the clearance/review/request rows, then the report scrub, and
- * the PLAYER# rows LAST — while any of them survives, a re-run finds the person again and
- * finishes the job. The PII-free audit row (actor + counts) is written once everything landed.
+ * Ordering is the re-runnable invariant: the scorecard + digest-feedback scrubs run FIRST, while
+ * every row naming the person (and so every spelling of their name) is still intact; then S3
+ * (object keys are only derivable while the rows naming them exist), then the clearance/review/
+ * request rows, then the captain's-report scrub, and the PLAYER# rows LAST — while any of them
+ * survives, a re-run finds the person again and finishes the job. A scorecard or digest that
+ * keeps changing underneath its scrub (3 contested writes) throws
+ * {@link ScorecardScrubContentionError} — never a silent skip that the audit counts would hide —
+ * and because nothing destructive has run yet, the erasure aborts intact and a retry has full
+ * name fidelity (including a person with no PLAYER# rows). The PII-free audit row (actor +
+ * counts) is written once everything landed.
  */
 export async function erasePlayerData(
   tenant: string,
@@ -7696,6 +8320,125 @@ export async function erasePlayerData(
   emails.delete('');
   cells.delete('');
 
+  // ── Scorecard scrubs FIRST, before anything destructive ──
+  // Every row naming the person is still intact here, so the name set is complete; a contention
+  // throw below aborts the erasure with nothing deleted (safe to retry).
+  const nameHit = (s: string | undefined) => !!s && names.has(normName(s));
+
+  // ── Cached medicoach scorecards: scrub batter / bowler / fall-of-wicket names ──
+  // A modified card is also marked `terminal` so the sweep never re-fetches it (and with it the
+  // name) from medicoach. Conditional on the card not having been replaced meanwhile; a
+  // replaced card is re-read and scrubbed afresh.
+  let scorecardsScrubbed = 0;
+  for (const listed of await listFixtureScorecards(tenant)) {
+    let card: StoredFixtureScorecard | null = listed;
+    let settled = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const scrubbed = card && scrubScorecardNames(card, nameHit);
+      if (!card || !scrubbed) {
+        settled = true; // deleted meanwhile, or nothing (left) to scrub
+        break;
+      }
+      try {
+        await ddb.send(
+          new PutCommand({
+            TableName: TABLE,
+            Item: {
+              ...scrubbed,
+              terminal: true,
+              ...fixtureScorecardKey(tenant, card.seriesId, card.fixtureId),
+            },
+            ConditionExpression: 'fetchedAt = :f',
+            ExpressionAttributeValues: { ':f': card.fetchedAt },
+          }),
+        );
+        scorecardsScrubbed++;
+        settled = true;
+        break;
+      } catch (err: unknown) {
+        if (!isCcf(err)) throw err;
+        card = await getFixtureScorecard(tenant, card.seriesId, card.fixtureId);
+      }
+    }
+    // Out of retries: only a card that STILL names the person is a failure.
+    if (!settled && card && scrubScorecardNames(card, nameHit)) {
+      throw new ScorecardScrubContentionError('scorecard');
+    }
+  }
+
+  // ── Scorecard digest feedback: the chair's free text may name the person ──
+  const namePatterns = [...names].map(
+    (n) =>
+      new RegExp(
+        `(?<![\\p{L}\\p{N}])${n
+          .split(' ')
+          .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+          .join('\\s+')}(?![\\p{L}\\p{N}])`,
+        'giu',
+      ),
+  );
+  const scrubText = (s: string) => namePatterns.reduce((t, re) => t.replace(re, ERASED_NAME), s);
+  let feedbackScrubbed = 0;
+  for (const listed of await listScorecardConfirmations(tenant)) {
+    // Conditional on each scrubbed feedback being unchanged; a digest changed meanwhile (an
+    // entry re-answered after a clear) is re-read and scrubbed afresh.
+    let d: ScorecardConfirmation | null = listed;
+    let settled = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (!d) {
+        settled = true; // deleted meanwhile
+        break;
+      }
+      const sets: string[] = [];
+      const conds: string[] = [];
+      const attrNames: Record<string, string> = {};
+      const values: Record<string, unknown> = {};
+      for (const [k, e] of Object.entries(d.entries ?? {})) {
+        if (!e.feedback) continue;
+        const next = scrubText(e.feedback);
+        if (next === e.feedback) continue;
+        const i = sets.length;
+        attrNames[`#k${i}`] = k;
+        values[`:fb${i}`] = next;
+        values[`:old${i}`] = e.feedback;
+        sets.push(`entries.#k${i}.feedback = :fb${i}`);
+        conds.push(`entries.#k${i}.feedback = :old${i}`);
+      }
+      if (!sets.length) {
+        settled = true; // nothing (left) to scrub
+        break;
+      }
+      try {
+        await ddb.send(
+          new UpdateCommand({
+            TableName: TABLE,
+            Key: scorecardConfirmKey(tenant, d.weekKey, d.clubId),
+            UpdateExpression: `SET ${sets.join(', ')}, updatedAt = :now`,
+            ConditionExpression: conds.join(' AND '),
+            ExpressionAttributeNames: attrNames,
+            ExpressionAttributeValues: { ...values, ':now': at },
+          }),
+        );
+        feedbackScrubbed += sets.length;
+        settled = true;
+        break;
+      } catch (err: unknown) {
+        if (!isCcf(err)) throw err;
+        d = await getScorecardConfirmation(tenant, d.weekKey, d.clubId);
+      }
+    }
+    // Out of retries: only a digest whose feedback STILL names the person is a failure.
+    if (
+      !settled &&
+      d &&
+      Object.values(d.entries ?? {}).some(
+        (e) => !!e.feedback && scrubText(e.feedback) !== e.feedback,
+      )
+    ) {
+      throw new ScorecardScrubContentionError('feedback');
+    }
+  }
+
   // Row docs are purged by deletePlayer itself; counted here so the total is truthful.
   const rowDocs = rows.flatMap((p) =>
     [p.idDocMeta?.objectKey, p.previousIdDocMeta?.objectKey].filter((k): k is string => !!k),
@@ -7711,7 +8454,6 @@ export async function erasePlayerData(
   if (unique.length) await batchDelete(unique);
 
   // ── Captain's reports: scrub mentions in place ──
-  const nameHit = (s: string | undefined) => !!s && names.has(normName(s));
   let captainsReportsScrubbed = 0;
   for (const r of await listCaptainsReports(tenant)) {
     const contact = r.recipientContact;
@@ -7777,6 +8519,8 @@ export async function erasePlayerData(
     documents: new Set([...uniqueObjects, ...rowDocs]).size,
     certificates,
     captainsReportsScrubbed,
+    scorecardsScrubbed,
+    feedbackScrubbed,
     reportOpenMarkers,
   };
   await putPlayerEraseLog(tenant, {

@@ -34,6 +34,10 @@ import { HelpLink, HelpProvider } from './help/HelpDrawer';
 import { TutorialsCard } from './platform-tutorials';
 import { RequiredDocsCard } from './platform-required-docs';
 import { FixtureRemindersCard } from './platform-fixture-reminders';
+import {
+  ScorecardConfirmationsCard,
+  ScorecardConfirmationsPage,
+} from './platform-scorecard-confirmations';
 import { TransferWindowCard } from './platform-transfer-windows';
 import { DocIntakeWizard } from './platform-intake';
 import { FixtureAmendmentsPage } from './platform-fixture-amendments';
@@ -463,6 +467,15 @@ export function PlatformPortal({
               </span>
               <span className="ni-label">New client</span>
             </button>
+            <button
+              className={`nav-item ${path === '/platform/scorecard-confirmations' ? 'active' : ''}`}
+              onClick={() => navigate('/platform/scorecard-confirmations')}
+            >
+              <span className="ni-icon">
+                <Icon.Check />
+              </span>
+              <span className="ni-label">Scorecard confirmations</span>
+            </button>
 
             {hasTenantConsole && (
               <>
@@ -493,6 +506,10 @@ export function PlatformPortal({
             <Routes>
               <Route path="/platform" element={<TenantListPage />} />
               <Route path="/platform/new" element={<CreateTenantWizard toast={toastShow} />} />
+              <Route
+                path="/platform/scorecard-confirmations"
+                element={<ScorecardConfirmationsPage toast={toastShow} />}
+              />
               <Route
                 path="/platform/tenants/:slug"
                 element={<TenantEditPage toast={toastShow} />}
@@ -854,6 +871,12 @@ function TenantEditPage({ toast }: { toast: Toast }) {
         />
         <FixtureRemindersCard
           key={`fr-${config.tenant}`}
+          config={config}
+          save={save}
+          toast={toast}
+        />
+        <ScorecardConfirmationsCard
+          key={`scc-${config.tenant}`}
           config={config}
           save={save}
           toast={toast}

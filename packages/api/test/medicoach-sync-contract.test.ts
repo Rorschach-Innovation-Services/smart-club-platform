@@ -15,11 +15,13 @@ import {
   MEDICOACH_SYNC_VERSION,
   SchedulePushRequestSchema,
   SchedulePushResponseSchema,
+  ScorecardResponseSchema,
   VENUE_MAX_LENGTH,
   capVenue,
   changesPathAndQuery,
   parseFixtureRef,
   parseTeamRef,
+  scorecardPathAndQuery,
   signRequest,
   signingString,
   verifySignature,
@@ -37,18 +39,21 @@ const schemaFor = (file: string) =>
       ? SchedulePushRequestSchema
       : file === 'schedule-push-response.json'
         ? SchedulePushResponseSchema
-        : null;
+        : file.startsWith('scorecard-')
+          ? ScorecardResponseSchema
+          : null;
 
 describe('contract examples', () => {
   const files = readdirSync(EXAMPLES).filter((f) => f.endsWith('.json'));
 
-  test('all five shared examples are present', () => {
+  test('all six shared examples are present', () => {
     assert.deepEqual(files.sort(), [
       'changes-knockout-reschedule.json',
       'changes-live-result.json',
       'changes-manual-and-cleared.json',
       'schedule-push-request.json',
       'schedule-push-response.json',
+      'scorecard-live-match.json',
     ]);
   });
 
@@ -59,7 +64,8 @@ describe('contract examples', () => {
       assert.ok(schema, `no schema mapped for ${file}`);
       const parsed = schema.parse(raw);
       assert.deepEqual(parsed, raw);
-      assert.equal(raw.version, MEDICOACH_SYNC_VERSION);
+      // The scorecard response is pinned without a `version` field (contract §3).
+      if (!file.startsWith('scorecard-')) assert.equal(raw.version, MEDICOACH_SYNC_VERSION);
     });
   }
 
@@ -240,5 +246,134 @@ describe('stored result view', () => {
         .medicoachMatchUrl,
       'https://live.medicoach.co.za/m/1',
     );
+  });
+});
+
+describe('scorecard contract', () => {
+  /** The pinned wire example for GET /integrations/smartclub/matches/:matchId/scorecard. */
+  const pinned = {
+    available: true,
+    matchId: 'pma-123',
+    matchState: 'Umzinto won by 23 runs',
+    innings: [
+      {
+        battingTeamName: 'Umzinto',
+        totalRuns: 184,
+        wickets: 6,
+        overs: '20.0',
+        extras: { byes: 1, legByes: 2, wides: 5, noBalls: 1, penalties: 0, total: 9 },
+        batters: [
+          {
+            order: 1,
+            name: 'A Batter',
+            runs: 64,
+            ballsFaced: 41,
+            fours: 6,
+            sixes: 3,
+            strikeRate: 156.1,
+            howOut: 'c Fielder b Bowler',
+            dismissal: 'caught',
+          },
+          {
+            order: 2,
+            name: 'B Batter',
+            runs: 12,
+            ballsFaced: 10,
+            fours: 1,
+            sixes: 0,
+            strikeRate: 120,
+            howOut: 'not out',
+          },
+        ],
+        bowlers: [
+          {
+            order: 1,
+            name: 'C Bowler',
+            overs: '4.0',
+            maidens: 0,
+            runsConceded: 31,
+            wickets: 2,
+            economy: 7.75,
+            wides: 2,
+            noBalls: 0,
+          },
+        ],
+        fallOfWickets: [{ wicket: 1, runs: 22, overs: '2.6', batterName: 'A Batter' }],
+      },
+    ],
+  };
+
+  test('the pinned example round-trips with no field lost', () => {
+    assert.deepEqual(ScorecardResponseSchema.parse(pinned), pinned);
+  });
+
+  test('available:false needs no innings or match state', () => {
+    const bare = { available: false, matchId: 'pma-123' };
+    assert.deepEqual(ScorecardResponseSchema.parse(bare), bare);
+  });
+
+  test('a batter missing a required field fails the schema', () => {
+    const bad = structuredClone(pinned) as Record<string, any>;
+    delete bad.innings[0].batters[0].ballsFaced;
+    assert.equal(ScorecardResponseSchema.safeParse(bad).success, false);
+    assert.equal(ScorecardResponseSchema.safeParse({ available: true }).success, false);
+  });
+
+  test('a result carries the optional medicoach match + tournament ids through the schema', () => {
+    const raw = JSON.parse(readFileSync(path.join(EXAMPLES, 'changes-live-result.json'), 'utf8'));
+    raw.fixtures[0].result.medicoachMatchId = 'pma-123';
+    raw.fixtures[0].result.medicoachTournamentId = 'tour-9';
+    const parsed = ChangesResponseSchema.parse(raw);
+    assert.equal(parsed.fixtures[0].result!.medicoachMatchId, 'pma-123');
+    assert.equal(parsed.fixtures[0].result!.medicoachTournamentId, 'tour-9');
+  });
+
+  test('a malformed medicoach match or tournament id fails the contract', () => {
+    const raw = JSON.parse(readFileSync(path.join(EXAMPLES, 'changes-live-result.json'), 'utf8'));
+    for (const [field, bad] of [
+      ['medicoachMatchId', 'pma 1/2'],
+      ['medicoachTournamentId', 'x'.repeat(129)],
+      ['medicoachTournamentId', 'tour?9'],
+    ] as const) {
+      const copy = structuredClone(raw);
+      copy.fixtures[0].result.medicoachMatchId = 'pma-123';
+      copy.fixtures[0].result.medicoachTournamentId = 'tour-9';
+      copy.fixtures[0].result[field] = bad;
+      assert.equal(ChangesResponseSchema.safeParse(copy).success, false, `${field}=${bad}`);
+    }
+    // An empty id is another spelling of "absent" (the puller drops it), not malformed.
+    const empty = structuredClone(raw);
+    empty.fixtures[0].result.medicoachMatchId = '';
+    empty.fixtures[0].result.medicoachTournamentId = 'x'.repeat(128);
+    assert.equal(ChangesResponseSchema.safeParse(empty).success, true);
+  });
+
+  test('scorecard path: match id encoded, tournamentId then tenant always in the query', () => {
+    assert.equal(
+      scorecardPathAndQuery('pma 1/2', 'tour-9', 'dolphins'),
+      '/integrations/smartclub/matches/pma%201%2F2/scorecard?tournamentId=tour-9&tenant=dolphins',
+    );
+    // Values are URL-encoded; the order never changes (it is part of the signed string).
+    assert.equal(
+      scorecardPathAndQuery('pma-1', 'tour 9&x', 'a b'),
+      '/integrations/smartclub/matches/pma-1/scorecard?tournamentId=tour+9%26x&tenant=a+b',
+    );
+  });
+
+  test('scorecard path signs and verifies with the tenant in the signed query', () => {
+    const pathAndQuery = scorecardPathAndQuery('pma-1', 'tour-9', 'dolphins');
+    const headers = signRequest({ secret: 's3cret', method: 'GET', pathAndQuery });
+    const verify = (pq: string) =>
+      verifySignature({
+        secret: 's3cret',
+        method: 'GET',
+        pathAndQuery: pq,
+        body: '',
+        timestampHeader: headers['X-Sync-Timestamp'],
+        signatureHeader: headers['X-Sync-Signature'],
+      }).ok;
+    assert.equal(verify(pathAndQuery), true);
+    // Swapping the tenant breaks the signature.
+    assert.equal(verify(pathAndQuery.replace('tenant=dolphins', 'tenant=titans')), false);
   });
 });

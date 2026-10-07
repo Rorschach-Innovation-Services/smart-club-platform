@@ -74,7 +74,11 @@ FixtureChange = {
     scoringSide: "home" | "away" | null,     // side whose team sheet the captain came from (live only);
                                              // null when the scoring team is not one of the fixture's sides
     captainRef: string | null,      // player ref of that side's captain; null when unknown
-    medicoachMatchUrl: string | null
+    medicoachMatchUrl: string | null,
+    medicoachMatchId?: string,      // the linked live match's id; ABSENT (never null) without a linked
+                                    // match (manual / imported results). See §3.
+    medicoachTournamentId?: string  // the medicoach competition of the fixture; present exactly when
+                                    // medicoachMatchId is. Together they address the scorecard (§3).
   },
   resultClearedAt: string | null    // ISO-8601 UTC; set when a previously recorded result was removed/reopened
 }
@@ -88,6 +92,8 @@ Consumer rules (smart club):
   copy of a fixture over the live one.
 - Schedule: apply only if `schedule.changedAt` > smart club's `schedule.changedAt` for that fixture.
 - Unknown refs are logged as "unmapped" (log count, never ref values for players).
+- Scorecard: when a result carries `medicoachMatchId` + `medicoachTournamentId`, the full scorecard can be
+  fetched from §3. Both are opaque medicoach ids: store them as given, never log them alongside refs.
 
 ## 2. POST /integrations/smartclub/schedule
 Body:
@@ -113,8 +119,71 @@ Response 200:
 Medicoach rules: apply only if `changedAt` > the fixture's `scheduleChangedAt`; applying sets `scheduleChangedAt = changedAt`
 (so the next pull does NOT bounce it back as newer) and stamps `syncStamp`. Never soft-delete — `cancelled` is a flag.
 A `changedAt` more than 5 minutes ahead of medicoach's clock is refused with `error` (fix the sender's clock).
+Gap fill (the one exception to most-recent-wins): when a change is stale BUT medicoach's stored venue is
+null/empty AND the incoming venue is non-empty, medicoach writes ONLY the venue (same compare-and-set as an
+applied change), sets `scheduleChangedAt` strictly after the stored value, stamps `syncStamp`, and answers
+`applied` with message `venue filled`. Every other field medicoach holds stands, and a non-empty medicoach
+venue is never overwritten this way. Typical case: smart club withheld the venue, medicoach edited the time,
+then smart club revealed the venue — the reveal is stale, but the venue still lands. The next pull returns
+medicoach's whole schedule (its time plus the filled venue) with a `changedAt` newer than smart club's.
 Every applied change is audited in medicoach under the `smartclub-sync` principal.
 `stale`/`unchanged`/`unmapped` are success outcomes for the caller (drop from outbox); `error` = retry later.
+
+## 3. GET /integrations/smartclub/matches/:matchId/scorecard?tournamentId=<id>&tenant=<t>
+- Same HMAC signing as §1 and §2; `pathAndQuery` is exactly
+  `/integrations/smartclub/matches/<matchId>/scorecard?tournamentId=<tournamentId>&tenant=<tenant>`
+  (params in that order; the whole query string is signed, so `tenant` is covered by the signature).
+- `matchId` = a result's `medicoachMatchId`; `tournamentId` = its `medicoachTournamentId`. Both are
+  `[A-Za-z0-9_-]{1,128}`. `tournamentId` is REQUIRED: medicoach finds the match through that
+  competition's synced fixtures (a match has no index by id alone).
+- `tenant` is REQUIRED, with the same meaning and format as §1's `tenant` (the smart club tenant slug,
+  `[a-z0-9][a-z0-9-]{0,62}`). Only fixtures whose `ref` belongs to that tenant are considered.
+- 400 `"<param> is required"` when `tournamentId` or `tenant` is missing or empty; 400
+  `"<param> is invalid"` when either is present but malformed; 400 `"matchId is invalid"` when `matchId`
+  is malformed.
+- 404 when no SYNCED fixture of that tournament (one with a smart club `ref`) OWNED BY THAT TENANT is
+  linked to that match, or the match was deleted. Another tenant's match is the same constant 404 as a
+  match that does not exist: nothing about it is revealed.
+- Scorecards are computed from the ball-by-ball record on every call (never stored); Time Cricket reads
+  its paged ball log. Cricket only.
+
+Response 200 — a match with no ball bowled yet:
+```ts
+{ available: false, matchId: string }
+```
+Response 200 — otherwise (example: `scorecard-live-match.json`):
+```ts
+{
+  available: true,
+  matchId: string,
+  matchState?: string,              // e.g. "Umzinto won by 8 runs"; limited overs, once decided
+  innings: Array<{                  // batting order; innings with no ball, run or batter are left out
+    battingTeamName: string,        // the fixture's side name
+    totalRuns: number, wickets: number,
+    overs: string,                  // over.ball, e.g. "19.4"
+    extras: { byes: number, legByes: number, wides: number, noBalls: number, penalties: number, total: number },
+    batters: Array<{
+      order: number,                // 1-based order at the crease
+      name: string,
+      runs: number, ballsFaced: number, fours: number, sixes: number,
+      strikeRate: number,           // 2 dp
+      howOut: string,               // "c E. Dlamini b D. Mokoena", "not out", "run out (A. Smith)"
+      dismissal?: string            // dismissal type ("caught", "bowled", "retired hurt"…); absent while not out
+    }>,
+    bowlers: Array<{
+      order: number,                // 1-based order of first appearance
+      name: string,
+      overs: string,                // "4.0"
+      maidens: number, runsConceded: number, wickets: number,
+      economy: number,              // 2 dp
+      wides: number, noBalls: number   // deliveries, not runs
+    }>,
+    fallOfWickets: Array<{ wicket: number, runs: number, overs: string, batterName: string }>
+  }>
+}
+```
+- Players are NAMES ONLY: no player ids, emails or refs ever appear. A player with no usable name on
+  record (blank, or an email in the name slot) reads `"Unknown"`.
 
 ## WhatsApp status forwarding (medicoach → smart club)
 

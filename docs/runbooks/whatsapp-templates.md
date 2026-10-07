@@ -258,3 +258,26 @@ prod), nothing sends `club_clearance_pending` and it can be deleted from the med
 Before then, an older deployment could still send it, so leave it in place until both stages run
 the v2-only code. Meta blocks reusing a deleted template name for **30 days**, so do not delete it
 if you expect to need that exact name again soon.
+
+---
+
+## `scorecard_confirm_due` (chair scorecard confirmation digest) — REGISTERED 7 Oct 2026
+
+The ScorecardConfirmations cron (`packages/api/src/crons/scorecard-confirmations.ts`, Mondays
+07:00 SAST) sends chairs a digest link to confirm their club's weekend scorecards. Registry
+entry `scorecardConfirmDue`; sender `sendScorecardConfirmDueWhatsApp` in `whatsapp.ts`.
+
+Approved in Meta on 7 Oct 2026 — **Utility**, English `en`, template ID `920518190917996`.
+
+Body (3 variables — the registry's `bodyText` must match it exactly):
+
+```
+Hi {{1}}, please review and confirm {{2}}'s match scorecards for the weekend of {{3}}. Tap below to view each scorecard and confirm or request a correction.
+```
+
+- Params: `{{1}}` chair first name, `{{2}}` club name, `{{3}}` weekend label
+  (e.g. `5–11 Oct 2026`).
+- Button: **Visit website**, dynamic URL
+  `https://platform.club.medicoach.co.za/sc/{{1}}` — the signed digest token is the suffix.
+  Button label: **Confirm scorecards**.
+- No header, no footer. No secret involved; the registry `status` is already `'registered'`.

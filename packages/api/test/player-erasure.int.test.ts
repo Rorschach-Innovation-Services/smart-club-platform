@@ -12,6 +12,9 @@
  *  - a window-auto-rejected clearance with NO player rows anywhere is still erasable (the gate
  *    must not 404 on "no player row") and its snapshot ID document is collected;
  *  - a pending clearance naming the person → 409, nothing touched;
+ *  - a cached scorecard / digest feedback that keeps changing under its scrub (forced perpetual
+ *    conditional failure) → 409 with NOTHING deleted (rows, clearance, certificate, S3 docs),
+ *    and a plain retry then completes the erasure;
  *  - unknown person → 404; a rep → 403.
  *
  * Run with the API package's test runner (tsx --test).
@@ -19,7 +22,7 @@
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
-import { mkdtemp, rm, access } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, access, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type {
@@ -29,6 +32,8 @@ import type {
   CertificateMeta,
   CaptainsReport,
   PlayerErasureCounts,
+  ScorecardConfirmation,
+  StoredFixtureScorecard,
 } from '../src/types.js';
 
 // Env must be set BEFORE importing repo/app — repo reads TABLE_NAME at module load.
@@ -348,6 +353,8 @@ describe('full erasure across every category', () => {
       documents: 3,
       certificates: 1,
       captainsReportsScrubbed: 1,
+      scorecardsScrubbed: 0,
+      feedbackScrubbed: 0,
       reportOpenMarkers: 1,
     });
   });
@@ -494,6 +501,221 @@ describe('orphaned clearance PII', () => {
     assert.equal(counts.playerRows, 1);
     assert.equal(counts.registrationReviews, 1);
     assert.equal(counts.documents, 1, 'one object, not one per record naming it');
+  });
+});
+
+describe('scorecard scrub contention', () => {
+  const ccf = () =>
+    Object.assign(new Error('The conditional request failed'), {
+      name: 'ConditionalCheckFailedException',
+    });
+
+  /** Run `fn` with every DynamoDB command matching `contested` failing its condition. */
+  async function withContention<T>(
+    contested: (cmd: { input: Record<string, unknown> }, kind: string) => boolean,
+    fn: () => T | Promise<T>,
+  ): Promise<T> {
+    const { DynamoDBDocumentClient } = await import('@aws-sdk/lib-dynamodb');
+    const proto = DynamoDBDocumentClient.prototype as unknown as {
+      send: (cmd: unknown, ...rest: unknown[]) => Promise<unknown>;
+    };
+    const original = proto.send;
+    proto.send = function (this: unknown, cmd: unknown, ...rest: unknown[]) {
+      const c = cmd as { input: Record<string, unknown>; constructor: { name: string } };
+      if (contested(c, c.constructor.name)) return Promise.reject(ccf());
+      return original.call(this, cmd, ...rest);
+    };
+    try {
+      return await fn();
+    } finally {
+      proto.send = original;
+    }
+  }
+  const scorecardScrubWrite = (c: { input: Record<string, unknown> }, kind: string) =>
+    kind === 'PutCommand' && c.input.ConditionExpression === 'fetchedAt = :f';
+  const feedbackScrubWrite = (c: { input: Record<string, unknown> }, kind: string) =>
+    kind === 'UpdateCommand' && String(c.input.UpdateExpression).includes('.feedback = :fb');
+
+  const card = (fixtureId: string, batter: string): StoredFixtureScorecard => ({
+    seriesId: 's1',
+    fixtureId,
+    medicoachMatchId: `pma-${fixtureId}`,
+    medicoachTournamentId: 'tour-1',
+    schemaVersion: 1,
+    fetchedAt: '2026-09-20T18:00:00.000Z',
+    available: true,
+    innings: [
+      {
+        battingTeamName: 'Alpha CC',
+        totalRuns: 10,
+        wickets: 0,
+        overs: '2.0',
+        extras: { byes: 0, legByes: 0, wides: 0, noBalls: 0, penalties: 0, total: 0 },
+        batters: [
+          {
+            order: 1,
+            name: batter,
+            runs: 10,
+            ballsFaced: 12,
+            fours: 1,
+            sixes: 0,
+            strikeRate: 83.33,
+            howOut: 'not out',
+          },
+        ],
+        bowlers: [],
+        fallOfWickets: [],
+      },
+    ],
+  });
+
+  test('a scorecard that keeps changing → 409, NOTHING deleted; a retry then completes', async () => {
+    const p = mkPlayer('alpha');
+    const fullName = `${p.firstName} ${p.lastName}`;
+    await repo.createPlayer(TENANT, p);
+    const opened = await openClearance('alpha', 'beta', p.naturalKey);
+    const issued = await call('PATCH', `/clubs/alpha/clearances/${opened.id}`, rep('alpha'), {
+      action: 'issue',
+      feesCleared: true,
+      misconductCleared: true,
+      version: opened.version,
+    });
+    assert.equal(issued.status, 200);
+    const approved = (await issued.json()) as PlayerClearance & {
+      certificateMeta?: CertificateMeta;
+    };
+    const pdf = diskPath(approved.certificateMeta!.objectKey);
+    assert.ok(await exists(pdf), 'precondition: certificate PDF on disk');
+    await repo.putFixtureScorecard(TENANT, card('fc-1', fullName));
+    const logsBefore = (await repo.listPlayerEraseLogs(TENANT)).length;
+
+    const res = await withContention(scorecardScrubWrite, () => erase(p.naturalKey));
+    assert.equal(res.status, 409);
+    assert.match(((await res.json()) as { error: string }).error, /try again/);
+    await withContention(scorecardScrubWrite, () =>
+      assert.rejects(repo.erasePlayerData(TENANT, p.naturalKey, { by: 'admin@union.test' }), {
+        name: 'ScorecardScrubContentionError',
+        code: 'SCORECARD_SCRUB_CONTENTION',
+      }),
+    );
+
+    // Nothing destructive ran: row, clearance (canonical + mirror), CERT#, PDF, card, no audit.
+    assert.ok(await repo.getPlayer(TENANT, 'beta', p.naturalKey), 'PLAYER# row kept');
+    assert.ok(await repo.getClearanceRaw(TENANT, 'alpha', approved.id), 'clearance kept');
+    assert.ok(await repo.getInboundClearance(TENANT, 'beta', approved.id), 'mirror kept');
+    assert.ok(await repo.getCertificateBySerial(approved.certificateMeta!.serial), 'CERT# kept');
+    assert.ok(await exists(pdf), 'certificate PDF kept');
+    const kept = (await repo.getFixtureScorecard(TENANT, 's1', 'fc-1'))!;
+    assert.equal(kept.innings![0].batters[0].name, fullName);
+    assert.equal(kept.terminal, undefined);
+    assert.equal((await repo.listPlayerEraseLogs(TENANT)).length, logsBefore, 'no audit row');
+
+    // A plain retry finishes the job.
+    const retry = await erase(p.naturalKey);
+    assert.equal(retry.status, 200);
+    const { counts } = (await retry.json()) as { counts: PlayerErasureCounts };
+    assert.equal(counts.scorecardsScrubbed, 1);
+    assert.equal(counts.clearances, 1);
+    const scrubbed = (await repo.getFixtureScorecard(TENANT, 's1', 'fc-1'))!;
+    assert.equal(scrubbed.innings![0].batters[0].name, repo.ERASED_NAME);
+    assert.equal(scrubbed.terminal, true);
+    assert.equal(await repo.getClearanceRaw(TENANT, 'alpha', approved.id), null);
+    assert.equal(await exists(pdf), false);
+  });
+
+  test('digest feedback that keeps changing → 409, NOTHING deleted (clearance-only person, no PLAYER# rows); a retry then completes', async () => {
+    const objectKey = `local/${TENANT}/gamma/contended.png`;
+    const p = mkPlayer('beta', {
+      status: 'clearance-pending',
+      idDocMeta: {
+        objectKey,
+        size: 1,
+        contentType: 'image/png',
+        uploadedAt: '2026-05-01T00:00:00.000Z',
+      },
+    });
+    const fullName = `${p.firstName} ${p.lastName}`;
+    const id = 'cl-contended';
+    await repo.createAutoRejectedClearance(TENANT, p, {
+      id,
+      playerNaturalKey: p.naturalKey,
+      playerName: fullName,
+      fromClubId: 'old-directory-club',
+      fromClubName: 'Old Directory CC',
+      fromClubDirectory: true,
+      toClubId: 'beta',
+      toClubName: 'Beta CC',
+      requestedAt: '2026-09-01T00:00:00.000Z',
+      origin: 'registration',
+      feesCleared: false,
+      misconductCleared: false,
+      status: 'rejected',
+      rejectedAt: '2026-09-01T00:00:00.000Z',
+      rejectedBy: 'system:transfer-window',
+      rejectOutcome: 'not-registered',
+      version: 1,
+    } as PlayerClearance);
+    await mkdir(path.dirname(diskPath(objectKey)), { recursive: true });
+    await writeFile(diskPath(objectKey), 'x');
+    assert.ok(
+      await repo.createScorecardConfirmation(TENANT, {
+        tenant: TENANT,
+        clubId: 'beta',
+        clubName: 'Beta CC',
+        weekKey: '2026-W38',
+        ref: 'scc-1',
+        memberId: 'm-1',
+        linkExpiresAt: '2026-10-01T00:00:00.000Z',
+        createdAt: '2026-09-21T00:00:00.000Z',
+        entries: {
+          's1#fd-1': {
+            seriesId: 's1',
+            fixtureId: 'fd-1',
+            homeTeamName: 'Beta CC',
+            awayTeamName: 'Alpha CC',
+            fixtureDate: '2026-09-20',
+            status: 'correction',
+            feedback: `${fullName} was not out.`,
+          },
+        },
+      } as ScorecardConfirmation),
+    );
+
+    const res = await withContention(feedbackScrubWrite, () => erase(p.naturalKey));
+    assert.equal(res.status, 409);
+    assert.match(((await res.json()) as { error: string }).error, /try again/);
+
+    // Nothing destructive ran: the clearance (the ONLY record of the person) and its doc survive,
+    // so the retry still finds them — with the name the feedback must lose.
+    assert.ok(await repo.getClearanceRaw(TENANT, 'old-directory-club', id), 'clearance kept');
+    assert.ok(await repo.getInboundClearance(TENANT, 'beta', id), 'mirror kept');
+    assert.ok(await exists(diskPath(objectKey)), 'snapshot ID doc kept');
+    const kept = (await repo.getScorecardConfirmation(TENANT, '2026-W38', 'beta'))!;
+    assert.equal(kept.entries['s1#fd-1'].feedback, `${fullName} was not out.`);
+
+    const retry = await erase(p.naturalKey);
+    assert.equal(retry.status, 200);
+    const { counts } = (await retry.json()) as { counts: PlayerErasureCounts };
+    assert.equal(counts.feedbackScrubbed, 1);
+    assert.equal(counts.clearances, 1);
+    const scrubbed = (await repo.getScorecardConfirmation(TENANT, '2026-W38', 'beta'))!;
+    assert.equal(scrubbed.entries['s1#fd-1'].feedback, `${repo.ERASED_NAME} was not out.`);
+    assert.equal(await repo.getClearanceRaw(TENANT, 'old-directory-club', id), null);
+    assert.equal(await exists(diskPath(objectKey)), false);
+  });
+
+  test('a single lost race is retried transparently (no throw)', async () => {
+    const p = mkPlayer('delta');
+    await repo.createPlayer(TENANT, p);
+    await repo.putFixtureScorecard(TENANT, card('fc-race', `${p.firstName} ${p.lastName}`));
+    let fails = 1;
+    const res = await withContention(
+      (c, kind) => scorecardScrubWrite(c, kind) && fails-- > 0,
+      () => erase(p.naturalKey),
+    );
+    assert.equal(res.status, 200);
+    const { counts } = (await res.json()) as { counts: PlayerErasureCounts };
+    assert.equal(counts.scorecardsScrubbed, 1);
   });
 });
 
