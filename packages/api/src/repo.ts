@@ -366,6 +366,7 @@ export async function createTenantConfig(config: TenantConfig): Promise<void> {
       ConditionExpression: 'attribute_not_exists(pk)',
     }),
   );
+  invalidatePlayerSyncFlag(config.tenant);
 }
 
 export async function putTenantConfig(config: TenantConfig): Promise<void> {
@@ -378,6 +379,7 @@ export async function putTenantConfig(config: TenantConfig): Promise<void> {
       Item: { ...config, ...tenantConfigKey(config.tenant), ...tenantConfigGsi1(config.tenant) },
     }),
   );
+  invalidatePlayerSyncFlag(config.tenant);
 }
 
 /**
@@ -1763,6 +1765,28 @@ export async function listPlayerDistinctPairs(tenant: string): Promise<Set<strin
  * the tenant has the player sync on. Best-effort: a failed enqueue never fails the write that
  * already landed (the backfill CLI re-enqueues everyone) — it warns with no player data.
  */
+/**
+ * The player-sync flag per tenant, cached in-process for a few seconds so a burst of player
+ * writes (a roster import, a club erase) doesn't read the tenant config once per row — and a
+ * flag-off tenant pays almost nothing. This process's own config writes invalidate it at once;
+ * another container's switch-on lands within the TTL (the backfill covers that window).
+ */
+const PLAYER_SYNC_FLAG_TTL_MS = 15_000;
+const playerSyncFlagCache = new Map<string, { on: boolean; at: number }>();
+
+export function invalidatePlayerSyncFlag(tenant?: string): void {
+  if (tenant === undefined) playerSyncFlagCache.clear();
+  else playerSyncFlagCache.delete(tenant);
+}
+
+async function playerSyncOn(tenant: string): Promise<boolean> {
+  const hit = playerSyncFlagCache.get(tenant);
+  if (hit && Date.now() - hit.at < PLAYER_SYNC_FLAG_TTL_MS) return hit.on;
+  const on = playerSyncEnabled(await getTenantConfig(tenant));
+  playerSyncFlagCache.set(tenant, { on, at: Date.now() });
+  return on;
+}
+
 export async function recordPlayerSyncChange(
   tenant: string,
   naturalKeys: string | string[],
@@ -1773,8 +1797,10 @@ export async function recordPlayerSyncChange(
   );
   if (!keys.length) return 0;
   try {
-    const config = opts.config !== undefined ? opts.config : await getTenantConfig(tenant);
-    if (!playerSyncEnabled(config)) return 0;
+    // A caller that holds the config passes it (no read); everyone else uses the short cache.
+    const on =
+      opts.config !== undefined ? playerSyncEnabled(opts.config) : await playerSyncOn(tenant);
+    if (!on) return 0;
     const at = opts.at ?? new Date().toISOString();
     // Bounded parallel slices (club erasure / backfill can touch hundreds of people).
     for (let i = 0; i < keys.length; i += 8)
@@ -7582,6 +7608,7 @@ async function batchDelete(keys: Array<{ pk: string; sk: string }>): Promise<voi
  * The erase-tenant CLI removes single-tenant users' accounts separately.
  */
 export async function eraseTenantData(tenant: string): Promise<number> {
+  invalidatePlayerSyncFlag(tenant);
   const config = await getTenantConfig(tenant);
   if (config?.clubSignupLink?.token) await deleteToken(config.clubSignupLink.token);
 
