@@ -1155,6 +1155,39 @@ async function runAppendSides(args: Args) {
     fatal.push(
       `league key(s) not on the tenant: ${unconfigured.join(', ')} — run bootstrap-titans-fixture-prereqs --confirm first`,
     );
+  // Every patch is validated up front, dry run included, with the same guard the rep PATCH
+  // uses: one invalid club patch refuses the whole run (no partial append).
+  const { validateClubPatch, resolveRequiredDocs, resolveDistricts } =
+    await import('./catalogue.js');
+  const { resolveVertical } = await import('./vertical.js');
+  const requiredDocs = resolveRequiredDocs(config);
+  const patchFor = (p: (typeof plan.patches)[number]): Partial<Club> => ({
+    version: p.version,
+    leagues: p.leagues,
+    leagueTeams: p.leagueTeams,
+    teamRosters: p.teamRosters,
+    teams: p.teams,
+    women: p.women,
+    juniors: p.juniors,
+  });
+  const invalidFor = (p: (typeof plan.patches)[number], club: Club) =>
+    validateClubPatch(
+      patchFor(p),
+      new Set([...configured, ...(club.leagues ?? [])]),
+      new Set([
+        ...requiredDocs.map((d) => d.key),
+        ...Object.keys(club.docs ?? {}),
+        ...Object.keys(club.docMeta ?? {}),
+      ]),
+      new Set([...resolveDistricts(config), ...(club.district ? [club.district] : [])]),
+      requiredDocs,
+      club.docMeta,
+      resolveVertical(config).sport,
+    );
+  for (const p of plan.patches) {
+    const invalid = invalidFor(p, clubs.find((c) => c.id === p.clubId)!);
+    if (invalid) fatal.push(`${p.clubId}: club patch fails validateClubPatch — ${invalid}`);
+  }
   if (fatal.length) {
     console.error(
       `\n✗ Refusing to ${args.confirm ? 'write' : 'pass the dry run'} — ${fatal.length} blocker(s):`,
@@ -1173,9 +1206,6 @@ async function runAppendSides(args: Args) {
     );
     return;
   }
-  const { validateClubPatch, resolveRequiredDocs, resolveDistricts } =
-    await import('./catalogue.js');
-  const { resolveVertical } = await import('./vertical.js');
   const backup = join(
     args.backupDir,
     `titans-append-sides-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
@@ -1197,29 +1227,8 @@ async function runAppendSides(args: Args) {
       raced++;
       continue;
     }
-    const patch: Partial<Club> = {
-      version: p.version,
-      leagues: p.leagues,
-      leagueTeams: p.leagueTeams,
-      teamRosters: p.teamRosters,
-      teams: p.teams,
-      women: p.women,
-      juniors: p.juniors,
-    };
-    const requiredDocs = resolveRequiredDocs(config);
-    const invalid = validateClubPatch(
-      patch,
-      new Set([...configured, ...(fresh.leagues ?? [])]),
-      new Set([
-        ...requiredDocs.map((d) => d.key),
-        ...Object.keys(fresh.docs ?? {}),
-        ...Object.keys(fresh.docMeta ?? {}),
-      ]),
-      new Set([...resolveDistricts(config), ...(fresh.district ? [fresh.district] : [])]),
-      requiredDocs,
-      fresh.docMeta,
-      resolveVertical(config).sport,
-    );
+    const patch = patchFor(p);
+    const invalid = invalidFor(p, fresh);
     if (invalid) {
       console.error(`✗ ${p.clubId}: ${invalid} — NOT written`);
       raced++;
