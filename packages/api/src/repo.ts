@@ -7339,7 +7339,7 @@ const BATCH_DELETE_RETRIES = 5;
  * club/tenant cascades rely on. Keys still unprocessed after the retries are an
  * error, not a shrug: the caller must know the erase did NOT complete.
  */
-async function batchDelete(keys: Array<{ pk: string; sk: string }>): Promise<void> {
+export async function batchDelete(keys: Array<{ pk: string; sk: string }>): Promise<void> {
   for (let i = 0; i < keys.length; i += 25) {
     let requests = keys.slice(i, i + 25).map((Key) => ({ DeleteRequest: { Key } }));
     for (let attempt = 0; requests.length > 0; attempt++) {
@@ -7811,18 +7811,34 @@ export class PlayerErasureBlockedError extends Error {
 export const ERASED_NAME = '[removed]';
 
 /**
- * Player erasure could not scrub a cached scorecard (FIXSCORECARD#) because the row kept
- * changing underneath it (3 contested conditional writes in a row). Thrown BEFORE anything
- * destructive has run, so the erasure is aborted with every row and artifact intact and can
- * simply be retried.
+ * Player erasure could not scrub a cached scorecard (FIXSCORECARD#) or a captain's report's
+ * scorecard correction `feedback` because the row kept changing underneath it (3 contested
+ * conditional writes in a row). Thrown BEFORE anything destructive has run, so the erasure is
+ * aborted with every row and artifact intact and can simply be retried.
  */
 export class ScorecardScrubContentionError extends Error {
   readonly code = 'SCORECARD_SCRUB_CONTENTION';
-  constructor(readonly target: 'scorecard') {
-    super('a match scorecard changed during erasure — try again');
+  constructor(readonly target: 'scorecard' | 'feedback') {
+    super(
+      target === 'scorecard'
+        ? 'a match scorecard changed during erasure — try again'
+        : "a captain's report changed during erasure — try again",
+    );
     this.name = 'ScorecardScrubContentionError';
   }
 }
+
+/**
+ * A nested SET whose parent map is gone (e.g. `scorecard.feedback` after a concurrent draft save
+ * REMOVEd `scorecard`): DynamoDB refuses it with a ValidationException rather than a CCF.
+ */
+const isMissingDocumentPath = (err: unknown): boolean => {
+  const e = err as { name?: string; message?: string };
+  return (
+    e.name === 'ValidationException' &&
+    /document path provided in the update expression is invalid/i.test(e.message ?? '')
+  );
+};
 
 const normName = (s: string | undefined | null) =>
   (s ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
@@ -7880,19 +7896,19 @@ function scrubScorecardNames(
  *    match the person are SCRUBBED in place, and a scrubbed card is marked `terminal` so the
  *    sweep never re-fetches the name from medicoach;
  *  - a captain's report's scorecard correction `feedback`: the person's name is replaced
- *    (case-insensitive, whole words), as part of the captain's-report scrub
+ *    (case-insensitive, whole words), conditional on the text being unchanged
  *    (`reportScorecardFeedbackScrubbed`).
  *
  * Gate: a pending clearance naming the person, or any `clearance-pending` row, throws
  * {@link PlayerErasureBlockedError} BEFORE anything is touched. Returns null when nothing in any
  * category exists (a clean 404 — and the re-run of a completed erasure).
  *
- * Ordering is the re-runnable invariant: the scorecard scrub runs FIRST, while every row naming
- * the person (and so every spelling of their name) is still intact; then S3 (object keys are
- * only derivable while the rows naming them exist), then the clearance/review/request rows, then
- * the captain's-report scrub, and the PLAYER# rows LAST — while any of them survives, a re-run
- * finds the person again and finishes the job. A scorecard that keeps changing underneath its
- * scrub (3 contested writes) throws
+ * Ordering is the re-runnable invariant: the scorecard + correction-feedback scrubs run FIRST,
+ * while every row naming the person (and so every spelling of their name) is still intact; then
+ * S3 (object keys are only derivable while the rows naming them exist), then the clearance/
+ * review/request rows, then the captain's-report name/contact scrub, and the PLAYER# rows LAST —
+ * while any of them survives, a re-run finds the person again and finishes the job. A scorecard
+ * or report feedback that keeps changing underneath its scrub (3 contested writes) throws
  * {@link ScorecardScrubContentionError} — never a silent skip that the audit counts would hide —
  * and because nothing destructive has run yet, the erasure aborts intact and a retry has full
  * name fidelity (including a person with no PLAYER# rows). The PII-free audit row (actor +
@@ -8034,6 +8050,50 @@ export async function erasePlayerData(
       ),
   );
   const scrubText = (s: string) => namePatterns.reduce((t, re) => t.replace(re, ERASED_NAME), s);
+  const feedbackNamesPerson = (r: CaptainsReport | null) => {
+    const fb = r?.scorecard?.feedback;
+    return !!fb && scrubText(fb) !== fb;
+  };
+
+  // ── Captain's report scorecard correction feedback: the captain's free text may name them ──
+  // Still before anything destructive (it can throw). Conditional on the feedback being
+  // unchanged: a concurrent draft save that REPLACES it fails the condition, one that REMOVES
+  // `scorecard` makes the nested SET a missing-path ValidationException — either way the report
+  // is re-read and judged afresh (feedback gone, or now clean, is settled).
+  const feedbackScrubbedReports = new Set<string>();
+  for (const listed of await listCaptainsReports(tenant)) {
+    let r: CaptainsReport | null = listed;
+    let settled = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (!r || !feedbackNamesPerson(r)) {
+        settled = true; // deleted meanwhile, or nothing (left) to scrub
+        break;
+      }
+      const old = r.scorecard!.feedback!;
+      try {
+        await ddb.send(
+          new UpdateCommand({
+            TableName: TABLE,
+            Key: reportKeyOf(tenant, r),
+            UpdateExpression: 'SET scorecard.feedback = :fb, updatedAt = :now',
+            ConditionExpression:
+              'attribute_exists(scorecard.feedback) AND scorecard.feedback = :old',
+            ExpressionAttributeValues: { ':fb': scrubText(old), ':old': old, ':now': at },
+          }),
+        );
+        feedbackScrubbedReports.add(r.id);
+        settled = true;
+        break;
+      } catch (err: unknown) {
+        if (!isCcf(err) && !isMissingDocumentPath(err)) throw err;
+        r = await getCaptainsReport(tenant, r.seriesId, r.fixtureId, r.clubId);
+      }
+    }
+    // Out of retries: only a report whose feedback STILL names the person is a failure.
+    if (!settled && feedbackNamesPerson(r)) {
+      throw new ScorecardScrubContentionError('feedback');
+    }
+  }
 
   // Row docs are purged by deletePlayer itself; counted here so the total is truthful.
   const rowDocs = rows.flatMap((p) =>
@@ -8049,9 +8109,8 @@ export async function erasePlayerData(
   const unique = uniqueKeys(keys);
   if (unique.length) await batchDelete(unique);
 
-  // ── Captain's reports: scrub mentions in place ──
-  let captainsReportsScrubbed = 0;
-  let reportScorecardFeedbackScrubbed = 0;
+  // ── Captain's reports: scrub name / contact mentions in place (feedback was scrubbed above) ──
+  const nameScrubbedReports = new Set<string>();
   for (const r of await listCaptainsReports(tenant)) {
     const contact = r.recipientContact;
     const contactHit =
@@ -8068,14 +8127,6 @@ export async function erasePlayerData(
     if (nameHit(r.recipient?.forwardedBy?.name)) sets.push('recipient.forwardedBy.#rn = :erased');
     if (nameHit(r.submittedBy) || (!!r.submittedBy && emails.has(normEmail(r.submittedBy)))) {
       sets.push('submittedBy = :erased');
-    }
-    // The scorecard correction's free text may name the person (whole words, any case).
-    const feedback = r.scorecard?.feedback;
-    const scrubbedFeedback = feedback ? scrubText(feedback) : feedback;
-    const feedbackHit = !!feedback && scrubbedFeedback !== feedback;
-    if (feedbackHit) {
-      sets.push('scorecard.feedback = :fb');
-      values[':fb'] = scrubbedFeedback;
     }
     // The stored contact is the recipient's — drop it when it is this person's, or when the
     // recipient IS this person by name.
@@ -8096,12 +8147,15 @@ export async function erasePlayerData(
           ExpressionAttributeValues: values,
         }),
       );
-      captainsReportsScrubbed++;
-      if (feedbackHit) reportScorecardFeedbackScrubbed++;
+      nameScrubbedReports.add(r.id);
     } catch (err: unknown) {
       if (!isCcf(err)) throw err; // deleted concurrently — nothing left to scrub
     }
   }
+  // A report scrubbed by both passes counts once.
+  const captainsReportsScrubbed = new Set([...feedbackScrubbedReports, ...nameScrubbedReports])
+    .size;
+  const reportScorecardFeedbackScrubbed = feedbackScrubbedReports.size;
 
   // ── Pending report-open markers addressed to this person's player ref ──
   // Scrub the ref, never delete the marker: it is the retry queue that opens BOTH clubs' reports

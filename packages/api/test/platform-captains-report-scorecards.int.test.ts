@@ -357,3 +357,46 @@ describe('the row cap', () => {
     );
   });
 });
+
+describe('a cleared result', () => {
+  const answered = (over: Partial<CaptainsReport> = {}) =>
+    report(
+      'dolphins',
+      'fx',
+      'home',
+      daysAgo(1),
+      submitted('CR-2026-0099', {
+        scorecard: {
+          action: 'correction',
+          feedback: 'Wrong total.',
+          againstFetchedAt: '2026-10-05T08:00:00.000Z',
+        },
+        ...over,
+      }),
+    );
+
+  test('a flagged report (result withdrawn) maps its answer to stale, answer kept', () => {
+    const r = answered({ flagged: { reason: 'result cleared', at: '2026-10-06T00:00:00.000Z' } });
+    // Even with a card still stored, the flag says the result behind the answer is gone.
+    const cell = cr.scorecardConsoleCell(r, true);
+    assert.equal(cell.scorecardStatus, 'stale');
+    assert.equal(cell.answeredAction, 'correction');
+    assert.equal(cell.feedback, 'Wrong total.');
+  });
+
+  test('an answered report whose card is gone maps to stale', () => {
+    const cell = cr.scorecardConsoleCell(
+      answered({
+        scorecard: { action: 'confirmed', againstFetchedAt: '2026-10-05T08:00:00.000Z' },
+      }),
+      false,
+    );
+    assert.equal(cell.scorecardStatus, 'stale');
+    assert.equal(cell.answeredAction, 'confirmed');
+  });
+
+  test('an unanswered report with no card is still n/a; a clean answer with a card is unchanged', () => {
+    assert.equal(cr.scorecardConsoleStatus(answered({ scorecard: undefined }), false), 'n/a');
+    assert.equal(cr.scorecardConsoleStatus(answered(), true), 'correction');
+  });
+});

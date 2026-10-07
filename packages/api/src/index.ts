@@ -6815,7 +6815,8 @@ async function reportFieldsFrom(
         ...(required
           ? {
               code: 'scorecard_required',
-              scorecardContext: await attachScorecardContext(repo, tenant, report),
+              // The card is already in hand — only the result is fetched.
+              scorecardContext: await attachScorecardContext(repo, tenant, report, { card }),
             }
           : {}),
       });

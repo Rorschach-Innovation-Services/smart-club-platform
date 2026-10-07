@@ -274,3 +274,15 @@ code sat on main, a deploy of an older main could still ship the cron, so wait u
 prod run code without it. Then delete it from the medicoach WABA. Meta blocks reusing a deleted
 template name for **30 days**, so do not delete it if you expect to need that exact name again
 soon.
+
+**Orphaned digest rows — run once per stage after deploying the retirement.** Any stack that ran
+the digest may still hold its `TENANT#<tenant>#SCORECONF` partition (digests with chair
+correction feedback and member ids, counters, send ledger). No code reads, scrubs or erases it any
+more, so delete it. Prod and dev never had the cron deployed, but local / e2e stacks and any
+interim deploy might hold rows; the script is a harmless no-op where there are none:
+
+```bash
+sst shell --stage <stage> -- npx tsx packages/api/scripts/cleanup-scorecard-confirmations.ts             # dry-run
+sst shell --stage <stage> -- npx tsx packages/api/scripts/cleanup-scorecard-confirmations.ts --confirm   # delete
+# --tenant=<id> limits it to one tenant
+```

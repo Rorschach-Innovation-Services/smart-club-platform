@@ -423,6 +423,30 @@ describe('the required gate', () => {
     const bad = await linkPut('umzinto', complete({ scorecard: { action: 'approve' } }));
     assert.equal(bad.status, 400);
   });
+
+  test('the context reuses a card already in hand — only the result is fetched', async () => {
+    await storeResult();
+    let cardReads = 0;
+    const counting = {
+      getFixtureScorecard: (...a: Parameters<typeof repo.getFixtureScorecard>) => {
+        cardReads++;
+        return repo.getFixtureScorecard(...a);
+      },
+      getFixtureResult: repo.getFixtureResult,
+    };
+    const r = await getReport('umzinto');
+    const ctx = await cr.attachScorecardContext(counting, T, r, { card: card() });
+    assert.equal(cardReads, 0);
+    assert.equal(ctx.scorecard?.fetchedAt, CARD_AT);
+    assert.equal(ctx.result?.summary, 'Umzinto CC won by 23 runs');
+    // `null` is "fetched, none stored" — still no second read, and no card in the context.
+    const none = await cr.attachScorecardContext(counting, T, r, { card: null });
+    assert.equal(cardReads, 0);
+    assert.equal(none.scorecard, undefined);
+    // Without a preloaded card it reads one as before.
+    await cr.attachScorecardContext(counting, T, r);
+    assert.equal(cardReads, 1);
+  });
 });
 
 describe('the correction email', () => {
@@ -742,7 +766,8 @@ describe('available:false is re-checked for 3 days', () => {
 });
 
 describe('player erasure', () => {
-  test("scrubs the person's name from a correction's text and counts it", async () => {
+  const FEEDBACK = 'XOLANI  zulu was caught, not bowled. Xolani Zuluness is fine.';
+  async function seedCorrection() {
     await repo.createPlayer(T, {
       naturalKey: 'nk-xolani',
       clubId: 'umzinto',
@@ -757,16 +782,97 @@ describe('player erasure', () => {
       (
         await linkPut(
           'umzinto',
-          complete({
-            scorecard: {
-              action: 'correction',
-              feedback: 'XOLANI  zulu was caught, not bowled. Xolani Zuluness is fine.',
-            },
-          }),
+          complete({ scorecard: { action: 'correction', feedback: FEEDBACK } }),
         )
       ).status,
       200,
     );
+  }
+
+  type Send = (cmd: unknown, ...rest: unknown[]) => Promise<unknown>;
+  /** Route every DynamoDB command through `intercept`; `undefined` passes the command through. */
+  async function withSend<R>(
+    intercept: (
+      cmd: { input: Record<string, unknown>; kind: string },
+      original: Send,
+    ) => Promise<unknown> | undefined,
+    fn: () => Promise<R>,
+  ): Promise<R> {
+    const { DynamoDBDocumentClient } = await import('@aws-sdk/lib-dynamodb');
+    const proto = DynamoDBDocumentClient.prototype as unknown as { send: Send };
+    const original = proto.send;
+    proto.send = function (this: unknown, cmd: unknown, ...rest: unknown[]) {
+      const c = cmd as { input: Record<string, unknown>; constructor: { name: string } };
+      const bound: Send = (x, ...r) => original.call(this, x, ...r);
+      return intercept({ input: c.input, kind: c.constructor.name }, bound) ?? bound(cmd, ...rest);
+    };
+    try {
+      return await fn();
+    } finally {
+      proto.send = original;
+    }
+  }
+  const isFeedbackScrub = (c: { input: Record<string, unknown>; kind: string }) =>
+    c.kind === 'UpdateCommand' &&
+    String(c.input.ConditionExpression ?? '').includes('scorecard.feedback = :old');
+
+  test('a feedback that keeps changing → contention error with NOTHING deleted', async () => {
+    await seedCorrection();
+    const ccf = () =>
+      Promise.reject(
+        Object.assign(new Error('The conditional request failed'), {
+          name: 'ConditionalCheckFailedException',
+        }),
+      );
+    await withSend(
+      (c) => (isFeedbackScrub(c) ? ccf() : undefined),
+      () =>
+        assert.rejects(repo.erasePlayerData(T, 'nk-xolani', { by: 'admin@union.test' }), {
+          name: 'ScorecardScrubContentionError',
+          code: 'SCORECARD_SCRUB_CONTENTION',
+          target: 'feedback',
+        }),
+    );
+    assert.ok(await repo.getPlayer(T, 'umzinto', 'nk-xolani'), 'PLAYER# row kept');
+    assert.equal((await getReport('umzinto')).scorecard?.feedback, FEEDBACK, 'feedback intact');
+    assert.equal((await repo.listPlayerEraseLogs(T)).length, 0, 'no audit row');
+  });
+
+  test('a draft save that removed the scorecard mid-scrub (missing path) settles', async () => {
+    await seedCorrection();
+    let raced = false;
+    const counts = await withSend(
+      (c, original) => {
+        if (!isFeedbackScrub(c) || raced) return undefined;
+        raced = true;
+        return (async () => {
+          // The concurrent save lands first: `scorecard` is gone, so the nested SET has no parent.
+          const { UpdateCommand } = await import('@aws-sdk/lib-dynamodb');
+          await original(
+            new UpdateCommand({
+              TableName: TABLE,
+              Key: c.input.Key as Record<string, unknown>,
+              UpdateExpression: 'REMOVE scorecard',
+            }),
+          );
+          throw Object.assign(
+            new Error('The document path provided in the update expression is invalid for update'),
+            { name: 'ValidationException' },
+          );
+        })();
+      },
+      () => repo.erasePlayerData(T, 'nk-xolani', { by: 'admin@union.test' }),
+    );
+    assert.ok(raced, 'the race was exercised');
+    assert.ok(counts);
+    assert.equal(counts.reportScorecardFeedbackScrubbed, 0, 'nothing left to scrub');
+    assert.equal(counts.playerRows, 1, 'erasure completed');
+    assert.equal((await getReport('umzinto')).scorecard, undefined);
+    assert.equal(await repo.getPlayer(T, 'umzinto', 'nk-xolani'), null);
+  });
+
+  test("scrubs the person's name from a correction's text and counts it", async () => {
+    await seedCorrection();
     const counts = await repo.erasePlayerData(T, 'nk-xolani', { by: 'admin@union.test' });
     assert.ok(counts);
     assert.equal(counts.reportScorecardFeedbackScrubbed, 1);

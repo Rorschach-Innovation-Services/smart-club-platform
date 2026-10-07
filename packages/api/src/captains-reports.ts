@@ -1291,44 +1291,6 @@ export async function sendReportReminders(
 /** A correction request is capped at this many characters. */
 export const SCORECARD_FEEDBACK_MAX = 2000;
 
-export class ScorecardInputError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'ScorecardInputError';
-  }
-}
-
-/** A chair's answer from a request body: `{action: 'confirm' | 'correction', feedback?}`. */
-export function parseScorecardAnswer(raw: unknown): {
-  action: 'confirm' | 'correction';
-  feedback?: string;
-  scorecardFetchedAt?: string;
-} {
-  if (!raw || typeof raw !== 'object') throw new ScorecardInputError('body must be an object');
-  const b = raw as Record<string, unknown>;
-  if (b.action !== 'confirm' && b.action !== 'correction')
-    throw new ScorecardInputError("action must be 'confirm' or 'correction'");
-  if (b.feedback !== undefined && b.feedback !== null && typeof b.feedback !== 'string')
-    throw new ScorecardInputError('feedback must be text');
-  const feedback = typeof b.feedback === 'string' ? b.feedback.trim() : '';
-  if (feedback.length > SCORECARD_FEEDBACK_MAX)
-    throw new ScorecardInputError(`feedback is too long (max ${SCORECARD_FEEDBACK_MAX})`);
-  // The `fetchedAt` of the scorecard the page rendered (echoed from the view), if any.
-  const fa = b.scorecardFetchedAt;
-  if (
-    fa !== undefined &&
-    fa !== null &&
-    (typeof fa !== 'string' || fa.length > 40 || !Number.isFinite(Date.parse(fa)))
-  )
-    throw new ScorecardInputError('scorecardFetchedAt must be an ISO timestamp');
-  const echoed = typeof fa === 'string' ? { scorecardFetchedAt: fa } : {};
-  if (b.action === 'correction') {
-    if (!feedback) throw new ScorecardInputError('feedback is required to request a correction');
-    return { action: 'correction', feedback, ...echoed };
-  }
-  return { action: 'confirm', ...(feedback ? { feedback } : {}), ...echoed };
-}
-
 /**
  * The card version an answer (confirm OR correction) was given against, stored as the entry's
  * `confirmedAgainstFetchedAt`. The page echoes the `scorecardFetchedAt` it rendered; that echo
@@ -1349,12 +1311,6 @@ export function answeredAgainstFetchedAt(
   const ms = Date.parse(echo);
   if (!Number.isFinite(ms) || ms > Date.parse(stored) || ms > now.getTime()) return stored;
   return new Date(ms).toISOString();
-}
-
-export interface ScorecardBranding {
-  name: string;
-  logoUrl: string;
-  colors: Record<string, string>;
 }
 
 // ───────────────────────── Scorecard correction → operators ─────────────────────────
@@ -1460,16 +1416,21 @@ export interface ScorecardContext {
 
 /**
  * The scorecard context for ONE report's detail view (the `/r/` link and the portal's report
- * route — never lists): two GetItems. Empty for an unlisted match (it has no fixture).
+ * route — never lists): two GetItems, or one when the caller already holds the card
+ * (`preloaded.card`, `null` meaning "fetched, none stored"). Empty for an unlisted match (it
+ * has no fixture).
  */
 export async function attachScorecardContext(
   repo: Pick<RepoModule, 'getFixtureScorecard' | 'getFixtureResult'>,
   tenant: string,
   report: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'source'>,
+  preloaded?: { card: StoredFixtureScorecard | null },
 ): Promise<ScorecardContext> {
   if (report.seriesId === UNLISTED_SERIES_ID || report.source === 'manual-unlisted') return {};
   const [card, res] = await Promise.all([
-    repo.getFixtureScorecard(tenant, report.seriesId, report.fixtureId),
+    preloaded
+      ? preloaded.card
+      : repo.getFixtureScorecard(tenant, report.seriesId, report.fixtureId),
     repo.getFixtureResult(tenant, report.seriesId, report.fixtureId),
   ]);
   const live = res && !res.cleared && res.recordedAt ? res : null;
@@ -1536,7 +1497,8 @@ export type ConsoleStatusFilter = (typeof CONSOLE_STATUSES)[number];
  * - `not-asked` — the report closed (submitted / void) without an answer while a card exists
  *   (incl. reports submitted before the card arrived, and pre-pivot submissions);
  * - `confirmed` / `correction` — the SUBMITTED answer;
- * - `stale` — a submitted answer against a card that has since changed (wins over both).
+ * - `stale` — a submitted answer against a card that has since changed, or whose result was
+ *   withdrawn (the report is `flagged`, or no available card is left) — wins over both.
  * A draft answer on an open report does not count — only a submitted one does.
  */
 export type ScorecardConsoleStatus =
@@ -1591,11 +1553,12 @@ export interface ScorecardConsolePayload {
 }
 
 export function scorecardConsoleStatus(
-  r: Pick<CaptainsReport, 'status' | 'scorecard'>,
+  r: Pick<CaptainsReport, 'status' | 'scorecard' | 'flagged'>,
   cardAvailable: boolean,
 ): ScorecardConsoleStatus {
   if (r.status === 'submitted' && r.scorecard) {
-    return r.scorecard.stale ? 'stale' : r.scorecard.action;
+    // A cleared result (report flagged, card gone) leaves the answer about nothing current.
+    return r.scorecard.stale || r.flagged || !cardAvailable ? 'stale' : r.scorecard.action;
   }
   if (!cardAvailable) return 'n/a';
   return r.status === 'pending' ? 'pending' : 'not-asked';
@@ -1628,18 +1591,16 @@ export function consoleSince(days: number, now: Date): string {
 }
 
 /**
- * One tenant's reports → fixture rows pairing both sides (home / away), newest first. Reports
- * outside the window and unlisted matches (no fixture, never a card) are left out.
+ * One tenant's reports → fixture rows pairing both sides (home / away), newest first. Pairs
+ * what it is given: the caller ({@link loadScorecardConsole}) has already dropped reports
+ * outside the window and unlisted matches (no fixture, never a card).
  */
 export function pairScorecardConsoleRows(
   reports: CaptainsReport[],
   cards: Map<string, { available: boolean }>,
-  since: string,
 ): ScorecardConsoleRow[] {
   const rows = new Map<string, ScorecardConsoleRow>();
   for (const r of reports) {
-    if (r.seriesId === UNLISTED_SERIES_ID || r.source === 'manual-unlisted') continue;
-    if (r.matchDate < since) continue;
     const key = `${r.seriesId}#${r.fixtureId}`;
     let row = rows.get(key);
     if (!row) {
@@ -1692,7 +1653,7 @@ export async function loadScorecardConsole(
       reports.map((r) => ({ seriesId: r.seriesId, fixtureId: r.fixtureId })),
     );
     const tenantName = orgCopy(cfg).name;
-    for (const row of pairScorecardConsoleRows(reports, cards, since))
+    for (const row of pairScorecardConsoleRows(reports, cards))
       if (consoleRowMatches(row, opts.status)) all.push({ tenant: cfg.tenant, tenantName, row });
   }
   all.sort(
