@@ -40,12 +40,15 @@ import { shortTeam } from './pro-scorecards';
 import { detectSquads } from './pro-team';
 import { useProMatches } from './pro-library';
 import { Dumbbell, PairBars, QuadrantMap, RankBars, type MapPt, type Tone } from './pro-charts';
+import { PlayerPerformance, RouteToPro } from './journeys-page';
 import { ResultsScouting } from './results-scouting';
 import { focusEvents, focusPools, isOurFranchise, useFocus } from './scouting-focus';
 
-type Sub = 'milestones' | 'improvers' | 'pyramid';
+type Sub = 'players' | 'route' | 'milestones' | 'improvers' | 'pyramid';
 const SUBS: [Sub, string][] = [
   ['milestones', 'Milestones'],
+  ['players', 'Players'],
+  ['route', 'Route to professional'],
   ['improvers', 'Improvers'],
   ['pyramid', 'Pyramid & leagues'],
 ];
@@ -119,6 +122,10 @@ export function PathwaysPage() {
 
       {sub === 'pyramid' ? (
         <ResultsScouting />
+      ) : sub === 'players' ? (
+        <PlayerPerformance />
+      ) : sub === 'route' ? (
+        <RouteToPro />
       ) : (
         <>
           <div className="ml-bar" role="group" aria-label="Milestone filters">

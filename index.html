@@ -6615,6 +6615,47 @@
   .ml-bench{fill:var(--viz-pool);stroke:#fff;stroke-width:1.5}
   .ml-band{fill:var(--viz-pool);opacity:.14}
   .pw-pick{cursor:pointer}
+  /* player journeys (Pathways → Players, Route to professional) */
+  .jn-list{list-style:none;margin:0;padding:0;display:grid;gap:2px}
+  .jn-list li{display:grid;grid-template-columns:minmax(0,1.4fr) auto auto auto;gap:4px 12px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line2);font-size:13px}
+  .jn-list li:last-child{border-bottom:0}
+  .jn-name{font:inherit;font-weight:700;color:var(--ink);background:none;border:0;padding:0;text-align:left;cursor:pointer}
+  .jn-name:hover{text-decoration:underline}
+  .jn-sub{font-size:12px;color:var(--muted)}
+  .jn-gain{font-size:12.5px;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .jn-pct{display:inline-flex;align-items:center;gap:8px;min-width:150px}
+  .jn-pct i{display:block;height:8px;border-radius:4px;background:var(--viz-squad);flex:none;max-width:70px}
+  .jn-pct b{font-size:12.5px;font-variant-numeric:tabular-nums}
+  .jn-tbl tr.pick{cursor:pointer}
+  .jn-tbl tr.pick.on td{background:var(--paper2)}
+  .jn-rows{display:grid;gap:8px}
+  .jn-row{display:grid;grid-template-columns:60px minmax(0,1fr) 80px;gap:10px;align-items:center;font-size:12.5px}
+  .jn-row i{display:block;height:12px;border-radius:4px;background:var(--viz-third)}
+  .jn-row b{text-align:right;font-variant-numeric:tabular-nums}
+  .jn-detail{margin:0 0 16px;border-left:3px solid var(--viz-squad)}
+  .jn-actions{display:flex;gap:8px;align-items:center}
+  .jn-detail .card-sub .pill{margin-left:6px}
+  .jn-gap{font-size:11px;font-weight:700;color:var(--viz-risk)}
+  .jn-route{display:inline-flex;flex-wrap:wrap;align-items:center;gap:2px 4px}
+  .jn-route em{font-style:normal;color:var(--muted);margin-right:4px}
+  .jn-chip{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;color:#fff;background:var(--viz-context-ink)}
+  .jn-chip.school{background:var(--viz-squad)} .jn-chip.club{background:var(--viz-third)} .jn-chip.rep{background:var(--viz-pool);color:var(--ink)} .jn-chip.pro{background:var(--viz-s5)}
+  .jn-watch{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:14px}
+  .jn-card{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--white);min-width:0}
+  .jn-card-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;margin-bottom:6px}
+  .jn-card-stats{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;font-size:12px;color:var(--muted);margin:0 0 10px}
+  .jn-card-stats b{font-size:16px;color:var(--ink);margin-right:4px}
+  .jn-strip-wrap{overflow-x:auto;margin:0 0 12px}
+  .jn-strip{border-collapse:separate;border-spacing:2px;font-size:11.5px}
+  .jn-strip th{font-weight:700;color:var(--muted);text-align:center;padding:2px 4px;white-space:nowrap}
+  .jn-strip th.out{opacity:.4}
+  .jn-strip th[scope=row]{text-align:left;color:var(--ink);padding-right:10px}
+  .jn-strip th[scope=row] .pv-key{margin-right:6px}
+  .jn-strip .jn-brk td{text-align:center;font-size:10.5px;color:var(--muted);padding:0 2px}
+  .jn-strip td{min-width:30px;height:26px;text-align:center;border-radius:5px;background:var(--paper2);padding:0}
+  .jn-strip td span{display:flex;align-items:center;justify-content:center;height:100%;border-radius:5px}
+  .jn-strip td b{font-size:11px;color:#fff}
+  .jn-strip-wrap.compact .jn-strip td{min-width:22px;height:22px}
   .ml-bar{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;margin:0 0 14px}
   .ml-seg{display:inline-flex;gap:2px;padding:3px;background:var(--paper2);border-radius:10px}
   .ml-seg button{font:inherit;font-size:13px;font-weight:700;color:var(--muted);background:none;border:0;border-radius:8px;padding:6px 12px;cursor:pointer}
