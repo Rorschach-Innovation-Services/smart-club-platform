@@ -17,7 +17,7 @@ invented sample data; real data is git-ignored (see _Data_).
 shows the invented "Highveld" sample and says so. To see the Lions view, sign in to the `lions`
 tenant (`?tenant=lions` on a bare host).
 
-**To check it.** `npm run typecheck && npx vitest run` (1,739 tests on a fresh clone). Nothing in `packages/api`
+**To check it.** `npm run typecheck && npx vitest run` (1,766 tests on a fresh clone). Nothing in `packages/api`
 changed. `eslint`: 0 errors, the same 103 pre-existing warnings as `main`.
 
 **What needs a decision from you.** Nothing to deploy differently. Two things to know:
