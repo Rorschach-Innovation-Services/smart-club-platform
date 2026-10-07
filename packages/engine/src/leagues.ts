@@ -114,6 +114,26 @@ export function clubTeamsForLeague(club: ClubSidesSource, leagueKey: string): Te
 }
 
 /**
+ * Every side a club fields across ALL its leagues, deduped by teamId (first league wins), or
+ * the club itself when it has no league at all. The candidate pool a knockout "Set team"
+ * picks from when the winner comes from outside the series ("Community Cup winner", ADR
+ * 0018) — the admin picker and the server check share it so they can never disagree.
+ */
+export function clubSides(club: ClubSidesSource & { leagues?: string[] }): TeamParticipant[] {
+  const keys = Array.isArray(club.leagues) ? club.leagues : [];
+  if (!keys.length) return clubTeamsForLeague(club, '');
+  const seen = new Set<string>();
+  const out: TeamParticipant[] = [];
+  for (const key of keys)
+    for (const p of clubTeamsForLeague(club, key)) {
+      if (seen.has(p.teamId)) continue;
+      seen.add(p.teamId);
+      out.push(p);
+    }
+  return out;
+}
+
+/**
  * The league fields these helpers read. A pick of `League`, loose on everything but `key`
  * so callers can pass the full catalogue entry or a lighter projection; the helpers hand
  * back whatever element type they were given. Lists may be absent (a fresh tenant, or a

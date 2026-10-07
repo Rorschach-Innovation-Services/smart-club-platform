@@ -5,6 +5,8 @@
  *   npx tsx src/import-titans-fixtures.ts --parse-only [--report-out <path>]      # no AWS at all
  *   npx sst shell --stage <s> -- npx tsx src/import-titans-fixtures.ts …           # live tenant:
  *     (no mode flag)            import dry run   [--only <ids>] [--report-out <path>]
+ *     --include-t20-ko          also build the T20 knockouts (tbd: sides — ONLY on a stage running
+ *                               PR B, ADR 0018); [--ko-cutoff <YYYY-MM-DD>] (default --today)
  *     --confirm                 import: backup → write series → club sync → post-write re-scan
  *     --append-sides            plan the club sides the sheets need (dry run), --confirm writes
  *     --revert                  delete the manifest series (dry run), --confirm [--include-released]
@@ -42,10 +44,12 @@ import { hasFeature } from './features.js';
 import { writeSeriesFromSnapshot } from './medicoach-sync/cli-write.js';
 import { storedDraftDrift } from './import-lions-fixtures.js';
 import { venueIdFor } from './lions-fixture-map.js';
+import { isSlotRef, slotSource } from '../../engine/src/formats.js';
 import {
   AMBIGUOUS_VENUES,
   EXPECTED_TOTAL_FIXTURES,
   HELD_BACK,
+  KO_RESOLVED,
   TITANS_GATE_ALIASES,
   TITANS_VENUE_SPELLINGS,
   canonicalVenueName,
@@ -72,7 +76,9 @@ import {
   resolveTeamClub,
   titansGroundKey,
   type HeldBackFixture,
+  type KoResolvedFixture,
   type KoRow,
+  type KoSlotProposal,
   type ParsedTitansSheet,
   type TimeSource,
   type TitansRawFixture,
@@ -577,17 +583,263 @@ export function stabiliseIds(
   stored: Series | undefined,
 ): { matched: number; added: string[]; removed: string[] } {
   type Slotted = WrittenFixture & { slots?: { home?: string; away?: string } };
-  const existing = ((stored?.fixtures as Slotted[] | undefined) ?? []).map((f) => ({
+  const byPlaceholder = (f: Slotted) => ({
     ...f,
     home: f.slots?.home ?? f.home,
     away: f.slots?.away ?? f.away,
-  }));
-  const r = reconcileFixtureIds(existing, incoming);
+  });
+  const existing = ((stored?.fixtures as Slotted[] | undefined) ?? []).map(byPlaceholder);
+  // An incoming knockout side the union already resolved (KO_RESOLVED) is matched by its
+  // placeholder too, so the same row keeps its id whichever side got its team first.
+  const keyed = (incoming as Slotted[]).map(byPlaceholder);
+  const r = reconcileFixtureIds(existing, keyed);
+  keyed.forEach((k, i) => (incoming[i].id = k.id));
   return {
     matched: r.matched,
     added: r.added,
     removed: r.removed.map((f) => `${f.id} ${f.date} ${f.home} v ${f.away}`),
   };
+}
+
+// ───────────────────────── T20 knockouts (PR B) ─────────────────────────
+
+/** A knockout fixture left out of the write, and why (union report, risk R10). */
+export interface KoSkip {
+  koSeriesId: string;
+  fixtureId: string;
+  stage: string;
+  date: string;
+  home: string;
+  away: string;
+  reason: string;
+}
+
+export interface T20KnockoutOptions {
+  /** KO fixtures dated BEFORE this (YYYY-MM-DD) are written only with both teams known. */
+  cutoff: string;
+  /** Union-confirmed teams (default: KO_RESOLVED). */
+  resolved?: Record<string, Record<string, KoResolvedFixture>>;
+  /** How a sheet team name becomes a live side (absent ⇒ the provisional parse-only ids). */
+  sideOf?: (leagueKey: string, name: string) => ResolvedSide | undefined;
+  labelOf?: (key: string) => string;
+  /** The tenant's stored series by id: ids are reconciled and console-set teams carried. */
+  stored?: Map<string, Series>;
+}
+
+/** The stage a knockout row plays: the sheet's Q/S tag, else a winners' final, else a play-off
+ * (the men's Community Cup winner v Group E winner row, which nothing in the bracket feeds). */
+export function koStage(k: Pick<KoRow, 'tag' | 'home' | 'away'>): { stage: string; round: number } {
+  if (k.tag?.startsWith('Q')) return { stage: 'Quarter-final', round: 1 };
+  if (k.tag?.startsWith('S')) return { stage: 'Semi-final', round: 2 };
+  if (k.home.kind === 'win' && k.away.kind === 'win') return { stage: 'Final', round: 3 };
+  return { stage: 'Play-off', round: 4 };
+}
+
+/**
+ * The T20 knockout series (ADR 0018): one per T20 sheet, the parsed KO rows with their `pos:`,
+ * `win:` and `tbd:` sides, real sheet dates and session times, no ground (the sheet's "WINNER
+ * GA (Q1)" means the home side's ground once known: venueStatus unresolved). Participants =
+ * the union of the sheet's group series, so every team that can reach the bracket is already
+ * a participant ("Set team" picks from them first).
+ *
+ * Past dates (risk R10): a fixture dated before `cutoff` is written only when both sides are
+ * real teams (KO_RESOLVED, a named team on the sheet, or a team already set in the console)
+ * or it is already stored; otherwise it is SKIPPED and reported — never an empty bracket for a
+ * date already played, and never a stored fixture silently dropped. A kept fixture fed
+ * (`win:`) by a skipped one is an error: name its team in KO_RESOLVED or move the cutoff. A
+ * side resolved from KO_RESOLVED keeps its placeholder in `slots[side]`, exactly as Set team
+ * does. Ids are stable against the stored series (`slots[side] ?? side`, risk R8). Pure.
+ */
+export function buildT20Knockouts(
+  sheets: ParsedTitansSheet[],
+  built: BuiltTitansSeries[],
+  opts: T20KnockoutOptions,
+): {
+  series: Series[];
+  skipped: KoSkip[];
+  errors: string[];
+  resolvedSides: string[];
+  /** Console Set-team sides kept on a re-import (carryConsoleSides). */
+  carried: string[];
+} {
+  const resolved = opts.resolved ?? KO_RESOLVED;
+  const out: Series[] = [];
+  const skipped: KoSkip[] = [];
+  const errors: string[] = [];
+  const resolvedSides: string[] = [];
+  const carried: string[] = [];
+  for (const sheet of sheets) {
+    const koId = sheet.spec.koSeriesId;
+    if (!koId || !T20_KO_SERIES_IDS.includes(koId)) continue;
+    const groups = sheet.spec.series.map((x) => built.find((b) => b.series.id === x.seriesId));
+    if (groups.some((g) => !g)) continue; // out of --only scope
+    const leagueKey = sheet.spec.leagueKey;
+    const participants: SeriesParticipant[] = [];
+    for (const g of groups)
+      for (const p of g!.series.participants ?? [])
+        if (!participants.some((x) => x.teamId === p.teamId)) participants.push(p);
+    const teamOf = (name: string, where: string): string | null => {
+      const canonical = canonicalTeamName(name);
+      const club = resolveTeamClub(canonical);
+      if (!club) {
+        errors.push(`${where}: "${name}" is not a Titans club`);
+        return null;
+      }
+      const live = opts.sideOf ? opts.sideOf(leagueKey, canonical) : undefined;
+      if (opts.sideOf && !live) {
+        errors.push(`${where}: "${name}" (${leagueKey}) has no side on the live club`);
+        return null;
+      }
+      const teamId = live?.teamId ?? provisionalSideId(leagueKey, canonical);
+      if (!participants.some((p) => p.teamId === teamId))
+        participants.push({
+          teamId,
+          clubId: club.id,
+          name: live?.name ?? canonical,
+          ...(live?.venue ? { venue: live.venue } : {}),
+        });
+      return teamId;
+    };
+    const fixtures: KoFixture[] = [];
+    const rowOf = new Map<KoFixture, KoRow>();
+    for (const k of sheet.ko) {
+      const { stage, round } = koStage(k);
+      const res = resolved[koId]?.[k.fixtureId] ?? {};
+      const where = `${koId} ${k.fixtureId}`;
+      const sideFor = (p: KoSlotProposal, union: string | undefined) => {
+        if (union) {
+          const teamId = teamOf(union, where);
+          if (teamId && p.kind !== 'team') resolvedSides.push(`${where}: ${p.ref} → ${union}`);
+          return { value: teamId ?? p.ref, slot: p.kind === 'team' ? undefined : p.ref };
+        }
+        if (p.kind === 'team')
+          return { value: teamOf(p.ref.slice('team:'.length), where) ?? p.ref };
+        return { value: p.ref };
+      };
+      const home = sideFor(k.home, res.home);
+      const away = sideFor(k.away, res.away);
+      const slots = {
+        ...(home.slot ? { home: home.slot } : {}),
+        ...(away.slot ? { away: away.slot } : {}),
+      };
+      const f = {
+        id: k.fixtureId,
+        round,
+        date: k.date,
+        time: k.time,
+        timeSource: k.timeSource,
+        home: home.value,
+        away: away.value,
+        ...(Object.keys(slots).length ? { slots } : {}),
+        stage,
+        venueStatus: 'unresolved',
+        venueReason: `Titans 2026-27 fixtures workbook — "${k.rawVenue}"`,
+      } as KoFixture;
+      fixtures.push(f);
+      rowOf.set(f, k);
+    }
+    const dates = fixtures.map((f) => f.date).sort();
+    const series = {
+      id: koId,
+      name: `${(opts.labelOf ?? leagueLabel)(leagueKey)} · Knockouts`,
+      leagueKey,
+      startDate: dates[0],
+      endDate: dates[dates.length - 1],
+      dateMode: 'reference',
+      teams: [] as string[],
+      participants,
+      fixtures,
+      seriesType: 'T20',
+      ...(TITANS_LEAGUE_OVERS[leagueKey]
+        ? { maxOvers: TITANS_LEAGUE_OVERS[leagueKey].maxOvers }
+        : {}),
+      kind: 'series',
+      approved: false,
+      released: false,
+      releasedAt: null,
+      version: 1,
+    } as unknown as Series;
+    // Stable ids, then the console's Set-team sides, BEFORE the cutoff: a team set in the
+    // console makes a past fixture known, and a stored fixture is never dropped.
+    const stored = opts.stored?.get(koId);
+    const st = stabiliseIds(fixtures, stored);
+    for (const x of st.removed) errors.push(`${koId}: stored fixture ${x} is not in the workbook`);
+    series.teams = participants.map((p) => p.teamId);
+    carried.push(...carryConsoleSides(series, stored));
+    const storedIds = new Set(((stored?.fixtures as KoFixture[]) ?? []).map((f) => f.id));
+    const keep = fixtures.filter((f) => {
+      const past = f.date < opts.cutoff && (isSlotRef(f.home) || isSlotRef(f.away));
+      if (!past || storedIds.has(f.id)) return true;
+      const k = rowOf.get(f)!;
+      skipped.push({
+        koSeriesId: koId,
+        fixtureId: f.id,
+        stage: f.stage,
+        date: f.date,
+        home: k.rawHome,
+        away: k.rawAway,
+        reason: `dated before the knockout cutoff ${opts.cutoff} and the union has not confirmed both teams (KO_RESOLVED)`,
+      });
+      return false;
+    });
+    const kept = new Set(keep.map((f) => f.id));
+    for (const f of keep)
+      for (const side of ['home', 'away'] as const) {
+        const src = slotSource(f[side]);
+        if (src && !kept.has(src.fixtureId))
+          errors.push(
+            `${koId} ${f.id} (${f.date}): its ${side} side is the ${src.kind} of ${src.fixtureId}, which is skipped — name the team in KO_RESOLVED or move --ko-cutoff`,
+          );
+      }
+    if (!keep.length) continue;
+    const keptDates = keep.map((f) => f.date).sort();
+    out.push({
+      ...series,
+      fixtures: keep,
+      startDate: keptDates[0],
+      endDate: keptDates[keptDates.length - 1],
+    } as Series);
+  }
+  return { series: out, skipped, errors, resolvedSides, carried };
+}
+
+/**
+ * Keep the teams an admin already set in the console (Set team, ADR 0018) when a knockout is
+ * re-imported: a stored fixture side whose `slots[side]` is the placeholder the sheet still
+ * has keeps its team, its slot and its participant. A side the union resolved this run
+ * (KO_RESOLVED) wins over the console. Run AFTER stabiliseIds. Mutates `built`; returns one
+ * line per side carried.
+ */
+export function carryConsoleSides(built: Series, stored: Series | undefined): string[] {
+  if (!stored) return [];
+  type Slotted = WrittenFixture & { slots?: { home?: string; away?: string } };
+  const byId = new Map(((stored.fixtures as Slotted[]) ?? []).map((f) => [f.id, f]));
+  const participants = [...(built.participants ?? [])];
+  const teams = [...(built.teams ?? [])];
+  const notes: string[] = [];
+  for (const f of built.fixtures as Slotted[]) {
+    const s = byId.get(f.id);
+    if (!s?.slots) continue;
+    for (const side of ['home', 'away'] as const) {
+      const placeholder = f[side];
+      if (f.slots?.[side] || !isSlotRef(placeholder) || s.slots[side] !== placeholder) continue;
+      const teamId = s[side];
+      if (!teamId || isSlotRef(teamId)) continue;
+      f[side] = teamId;
+      f.slots = { ...(f.slots ?? {}), [side]: placeholder };
+      if (!participants.some((p) => p.teamId === teamId)) {
+        const p = stored.participants?.find((x) => x.teamId === teamId);
+        if (p) participants.push(p);
+      }
+      if (!teams.includes(teamId)) teams.push(teamId);
+      notes.push(
+        `${built.id} ${f.id} ${side}: kept the console's team ${teamId} (placeholder ${placeholder})`,
+      );
+    }
+  }
+  built.participants = participants;
+  built.teams = teams;
+  return notes;
 }
 
 // ───────────────────────── Report helpers ─────────────────────────
@@ -767,6 +1019,8 @@ export interface UnionReport {
   venueAliasesApplied: Array<{ raw: string; canonical: string; count: number }>;
   venueSpellings: Array<{ name: string; aliases: string[]; note: string }>;
   knockouts: KoRow[];
+  /** T20 knockout fixtures left out (`--include-t20-ko` runs only; risk R10). */
+  knockoutsSkipped?: KoSkip[];
   splitRounds: Array<{ sheet: string; date: string; rows: number }>;
   tbcVenues: TitansBuildOutcome['tbc'];
   pastFixtures: Array<{
@@ -880,6 +1134,15 @@ export function renderUnionMarkdown(r: UnionReport): string {
       `| ${k.sheet}${k.tag ? ` (${k.tag})` : ''} | ${longDate(k.date)} | ${k.time} | ${k.rawHome} → \`${k.home.ref}\` | ${k.rawAway} → \`${k.away.ref}\` | ${k.rawVenue} |`,
     );
   L.push('');
+  if (r.knockoutsSkipped?.length) {
+    L.push(
+      'These knockout fixtures are dated in the past and we do not know who played, so they are **not loaded**. Send us the teams (or the results) and we will load them:',
+    );
+    L.push('');
+    for (const k of r.knockoutsSkipped)
+      L.push(`- ${k.stage}, ${longDate(k.date)}: ${k.home} v ${k.away}`);
+    L.push('');
+  }
   L.push("## 7. Women's League Top 6 / Bottom 6 rounds");
   L.push('');
   L.push(
@@ -983,10 +1246,19 @@ export interface Args {
   includeReleased: boolean;
   /** Where JSON backups go (default: the working directory). */
   backupDir: string;
+  /** Build (and with --confirm write) the T20 knockouts — tbd: sides, PR B stages only. */
+  includeT20Ko: boolean;
+  /** T20 KO fixtures dated before this need both teams known (default: --today). */
+  koCutoff: string;
 }
 
-/** Every series id this importer may write (or --revert deletes). */
-export const WRITABLE_SERIES_IDS = [...KNOWN_SERIES_IDS, ...VETERANS_KO_SERIES_IDS];
+/** Every series id this importer may write (or --revert deletes). T20 knockouts are written
+ * only with --include-t20-ko. */
+export const WRITABLE_SERIES_IDS = [
+  ...KNOWN_SERIES_IDS,
+  ...VETERANS_KO_SERIES_IDS,
+  ...T20_KO_SERIES_IDS,
+];
 
 export function parseArgs(argv: string[]): Args {
   const args: Args = {
@@ -1001,6 +1273,8 @@ export function parseArgs(argv: string[]): Args {
     noClubSync: false,
     includeReleased: false,
     backupDir: process.cwd(),
+    includeT20Ko: false,
+    koCutoff: '',
   };
   const need = (i: number, flag: string) => {
     const v = argv[i];
@@ -1023,6 +1297,8 @@ export function parseArgs(argv: string[]): Args {
     } else if (a === '--no-club-sync') args.noClubSync = true;
     else if (a === '--include-released') args.includeReleased = true;
     else if (a === '--backup-dir') args.backupDir = need(++i, a);
+    else if (a === '--include-t20-ko') args.includeT20Ko = true;
+    else if (a === '--ko-cutoff') args.koCutoff = need(++i, a);
     else if (a === '--only')
       args.only = need(++i, a)
         .split(',')
@@ -1038,11 +1314,20 @@ export function parseArgs(argv: string[]): Args {
     throw new Error('--only is an import / --append-sides flag');
   if (args.includeReleased && args.mode !== 'revert')
     throw new Error('--include-released is a --revert flag');
-  for (const id of args.only)
-    if (!WRITABLE_SERIES_IDS.includes(id))
+  if (args.includeT20Ko && args.mode !== 'import')
+    throw new Error('--include-t20-ko is an import flag');
+  if (args.koCutoff && !args.includeT20Ko)
+    throw new Error('--ko-cutoff is an --include-t20-ko flag');
+  if (args.koCutoff && !/^\d{4}-\d{2}-\d{2}$/.test(args.koCutoff))
+    throw new Error('--ko-cutoff needs YYYY-MM-DD');
+  args.koCutoff ||= args.today;
+  for (const id of args.only) {
+    if (!WRITABLE_SERIES_IDS.includes(id)) throw new Error(`--only: unknown series id "${id}"`);
+    if (T20_KO_SERIES_IDS.includes(id) && !args.includeT20Ko)
       throw new Error(
-        `--only: unknown series id "${id}"${T20_KO_SERIES_IDS.includes(id) ? ' (T20 knockouts wait for PR B)' : ''}`,
+        `--only: ${id} is a T20 knockout series — pass --include-t20-ko, and only on a stage already running PR B (tbd: sides; runbook)`,
       );
+  }
   return args;
 }
 
@@ -1129,16 +1414,37 @@ export function titansAliasState(cfg: Pick<TenantConfig, 'competitionDefaults'>)
 }
 
 /**
- * The series whose sides and names a run must resolve: `--only` plus, for a veterans playoff
- * id, its division (the playoff's participants ARE the division's). null ⇒ every series.
- * Writes are still exactly the `--only` ids.
+ * The series whose sides and names a run must resolve: `--only` plus, for a knockout id, every
+ * series of its sheet (a veterans playoff's division, a T20 bracket's groups — the knockout's
+ * participants ARE theirs). null ⇒ every series. Writes are still exactly the `--only` ids.
  */
 export function runScope(only: string[]): Set<string> | null {
   if (!only.length) return null;
   const scope = new Set(only);
   for (const sh of TITANS_FIXTURE_SHEETS)
-    if (sh.koSeriesId && scope.has(sh.koSeriesId)) scope.add(sh.series[0].seriesId);
+    if (sh.koSeriesId && scope.has(sh.koSeriesId)) for (const x of sh.series) scope.add(x.seriesId);
   return scope;
+}
+
+/** The T20 knockout sides a run must resolve beyond the group fixtures: named teams on the
+ * sheet's KO rows and union-confirmed teams (KO_RESOLVED), for the in-scope knockouts. */
+export function koSideNeeds(
+  sheets: ParsedTitansSheet[],
+  scope: Set<string> | null,
+  resolved: Record<string, Record<string, KoResolvedFixture>> = KO_RESOLVED,
+): SideNeed[] {
+  const out: SideNeed[] = [];
+  for (const s of sheets) {
+    const koId = s.spec.koSeriesId;
+    if (!koId || !T20_KO_SERIES_IDS.includes(koId) || (scope && !scope.has(koId))) continue;
+    const add = (name: string) =>
+      out.push({ leagueKey: s.spec.leagueKey, name: canonicalTeamName(name) });
+    for (const k of s.ko)
+      for (const p of [k.home, k.away]) if (p.kind === 'team') add(p.ref.slice('team:'.length));
+    for (const r of Object.values(resolved[koId] ?? {}))
+      for (const n of [r.home, r.away]) if (n) add(n);
+  }
+  return out;
 }
 
 /** Every (league, sheet side) the in-scope series name — the input to the side plan. */
@@ -1650,7 +1956,12 @@ export async function runImport(args: Args) {
         `  ⚠ venue registry is EMPTY — scanning against the would-be registry (${venues.length} grounds); run bootstrap-titans-fixture-prereqs --confirm before --confirm`,
       );
     }
-    sidePlan = planSides(sideNeeds(sheets, scope), clubs, {
+    const needs = sideNeeds(sheets, scope);
+    if (args.includeT20Ko)
+      for (const n of koSideNeeds(sheets, scope))
+        if (!needs.some((x) => sideKey(x.leagueKey, x.name) === sideKey(n.leagueKey, n.name)))
+          needs.push(n);
+    sidePlan = planSides(needs, clubs, {
       storedSeries: stored,
       seasonRuns,
       hostLeagues: t20HostLeagues(sheets),
@@ -1678,7 +1989,15 @@ export async function runImport(args: Args) {
   const writeBuilt = outcome.built.filter((b) => writes(String(b.series.id)));
   if (args.only.length) console.log(`\n── --only: writing ${args.only.join(', ')}`);
   const vets = buildVeteransKnockouts(sheets, outcome.built, labelOf);
-  const koSeries = vets.series.filter((s) => writes(String(s.id)));
+  const t20 = args.includeT20Ko
+    ? buildT20Knockouts(sheets, outcome.built, {
+        cutoff: args.koCutoff,
+        labelOf,
+        stored: storedById,
+        ...(plan ? { sideOf: (k: string, n: string) => plan.resolve.get(sideKey(k, n)) } : {}),
+      })
+    : null;
+  const koSeries = [...vets.series, ...(t20?.series ?? [])].filter((s) => writes(String(s.id)));
   console.log(`\n── Name resolution (${outcome.resolutions.size} league side(s))`);
   const byClub = new Map<string, Set<string>>();
   for (const r of outcome.resolutions.values())
@@ -1745,14 +2064,30 @@ export async function runImport(args: Args) {
   // ── Knockouts ──
   const ko = sheets.flatMap((s) => s.ko);
   console.log(`\n── Knockout rows (${ko.length})`);
-  for (const k of ko)
-    console.log(
-      `    ${T20_KO_SERIES_IDS.includes(k.koSeriesId) ? '[pending PR B] ' : '[written]      '}${koLine(k)}`,
-    );
+  const koSkipped = t20?.skipped ?? [];
+  const isSkipped = (k: KoRow) =>
+    koSkipped.some((x) => x.koSeriesId === k.koSeriesId && x.fixtureId === k.fixtureId);
+  for (const k of ko) {
+    const tag = !T20_KO_SERIES_IDS.includes(k.koSeriesId)
+      ? '[written]        '
+      : !t20
+        ? '[--include-t20-ko]'
+        : isSkipped(k)
+          ? '[SKIPPED: past] '
+          : '[written]        ';
+    console.log(`    ${tag} ${koLine(k)}`);
+  }
   for (const e of vets.errors) console.log(`    ✗ ${e}`);
+  for (const e of t20?.errors ?? []) console.log(`    ✗ ${e}`);
+  for (const r of t20?.resolvedSides ?? []) console.log(`    union-confirmed: ${r}`);
   console.log(
-    `  veterans playoff series built: ${koSeries.map((s) => s.id).join(', ') || 'none'}; T20 knockouts (${T20_KO_SERIES_IDS.join(', ')}) are NOT written — they need PR B's tbd: slots`,
+    `  knockout series built: ${koSeries.map((s) => s.id).join(', ') || 'none'}` +
+      (t20
+        ? `; T20 knockout cutoff ${args.koCutoff}: ${koSkipped.length} past fixture(s) skipped (teams unknown)`
+        : `; T20 knockouts (${T20_KO_SERIES_IDS.join(', ')}) are NOT built — pass --include-t20-ko, only on a stage running PR B`),
   );
+  for (const x of koSkipped)
+    console.log(`    skipped ${x.koSeriesId} ${x.fixtureId} ${x.stage} ${x.date}: ${x.reason}`);
   const splitRounds = sheets.flatMap((s) =>
     [...new Set(s.splitRounds.map((x) => x.date))].map((date) => ({
       sheet: s.spec.sheet,
@@ -1770,11 +2105,13 @@ export async function runImport(args: Args) {
   for (const b of writeBuilt)
     for (const x of outcome.removedBySeries.get(String(b.series.id)) ?? [])
       idProblems.push(`${b.series.id}: stored fixture ${x} is not in the workbook`);
-  for (const s of koSeries) {
+  // T20 knockouts were reconciled (and console sides carried) in their build.
+  for (const s of koSeries.filter((x) => !T20_KO_SERIES_IDS.includes(String(x.id)))) {
     const r = stabiliseIds(s.fixtures as TitansFixture[], storedById.get(String(s.id)));
     for (const x of r.removed)
       idProblems.push(`${s.id}: stored fixture ${x} is not in the workbook`);
   }
+  for (const n of t20?.carried ?? []) console.log(`  ${n}`);
   const writeSet: Series[] = [...writeBuilt.map((b) => b.series), ...koSeries];
   const writeIds = new Set(writeSet.map((s) => String(s.id)));
 
@@ -1939,6 +2276,7 @@ export async function runImport(args: Args) {
       venueAliasesApplied: applied,
       venueSpellings: TITANS_VENUE_SPELLINGS,
       knockouts: ko,
+      ...(t20 ? { knockoutsSkipped: koSkipped } : {}),
       splitRounds,
       tbcVenues: outcome.tbc,
       pastFixtures,
@@ -1961,6 +2299,7 @@ export async function runImport(args: Args) {
     if (inScope(sid)) for (const n of names) fatal.push(`unresolved side ${n}`);
   fatal.push(...outcome.heldProblems);
   fatal.push(...vets.errors);
+  fatal.push(...(t20?.errors ?? []).filter((e) => writes(e.split(' ')[0])));
   fatal.push(...idProblems);
   if (after.length)
     fatal.push(

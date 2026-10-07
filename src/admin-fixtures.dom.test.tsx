@@ -563,6 +563,103 @@ describe('a knockout side that is still a forward reference', () => {
   });
 });
 
+describe('knockout Set team / revert (ADR 0018)', () => {
+  const ko = (f2: Record<string, unknown>) =>
+    series({
+      teams: ['spartan', 'tongaat'],
+      fixtures: [
+        { id: 'f1', round: 1, date: '2026-09-12', home: 'spartan', away: 'tongaat' },
+        { id: 'f2', round: 2, date: '2026-09-19', ...f2 },
+      ],
+    } as Partial<Series>);
+
+  const renderKo = (s: Series, onSetSide: ReturnType<typeof vi.fn>) => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <FixtureTable
+        series={s}
+        clubs={clubs}
+        onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
+        onDeleteSeries={vi.fn()}
+        onDuplicateSeries={vi.fn()}
+        onAskRelease={vi.fn()}
+        onAskRecall={vi.fn()}
+        onAskReveal={vi.fn()}
+        onApprove={vi.fn()}
+        onUnapprove={vi.fn()}
+        onAllocateVenues={vi.fn()}
+        onCheckClashes={vi.fn().mockResolvedValue({ results: [] })}
+        onSetSide={onSetSide}
+        toast={vi.fn()}
+      />,
+    );
+    return user;
+  };
+  const openKo = async (user: ReturnType<typeof userEvent.setup>, text: RegExp) => {
+    const row = screen.getAllByRole('row').find((r) => text.test(r.textContent ?? ''))!;
+    await user.click(within(row).getByTitle('Edit fixture'));
+  };
+
+  it('a tbd: side reads as its words and Set team sends the picked team to the server', async () => {
+    const onSetSide = vi.fn().mockResolvedValue(undefined);
+    const user = renderKo(ko({ home: 'win:f1', away: 'tbd:Best%203rd%20place' }), onSetSide);
+    await openKo(user, /best 3rd place/i);
+
+    const away = screen.getByLabelText(/away \(visitors\)/i) as HTMLInputElement;
+    expect(away).toBeDisabled();
+    expect(away.value).toBe('Best 3rd place');
+    const picker = screen.getByRole('combobox', { name: /team to set as away/i });
+    // Series teams first, then every other club side grouped by club.
+    const groups = Array.from(picker.querySelectorAll('optgroup')).map((g) => g.label);
+    expect(groups).toEqual(['In this series', 'Ilembe CC']);
+    await user.selectOptions(picker, 'ilembe');
+    await user.click(screen.getByRole('button', { name: /set away team/i }));
+    expect(onSetSide).toHaveBeenCalledWith('s1', 'f2', 'away', 'ilembe');
+    // No revert before anything is set.
+    expect(screen.queryByRole('button', { name: /revert away/i })).toBeNull();
+  });
+
+  it('a side set from a placeholder shows the team, the placeholder, and reverts', async () => {
+    const onSetSide = vi.fn().mockResolvedValue(undefined);
+    const user = renderKo(
+      ko({ home: 'win:f1', away: 'tongaat', slots: { away: 'tbd:Best%203rd%20place' } }),
+      onSetSide,
+    );
+    await openKo(user, /winner/i);
+    expect((screen.getByLabelText(/away \(visitors\)/i) as HTMLInputElement).value).toBe(
+      'Tongaat CC',
+    );
+    expect(screen.getByText(/placeholder: best 3rd place/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /revert away to placeholder/i }));
+    expect(onSetSide).toHaveBeenCalledWith('s1', 'f2', 'away', null);
+  });
+
+  it('a clash refusal from the server shows the clash panel inline', async () => {
+    const clash: Clash = {
+      fixtureId: 'f2',
+      round: 2,
+      ground: 'Spartan Park',
+      date: '2026-09-19',
+      home: 'Spartan Sporting CC',
+      away: 'Winner of Round 1',
+      with: { seriesId: 's9', seriesName: 'Other league', fixtureId: 'f4', round: 3 },
+    };
+    const onSetSide = vi.fn().mockRejectedValue(
+      new ApiError(409, 'Change blocked — 1 venue clash(es)', 'venue_clash', {
+        clashes: [clash],
+      }),
+    );
+    const user = renderKo(ko({ home: 'pos:s-g-a:1', away: 'win:f1' }), onSetSide);
+    await openKo(user, /group a/i);
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: /team to set as home/i }),
+      'spartan',
+    );
+    await user.click(screen.getByRole('button', { name: /set home team/i }));
+    expect(await screen.findByText(/change blocked — not saved/i)).toBeInTheDocument();
+  });
+});
+
 describe('a tenant with no series still gets the season machinery', () => {
   // Generating a season stage is what CREATES the first series. Gating the whole page on
   // allSeries.length hid the only way in — the exact tenant state after clear-cohort or a

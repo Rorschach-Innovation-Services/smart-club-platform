@@ -23,6 +23,7 @@ import type ExcelJS from 'exceljs';
 import { isoDate } from './import-planb-fixtures.js';
 import { normaliseName, groundKey, DEFAULT_VENUE_ALIASES } from './venue-clash.js';
 import { resolveClubToken, type ClubMapEntry } from './titans-import-map.js';
+import { tbdOf } from '../../engine/src/formats.js';
 
 export const TITANS_TENANT = 'titans';
 /** Every series this importer writes carries this id prefix (`--revert` scope). */
@@ -240,8 +241,9 @@ export const KNOWN_SERIES_IDS = TITANS_FIXTURE_SHEETS.flatMap((s) =>
   s.series.map((x) => x.seriesId),
 );
 
-/** Knockout series: veterans playoffs are written by this importer (`pos:`/`win:` only); the
- * T20 brackets need PR B's `tbd:` slots and are parsed and reported only. */
+/** Knockout series: veterans playoffs (`pos:`/`win:` only) are always written; the T20
+ * brackets carry `tbd:` sides (ADR 0018), so they are written only with `--include-t20-ko`, and
+ * only to a stage already running the code that understands `tbd:` (runbook, risk R9). */
 export const VETERANS_KO_SERIES_IDS = TITANS_FIXTURE_SHEETS.filter(
   (s) => s.leagueKey === 'veterans-league' && s.koSeriesId,
 ).map((s) => s.koSeriesId!);
@@ -733,10 +735,29 @@ export interface TitansRawFixture {
 
 export type SlotRefKind = 'pos' | 'win' | 'tbd' | 'team';
 
+/** Union-confirmed teams for one knockout fixture, as SHEET team names (resolved like a group
+ * side, through the T20 league). A side left out keeps its placeholder. */
+export interface KoResolvedFixture {
+  home?: string;
+  away?: string;
+}
+
+/**
+ * Knockout fixtures whose teams the union has confirmed, by KO series id → fixture id (risk
+ * R10). A T20 knockout fixture dated before `--ko-cutoff` is imported ONLY when both its sides
+ * are known (here, or a named team on the sheet); otherwise it is skipped and reported, so no
+ * empty bracket is ever built for a date already played. The placeholder a resolved side
+ * replaces is kept in `slots[side]`, as Set team does. Empty until the union reports results.
+ *
+ * Example: `{ 's-titans-mens-t20-ko': { f1: { home: 'IRENE VILLAGERS 1' } } }`.
+ */
+export const KO_RESOLVED: Record<string, Record<string, KoResolvedFixture>> = {};
+
 export interface KoSlotProposal {
   raw: string;
   kind: SlotRefKind;
-  /** `pos:<seriesId>:<rank>`, `win:f<n>`, `tbd:<label>` or `team:<canonical name>`. */
+  /** `pos:<seriesId>:<rank>`, `win:f<n>`, `tbd:<URI-encoded label>` (engine `tbdOf`) or
+   * `team:<canonical name>`. */
   ref: string;
   note?: string;
 }
@@ -856,16 +877,16 @@ export function proposeSlotRef(
     return {
       raw,
       kind: 'tbd',
-      ref: `tbd:Runner-up ${m[1]}`,
+      ref: tbdOf(`Runner-up ${m[1]}`),
       note: 'ranked runner-up across groups — no pos: ref can express it',
     };
   m = t.match(/^WINNER ([QS]\d)$/);
   if (m && ctx.tags.has(m[1])) return { raw, kind: 'win', ref: `win:${ctx.tags.get(m[1])}` };
-  if (/^BEST 3RD+ PLACE$/.test(t)) return { raw, kind: 'tbd', ref: 'tbd:Best 3rd place' };
+  if (/^BEST 3RD+ PLACE$/.test(t)) return { raw, kind: 'tbd', ref: tbdOf('Best 3rd place') };
   if (/^SECOND BEST 3RD+ PLACE$/.test(t))
-    return { raw, kind: 'tbd', ref: 'tbd:Second best 3rd place' };
+    return { raw, kind: 'tbd', ref: tbdOf('Second best 3rd place') };
   if (/^COMMUNITY CUP WINNER$/.test(t))
-    return { raw, kind: 'tbd', ref: 'tbd:Community Cup winner' };
+    return { raw, kind: 'tbd', ref: tbdOf('Community Cup winner') };
   m = t.match(/^(\d)(?:ST|ND|RD|TH) PLACE$/);
   if (m && ctx.leagueSeries) return { raw, kind: 'pos', ref: `pos:${ctx.leagueSeries}:${m[1]}` };
   if (/^SEMI-?FINAL WINNER$/.test(t) && ctx.firstKoFixture)

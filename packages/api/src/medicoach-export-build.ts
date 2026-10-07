@@ -30,7 +30,7 @@
  */
 import { createHash } from 'node:crypto';
 import { clubTeamsForLeague, isVeteransLeague } from '../../engine/src/leagues.js';
-import { slotSource } from '../../engine/src/formats.js';
+import { isSlotRef, slotSource } from '../../engine/src/formats.js';
 import {
   BUNDLE_SCHEMA,
   BUNDLE_VERSION,
@@ -535,7 +535,8 @@ export function scheduledInstant(date: string, time: string | undefined, offset:
 /**
  * Map one stored fixture. Status: cancelled → skip; postponed → scheduled with a note
  * (its stored date is already the rescheduled one); anything else → scheduled with the
- * source status kept for the results backfill. A `win:`/`lose:` side is a slot; a concrete
+ * source status kept for the results backfill. A `win:`/`lose:` side is a slot; a `pos:`/`tbd:`
+ * side skips the fixture (`unresolved-side`); a concrete
  * side is a teamRef (smart club materialises a knockout side by replacing the slot).
  */
 export function mapFixture(f: SourceFixture, ctx: FixtureContext): FixtureOutcome {
@@ -557,6 +558,9 @@ export function mapFixture(f: SourceFixture, ctx: FixtureContext): FixtureOutcom
           ofFixtureRef: refs.fixture(ctx.tenant, ctx.seriesId, src.fixtureId),
         },
       };
+    // A `pos:`/`tbd:` placeholder names neither a team nor a fixture to wait on: the fixture is
+    // skipped as unresolved until the admin sets the team (ADR 0018).
+    if (isSlotRef(id)) return null;
     const team = ctx.resolveTeam(id);
     return team ? { ref: team.ref, ground: team.ground } : null;
   };

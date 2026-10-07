@@ -25,7 +25,7 @@ every blocker aborts with its reason, a JSON backup is written before any write,
 
 | what                    | detail                                                                                                                                                                                                                                                                                   |
 | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Series                  | 44 drafts, 1,398 fixtures. 4 more fixtures are parsed but held back (see below). T20 knockouts are **not** written (they need PR B).                                                                                                                                                     |
+| Series                  | 44 drafts, 1,398 fixtures. 4 more fixtures are parsed but held back (see below). T20 knockouts only with `--include-t20-ko` (below).                                                                                                                                                     |
 | Tenant config           | +3 league keys (`mens-t20`, `womens-t20` fixtures-only; `womens-junior-league`), +15 misspelling-only venue aliases                                                                                                                                                                      |
 | Venue registry          | ~77 new rows (`v-*`, surfaces 1). The 21 existing rows that match are reused untouched.                                                                                                                                                                                                  |
 | Clubs, `--append-sides` | TUKS: `third-league` grows 1 → 2 (TUKS 5, TUKS 6) and `u11` gains TUKS C. Pretoria: `veterans-league` key + 2 sides. Pretoria East: `u11` gains PRETORIA EAST C. Counters (`teams/women/juniors`) recomputed.                                                                            |
@@ -299,8 +299,8 @@ npx sst shell --stage prod -- npm --prefix packages/api run import-titans-fixtur
 … -- --revert --include-released --confirm   # only if something was released
 ```
 
-`--revert` backs up then deletes the 44 manifest series (with their umpire appointments and
-sync state). A released series in scope makes `--confirm` refuse unless you pass
+`--revert` backs up then deletes the 44 manifest series, plus the 2 T20 knockouts once imported
+(with their umpire appointments and sync state). A released series in scope makes `--confirm` refuse unless you pass
 `--include-released`. Other `s-titans-*` series aren't touched.
 
 **What `--revert` does NOT undo** (it says so when it finishes):
@@ -339,10 +339,53 @@ Not part of this import. When the union has answered:
   confirms the provisional times. Only the release dialog sets `withheld`.
 - **Vets B will 409 at release** until its 18 TBC fixtures have venues: the release gate places
   them at the home club ground, where 3 of them clash. Set grounds in the console first.
-- **T20 knockouts** (`s-titans-mens-t20-ko`, `s-titans-womens-t20-ko`) need PR B (the `tbd:` slot
-  type and Set team). **Don't import them on a stage before PR B is deployed to that stage.** The
-  CLI rejects them in `--only` until then. The Mens T20 QF/SF (10 Oct) and final (17 Oct) will be
-  in the past by then: import them only with union-confirmed teams, otherwise skip.
+- **T20 knockouts**: see the next section.
+
+## T20 knockouts (PR B, ADR 0018)
+
+`s-titans-mens-t20-ko` (8 rows) and `s-titans-womens-t20-ko` (7 rows) carry `tbd:` sides ("Best
+3rd place", "Runner-up 1", "Community Cup winner"), `pos:` group positions and `win:` links.
+
+**Hard precondition: PR B is deployed to the stage you import into.** Older code reads a `tbd:`
+side as an unknown team ("Unknown team"/"TBA"). The importer can't detect the deployed version,
+so it never writes them by accident: they are built only with `--include-t20-ko`, and `--only`
+refuses their ids without it. Deploy first, then:
+
+```bash
+# dry run (prints what would be written and what is skipped)
+npx sst shell --stage <s> -- npm --prefix packages/api run import-titans-fixtures -- --include-t20-ko --only s-titans-mens-t20-ko,s-titans-womens-t20-ko
+# then the same with --confirm
+```
+
+What gets written: one draft series per bracket, named "<league label> · Knockouts", stages
+Quarter-final / Semi-final / Final (the men's Community Cup row is a "Play-off"), real sheet dates
+and 09:00/13:30 session times, **no ground** (`venueStatus: unresolved`: "WINNER GA (Q1)" means
+the home side's ground once known). Participants are every team in the T20 groups, so Set team
+lists them first. The men's Q1 has the literal team `IRENE VILLAGERS 1` in its away slot (union
+report question).
+
+**Past dates (`--ko-cutoff`, default `--today`).** A knockout fixture dated before the cutoff is
+written only if both teams are known; otherwise it is skipped and listed (dry run and union
+report). The men's QF/SF (10 Oct) and final (17 Oct) are past once this lands, so:
+
+- With no union answer: run with the default cutoff after 17 Oct. Only the 20 Mar 2027 Community
+  Cup play-off is written for the men; the women's bracket is all future.
+- Between 10 and 17 Oct the men's final is future but its semis are skipped: the run refuses
+  ("its home side is the winner of f5, which is skipped"). Either supply the semi-final winners or
+  wait until after 17 Oct.
+- With union-confirmed teams: add them to `KO_RESOLVED` in `titans-fixture-map.ts` by fixture id,
+  as sheet team names (`{ 's-titans-mens-t20-ko': { f1: { home: 'TUKS 1', away: 'IRENE VILLAGERS 1' } } }`).
+  Those fixtures are written with the real teams and the placeholder kept in `slots`, exactly as
+  Set team does. Results are not recorded by this importer.
+
+A fixture already stored is never dropped by the cutoff.
+
+**Set team in the console.** Fixture editor → a placeholder side → "Team to set as home/away" →
+"Set … team". The picker lists the series' teams, then every other club side by club (for the
+"Community Cup winner"). "Revert … to placeholder" puts the placeholder back. A Set team that puts
+the home side's ground into a slot another fixture already holds is refused with the clash panel
+(drafts too). A re-import keeps teams set in the console as long as the sheet still has the same
+placeholder.
 
 ## Union follow-ups
 
@@ -382,7 +425,7 @@ drafts in place without forking ids.
   `titans-fixture-map.ts` (a stale entry is fatal), apply the move in a reissued workbook, then
   dry-run and `--confirm` with `--only s-titans-u11-platinum-b,s-titans-u11-gold-a,…`. `--only`
   takes full series ids and isolates the run: side and name blockers are scoped to those series
-  (a playoff id brings its division in, since its participants are the division's), the strict
+  (a knockout id brings its sheet's division or groups in, since its participants are theirs), the strict
   clash gate ignores other stored series' TBC fixtures, and only those series are written.
   HELD_BACK problems stay global. `--append-sides --only …` scopes the side plan the same way.
 - **Amended workbook:** pass `--file <path>` and update each sheet's expected count in the

@@ -36,7 +36,7 @@
  * migration bundle carries its own `venueWithheld`/`timeWithheld`.
  */
 import { randomUUID } from 'node:crypto';
-import { isSlotRef } from '../../../engine/src/formats.js';
+import { isSlotRef, tbdLabel } from '../../../engine/src/formats.js';
 import { fixtureSyncRef } from '../fixture-identity.js';
 import {
   capVenue,
@@ -801,7 +801,10 @@ export async function applyInboundSchedule(
 /** A readable "Home v Away" for a fixture (participant names, else the raw side). */
 function matchLineOf(series: Series, f: ScheduleFixture): string {
   const name = (side: string | undefined) =>
-    series.participants?.find((p) => p.teamId === side)?.name ?? side ?? '?';
+    series.participants?.find((p) => p.teamId === side)?.name ??
+    (side ? tbdLabel(side) : null) ??
+    side ??
+    '?';
   return `${name(f.home)} v ${name(f.away)}`;
 }
 
