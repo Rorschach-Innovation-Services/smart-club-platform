@@ -209,7 +209,9 @@ export type NameDobIndex = Map<string, Array<{ naturalKey: string; clubName: str
 export function addToNameDobIndex(
   index: NameDobIndex,
   clubName: string,
-  roster: PlayerRegistration[],
+  roster: Array<
+    Pick<PlayerRegistration, 'naturalKey' | 'firstName' | 'lastName' | 'dob' | 'placeholder'>
+  >,
 ): void {
   for (const p of roster) {
     if (p.placeholder === true) continue;
@@ -221,7 +223,10 @@ export function addToNameDobIndex(
   }
 }
 
-/** Read every club's roster (bounded parallel) into a {@link NameDobIndex}. */
+/**
+ * Read every club's roster (bounded parallel, PROJECTED to name + dob — no IDs or contacts)
+ * into a {@link NameDobIndex}.
+ */
 export async function buildNameDobIndex(
   tenant: string,
   clubs: Array<{ id: string; name: string }>,
@@ -231,7 +236,7 @@ export async function buildNameDobIndex(
   for (let i = 0; i < clubs.length; i += CONCURRENCY) {
     const slice = clubs.slice(i, i + CONCURRENCY);
     // eslint-disable-next-line no-await-in-loop -- sequential slices, each internally parallel
-    const rosters = await Promise.all(slice.map((c) => repo.listPlayers(tenant, c.id)));
+    const rosters = await Promise.all(slice.map((c) => repo.listPlayerNameDobRows(tenant, c.id)));
     slice.forEach((c, k) => addToNameDobIndex(index, c.name, rosters[k]));
   }
   return index;

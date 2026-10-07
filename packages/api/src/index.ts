@@ -2632,7 +2632,8 @@ async function registerChairRows(
         ...(nameDob ? { nameDob } : {}),
       })
     : undefined;
-  if (nameDob) addToNameDobIndex(nameDob, club.name, await repo.listPlayers(ra.tenant, club.id));
+  if (nameDob)
+    addToNameDobIndex(nameDob, club.name, await repo.listPlayerNameDobRows(ra.tenant, club.id));
   const warnAt = (p: PlayerRegistration) => {
     const at = nameDob ? possibleExistingRegistrations(nameDob, p) : [];
     return at.length ? { possibleExistingAt: at } : {};
@@ -9229,8 +9230,9 @@ function keepStoredCompetitions(incoming: League[], stored: League[]): League[] 
 /**
  * `integrations` on PUT /platform/tenants/:slug (operator-only):
  *  - `medicoach.goLiveDate`: YYYY-MM-DD, or ''/null to clear it;
- *  - `medicoach.playerSync` (ADR 0018): boolean; absent ⇒ the stored value is kept (the
- *    caller merges it), so a goLiveDate-only save never switches the player sync off.
+ *  - `medicoach.playerSync` (ADR 0018): boolean; absent (incl. an absent/null `medicoach`
+ *    block) ⇒ the stored value is kept (the caller merges it), so only an explicit `false`
+ *    switches the player sync off.
  */
 function validateIntegrations(value: unknown): TenantConfig['integrations'] {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -9413,8 +9415,10 @@ app.put('/platform/tenants/:slug', async (c) => {
     const stored = current.integrations?.medicoach?.playerSync;
     const asked = integrations.medicoach?.playerSync;
     const playerSync = asked ?? stored;
-    if (integrations.medicoach && playerSync !== undefined)
-      integrations.medicoach = { ...integrations.medicoach, playerSync };
+    // Only an explicit `playerSync: false` switches it off: an absent/null `medicoach` block
+    // (or `integrations: {}`) keeps the stored value.
+    if (playerSync !== undefined)
+      integrations.medicoach = { ...(integrations.medicoach ?? {}), playerSync };
     if (playerSync === true) {
       const features = body.features !== undefined ? body.features : current.features;
       if (features?.medicoachSync !== true)

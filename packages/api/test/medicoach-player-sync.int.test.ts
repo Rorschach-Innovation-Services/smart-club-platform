@@ -507,6 +507,37 @@ describe('duplicate prevention (smart club side)', () => {
   });
 });
 
+describe('review resolutions survive the guard', () => {
+  test('a name+dob twin appearing after a link resolution never discards it', async () => {
+    const a = mkPlayer({ firstName: 'Lindo', lastName: 'Zulu', dob: '2003-03-03' });
+    await repo.createPlayer(T, a);
+    await repo.putPendingPlayerSync(T, a.naturalKey, later(), {
+      resolution: { action: 'link', playerId: 'pl_7' },
+    });
+    await repo.createPlayer(
+      T,
+      mkPlayer({ firstName: 'Lindo', lastName: 'Zulu', dob: '2003-03-03', clubId: 'other' }),
+    );
+    answer = () => ({ status: 'linked' });
+    await flush();
+    const sentA = pushes.flatMap((p) => p.players).find((e) => e.ref === ref(a.naturalKey));
+    assert.deepEqual(sentA?.resolution, { action: 'link', playerId: 'pl_7' });
+    assert.equal(await repo.getPlayerReview(T, a.naturalKey), null);
+    await clearPlayerSync();
+  });
+});
+
+describe('projected roster reads', () => {
+  test('the name+dob index read carries no ID number or contact details', async () => {
+    const p = mkPlayer({ email: 'x@y.test' });
+    await repo.createPlayer(T, p);
+    const rows = await repo.listPlayerNameDobRows(T, 'solo');
+    const mine = rows.find((r) => r.naturalKey === p.naturalKey)!;
+    assert.deepEqual(Object.keys(mine).sort(), ['dob', 'firstName', 'lastName', 'naturalKey']);
+    await clearPlayerSync();
+  });
+});
+
 describe('erasure', () => {
   test('erasing a VETERANS club is a plain change: upsert with fewer teams, never erase', async () => {
     const p = mkPlayer({ veteransClubId: 'vets', veteransClub: 'Vets CC' });
@@ -656,6 +687,15 @@ describe('admin + operator surface', () => {
     const keep = await put({ integrations: { medicoach: { goLiveDate: '2026-10-01' } } });
     const kept = (await keep.json()) as TenantConfig;
     assert.deepEqual(kept.integrations?.medicoach, { goLiveDate: '2026-10-01', playerSync: true });
+    // An empty integrations object or a null medicoach block keeps it on too.
+    for (const integrations of [{}, { medicoach: null }]) {
+      const r = await put({ integrations });
+      assert.equal(r.status, 200);
+      assert.equal(((await r.json()) as TenantConfig).integrations?.medicoach?.playerSync, true);
+    }
+    // Only an explicit false switches it off.
+    const off = await put({ integrations: { medicoach: { playerSync: false } } });
+    assert.equal(((await off.json()) as TenantConfig).integrations?.medicoach?.playerSync, false);
     await repo.putTenantConfig(config(true));
     await clearPlayerSync();
   });

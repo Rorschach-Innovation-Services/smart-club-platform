@@ -1773,7 +1773,10 @@ export async function recordPlayerSyncChange(
     const config = opts.config !== undefined ? opts.config : await getTenantConfig(tenant);
     if (!playerSyncEnabled(config)) return 0;
     const at = opts.at ?? new Date().toISOString();
-    for (const nk of keys) await putPendingPlayerSync(tenant, nk, at);
+    // Bounded parallel slices (club erasure / backfill can touch hundreds of people).
+    for (let i = 0; i < keys.length; i += 8)
+      // eslint-disable-next-line no-await-in-loop -- sequential slices, each internally parallel
+      await Promise.all(keys.slice(i, i + 8).map((nk) => putPendingPlayerSync(tenant, nk, at)));
     return keys.length;
   } catch (err) {
     console.warn(
@@ -2889,6 +2892,32 @@ export async function listPlayers(tenant: string, clubId: string): Promise<Playe
     ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
   });
   return items.map((i) => stripKeys<PlayerRegistration>(i)!);
+}
+
+/**
+ * A club's roster PROJECTED to the identity fields a name + dob match needs (ADR 0018's
+ * registration-time warning): no ID number, contact or document metadata leaves DynamoDB.
+ */
+export async function listPlayerNameDobRows(
+  tenant: string,
+  clubId: string,
+): Promise<
+  Array<Pick<PlayerRegistration, 'naturalKey' | 'firstName' | 'lastName' | 'dob' | 'placeholder'>>
+> {
+  const { pk, skPrefix } = playersListKey(tenant, clubId);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    ProjectionExpression: 'sk, firstName, lastName, dob, placeholder',
+  });
+  return items.map((i) => ({
+    naturalKey: String(i.sk).slice(skPrefix.length),
+    firstName: String(i.firstName ?? ''),
+    lastName: String(i.lastName ?? ''),
+    dob: String(i.dob ?? ''),
+    ...(i.placeholder === true ? { placeholder: true as const } : {}),
+  }));
 }
 
 /**
