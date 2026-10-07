@@ -11738,8 +11738,10 @@ app.post('/admin/export-log', async (c) => {
  * 404 only when NOTHING exists in any category — a person already removed via the per-club
  * delete (or a window-rejected-only registrant) has no player row but still has PII on
  * clearance rows, and that must stay erasable. 409 while a clearance naming them is pending
- * (or a row is clearance-pending), and on a lost race with a concurrent clearance. Data already
- * exported to Medicoach is NOT recalled (no delete signal exists). Returns per-category counts.
+ * (or a row is clearance-pending), and on a lost race with a concurrent clearance. With the
+ * medicoach player sync on (ADR 0018) the erasure queues an `erase` tombstone, so medicoach
+ * anonymises the player on the next sync; without it, data already exported to medicoach is not
+ * recalled. Returns per-category counts.
  */
 app.delete('/admin/players/:nk', async (c) => {
   const ra = c.get('requestAuth')!;
