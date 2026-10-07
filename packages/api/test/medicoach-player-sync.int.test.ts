@@ -260,6 +260,24 @@ describe('repo write hooks', () => {
   });
 });
 
+describe('the flag check behind every player write', () => {
+  test('a caller-supplied config is used as-is (no read): flag on in it, off in the table', async () => {
+    await repo.putTenantConfig(config(false));
+    const p = mkPlayer();
+    await repo.createPlayer(T, p); // off in the table → nothing
+    assert.equal(await rowOf(p.naturalKey), null);
+    const queued = await repo.recordPlayerSyncChange(T, p.naturalKey, { config: config(true) });
+    assert.equal(queued, 1);
+    assert.ok(await rowOf(p.naturalKey));
+    // A config write in this process is seen at once (the short flag cache is invalidated).
+    await repo.putTenantConfig(config(true));
+    const q = mkPlayer();
+    await repo.createPlayer(T, q);
+    assert.ok(await rowOf(q.naturalKey));
+    await clearPlayerSync();
+  });
+});
+
 describe('flush', () => {
   test('pushes the rebuilt desired state, signed; created deletes the row', async () => {
     const p = mkPlayer({ email: ' Sipho@Example.COM ', guardianName: 'Thandi' });
@@ -472,6 +490,41 @@ describe('reviews', () => {
     answer = () => ({ status: 'created' });
     await flush();
     assert.equal(await rowOf(p.naturalKey), null, 'gone once medicoach accepts it');
+    await clearPlayerSync();
+  });
+
+  test('a slow medicoach: the instant send gives up at the short interactive timeout → queued', async () => {
+    const p = mkPlayer();
+    await repo.createPlayer(T, p);
+    answer = () => ({
+      status: 'needs-review',
+      candidates: [{ playerId: 'pl_s', name: 'S', dob: null, institutionName: null }],
+    });
+    await flush();
+    process.env.MEDICOACH_RESOLVE_TIMEOUT_MS = '300';
+    duringPush = () => new Promise((r) => setTimeout(r, 1500)); // slower than 300 ms, far below 25 s
+    answer = () => ({ status: 'linked' });
+    try {
+      const started = Date.now();
+      const res = await call(
+        'POST',
+        `/integrations/medicoach/player-reviews/${p.naturalKey}/resolve`,
+        { action: 'link', medicoachPlayerId: 'pl_s' },
+      );
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), { status: 'queued', sent: 0, queued: 1, review: 0 });
+      assert.ok(Date.now() - started < 1500, 'did not wait for the slow medicoach');
+      const row = await rowOf(p.naturalKey);
+      assert.equal(row?.lastError, 'medicoach unreachable: TimeoutError');
+      assert.deepEqual(row?.resolution, { action: 'link', playerId: 'pl_s' });
+    } finally {
+      delete process.env.MEDICOACH_RESOLVE_TIMEOUT_MS;
+      duringPush = null;
+      await new Promise((r) => setTimeout(r, 1300)); // let the stub's slow answer drain
+    }
+    // The cron (25 s timeout) sends it.
+    await flush();
+    assert.equal(await rowOf(p.naturalKey), null);
     await clearPlayerSync();
   });
 

@@ -79,6 +79,13 @@ export function playerFlushCap(trigger: 'cron' | 'manual' | 'cli'): number {
  * ~3–5 s with 3× spikes, so the fixture push's 10 s would cut real work short.
  */
 const HTTP_TIMEOUT_MS = 25_000;
+
+/**
+ * The timeout for an admin's review decision sent at once (behind the 30 s API Gateway
+ * limit): a slow medicoach leaves the row queued for the cron instead of risking a 504 that
+ * would tell the admin a decision failed when it was saved.
+ */
+export const INTERACTIVE_PUSH_TIMEOUT_MS = 10_000;
 const ROSTER_CONCURRENCY = 8;
 
 /* ─────────────────────────── Snapshot (one read of the tenant) ─────────────────────────── */
@@ -246,6 +253,8 @@ export interface PlayerPushDeps {
   url: string;
   secret: string;
   fetch?: typeof fetch;
+  /** Per-request timeout; default HTTP_TIMEOUT_MS (25 s). Interactive callers pass less. */
+  timeoutMs?: number;
 }
 
 /**
@@ -274,7 +283,7 @@ export async function postPlayerBatch(
         ...signRequest({ secret: deps.secret, method: 'POST', pathAndQuery: PLAYERS_PATH, body }),
       },
       body,
-      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+      signal: AbortSignal.timeout(deps.timeoutMs ?? HTTP_TIMEOUT_MS),
     });
   } catch (err) {
     throw new Error(`medicoach unreachable: ${err instanceof Error ? err.name : 'request failed'}`);

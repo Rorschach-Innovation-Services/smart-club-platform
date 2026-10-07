@@ -73,6 +73,15 @@ export function medicoachSyncUrl(): string {
   ).replace(/\/+$/, '');
 }
 
+/**
+ * The per-request timeout of the review-decision push (ADR 0018), default 10 s. Overridable
+ * via MEDICOACH_RESOLVE_TIMEOUT_MS (tests, and ops tuning without a code change).
+ */
+export function medicoachResolveTimeoutMs(fallback: number): number {
+  const v = Number(process.env.MEDICOACH_RESOLVE_TIMEOUT_MS);
+  return Number.isFinite(v) && v > 0 ? v : fallback;
+}
+
 export function medicoachSyncSecret(): string {
   return process.env.MEDICOACH_SYNC_SECRET ?? fromSstResource('MedicoachSyncSecret', 'value') ?? '';
 }

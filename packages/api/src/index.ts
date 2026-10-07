@@ -63,7 +63,11 @@ import {
 } from './medicoach-sync/series-results.js';
 import { MedicoachSyncError } from './medicoach-sync/puller.js';
 import { runTenantSync } from './medicoach-sync/run.js';
-import { flushPlayerOutbox, playerSyncCoverageProbe } from './medicoach-sync/players.js';
+import {
+  INTERACTIVE_PUSH_TIMEOUT_MS,
+  flushPlayerOutbox,
+  playerSyncCoverageProbe,
+} from './medicoach-sync/players.js';
 import { playerSyncEnabled } from './medicoach-sync/player-placement.js';
 import { explainSyncError } from './medicoach-sync/explain.js';
 import { carrySyncOwnedFields, fixtureSyncRef } from './fixture-identity.js';
@@ -82,7 +86,12 @@ import {
   seriesHoldsSchedule,
   type ScheduleFixture,
 } from './medicoach-sync/schedule.js';
-import { captainsReportLinkSecret, medicoachSyncSecret, medicoachSyncUrl } from './env.js';
+import {
+  captainsReportLinkSecret,
+  medicoachResolveTimeoutMs,
+  medicoachSyncSecret,
+  medicoachSyncUrl,
+} from './env.js';
 import { VersionConflictError, LastAdminError } from './repo.js';
 import { clubIdFromName } from './club-id.js';
 import {
@@ -5346,6 +5355,8 @@ async function deliverResolvedPlayers(
       secret: medicoachSyncSecret(),
       config,
       only: naturalKeys,
+      // Interactive: a short timeout so a slow medicoach degrades to `queued`, never a 504.
+      timeoutMs: medicoachResolveTimeoutMs(INTERACTIVE_PUSH_TIMEOUT_MS),
     });
   } catch (err) {
     console.warn(
