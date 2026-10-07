@@ -34,6 +34,7 @@
     "recall-release": "tsx src/recall-fixture-release.ts",
     "shift-fixture-dates": "tsx src/shift-fixture-dates.ts",
     "patch-fixtures": "tsx src/patch-fixtures.ts",
+    "reminder-fixtures": "tsx src/reminder-fixtures.ts",
     "import-emcu-fixtures": "tsx src/import-emcu-fixtures.ts",
     "bootstrap-emcu-prereqs": "tsx src/bootstrap-emcu-fixture-prereqs.ts",
     "bootstrap-admin": "tsx src/bootstrap-admin.ts",

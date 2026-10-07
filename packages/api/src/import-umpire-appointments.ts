@@ -310,7 +310,7 @@ export function resolveSheetTeam(
 }
 
 /** A fixture side's club + lettered index (`tm_<club>_<league>_<i>`), from the series. */
-function sideOf(series: Series, teamId: unknown): ResolvedTeam | undefined {
+export function sideOf(series: Series, teamId: unknown): ResolvedTeam | undefined {
   if (typeof teamId !== 'string' || !teamId) return undefined;
   const p = (series.participants ?? []).find((x) => x.teamId === teamId);
   const clubId = p?.clubId ?? teamId;
@@ -319,7 +319,7 @@ function sideOf(series: Series, teamId: unknown): ResolvedTeam | undefined {
 }
 
 /** A plain sheet name matches the club's plain or A side; "X A" matches A or plain. */
-function sameTeam(sheet: ResolvedTeam, fixtureSide: ResolvedTeam | undefined): boolean {
+export function sameTeam(sheet: ResolvedTeam, fixtureSide: ResolvedTeam | undefined): boolean {
   if (!fixtureSide || sheet.clubId !== fixtureSide.clubId) return false;
   const a = sheet.side ?? 0;
   const b = fixtureSide.side ?? 0;
