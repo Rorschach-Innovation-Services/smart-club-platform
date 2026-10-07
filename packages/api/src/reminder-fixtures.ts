@@ -33,6 +33,7 @@ import { writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { buildClubIndex } from './club-name-resolve.js';
 import type { SheetGrid } from './emcu-fixture-map.js';
+import { cellDate, cellText, cellTime } from './xlsx-cells.js';
 import { resolveSheetTeam, sameTeam, sideOf } from './import-umpire-appointments.js';
 import {
   canonicalJson,
@@ -113,76 +114,11 @@ export interface ParsedReminderWorkbook {
 /** Minimum share of a sheet's content rows that must read as fixtures (else refused). */
 export const MIN_RECOGNISED_RATIO = 0.75;
 
-const pad = (n: number) => String(n).padStart(2, '0');
 const DAY_MS = 86_400_000;
-const EXCEL_EPOCH_MS = Date.UTC(1899, 11, 30);
 
-const unwrap = (v: unknown): unknown =>
-  v && typeof v === 'object' && !(v instanceof Date) && 'result' in (v as object)
-    ? (v as { result: unknown }).result
-    : v;
-
-/** Text of a cell (rich text joined, formula results unwrapped), whitespace collapsed. */
-export function cellText(raw: unknown): string {
-  const v = unwrap(raw);
-  if (v == null || v instanceof Date) return '';
-  if (typeof v === 'object') {
-    const o = v as Record<string, unknown>;
-    if (Array.isArray(o.richText))
-      return (o.richText as Array<{ text: string }>)
-        .map((r) => r.text)
-        .join('')
-        .replace(/\s+/g, ' ')
-        .trim();
-    if (typeof o.text === 'string') return o.text.replace(/\s+/g, ' ').trim();
-    return '';
-  }
-  return String(v).replace(/\s+/g, ' ').trim();
-}
-
-/**
- * A calendar date cell → ISO: a real Date (exceljs, ≥1970), an Excel date SERIAL (a plain
- * number when the cell carries no date format — 46305 = 2026-10-10), or ISO / d/m/yyyy text.
- */
-export function cellDate(raw: unknown): string | undefined {
-  const v = unwrap(raw);
-  if (v instanceof Date)
-    return v.getUTCFullYear() >= 1970 ? v.toISOString().slice(0, 10) : undefined;
-  if (typeof v === 'number') {
-    // 20000 ≈ 1954, 80000 ≈ 2119: anything outside is not a plausible fixture date.
-    if (v < 20000 || v >= 80000) return undefined;
-    return new Date(EXCEL_EPOCH_MS + Math.floor(v) * DAY_MS).toISOString().slice(0, 10);
-  }
-  const t = cellText(v);
-  const iso = t.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
-  const dmy = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (dmy) {
-    const d = new Date(Date.UTC(Number(dmy[3]), Number(dmy[2]) - 1, Number(dmy[1])));
-    if (d.getUTCDate() === Number(dmy[1])) return d.toISOString().slice(0, 10);
-  }
-  return undefined;
-}
-
-/**
- * A time-of-day cell → HH:MM: a 1899-epoch Date (exceljs reads a time-formatted fraction so,
- * wall clock in the UTC fields), a bare day FRACTION (0.5417 = 13:00), or "HH:MM" text.
- */
-export function cellTime(raw: unknown): string | undefined {
-  const v = unwrap(raw);
-  if (v instanceof Date) {
-    if (v.getUTCFullYear() >= 1970) return undefined;
-    return `${pad(v.getUTCHours())}:${pad(v.getUTCMinutes())}`;
-  }
-  if (typeof v === 'number') {
-    if (!(v > 0 && v < 1)) return undefined;
-    const mins = Math.round(v * 24 * 60);
-    return `${pad(Math.floor(mins / 60) % 24)}:${pad(mins % 60)}`;
-  }
-  const m = cellText(v).match(/^(\d{1,2})[:h.](\d{2})$/i);
-  if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) return undefined;
-  return `${pad(Number(m[1]))}:${m[2]}`;
-}
+// Cell readers live in xlsx-cells.ts (shared with the EMCU and umpire importers); re-exported
+// here for the existing callers and tests.
+export { cellDate, cellText, cellTime };
 
 const isValueCell = (v: unknown) => cellDate(v) !== undefined || cellTime(v) !== undefined;
 

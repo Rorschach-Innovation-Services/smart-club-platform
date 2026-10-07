@@ -58,6 +58,17 @@ describe('reminder parser — cell values', () => {
     assert.equal(cellTime('Reminder Fixtures: 10th & 11th October 2026'), undefined);
     assert.equal(cellTime('25:00'), undefined);
   });
+
+  test('a combined date+time cell yields BOTH the date and the time', () => {
+    const dt = new Date(Date.UTC(2026, 9, 11, 13, 30));
+    assert.equal(cellDate(dt), SUN);
+    assert.equal(cellTime(dt), '13:30');
+    assert.equal(cellTime(new Date(Date.UTC(2026, 9, 11))), undefined, 'midnight = date only');
+    assert.equal(cellDate(46306.5625), SUN);
+    assert.equal(cellTime(46306.5625), '13:30');
+    assert.equal(cellTime(46306), undefined, 'a whole serial has no time');
+    assert.equal(cellTime(1234.5), undefined, 'outside the serial range: neither');
+  });
 });
 
 describe('reminder parser — sample workbook', async () => {
@@ -153,6 +164,23 @@ describe('reminder parser — grid edge cases', () => {
     assert.equal(p.rows.length, 3);
     assert.equal(p.skippedRows[0].sheetRow, 1);
     assert.match(p.skippedRows[0].reason, /before any dated/);
+  });
+
+  test('a datetime block header (one cell) sets both the block date and time', () => {
+    const p = grid([
+      ['Week 1', '', '', '', new Date(Date.UTC(2026, 9, 11, 13, 30)), 'Venue:'],
+      ['Alpha', '', 'v', '', 'Beta', 'Beta Park'],
+      ['Week 2', '', '', '', 46313.375, 'Venue:'],
+      ['Gamma', '', 'v', '', 'Delta', 'Gamma Field'],
+    ]);
+    assert.equal(p.sheets[0].status, 'ok');
+    assert.deepEqual(
+      p.rows.map((r) => [r.date, r.time]),
+      [
+        [SUN, '13:30'],
+        ['2026-10-18', '09:00'],
+      ],
+    );
   });
 
   test('a sheet without a heading takes its competition from the sheet name', () => {
