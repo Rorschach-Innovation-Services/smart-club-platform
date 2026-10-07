@@ -604,6 +604,59 @@ describe('payloads', () => {
     assert.equal(body.result, undefined);
   });
 
+  test('a report the chair forwards still carries the scorecard on the captain’s link, and submits', async () => {
+    await storeResult();
+    await repo.putFixtureScorecard(T, card());
+    await repo.createPlayer(T, {
+      naturalKey: 'k-captain',
+      clubId: 'umzinto',
+      firstName: 'Match',
+      lastName: 'Captain',
+      isMinor: false,
+      status: 'active',
+      email: 'captain@umzinto.test',
+    } as never);
+    const chairToken = await tokenFor('umzinto');
+    const cands = (await (
+      await app.request(`/captains-report-link/${chairToken}/forward-candidates`)
+    ).json()) as { candidates: Array<{ id: string; name: string }> };
+    assert.deepEqual(
+      cands.candidates.map((c) => c.name),
+      ['Match Captain'],
+    );
+    const fwd = await app.request(`/captains-report-link/${chairToken}/forward`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ candidateId: cands.candidates[0].id }),
+    });
+    assert.equal(fwd.status, 200);
+    assert.equal((await getReport('umzinto')).recipient.kind, 'captain');
+
+    // The captain's own link (the re-pointed recipient) carries the full context.
+    const body = (await (await linkGet('umzinto')).json()) as Record<string, unknown>;
+    assert.notEqual(await tokenFor('umzinto'), chairToken);
+    assert.deepEqual(body.scorecard, {
+      matchState: 'Umzinto CC won by 23 runs',
+      innings: innings(),
+      fetchedAt: CARD_AT,
+    });
+    assert.equal((body.result as { summary: string }).summary, 'Umzinto CC won by 23 runs');
+    assert.equal(body.medicoachMatchUrl, 'https://medicoach.example/matches/pma-1');
+
+    // The gate holds for the captain too, and the answer submits.
+    const blocked = await linkPut('umzinto', complete());
+    assert.equal(blocked.status, 400);
+    assert.equal(((await blocked.json()) as { code: string }).code, 'scorecard_required');
+    const res = await linkPut(
+      'umzinto',
+      complete({ scorecard: { action: 'confirmed', againstFetchedAt: CARD_AT } }),
+    );
+    assert.equal(res.status, 200);
+    const stored = await getReport('umzinto');
+    assert.equal(stored.status, 'submitted');
+    assert.equal(stored.scorecard?.action, 'confirmed');
+  });
+
   test('the portal DETAIL route carries the context; the list never does', async () => {
     await storeResult();
     await repo.putFixtureScorecard(T, card());

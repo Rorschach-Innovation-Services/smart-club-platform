@@ -194,6 +194,47 @@ describe('CaptainsReportScorecardsPage', () => {
     expect(within(chips).getByRole('button', { name: /^All/ })).toHaveTextContent('All·2');
   });
 
+  it('renders a side that closed without an answer as "Not asked", counted on its chip', async () => {
+    list.mockResolvedValue(
+      payload({
+        status: 'not-asked',
+        total: 1,
+        counts: { all: 3, pending: 0, confirmed: 1, correction: 1, stale: 1, 'not-asked': 1 },
+        tenants: [
+          {
+            tenant: 'dolphins',
+            tenantName: 'Dolphins Cricket',
+            rows: [
+              row({
+                fixtureId: 'f3',
+                homeTeamName: 'Kloof CC',
+                awayTeamName: 'Umzinto CC',
+                home: {
+                  reportId: 's-1~f3~kloof',
+                  reportRef: 'CR-2026-0005',
+                  clubId: 'kloof',
+                  clubName: 'Kloof CC',
+                  reportStatus: 'submitted',
+                  scorecardStatus: 'not-asked',
+                  submittedAt: '2026-10-05T09:00:00.000Z',
+                },
+                away: undefined,
+              }),
+            ],
+          },
+        ],
+      }),
+    );
+    renderPage();
+    const side = await screen.findByTestId('scc-side-kloof');
+    expect(within(side).getByText('Not asked')).toHaveClass('pill-muted');
+    expect(side).toHaveTextContent('CR-2026-0005');
+    const chips = screen.getByRole('group', { name: 'Scorecard status' });
+    expect(within(chips).getByRole('button', { name: /^Not asked/ })).toHaveTextContent(
+      'Not asked·1',
+    );
+  });
+
   it('the client picker re-queries for one tenant and lists every tenant', async () => {
     list.mockResolvedValue(payload());
     renderPage();

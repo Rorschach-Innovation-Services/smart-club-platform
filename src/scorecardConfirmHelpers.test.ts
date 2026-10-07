@@ -12,6 +12,8 @@ import {
   headlineScore,
   inningsHeading,
   inningsHint,
+  isOwnTeam,
+  ownInningsFlags,
   totalDetail,
 } from './scorecardConfirmHelpers';
 
@@ -108,5 +110,44 @@ describe('feedbackProblem', () => {
     expect(feedbackProblem('   ')).toMatch(/what needs correcting/);
     expect(feedbackProblem('x'.repeat(FEEDBACK_MAX))).toBeNull();
     expect(feedbackProblem('x'.repeat(FEEDBACK_MAX + 1))).toMatch(/2000 characters/);
+  });
+});
+
+describe('own innings matching', () => {
+  it('matches the same name, ignoring case and spacing', () => {
+    expect(isOwnTeam('  clares   cc ', 'Clares CC')).toBe(true);
+  });
+
+  it('strips the "CC" / "Cricket Club" suffix on either side', () => {
+    expect(isOwnTeam('Clares', 'Clares CC')).toBe(true);
+    expect(isOwnTeam('Clares CC', 'Clares Cricket Club')).toBe(true);
+  });
+
+  it('accepts a team named for the club ("Clares 2nd XI")', () => {
+    expect(isOwnTeam('Clares 2nd XI', 'Clares CC')).toBe(true);
+  });
+
+  it('matches nothing else: another club, a mere letter prefix, a blank club', () => {
+    expect(isOwnTeam('Chatsworth', 'Clares CC')).toBe(false);
+    expect(isOwnTeam('Claresholm', 'Clares CC')).toBe(false);
+    expect(isOwnTeam('Clares', '  ')).toBe(false);
+  });
+
+  it('flags every innings the club batted, none when it batted in none', () => {
+    expect(ownInningsFlags(['Chatsworth', 'Clares', 'Chatsworth', 'Clares'], 'Clares CC')).toEqual([
+      false,
+      true,
+      false,
+      true,
+    ]);
+    expect(ownInningsFlags(['Chatsworth', 'Umzinto'], 'Clares CC')).toEqual([false, false]);
+  });
+
+  it('a derby of two sides named for the club keeps only the exact name, else none', () => {
+    expect(ownInningsFlags(['Clares 2nd XI', 'Clares'], 'Clares CC')).toEqual([false, true]);
+    expect(ownInningsFlags(['Clares 2nd XI', 'Clares 3rd XI'], 'Clares CC')).toEqual([
+      false,
+      false,
+    ]);
   });
 });

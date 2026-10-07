@@ -41,6 +41,7 @@ import {
 import { applyTheme } from './config';
 import { formatSastWeekdayDay, formatWeekdayDayYear } from './dates';
 import { qk } from './query';
+import { ownInningsFlags } from './scorecardConfirmHelpers';
 import {
   CONCERN_AREAS,
   RATING_CRITERIA,
@@ -529,8 +530,8 @@ export type ReportShell = Pick<
 > &
   Partial<Pick<CaptainsReport, 'scorecard'>>;
 
-/** Same name, ignoring case and outer spaces — no fuzzier than that. */
-const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+/** An API message shown as its own sentence: first letter upper-cased. */
+const sentenceCase = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 /** A stored answer as the form edits it (the server-only stamps dropped). */
 const toChoice = (
@@ -575,11 +576,11 @@ function MatchScorecardSection({
   const team = (side: 'home' | 'away', name: string) =>
     report.side === side ? <strong>{name}</strong> : <span>{name}</span>;
   // Own innings first (stable otherwise); it opens, or the first innings when none is ours.
-  const innings = (card?.innings ?? []).map((inn, i) => ({
-    inn,
-    i,
-    own: sameName(inn.battingTeamName, report.clubName),
-  }));
+  const ownFlags = ownInningsFlags(
+    (card?.innings ?? []).map((inn) => inn.battingTeamName),
+    report.clubName,
+  );
+  const innings = (card?.innings ?? []).map((inn, i) => ({ inn, i, own: ownFlags[i] }));
   innings.sort((a, b) => Number(b.own) - Number(a.own) || a.i - b.i);
   const anyOwn = innings.some((x) => x.own);
   return (
@@ -1734,7 +1735,7 @@ export function CaptainsReportLinkPage() {
       <div className="cr-done">
         <div className="cr-done-title">This report is closed</div>
         <div className="cr-done-sub">
-          {query.error instanceof ApiError && query.error.message.replace(/\.$/, '')}.
+          {query.error instanceof ApiError && sentenceCase(query.error.message.replace(/\.$/, ''))}.
         </div>
       </div>
     );

@@ -95,6 +95,42 @@ export function feedbackProblem(text: string): string | null {
   return null;
 }
 
+/** Club / team name reduced for matching: lowercase, no punctuation, no "CC"/"Cricket Club". */
+function normName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\b(cricket club|cc)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Whether a scorecard team name is the club's own side: "Clares", "Clares CC" and
+ * "Clares 2nd XI" all match the club "Clares CC" (suffixes stripped, then equal or a
+ * word-boundary prefix). A blank club name matches nothing.
+ */
+export function isOwnTeam(teamName: string, clubName: string): boolean {
+  const club = normName(clubName);
+  if (!club) return false;
+  const team = normName(teamName);
+  return team === club || team.startsWith(`${club} `);
+}
+
+/**
+ * Per innings, whether the club batted in it. When the loose match claims more than one
+ * distinct batting side (a derby — "Clares" vs "Clares 2nd XI"), only an exact (normalized)
+ * name keeps the mark; still ambiguous → nothing is marked.
+ */
+export function ownInningsFlags(battingTeamNames: string[], clubName: string): boolean[] {
+  const loose = battingTeamNames.map((n) => isOwnTeam(n, clubName));
+  const sides = new Set(battingTeamNames.filter((_, i) => loose[i]).map(normName));
+  if (sides.size <= 1) return loose;
+  const club = normName(clubName);
+  const exact = battingTeamNames.map((n) => normName(n) === club);
+  return exact.some(Boolean) ? exact : battingTeamNames.map(() => false);
+}
+
 /** "UKZN CC 156/7 · Crusaders CC 149/9" — a missing score reads "—". */
 export function headlineScore(entry: {
   homeTeamName: string;

@@ -232,10 +232,30 @@ describe('the match scorecard section', () => {
     ).toBeTruthy();
   });
 
+  it('the card names the side loosely ("African Warriors" for "African Warriors CC"): still ours, first and open', () => {
+    renderWithProviders(
+      <CaptainsReportForm
+        report={shell({
+          side: 'home',
+          clubName: 'African Warriors CC',
+          opponentName: 'Umzinto CC',
+        })}
+        registry={REGISTRY}
+        onSubmit={vi.fn()}
+        scorecardContext={WITH_CARD}
+      />,
+    );
+    const [first, second] = within(section()).getAllByRole('button', { name: / — \d+\/\d+/ });
+    expect(first).toHaveTextContent(/^African Warriors — 161\/6 \(20 ov\)Your innings/);
+    expect(first).toHaveAttribute('aria-expanded', 'true');
+    expect(second).not.toHaveTextContent('Your innings');
+    expect(second).toHaveAttribute('aria-expanded', 'false');
+  });
+
   it('no innings carries the club’s name: the first one opens', () => {
     renderWithProviders(
       <CaptainsReportForm
-        report={shell({ clubName: 'Umzinto Cricket Club' })}
+        report={shell({ clubName: 'Port Shepstone CC' })}
         registry={REGISTRY}
         onSubmit={vi.fn()}
         scorecardContext={WITH_CARD}
@@ -486,6 +506,23 @@ describe('the club portal', () => {
     expect(
       screen.getByText('Confirm the scorecard', { selector: '.cr-steps li' }),
     ).toBeInTheDocument();
+  });
+});
+
+describe('a closed link', () => {
+  it('reads as two sentences, the API reason capitalised', async () => {
+    vi.mocked(api.getLinkedCaptainsReport).mockRejectedValue(
+      new ApiError(410, 'this report has already been submitted'),
+    );
+    renderWithProviders(
+      <MemoryRouter initialEntries={['/r/tok.sig']}>
+        <Routes>
+          <Route path="/r/:token" element={<CaptainsReportLinkPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText('This report is closed')).toBeInTheDocument();
+    expect(screen.getByText('This report has already been submitted.')).toBeInTheDocument();
   });
 });
 

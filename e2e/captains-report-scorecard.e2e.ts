@@ -351,10 +351,11 @@ test('home, by link on a phone: the scorecard is required, then confirmed', asyn
   const section = p.getByTestId('report-scorecard');
   await expect(section.getByRole('heading', { name: /^Clares — 152\/6 \(20 ov\)/ })).toBeVisible();
   // The innings is a disclosure: its summary toggles the tables, and the answer never hides.
-  // (The card's "Clares" is not the club's "Clares CC", so no innings is marked as ours — the
-  // first one opens.)
+  // (The card's "Clares" is the club's "Clares CC" with the suffix dropped: it is marked as
+  // ours and starts open.)
   const toggle = section.getByRole('button', { name: /^Clares — 152\/6/ });
   await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(toggle).toContainText('Your innings');
   const batting = section.getByRole('region', { name: 'Clares batting' });
   const answer = section.getByRole('radiogroup', { name: 'Are these stats correct?' });
   await toggle.click();
@@ -396,6 +397,7 @@ test('home, by link on a phone: the scorecard is required, then confirmed', asyn
   await expect(p.locator('.cr-summary-row', { hasText: 'Scorecard' })).toContainText('Confirmed');
   await p.reload();
   await expect(p.getByText('This report is closed')).toBeVisible();
+  await expect(p.getByText('This report has already been submitted.')).toBeVisible();
   await ctx.close();
 });
 
@@ -408,6 +410,10 @@ test('away, in the club portal: a correction needs its text, then submits', asyn
   // The form is fed by the report's detail route — the only response with the scorecard.
   const section = page.getByTestId('report-scorecard');
   await expect(section.getByRole('heading', { name: /^Clares — 152\/6 \(20 ov\)/ })).toBeVisible();
+  // Chatsworth did not bat on this card: nothing is marked as theirs, the first innings opens.
+  const toggle = section.getByRole('button', { name: /^Clares — 152\/6/ });
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(toggle).not.toContainText('Your innings');
 
   await rateUmpires(page, '5');
   await page.getByRole('combobox', { name: "Captain's name" }).fill(`Away captain ${RUN}`);
