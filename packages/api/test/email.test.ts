@@ -20,6 +20,15 @@ import {
   postponementDeclinedEmailContent,
   fixtureReminderEmailContent,
   fixtureReminderDateLabel,
+  clearancePendingEmailContent,
+  clearanceResolvedEmailContent,
+  clearanceReopenedSourceEmailContent,
+  clearanceReopenedDestEmailContent,
+  clearanceOpenedDestEmailContent,
+  clearanceOpenedAdminEmailContent,
+  clearanceOpenedAdminSummaryEmailContent,
+  clearanceAutoRejectedAdminEmailContent,
+  clearanceReminderDigestEmailContent,
 } from '../src/notify/email.js';
 import { orgCopy } from '../src/branding.js';
 
@@ -345,5 +354,191 @@ describe("captainsReportDueEmailContent · the captain's report link", () => {
     const { captainsReportDueEmailContent } = await import('../src/notify/email.js');
     const { text } = captainsReportDueEmailContent({ ...input, forwardedBy: 'Uma Chair' });
     assert.match(text, /Uma Chair asked you to complete/);
+  });
+});
+
+describe('clearance notice deep links', () => {
+  const CHAIR_LINK = 'https://glenwood.example.com/club/c1/clearances?clearance=clr-1&x=<y>';
+  const ADMIN_LINK = 'https://glenwood.example.com/admin/clearances?clearance=clr-1';
+  const LIST_LINK = 'https://glenwood.example.com/admin/clearances';
+  const chairCopy = {
+    to: 'chair@example.com',
+    chairName: 'Sam',
+    fromClubName: 'Northlands CC',
+    playerName: 'Thabo Nkosi',
+    toClubName: 'Glenwood CC',
+  };
+  const adminCopy = {
+    to: 'admin@example.com',
+    fromClubName: 'Northlands CC',
+    playerName: 'Thabo Nkosi',
+    toClubName: 'Glenwood CC',
+  };
+
+  type Content = { subject: string; text: string; html: string };
+  /** Every chair builder, rendered with and without its link. */
+  const chairBuilders: Array<[string, (link?: string) => Content]> = [
+    ['pending', (portalLink) => clearancePendingEmailContent({ ...chairCopy, portalLink })],
+    [
+      'resolved (approved)',
+      (portalLink) =>
+        clearanceResolvedEmailContent({ ...chairCopy, outcome: 'approved', portalLink }),
+    ],
+    [
+      'resolved (rejected, with reason)',
+      (portalLink) =>
+        clearanceResolvedEmailContent({
+          ...chairCopy,
+          outcome: 'rejected',
+          reason: 'unpaid fees',
+          rejectOutcome: 'source-reactivated',
+          portalLink,
+        }),
+    ],
+    [
+      'reopened (source)',
+      (portalLink) => clearanceReopenedSourceEmailContent({ ...chairCopy, portalLink }),
+    ],
+    [
+      'reopened (destination)',
+      (portalLink) => clearanceReopenedDestEmailContent({ ...chairCopy, portalLink }),
+    ],
+    [
+      'opened (destination)',
+      (portalLink) => clearanceOpenedDestEmailContent({ ...chairCopy, portalLink }),
+    ],
+  ];
+
+  for (const [name, build] of chairBuilders) {
+    test(`${name}: the link rides in text + HTML, right before the union-office fallback`, () => {
+      const { text, html } = build(CHAIR_LINK);
+      assert.ok(text.includes(`Review it here: ${CHAIR_LINK}\n\n`));
+      const escaped =
+        'https://glenwood.example.com/club/c1/clearances?clearance=clr-1&amp;x=&lt;y&gt;';
+      assert.ok(html.includes(`<p>Review it here: <a href="${escaped}">${escaped}</a></p>`));
+      assert.ok(!html.includes('<y>'), 'the link is HTML-escaped');
+      // The escape hatch for a chair with no portal login always stays, after the link.
+      assert.ok(
+        text.indexOf('Review it here') < text.indexOf('contact your union office'),
+        'link line first, then the union-office fallback',
+      );
+    });
+
+    test(`${name}: with no link the body is unchanged — no link line, no anchor`, () => {
+      const without = build();
+      assert.ok(!without.text.includes('Review it here'));
+      assert.ok(!without.html.includes('<a '));
+      assert.match(without.text, /contact your union office/);
+      // Adding a link only inserts the link paragraph: strip it and the bodies match exactly.
+      const withLink = build(CHAIR_LINK);
+      assert.equal(withLink.text.replace(`Review it here: ${CHAIR_LINK}\n\n`, ''), without.text);
+      assert.equal(
+        withLink.html.replace(/<p>Review it here: <a [^]*?<\/a><\/p>/, ''),
+        without.html,
+      );
+      assert.equal(withLink.subject, without.subject);
+    });
+  }
+
+  test('pending: the extracted builder keeps the original pending copy', () => {
+    const { subject, text, html } = clearancePendingEmailContent({
+      ...chairCopy,
+      playerName: 'Thabo\nNkosi',
+    });
+    assert.equal(subject, 'Clearance pending — Thabo Nkosi');
+    assert.equal(
+      text,
+      'Hello Sam,\n\n' +
+        "A player clearance is awaiting Northlands CC's review: Thabo\nNkosi has applied to join " +
+        'Glenwood CC and needs a clearance from your club.\n\n' +
+        'Please have this reviewed and approved or rejected in your club portal, or contact your ' +
+        'union office if you have any questions.\n\n' +
+        'Thank you,\nThe union office',
+    );
+    assert.match(html, /<strong>Northlands CC<\/strong>'s review/);
+  });
+
+  test('admin opened: per-clearance admin link, none without', () => {
+    const withLink = clearanceOpenedAdminEmailContent({ ...adminCopy, adminLink: ADMIN_LINK });
+    assert.ok(withLink.text.includes(`Review it here: ${ADMIN_LINK}\n\nThe union office platform`));
+    assert.ok(withLink.html.includes(`<a href="${ADMIN_LINK}">${ADMIN_LINK}</a>`));
+    const without = clearanceOpenedAdminEmailContent(adminCopy);
+    assert.ok(!without.text.includes('Review it here'));
+    assert.ok(!without.html.includes('<a '));
+    assert.match(
+      without.text,
+      /listed under Clearances in the admin console\.\n\nThe union office platform$/,
+    );
+  });
+
+  test('admin auto-rejected: per-clearance admin link after the reason, none without', () => {
+    const base = { ...adminCopy, reason: 'transfers are closed' };
+    const withLink = clearanceAutoRejectedAdminEmailContent({ ...base, adminLink: ADMIN_LINK });
+    assert.ok(
+      withLink.text.includes(
+        `Reason: transfers are closed\n\nReview it here: ${ADMIN_LINK}\n\nThe union office platform`,
+      ),
+    );
+    assert.ok(withLink.html.includes(`<a href="${ADMIN_LINK}">`));
+    const without = clearanceAutoRejectedAdminEmailContent(base);
+    assert.ok(!without.text.includes('Review it here'));
+    assert.ok(!without.html.includes('<a '));
+    assert.match(without.text, /Reason: transfers are closed\n\nThe union office platform$/);
+  });
+
+  test('admin summary: links the clearances LIST, none without', () => {
+    const base = {
+      toClubName: 'Glenwood CC',
+      clearances: [{ playerName: 'Thabo Nkosi', fromClubName: 'Northlands CC' }],
+    };
+    const withLink = clearanceOpenedAdminSummaryEmailContent({ ...base, adminLink: LIST_LINK });
+    assert.ok(
+      withLink.text.includes(`Review them here: ${LIST_LINK}\n\nThe union office platform`),
+    );
+    assert.ok(withLink.html.includes(`<a href="${LIST_LINK}">${LIST_LINK}</a>`));
+    const without = clearanceOpenedAdminSummaryEmailContent(base);
+    assert.ok(!without.text.includes('Review them here'));
+    assert.ok(!without.html.includes('<a '));
+  });
+
+  test('reminder digest: each line carries its own admin deep link; lines without one stay plain', () => {
+    const line = {
+      id: 'clr-1',
+      playerName: 'Thabo Nkosi',
+      fromClubName: 'Northlands CC',
+      toClubName: 'Glenwood CC',
+      daysPending: 9,
+    };
+    const withLinks = clearanceReminderDigestEmailContent({
+      orgName: 'Dolphins',
+      nudged: [{ ...line, adminLink: ADMIN_LINK }],
+      chairless: [
+        {
+          ...line,
+          id: 'clr-2',
+          fromClubName: 'Off System CC',
+          adminLink: 'https://glenwood.example.com/admin/clearances?clearance=clr-2',
+        },
+      ],
+    });
+    assert.ok(
+      withLinks.text.includes(
+        `- Thabo Nkosi: Northlands CC → Glenwood CC (9 days) — ${ADMIN_LINK}`,
+      ),
+    );
+    assert.ok(
+      withLinks.text.includes(
+        '- Thabo Nkosi: Off System CC → Glenwood CC (9 days) — https://glenwood.example.com/admin/clearances?clearance=clr-2',
+      ),
+    );
+    assert.ok(withLinks.html.includes(`(9 days) — <a href="${ADMIN_LINK}">Review</a></li>`));
+
+    const without = clearanceReminderDigestEmailContent({
+      orgName: 'Dolphins',
+      nudged: [line],
+      chairless: [],
+    });
+    assert.ok(without.text.includes('- Thabo Nkosi: Northlands CC → Glenwood CC (9 days)\n'));
+    assert.ok(!without.html.includes('<a '));
   });
 });

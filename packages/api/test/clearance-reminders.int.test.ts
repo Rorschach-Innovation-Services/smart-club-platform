@@ -6,6 +6,9 @@
  * release-on-failure, the WhatsApp template/feature gate, the clearances-module gate, and the admin
  * digest (nudged + chairless off-system clearances + on-system sources with no usable chair
  * contact; nothing eligible ⇒ no digest), and that only DELIVERED reminders start the cadence.
+ * Links: with an injected `portalLinkFor` origin the chair reminder carries the source club's
+ * clearance deep link and each digest line its admin deep link; with no origin (the test env has
+ * no canonical origin, like a dev stage) neither carries one.
  *
  * Run with the API package's test runner (tsx --test).
  */
@@ -314,17 +317,28 @@ describe('reminder runs', () => {
     assert.equal(sends.length, 1);
     assert.equal(sends[0].fromClubName, 'Source CC');
     assert.equal(sends[0].chair.email, 'chair@src.test');
+    // The default gate reads the registered club_clearance_pending_v2 entry.
     assert.deepEqual(sends[0].channels, ['email', 'whatsapp']);
+    // No canonical origin in this env (like a dev stage) ⇒ no link anywhere.
+    assert.equal(sends[0].portalLink, undefined);
 
     const rows = await reminderRows('cr-due');
-    assert.deepEqual(rows.map((r) => r.channel).sort(), ['email', 'whatsapp']);
+    assert.deepEqual(rows.map((r) => `${r.channel}/${r.status}`).sort(), [
+      'email/sent',
+      'whatsapp/skipped',
+    ]);
+    // The only clearance template carries the link, so a link-less reminder skips WhatsApp.
+    assert.equal(
+      rows.find((r) => r.channel === 'whatsapp')?.error,
+      'no portal link for this tenant',
+    );
     assert.ok(rows.every((r) => r.by === cron.CLEARANCE_REMINDER_ACTOR));
     assert.ok(
       rows.every((r) =>
         r.idempotencyKey.startsWith(`clearance-${clearance.id}-reminder-${TODAY}-`),
       ),
     );
-    assert.match(rows[0].messageId ?? '', /^dry-run-/);
+    assert.match(rows.find((r) => r.channel === 'email')?.messageId ?? '', /^dry-run-/);
     // Reminders never count toward the creation cap's `clearance` kind.
     const srcLog = (await repo.getClub('cr-due', 'src'))?.commLog ?? [];
     assert.equal(srcLog.filter((e) => e.kind === 'clearance').length, 0);
@@ -334,6 +348,7 @@ describe('reminder runs', () => {
     assert.equal(digests[0].orgName, 'cr-due Union');
     assert.deepEqual(digests[0].nudged, [
       {
+        id: clearance.id,
         playerName: clearance.playerName,
         fromClubName: 'src name',
         toClubName: 'dst name',
@@ -342,6 +357,55 @@ describe('reminder runs', () => {
     ]);
     assert.deepEqual(digests[0].chairless, []);
     assert.deepEqual(digests[0].noContact, []);
+  });
+
+  test('with a portal origin, the chair reminder and every digest line carry their deep links', async () => {
+    const PORTAL = 'https://portal.example.com';
+    const clearance = await seedTenant('cr-link', '2026-10-13T08:00:00Z');
+    await seedChairless('cr-link', 'clr-dir-link', '2026-10-13T08:00:00Z');
+    const seen: string[] = [];
+    const { sends, digests } = await run(['cr-link'], TODAY, {
+      portalLinkFor: (tenant) => {
+        seen.push(tenant);
+        return PORTAL;
+      },
+    });
+    assert.deepEqual([...new Set(seen)], ['cr-link']);
+    // The source chair lands on the clearance in THEIR club portal.
+    assert.equal(sends.length, 1);
+    assert.equal(sends[0].portalLink, `${PORTAL}/club/src/clearances?clearance=${clearance.id}`);
+    // With the link, the v2 WhatsApp template goes out alongside the email.
+    assert.deepEqual(
+      (await reminderRows('cr-link')).map((r) => `${r.channel}/${r.status}`).sort(),
+      ['email/sent', 'whatsapp/sent'],
+    );
+    // Admins land on each clearance in the console — the chairless one most of all.
+    assert.equal(digests.length, 1);
+    assert.deepEqual(
+      digests[0].nudged.map((l) => l.adminLink),
+      [`${PORTAL}/admin/clearances?clearance=${clearance.id}`],
+    );
+    assert.deepEqual(
+      digests[0].chairless.map((l) => l.adminLink),
+      [`${PORTAL}/admin/clearances?clearance=clr-dir-link`],
+    );
+    // The rendered digest email carries them too.
+    const { clearanceReminderDigestEmailContent } = await import('../src/notify/email.js');
+    const { text, html } = clearanceReminderDigestEmailContent(digests[0]);
+    assert.ok(text.includes(`${PORTAL}/admin/clearances?clearance=clr-dir-link`));
+    assert.ok(html.includes(`href="${PORTAL}/admin/clearances?clearance=${clearance.id}"`));
+  });
+
+  test('with no portal origin, neither the reminder nor the digest carries a link', async () => {
+    await seedTenant('cr-nolink', '2026-10-13T08:00:00Z');
+    const { sends, digests } = await run(['cr-nolink'], TODAY, { portalLinkFor: () => null });
+    assert.equal(sends.length, 1);
+    assert.ok(!('portalLink' in sends[0]));
+    const wa = (await reminderRows('cr-nolink')).find((r) => r.channel === 'whatsapp');
+    assert.equal(wa?.status, 'skipped');
+    assert.equal(wa?.error, 'no portal link for this tenant');
+    assert.equal(digests.length, 1);
+    assert.ok(digests[0].nudged.every((l) => !('adminLink' in l)));
   });
 
   test('6 days pending: nothing sent and no digest', async () => {
@@ -446,6 +510,7 @@ describe('reminder runs', () => {
     assert.deepEqual(digests[0].nudged, []);
     assert.deepEqual(digests[0].chairless, [
       {
+        id: 'clr-dir',
         playerName: 'Player clr-dir',
         fromClubName: 'Off System CC',
         toClubName: 'dst name',
@@ -532,6 +597,7 @@ describe('reminder runs', () => {
     assert.deepEqual(digests[0].chairless, []);
     assert.deepEqual(digests[0].noContact, [
       {
+        id: clearance.id,
         playerName: clearance.playerName,
         fromClubName: 'src name',
         toClubName: 'dst name',

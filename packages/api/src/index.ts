@@ -271,6 +271,11 @@ import {
 import { grantTenantAdmin, addAdminMembership } from './tenant-admin.js';
 import { originAllowed, originAllowedForTenant, canonicalWebOrigin } from './origins.js';
 import {
+  clearanceAdminLink,
+  clearanceChairLink,
+  clearancesAdminListLink,
+} from './clearance-links.js';
+import {
   issueCertificate,
   ensureCertificateRecord,
   isCertifiable,
@@ -1462,6 +1467,11 @@ interface ClearanceOpenedNotifyOpts {
  * Email is attempted on every notice, so counting email rows counts notices — including capped
  * ones, which keeps the gate shut for the rest of the day. Read-then-append with no transaction:
  * parallel creates can briefly overshoot the cap. Fine for an anti-abuse bound; not a quota.
+ *
+ * Each notice carries a deep link to the clearance (source/destination chair: their own club
+ * portal; admins: the console) built from canonicalWebOrigin ONLY — this fires from the anonymous
+ * register route, so a request Origin must never steer the link host (see clearance-links.ts).
+ * No canonical origin (dev stages) ⇒ no link, and the notices render exactly as before.
  */
 async function notifyClearanceOpened(
   tenant: string,
@@ -1471,6 +1481,7 @@ async function notifyClearanceOpened(
   by: string,
   opts: ClearanceOpenedNotifyOpts = {},
 ): Promise<void> {
+  const linkOrigin = canonicalWebOrigin(tenant);
   let capped = false;
   if (fromClub) {
     try {
@@ -1482,6 +1493,7 @@ async function notifyClearanceOpened(
         (e) => e.kind === 'clearance' && e.channel === 'email',
       );
       capped = !opts.bypassCap && noticesToday >= CLEARANCE_NOTICES_PER_DAY;
+      const portalLink = clearanceChairLink(linkOrigin, fromClub.id, clearance.id);
       const results: SendResult[] = capped
         ? channels.map((channel) => ({
             channel,
@@ -1494,6 +1506,7 @@ async function notifyClearanceOpened(
               fromClubName: fromClub.name,
               playerName: clearance.playerName,
               toClubName: clearance.toClubName,
+              ...(portalLink ? { portalLink } : {}),
               channels,
             })
           ).results;
@@ -1533,6 +1546,7 @@ async function notifyClearanceOpened(
         ) >= CLEARANCE_NOTICES_PER_DAY;
     }
     if (toClub) {
+      const portalLink = clearanceChairLink(linkOrigin, toClub.id, clearance.id);
       const { results } = capped
         ? {
             results: [
@@ -1544,6 +1558,7 @@ async function notifyClearanceOpened(
             fromClubName: clearance.fromClubName,
             playerName: clearance.playerName,
             toClubName: clearance.toClubName,
+            ...(portalLink ? { portalLink } : {}),
           });
       await repo.appendClubCommEvents(
         tenant,
@@ -1579,12 +1594,14 @@ async function notifyClearanceOpened(
   try {
     const admins = await (opts.adminEmails ?? adminEmailsProvider(repo, tenant))();
     if (admins.length > 0) {
+      const adminLink = clearanceAdminLink(linkOrigin, clearance.id);
       await sendClearanceAdminNotice({
         to: admins,
         fromClubName: clearance.fromClubName,
         playerName: clearance.playerName,
         toClubName: clearance.toClubName,
         ...(clearance.fromClubDirectory ? { fromClubDirectory: true } : {}),
+        ...(adminLink ? { adminLink } : {}),
       });
     }
   } catch (err) {
@@ -1606,6 +1623,8 @@ async function notifyClearanceAdminSummary(
   try {
     const admins = await adminEmails();
     if (admins.length === 0) return;
+    // Canonical origin only — the chair bulk routes are not admin actions.
+    const adminLink = clearancesAdminListLink(canonicalWebOrigin(tenant));
     await sendClearanceAdminSummaryNotice({
       to: admins,
       toClubName,
@@ -1614,6 +1633,7 @@ async function notifyClearanceAdminSummary(
         fromClubName: x.fromClubName,
         ...(x.fromClubDirectory ? { fromClubDirectory: true } : {}),
       })),
+      ...(adminLink ? { adminLink } : {}),
     });
   } catch (err) {
     console.error(`clearance admin summary failed for ${tenant}`, err);
@@ -1649,12 +1669,18 @@ async function notifyClearanceAdminSummary(
  * fault is logged and swallowed, never failing the request. A partial send (the Lambda dies
  * between the two clubs) is NOT replayed — the resolved clearance 409s on any retry — which is
  * accepted: at worst one club's chair is not messaged, and the resolution itself stands.
+ *
+ * Each chair's email links to the clearance in THEIR OWN club portal, built from `linkOrigin`.
+ * It defaults to canonicalWebOrigin — the only origin the anonymous auto-reject path may use —
+ * and only the authenticated reject/override routes pass adminClearanceLinkOrigin (which may fall
+ * back to the request Origin on dev stages). No origin ⇒ no link.
  */
 async function notifyClearanceResolved(
   tenant: string,
   clearance: PlayerClearance,
   outcome: 'approved' | 'rejected',
   by: string,
+  linkOrigin: string | null = canonicalWebOrigin(tenant),
 ): Promise<void> {
   try {
     const [fromClub, toClub] = await Promise.all([
@@ -1664,6 +1690,7 @@ async function notifyClearanceResolved(
     const notifyClub = async (club: Club | null): Promise<void> => {
       if (!club) return; // directory source (or a club since deleted): nothing to notify
       const reason = outcome === 'rejected' ? clearance.rejectReason : clearance.overrideReason;
+      const portalLink = clearanceChairLink(linkOrigin, club.id, clearance.id);
       const { results } = await sendClearanceResolvedNotice({
         chair: chairContactOf(club),
         fromClubName: clearance.fromClubName,
@@ -1672,6 +1699,7 @@ async function notifyClearanceResolved(
         outcome,
         ...(reason ? { reason } : {}),
         ...(clearance.rejectOutcome ? { rejectOutcome: clearance.rejectOutcome } : {}),
+        ...(portalLink ? { portalLink } : {}),
       });
       await repo.appendClubCommEvents(
         tenant,
@@ -1740,12 +1768,15 @@ async function notifyClearanceAutoRejected(
   try {
     const admins = await adminEmails();
     if (admins.length > 0) {
+      // Anonymous path: canonical origin only, never the request Origin.
+      const adminLink = clearanceAdminLink(canonicalWebOrigin(tenant), clearance.id);
       await sendClearanceAutoRejectedAdminNotice({
         to: admins,
         fromClubName: clearance.fromClubName,
         playerName: clearance.playerName,
         toClubName: clearance.toClubName,
         reason: clearance.rejectReason ?? '',
+        ...(adminLink ? { adminLink } : {}),
       });
     }
   } catch (err) {
@@ -1764,12 +1795,15 @@ async function notifyClearanceAutoRejected(
  * `clearance-${id}-reopened-v${version}-${channel}` (version-suffixed so repeated reject→reopen
  * cycles never collide). The cap is bypassed for the same reason a resolution bypasses it — a
  * reopen is a deliberate authenticated admin action, not the anonymous abuse the cap guards.
+ * Each chair's notice links to the clearance in their own club portal, built from `linkOrigin`
+ * (the reopen route passes adminClearanceLinkOrigin); no origin ⇒ no link.
  */
 async function notifyClearanceReopened(
   tenant: string,
   tenantConfig: TenantConfig | null,
   clearance: PlayerClearance,
   by: string,
+  linkOrigin: string | null = canonicalWebOrigin(tenant),
 ): Promise<void> {
   try {
     const channels: Channel[] = hasFeature(tenantConfig, 'whatsappInvites', true)
@@ -1781,12 +1815,14 @@ async function notifyClearanceReopened(
     ]);
     const notifyClub = async (club: Club | null, side: 'source' | 'destination'): Promise<void> => {
       if (!club) return; // directory source (or a club since deleted): nothing to notify
+      const portalLink = clearanceChairLink(linkOrigin, club.id, clearance.id);
       const { results } = await sendClearanceReopenedNotice({
         side,
         chair: chairContactOf(club),
         fromClubName: clearance.fromClubName,
         playerName: clearance.playerName,
         toClubName: clearance.toClubName,
+        ...(portalLink ? { portalLink } : {}),
         channels,
       });
       await repo.appendClubCommEvents(
@@ -11623,7 +11659,13 @@ app.post('/admin/clearances/:cid/override', async (c) => {
     });
     // Best-effort: email BOTH clubs' chairmen that the union issued the transfer (never fails
     // the request). See notifyClearanceResolved re: email-only, no daily cap, destination chair.
-    await notifyClearanceResolved(ra.tenant, resolved, 'approved', ra.email);
+    await notifyClearanceResolved(
+      ra.tenant,
+      resolved,
+      'approved',
+      ra.email,
+      adminClearanceLinkOrigin(c, ra.tenant),
+    );
     const cert = declineCertificate ? {} : await issueOnResolve(ra.tenant, resolved);
     return c.json({ ...repo.publicClearance(resolved), ...cert });
   } catch (err) {
@@ -11797,7 +11839,13 @@ app.post('/admin/clearances/:cid/reject', async (c) => {
     });
     // Best-effort: email BOTH clubs' chairmen that the union declined the transfer (never fails
     // the request). The reject reason rides the email — see notifyClearanceResolved.
-    await notifyClearanceResolved(ra.tenant, rejected, 'rejected', ra.email);
+    await notifyClearanceResolved(
+      ra.tenant,
+      rejected,
+      'rejected',
+      ra.email,
+      adminClearanceLinkOrigin(c, ra.tenant),
+    );
     return c.json(repo.publicClearance(rejected));
   } catch (err) {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'clearance changed; refetch');
@@ -11842,7 +11890,13 @@ app.post('/admin/clearances/:cid/reopen', async (c) => {
     // Best-effort: tell BOTH clubs' chairmen the union reopened the clearance (never fails the
     // request). Source and destination get different copy — see notifyClearanceReopened.
     const tenantConfig = await getTenantConfigCached(c, ra.tenant).catch(() => null);
-    await notifyClearanceReopened(ra.tenant, tenantConfig, reopened, ra.email);
+    await notifyClearanceReopened(
+      ra.tenant,
+      tenantConfig,
+      reopened,
+      ra.email,
+      adminClearanceLinkOrigin(c, ra.tenant),
+    );
     return c.json(repo.publicClearance(reopened));
   } catch (err) {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'clearance changed; refetch');
@@ -11891,6 +11945,7 @@ app.post('/admin/clearances/:cid/remind', async (c) => {
     'clearance-reminder',
   );
   if (replay) throw new HttpError(409, 'already reminded today');
+  const portalLink = clearanceChairLink(adminClearanceLinkOrigin(c, ra.tenant), fromClub.id, cid);
   let results: SendResult[];
   try {
     ({ results } = await sendClearanceNotice({
@@ -11898,6 +11953,7 @@ app.post('/admin/clearances/:cid/remind', async (c) => {
       fromClubName: fromClub.name,
       playerName: clearance.playerName,
       toClubName: clearance.toClubName,
+      ...(portalLink ? { portalLink } : {}),
       channels,
     }));
   } catch (err) {
@@ -12063,6 +12119,31 @@ function resolveLoginUrl(c: Context<HonoEnv>, tenant: string, link?: string): st
   // No usable origin (e.g. a server-to-server call) — return a harmless localhost
   // default so the response always carries a copyable link; the admin can correct it.
   return 'http://localhost:5173';
+}
+
+/**
+ * The origin an AUTHENTICATED admin action's clearance-notice links point at (reject/override,
+ * reopen, manual remind): the tenant's canonical origin, else — only in the dormant pre-wildcard
+ * state (dev stages) — the request Origin when it belongs to THIS tenant (originAllowedForTenant)
+ * or is a plain localhost dev origin; else null (no link). Deliberately stricter than the broad
+ * CORS check (originAllowed): a `*.cloudfront.net` clone or another tenant's host never becomes a
+ * link. A tenant with no canonical origin has no origins of its own, so in practice only
+ * localhost passes the fallback — a deployed dev stage (CloudFront) sends link-less notices.
+ * Never use this on an anonymous path or in a cron: those take canonicalWebOrigin alone, so a
+ * caller can never steer the link host (see clearance-links.ts).
+ */
+function adminClearanceLinkOrigin(c: Context<HonoEnv>, tenant: string): string | null {
+  const canonical = canonicalWebOrigin(tenant);
+  if (canonical) return canonical;
+  const origin = c.req.header('origin') ?? '';
+  if (!origin) return null;
+  if (originAllowedForTenant(origin, tenant)) return origin;
+  try {
+    // Local dev (vite on localhost), which originAllowedForTenant excludes on purpose.
+    return new URL(origin).hostname === 'localhost' ? origin : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

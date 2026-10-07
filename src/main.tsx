@@ -2937,6 +2937,7 @@ function Shell({
             transferWindowStatus={tenantConfig?.transferWindowStatus}
             busyId={busyClearanceId}
             busyAction={busyClearanceAction}
+            clearancesLoaded={allClearancesQuery.isSuccess}
           />
         );
       if (view === 'reg_reviews')
@@ -3093,6 +3094,7 @@ function Shell({
             onOpenRequest={() => setShowRequestPlayer(true)}
             busyId={busyClearanceId}
             onCertificateViewed={() => invalidate(qk.clearances(clubId))}
+            clearancesLoaded={clearancesQuery.isSuccess}
           />
         );
       }

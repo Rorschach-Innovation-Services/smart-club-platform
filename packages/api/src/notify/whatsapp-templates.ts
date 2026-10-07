@@ -40,10 +40,15 @@
  *   "pending"    — NOT yet created/approved in Meta. The sender exists; a real send
  *      is rejected on the missing template until it is created under this name.
  * `status` is documentation, not a runtime gate — nothing here can verify Meta's
- * state, and the send path fails open (attempts the send) for every entry. The three
- * exceptions are `fixtureReminder` (the FixtureReminders cron skips WhatsApp until it is
- * "registered"), and `captainsReportDue` / `captainsReportOpsDigest` (their senders skip the
- * channel as template-pending until it is "registered") — see those entries.
+ * state, and the send path fails open (attempts the send) for every entry. The exceptions
+ * are `fixtureReminder` (the FixtureReminders cron skips WhatsApp until it is
+ * "registered"), `captainsReportDue` / `captainsReportOpsDigest` (their senders skip the
+ * channel as template-pending until it is "registered") and `clearancePendingV2` (the
+ * ClearanceReminders cron's WhatsApp gate) — see those entries.
+ *
+ * RETIRED: `club_clearance_pending` (the 4-param, link-less v1 clearance template) has NO entry
+ * here since 7 Oct 2026. `club_clearance_pending_v2` is the only clearance template; a clearance
+ * notice with no link skips WhatsApp rather than sending a link-less message.
  */
 
 export type WhatsAppTemplateDefinition = {
@@ -87,21 +92,28 @@ export const WHATSAPP_TEMPLATES = {
   },
 
   /**
-   * Clearance-pending heads-up to the from-club chairman. Body-only Utility
-   * template (no header/buttons/links). LIVE — created under the medicoach WABA on
-   * 4 Aug 2026 and Active (template id 1015867618110855). Body copied verbatim from
-   * docs/runbooks/whatsapp-templates.md; POPIA: names only, never a reject/override
-   * reason. See `sendClearanceWhatsApp`.
+   * Clearance-pending heads-up to the from-club chairman, with a deep link ({{5}}) to the
+   * clearance in the chair's club portal. Body-only Utility template. It replaced the 4-param
+   * `club_clearance_pending` (v1) under a NEW name rather than an in-place edit, which would have
+   * failed every live 4-param send with error 132000 until the edit cleared review; v1 was retired
+   * in code on 7 Oct 2026. The link sits mid-body because Meta rejects a body that ends on a
+   * variable; the "contact your union office" fallback stays (a chair with no portal login can't
+   * get past sign-in). POPIA: names only, never a reject/override reason.
+   *
+   * Approved in Meta 7 Oct 2026 (template id 1076095408549057). The only clearance template:
+   * a notice with no link skips the WhatsApp channel (see `sendClearanceWhatsApp`). This status
+   * IS read at runtime: the ClearanceReminders cron's WhatsApp gate.
    */
-  clearancePending: {
-    name: 'club_clearance_pending',
+  clearancePendingV2: {
+    name: 'club_clearance_pending_v2',
     lang: 'en',
-    paramCount: 4,
-    params: ['chair name', 'from-club name', 'player name', 'to-club name'],
+    paramCount: 5,
+    params: ['chair name', 'from-club name', 'player name', 'to-club name', 'clearance link'],
     bodyText:
       'Hello {{1}},\n\n' +
       "A player clearance is awaiting {{2}}'s review: {{3}} has applied to join {{4}} " +
       'and needs a clearance from your club.\n\n' +
+      'Review it here: {{5}}\n\n' +
       'Please have this reviewed and approved or rejected in your club portal, or ' +
       'contact your union office if you have any questions.',
     status: 'registered',
