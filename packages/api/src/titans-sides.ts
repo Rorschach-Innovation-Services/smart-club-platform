@@ -59,6 +59,41 @@ export function sideSuffixFor(
   return null;
 }
 
+/** A club's own side in one league, read the way clubTeamsForLeague does: the roster entry
+ * with the same side suffix at a count of 2+, the bare club id at a count of 1. */
+function directSide(
+  club: Club,
+  entry: ClubMapEntry,
+  leagueKey: string,
+  name: string,
+): ResolvedSide | undefined {
+  if (!(club.leagues ?? []).includes(leagueKey)) return undefined;
+  const count = Number(club.leagueTeams?.[leagueKey]) || 1;
+  const ground = club.ground?.venue;
+  if (count < 2)
+    return {
+      teamId: club.id,
+      clubId: club.id,
+      name: club.name,
+      ...(ground ? { venue: ground } : {}),
+      how: 'bare',
+    };
+  const roster = Array.isArray(club.teamRosters?.[leagueKey])
+    ? (club.teamRosters![leagueKey] as ClubTeam[])
+    : [];
+  const want = sideSuffixFor(name, entry);
+  const t = roster.find((r) => sideSuffixFor(r.name ?? '', entry) === want);
+  return t
+    ? {
+        teamId: t.id,
+        clubId: club.id,
+        name: t.name,
+        ...(t.venue || ground ? { venue: t.venue || ground } : {}),
+        how: 'roster',
+      }
+    : undefined;
+}
+
 /** Order sides "1" < "2" < "10", "A" < "B", "VETERANS 1" < "VETERANS 2". */
 function suffixOrder(a: string, b: string): number {
   const na = /(\d+)$/.exec(a);
@@ -132,7 +167,16 @@ export const sideKey = (leagueKey: string, name: string) =>
 export function planSides(
   needs: SideNeed[],
   clubs: Club[],
-  opts: { allowAppend: boolean; fixturesOnlyKeys?: Set<string> },
+  opts: {
+    allowAppend: boolean;
+    fixturesOnlyKeys?: Set<string>;
+    /**
+     * Cup competitions whose sides REUSE the club's existing league ids (the T20s): for such a
+     * league key, the host league keys to borrow from, in preference order; null for an
+     * ordinary league. A borrowed side is never appended and adds no roster entry.
+     */
+    hostLeagues?: (leagueKey: string, name: string) => string[] | null;
+  },
 ): SidePlan {
   const plan: SidePlan = {
     resolve: new Map(),
@@ -145,10 +189,16 @@ export function planSides(
   const clubsById = new Map(clubs.map((c) => [c.id, c]));
   // club → league → canonical names
   const want = new Map<string, Map<string, Set<string>>>();
+  const borrowed: Array<{ need: SideNeed; hosts: string[] }> = [];
   for (const n of needs) {
     const entry = resolveTeamClub(n.name);
     if (!entry) {
       plan.fatal.push(`"${n.name}" (${n.leagueKey}) resolves to no club`);
+      continue;
+    }
+    const hosts = opts.hostLeagues?.(n.leagueKey, n.name) ?? null;
+    if (hosts) {
+      borrowed.push({ need: n, hosts });
       continue;
     }
     const byLeague = want.get(entry.id) ?? new Map<string, Set<string>>();
@@ -331,6 +381,30 @@ export function planSides(
         changes,
       });
     }
+  }
+
+  // Cup sides borrow the club's existing side in a host league: a side the sheets already
+  // resolved there (incl. one this plan appends), else the club's own host-league side.
+  for (const { need, hosts } of borrowed) {
+    const name = canonicalTeamName(need.name);
+    const entry = resolveTeamClub(name)!;
+    const club = clubsById.get(entry.id);
+    const where = `${entry.name} / ${need.leagueKey} "${name}"`;
+    if (!club) {
+      if (!plan.fatal.some((f) => f.includes(`"${entry.id}"`)))
+        plan.fatal.push(`club "${entry.id}" (${entry.name}) is not on the tenant`);
+      continue;
+    }
+    let side: ResolvedSide | undefined;
+    for (const host of hosts) {
+      side = plan.resolve.get(sideKey(host, name)) ?? directSide(club, entry, host, name);
+      if (side) break;
+    }
+    if (side) plan.resolve.set(sideKey(need.leagueKey, name), side);
+    else
+      plan.fatal.push(
+        `${where}: no existing side to reuse in ${hosts.join(' / ') || '(no host league in the workbook)'} — needs a decision`,
+      );
   }
 
   // Women's League placement table: premier / promotion sides per club, against the sheet.

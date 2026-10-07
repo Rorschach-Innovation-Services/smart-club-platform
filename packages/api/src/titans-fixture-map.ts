@@ -252,6 +252,24 @@ export const T20_KO_SERIES_IDS = TITANS_FIXTURE_SHEETS.filter(
 /** Every league key the workbook uses — each must exist on the tenant before a write. */
 export const TITANS_LEAGUE_KEYS = [...new Set(TITANS_FIXTURE_SHEETS.map((s) => s.leagueKey))];
 
+/**
+ * T20 cup sides REUSE the club's existing league side ids (user decision, 7 Oct 2026): the host
+ * leagues each cup borrows from, in preference order. Men's T20 → the senior men's league the
+ * exact sheet name plays in this workbook; women's T20 → women's premier, else promotion.
+ */
+export const T20_HOST_LEAGUES: Record<string, string[]> = {
+  'mens-t20': [
+    'premier-league',
+    'promotion-league',
+    'second-league',
+    'third-league',
+    'fourth-league',
+    'fifth-league',
+    'sixth-league',
+  ],
+  'womens-t20': ['womens-premier-league', 'womens-promotion-league'],
+};
+
 /** League keys the prereqs bootstrap adds when absent (every other key must already exist).
  * The T20 cups are fixtures-only: competitions the clubs' existing sides play. */
 export const TITANS_NEW_LEAGUES: Array<{

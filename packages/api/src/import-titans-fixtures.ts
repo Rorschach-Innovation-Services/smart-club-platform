@@ -59,6 +59,8 @@ import {
   TITANS_TENANT,
   TITANS_VENUE_ALIASES,
   VETERANS_KO_SERIES_IDS,
+  T20_HOST_LEAGUES,
+  canonicalTeamName,
   provisionalSideId,
   resolveTeamClub,
   titansGroundKey,
@@ -710,6 +712,8 @@ export interface UnionReport {
     gatePreview: TaggedClash[] | null;
   };
   womensLeagueTeams: Array<{ name: string; clubId: string; clubName: string }>;
+  /** Live run only: registry rows no workbook fixture or club ground uses (cleanup items). */
+  registryCleanup?: Array<{ id: string; name: string; homeClubIds: string[] }>;
   /** Live run only: the per-club premier/promotion placement table (risk R6). */
   womensPlacement?: WomensPlacementRow[];
   todo: string[];
@@ -859,6 +863,17 @@ export function renderUnionMarkdown(r: UnionReport): string {
       );
     L.push('');
   }
+  if (r.registryCleanup?.length) {
+    L.push('## 12. Registry clean-up (for the admin, not the union)');
+    L.push('');
+    L.push(
+      'These venue registry rows are used by no fixture and no club ground. They were left untouched — please review and delete or rename them in the console.',
+    );
+    L.push('');
+    for (const v of r.registryCleanup)
+      L.push(`- \`${v.id}\` "${v.name}" (home club: ${v.homeClubIds.join(', ') || 'none'})`);
+    L.push('');
+  }
   L.push('## 10. Dates we corrected');
   L.push('');
   if (!r.dateCorrections.length) L.push('None.');
@@ -881,6 +896,8 @@ export interface Args {
   noClubSync: boolean;
   /** --revert only: required to delete a RELEASED series. */
   includeReleased: boolean;
+  /** Where JSON backups go (default: the working directory). */
+  backupDir: string;
 }
 
 /** Every series id this importer may write (or --revert deletes). */
@@ -897,6 +914,7 @@ export function parseArgs(argv: string[]): Args {
     today: new Date().toISOString().slice(0, 10),
     noClubSync: false,
     includeReleased: false,
+    backupDir: process.cwd(),
   };
   const need = (i: number, flag: string) => {
     const v = argv[i];
@@ -915,6 +933,7 @@ export function parseArgs(argv: string[]): Args {
     else if (a === '--revert') args.mode = 'revert';
     else if (a === '--no-club-sync') args.noClubSync = true;
     else if (a === '--include-released') args.includeReleased = true;
+    else if (a === '--backup-dir') args.backupDir = need(++i, a);
     else if (a === '--only')
       args.only = need(++i, a)
         .split(',')
@@ -959,6 +978,53 @@ function printClashes(title: string, clashes: TaggedClash[]) {
   }
   console.log(`  ✗ ${clashes.length} clash(es) — ${tagCounts(clashes)}`);
   for (const c of clashes) console.log(`    ${clashLine(c)}`);
+}
+
+/**
+ * T20 sides reuse the club's existing league ids (user decision): a men's T20 side is the side
+ * of that exact sheet name in the senior men's league it plays in this workbook (premier first);
+ * a women's T20 side is the club's women's premier side, else its promotion side.
+ */
+export function t20HostLeagues(
+  sheets: ParsedTitansSheet[],
+): (leagueKey: string, name: string) => string[] | null {
+  const seen = new Map<string, Set<string>>();
+  for (const s of sheets)
+    for (const f of s.fixtures)
+      for (const n of [f.home, f.away])
+        seen.set(n, (seen.get(n) ?? new Set()).add(s.spec.leagueKey));
+  return (leagueKey, name) => {
+    const hosts = T20_HOST_LEAGUES[leagueKey];
+    if (!hosts) return null;
+    if (leagueKey !== 'mens-t20') return hosts;
+    const inWorkbook = seen.get(canonicalTeamName(name)) ?? new Set();
+    return hosts.filter((k) => inWorkbook.has(k));
+  };
+}
+
+/** Clubs a set of cup (T20) series needs the cup league key added for — `club.leagues` only:
+ * a cup side is an existing league side, so no roster and no leagueTeams entry (which would
+ * duplicate ids and double-count the club's teams). */
+export function cupLeaguePatches(
+  clubs: Club[],
+  series: Series[],
+  cupKeys: Set<string>,
+): Array<{ clubId: string; add: string[] }> {
+  const want = new Map<string, Set<string>>();
+  for (const s of series) {
+    const key = String(s.leagueKey);
+    if (!cupKeys.has(key)) continue;
+    for (const p of s.participants ?? [])
+      want.set(p.clubId, (want.get(p.clubId) ?? new Set()).add(key));
+  }
+  const out: Array<{ clubId: string; add: string[] }> = [];
+  for (const [clubId, keys] of want) {
+    const club = clubs.find((c) => c.id === clubId);
+    if (!club) continue;
+    const add = [...keys].filter((k) => !(club.leagues ?? []).includes(k));
+    if (add.length) out.push({ clubId, add });
+  }
+  return out.sort((a, b) => a.clubId.localeCompare(b.clubId));
 }
 
 /** Every (league, sheet side) the written series name — the input to the side plan. */
@@ -1075,6 +1141,7 @@ async function runAppendSides(args: Args) {
   const clubs = await repo.listClubs(TITANS_TENANT);
   console.log(`\nTenant "${TITANS_TENANT}": ${clubs.length} club(s)`);
   const plan = planSides(sideNeeds(parsed.sheets), clubs, {
+    hostLeagues: t20HostLeagues(parsed.sheets),
     allowAppend: true,
     fixturesOnlyKeys: fixturesOnlyKeys(config),
   });
@@ -1110,7 +1177,7 @@ async function runAppendSides(args: Args) {
     await import('./catalogue.js');
   const { resolveVertical } = await import('./vertical.js');
   const backup = join(
-    process.cwd(),
+    args.backupDir,
     `titans-append-sides-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
   );
   await writeFile(
@@ -1184,9 +1251,17 @@ async function deleteSeriesFully(repo: RepoModule, id: string) {
   await repo.deleteSeriesSyncState(TITANS_TENANT, id);
 }
 
-async function backupTitansSeries(series: Series[]): Promise<string> {
+async function backupTitansSeries(series: Series[], dir: string, clubs?: Club[]): Promise<string> {
+  if (clubs) {
+    const cpath = join(
+      dir,
+      `titans-clubs-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
+    );
+    await writeFile(cpath, JSON.stringify(clubs, null, 2));
+    console.log(`Club backup written: ${cpath} (${clubs.length} clubs)`);
+  }
   const path = join(
-    process.cwd(),
+    dir,
     `titans-fixtures-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
   );
   await writeFile(path, JSON.stringify(series, null, 2));
@@ -1220,7 +1295,7 @@ async function runRevert(args: Args) {
     }
     console.warn(`\n⚠ ${msg}\n--confirm will refuse unless --include-released is passed.`);
   }
-  if (args.confirm) await backupTitansSeries(mine);
+  if (args.confirm) await backupTitansSeries(mine, args.backupDir);
   for (const s of mine) {
     const status = s.released ? 'RELEASED' : s.approved ? 'approved' : 'draft';
     console.log(
@@ -1291,6 +1366,7 @@ async function runImport(args: Args) {
       );
     }
     sidePlan = planSides(sideNeeds(sheets), clubs, {
+      hostLeagues: t20HostLeagues(sheets),
       allowAppend: false,
       fixturesOnlyKeys: fixturesOnlyKeys(cfg),
     });
@@ -1409,6 +1485,7 @@ async function runImport(args: Args) {
   }
   const writeSet: Series[] = [...outcome.built.map((b) => b.series), ...koSeries];
   const writeIds = new Set(writeSet.map((s) => String(s.id)));
+  const cupKeys = new Set(Object.keys(T20_HOST_LEAGUES));
 
   // ── Clash scan ──
   const existingOther = stored.filter((s) => !writeIds.has(String(s.id)));
@@ -1499,6 +1576,24 @@ async function runImport(args: Args) {
     );
   }
 
+  // Registry rows nothing in the workbook (or a club ground) uses — a cleanup item, never merged.
+  const usedKeys = new Set<string>();
+  for (const s of sheets)
+    for (const f of s.fixtures) if (f.venue) usedKeys.add(groundKey(f.venue, aliases));
+  for (const c of clubs) if (c.ground?.venue) usedKeys.add(groundKey(c.ground.venue, aliases));
+  const registryCleanup = args.parseOnly
+    ? []
+    : venues
+        .filter((v) => !usedKeys.has(groundKey(v.name, aliases)))
+        .map((v) => ({ id: v.id, name: v.name, homeClubIds: v.homeClubIds ?? [] }));
+  if (registryCleanup.length) {
+    console.log(
+      `\n── Registry rows no fixture or club ground uses (cleanup for the admin; left untouched):`,
+    );
+    for (const v of registryCleanup)
+      console.log(`    ${v.id} "${v.name}" (home of ${v.homeClubIds.join(', ') || '—'})`);
+  }
+
   const dateCorrections = sheets.flatMap((s) => s.dateCorrections);
   if (args.reportOut) {
     const report: UnionReport = {
@@ -1555,7 +1650,7 @@ async function runImport(args: Args) {
       dateCorrections,
       clashes: { beforeHeldBack: before, afterHeldBack: after, gatePreview },
       womensLeagueTeams: womens,
-      ...(plan ? { womensPlacement: plan.womens } : {}),
+      ...(plan ? { womensPlacement: plan.womens, registryCleanup } : {}),
       todo,
     };
     const base = args.reportOut.replace(/\.(md|json)$/i, '');
@@ -1637,15 +1732,21 @@ async function runImport(args: Args) {
     if (!args.noClubSync) {
       console.log('\n── Club league sync (dry-run preview, includeDrafts):');
       const { syncClubLeaguesFromSeries } = await import('./sync-club-leagues-from-series.js');
+      const syncSet = writeSet.filter((s) => !cupKeys.has(String(s.leagueKey)));
       const res = await syncClubLeaguesFromSeries(TITANS_TENANT, {
         confirm: false,
-        only: [...writeIds],
+        only: syncSet.map((s) => String(s.id)),
         includeDrafts: true,
-        series: writeSet,
+        series: syncSet,
       });
       console.log(
         `  club sync preview: ${res.wouldPatch} club(s) would change, ${res.conflicts} CONFLICT(s), ${res.orphanSeries} orphan series`,
       );
+      const cup = cupLeaguePatches(clubs, writeSet, cupKeys);
+      console.log(
+        `\n── Cup league keys (T20 series reuse league side ids; only club.leagues gains the key): ${cup.length} club(s)`,
+      );
+      for (const c of cup) console.log(`  [dry-run] ${c.clubId}: +[${c.add.join(', ')}]`);
     }
     return;
   }
@@ -1653,6 +1754,8 @@ async function runImport(args: Args) {
   // ── Write ──
   const backupPath = await backupTitansSeries(
     stored.filter((s) => String(s.id).startsWith(TITANS_SERIES_PREFIX)),
+    args.backupDir,
+    clubs,
   );
   const written: string[] = [];
   const drifted: string[] = [];
@@ -1674,10 +1777,37 @@ async function runImport(args: Args) {
     const { syncClubLeaguesFromSeries } = await import('./sync-club-leagues-from-series.js');
     const res = await syncClubLeaguesFromSeries(TITANS_TENANT, {
       confirm: true,
-      only: written,
+      only: written.filter(
+        (id) => !cupKeys.has(String(writeSet.find((s) => s.id === id)?.leagueKey)),
+      ),
       includeDrafts: true,
     });
     if (res.conflicts) console.warn(`⚠ ${res.conflicts} club-sync CONFLICT(s) — see above`);
+    // T20 cups: add the league key only (fresh read, version-pinned) — never a roster.
+    const freshClubs = await repo.listClubs(TITANS_TENANT);
+    const cup = cupLeaguePatches(
+      freshClubs,
+      writeSet.filter((s) => written.includes(String(s.id))),
+      cupKeys,
+    );
+    console.log(`\n── Cup league keys: ${cup.length} club(s)`);
+    for (const c of cup) {
+      const club = freshClubs.find((x) => x.id === c.clubId)!;
+      try {
+        await repo.updateClub(
+          TITANS_TENANT,
+          c.clubId,
+          { version: club.version, leagues: [...(club.leagues ?? []), ...c.add] },
+          'import-titans-fixtures (cup league keys)',
+          new Date().toISOString(),
+        );
+        console.log(`  ${c.clubId}: +[${c.add.join(', ')}]`);
+      } catch (err) {
+        if ((err as { name?: string }).name !== 'VersionConflictError') throw err;
+        console.error(`  ✗ ${c.clubId} changed mid-run — cup key NOT added (re-run)`);
+        process.exitCode = 1;
+      }
+    }
   }
   // Post-write verification against the stored tenant, release-gate semantics.
   const [afterSeries, afterClubs, afterVenues, afterConfig] = await Promise.all([

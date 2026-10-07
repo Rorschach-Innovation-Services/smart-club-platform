@@ -17,12 +17,19 @@ const {
   buildTitansSeries,
   buildVeteransKnockouts,
   clubsFromMap,
+  cupLeaguePatches,
+  t20HostLeagues,
   parseArgs,
   stabiliseIds,
   wouldBeRegistry,
 } = await import('../src/import-titans-fixtures.js');
-const { TITANS_FIXTURE_SHEETS, TITANS_VENUE_ALIASES, parseTitansSheet, seriesNameFor } =
-  await import('../src/titans-fixture-map.js');
+const {
+  T20_HOST_LEAGUES,
+  TITANS_FIXTURE_SHEETS,
+  TITANS_VENUE_ALIASES,
+  parseTitansSheet,
+  seriesNameFor,
+} = await import('../src/titans-fixture-map.js');
 const { CLUB_MAP } = await import('../src/titans-import-map.js');
 
 const club = (id: string, extra: Partial<Club> = {}): Club =>
@@ -253,6 +260,125 @@ describe('planSides — resolution against live rosters', () => {
     );
     assert.equal(plan.patches[0].leagueTeams['mens-t20'], 2);
     assert.equal(plan.patches[0].teams, 1);
+  });
+});
+
+describe("T20 sides reuse the clubs' existing league ids", () => {
+  const hosts = (k: string, n: string) =>
+    k === 'mens-t20'
+      ? n.startsWith('TUKS')
+        ? ['premier-league']
+        : ['promotion-league']
+      : (T20_HOST_LEAGUES[k] ?? null);
+  const tuks = club('tuks-cricket-club', {
+    leagues: ['premier-league'],
+    leagueTeams: { 'premier-league': 2 },
+    teamRosters: {
+      'premier-league': [
+        { id: 'tuks-cricket-club', name: 'TUKS 1' },
+        { id: 'tm_tuks-cricket-club_premier-league_1', name: 'TUKS 2' },
+      ],
+    },
+  });
+  const brits = club('brits-cricket-club', { leagues: ['promotion-league'] });
+  const irene = club('irene-villagers-cricket-club', {
+    leagues: ['womens-premier-league'],
+    leagueTeams: { 'womens-premier-league': 2 },
+    teamRosters: {
+      'womens-premier-league': [
+        { id: 'irene-villagers-cricket-club', name: 'IRENE VILLAGERS 1' },
+        {
+          id: 'tm_irene-villagers-cricket-club_womens-premier-league_1',
+          name: 'IRENE VILLAGERS 2',
+        },
+      ],
+    },
+  });
+  const plan = planSides(
+    [
+      { leagueKey: 'mens-t20', name: 'TUKS 1' },
+      { leagueKey: 'mens-t20', name: 'TUKS 2' },
+      { leagueKey: 'mens-t20', name: 'BRITS 1' },
+      { leagueKey: 'womens-t20', name: 'IRENE VILLAGERS 1' },
+      { leagueKey: 'womens-t20', name: 'IRENE VILLAGERS 2' },
+    ],
+    [tuks, brits, irene],
+    { allowAppend: true, hostLeagues: hosts },
+  );
+
+  test("men's T20 sides are the premier roster ids / a bare single side", () => {
+    assert.deepEqual(plan.fatal, []);
+    assert.equal(plan.resolve.get('mens-t20::TUKS 1')!.teamId, 'tuks-cricket-club');
+    assert.equal(
+      plan.resolve.get('mens-t20::TUKS 2')!.teamId,
+      'tm_tuks-cricket-club_premier-league_1',
+    );
+    assert.equal(plan.resolve.get('mens-t20::BRITS 1')!.teamId, 'brits-cricket-club');
+  });
+
+  test("women's T20 sides are the women's premier roster ids", () => {
+    assert.equal(
+      plan.resolve.get('womens-t20::IRENE VILLAGERS 2')!.teamId,
+      'tm_irene-villagers-cricket-club_womens-premier-league_1',
+    );
+  });
+
+  test('no T20 roster, leagueTeams or counter change is planned', () => {
+    assert.equal(plan.patches.length, 0);
+  });
+
+  test('a T20 side with no side in its host league is a decision', () => {
+    const p = planSides([{ leagueKey: 'mens-t20', name: 'TUKS 3' }], [tuks], {
+      allowAppend: true,
+      hostLeagues: hosts,
+    });
+    assert.equal(p.fatal.length, 1);
+    assert.equal(p.patches.length, 0);
+  });
+
+  test('cup series add only the league key to club.leagues', () => {
+    const series = [
+      {
+        id: 's-titans-mens-t20-g-e',
+        leagueKey: 'mens-t20',
+        participants: [
+          { teamId: 'tuks-cricket-club', clubId: 'tuks-cricket-club', name: 'TUKS 1' },
+          {
+            teamId: 'tm_tuks-cricket-club_premier-league_1',
+            clubId: 'tuks-cricket-club',
+            name: 'TUKS 2',
+          },
+        ],
+      },
+      {
+        id: 's-titans-second-league',
+        leagueKey: 'second-league',
+        participants: [{ teamId: 'brits-cricket-club', clubId: 'brits-cricket-club', name: 'x' }],
+      },
+    ] as unknown as Series[];
+    const withKey = club('irene-villagers-cricket-club', { leagues: ['mens-t20'] });
+    assert.deepEqual(cupLeaguePatches([tuks, brits, withKey], series, new Set(['mens-t20'])), [
+      { clubId: 'tuks-cricket-club', add: ['mens-t20'] },
+    ]);
+  });
+});
+
+describe('t20HostLeagues', () => {
+  test("a men's T20 name borrows from the senior league it plays in the workbook", () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('P');
+    ws.addRow(['DATE', 'HOME', 'AWAY', 'VENUE']);
+    ws.addRow([new Date(Date.UTC(2026, 9, 24)), 'TUKS 2', 'MAMELODI 1', 'TUKS C']);
+    const base = TITANS_FIXTURE_SHEETS.find((s) => s.sheet === 'PREMIER DIVISION A')!;
+    const sheet = parseTitansSheet(ws, { ...base, series: [{ ...base.series[0], expected: 1 }] });
+    const h = t20HostLeagues([sheet]);
+    assert.deepEqual(h('mens-t20', 'TUKS 2'), ['premier-league']);
+    assert.deepEqual(h('mens-t20', 'TUKS 9'), []);
+    assert.deepEqual(h('womens-t20', 'TUKS 1'), [
+      'womens-premier-league',
+      'womens-promotion-league',
+    ]);
+    assert.equal(h('premier-league', 'TUKS 2'), null);
   });
 });
 
