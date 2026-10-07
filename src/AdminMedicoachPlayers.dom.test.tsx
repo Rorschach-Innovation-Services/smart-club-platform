@@ -226,6 +226,23 @@ describe('Players panel', () => {
     ).toBeInTheDocument();
   });
 
+  it('warns that linking a candidate at another club moves them off that club’s team', async () => {
+    renderPage(status(on({ reviews: 1 })), [
+      {
+        ...MEDICOACH_REVIEW,
+        clubName: 'Crusaders CC',
+        candidates: [
+          { playerId: 'pl_1', name: 'Sipho Dlamini', dob: null, institutionName: 'Umzinto CC' },
+          { playerId: 'pl_2', name: 'Sipho Dlamini', dob: null, institutionName: 'crusaders  cc' },
+        ],
+      },
+    ]);
+    const list = await screen.findByTestId('mcs-player-reviews');
+    const notes = within(list).getAllByRole('note');
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toHaveTextContent(/they will leave Umzinto CC.s synced team/);
+  });
+
   it('summarises a player push in recent activity', async () => {
     renderPage({
       ...status(on()),

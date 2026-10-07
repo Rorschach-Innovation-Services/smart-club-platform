@@ -363,6 +363,15 @@ export function resolveToast(label: string, res: api.MedicoachResolveResult): [s
   return [`${label} — queued, will send on the next sync`];
 }
 
+/**
+ * Linking a medicoach player at ANOTHER club to this registration applies smart club's desired
+ * state: they are taken off that club's synced team. Compared by name (case/space tolerant).
+ */
+function movesClub(candidateClub: string | null, ourClub: string | null): boolean {
+  const norm = (v: string | null) => (v ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+  return !!norm(candidateClub) && !!norm(ourClub) && norm(candidateClub) !== norm(ourClub);
+}
+
 /** One held player: who, why, the candidates, and the decisions that apply. */
 function PlayerReviewCard({
   r,
@@ -410,6 +419,11 @@ function PlayerReviewCard({
               <div className="ump-sub">
                 {[c.institutionName, c.dob].filter(Boolean).join(' · ') || '—'}
               </div>
+              {medicoach && c.playerId && movesClub(c.institutionName, r.clubName) && (
+                <div className="mcs-error-text" role="note">
+                  Linking moves them: they will leave {c.institutionName}&apos;s synced team.
+                </div>
+              )}
             </div>
             {medicoach && c.playerId && (
               <Btn
