@@ -11,13 +11,22 @@
  * Env is set HERE before importing repo/app (repo reads it at module load).
  */
 import { createServer } from 'node:http';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const TABLE = 'SmartClubLocal';
 const DDB_PORT = 4567;
 const API_PORT = 3333;
+/**
+ * The checkout this stack runs from (packages/api/src/local → repo root). Served at
+ * `GET /__local/stack` so the Playwright global setup can refuse to reuse a stack another
+ * worktree started on the same fixed ports.
+ */
+export const STACK_ROOT = realpathSync.native(
+  fileURLToPath(new URL('../../../..', import.meta.url)),
+);
 
 process.env.TABLE_NAME = TABLE;
 process.env.DYNAMO_ENDPOINT = `http://localhost:${DDB_PORT}`;
@@ -92,7 +101,13 @@ async function main(): Promise<void> {
   // 4. Serve the Hono app.
   const { serve } = await import('@hono/node-server');
   const { app } = await import('../index.js');
-  serve({ fetch: app.fetch, port: API_PORT });
+  serve({
+    fetch: (req, ...rest) =>
+      new URL(req.url).pathname === '/__local/stack'
+        ? Response.json({ root: STACK_ROOT, pid: process.pid })
+        : app.fetch(req, ...rest),
+    port: API_PORT,
+  });
   console.log(`\n✓ Local API ready at http://localhost:${API_PORT}`);
   console.log(`  Point the SPA at it: VITE_API_URL=http://localhost:${API_PORT} VITE_LOCAL_AUTH=1`);
   console.log('  Auth is the dev bypass (x-dev-auth) — no Cognito. Ctrl-C to stop.\n');
