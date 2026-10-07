@@ -7,16 +7,42 @@ import type { InningsScorecard } from './types';
 /** A correction request is capped at this many characters (the API's SCORECARD_FEEDBACK_MAX). */
 export const FEEDBACK_MAX = 2000;
 
-/** "UKZN CC — 156/7 (20.0)" */
+/** "20 ov" for a completed "20.0", "18.3 ov" otherwise. */
+export function fmtOvers(overs: string): string {
+  return `${overs.replace(/\.0$/, '')} ov`;
+}
+
+/** "UKZN CC — 156/7 (20 ov)" */
 export function inningsHeading(
   inn: Pick<InningsScorecard, 'battingTeamName' | 'totalRuns' | 'wickets' | 'overs'>,
 ) {
-  return `${inn.battingTeamName} — ${inn.totalRuns}/${inn.wickets} (${inn.overs})`;
+  return `${inn.battingTeamName} — ${inn.totalRuns}/${inn.wickets} (${fmtOvers(inn.overs)})`;
 }
 
-/** "Extras 12 (b 1, lb 2, w 6, nb 2, pen 1)" — zero parts left out; "Extras 0" when none. */
-export function extrasLine(e: InningsScorecard['extras']): string {
-  const parts = (
+/**
+ * The innings' one-line hint under its summary: the top scorer (most runs, then fewest balls;
+ * `*` when not out) and the best bowling (most wickets, then fewest runs). Either half is left
+ * out when there is no one to name; empty when neither is.
+ */
+export function inningsHint(inn: Pick<InningsScorecard, 'batters' | 'bowlers'>): string {
+  const bat = [...byOrder(inn.batters)].sort(
+    (a, b) => b.runs - a.runs || a.ballsFaced - b.ballsFaced,
+  )[0];
+  const bowl = [...byOrder(inn.bowlers)].sort(
+    (a, b) => b.wickets - a.wickets || a.runsConceded - b.runsConceded,
+  )[0];
+  const parts: string[] = [];
+  if (bat)
+    parts.push(
+      `Top score ${bat.name} ${bat.runs}${/^not out$/i.test(bat.howOut.trim()) ? '*' : ''} (${bat.ballsFaced})`,
+    );
+  if (bowl) parts.push(`Best bowling ${bowl.name} ${bowl.wickets}/${bowl.runsConceded}`);
+  return parts.join(' · ');
+}
+
+/** "b 1, lb 2, w 6, nb 2, pen 1" — zero parts left out; empty when there were none. */
+export function extrasDetail(e: InningsScorecard['extras']): string {
+  return (
     [
       ['b', e.byes],
       ['lb', e.legByes],
@@ -26,8 +52,20 @@ export function extrasLine(e: InningsScorecard['extras']): string {
     ] as const
   )
     .filter(([, n]) => n > 0)
-    .map(([k, n]) => `${k} ${n}`);
-  return parts.length ? `Extras ${e.total} (${parts.join(', ')})` : `Extras ${e.total}`;
+    .map(([k, n]) => `${k} ${n}`)
+    .join(', ');
+}
+
+/** "Extras 12 (b 1, lb 2, w 6, nb 2, pen 1)" — zero parts left out; "Extras 0" when none. */
+export function extrasLine(e: InningsScorecard['extras']): string {
+  const detail = extrasDetail(e);
+  return detail ? `Extras ${e.total} (${detail})` : `Extras ${e.total}`;
+}
+
+/** "6 wkts, 20 ov" — "all out" at ten wickets, "1 wkt" for one. */
+export function totalDetail(inn: Pick<InningsScorecard, 'wickets' | 'overs'>): string {
+  const w = inn.wickets >= 10 ? 'all out' : `${inn.wickets} ${inn.wickets === 1 ? 'wkt' : 'wkts'}`;
+  return `${w}, ${fmtOvers(inn.overs)}`;
 }
 
 /** "1-23 (S. Naidoo, 2.6), 2-40 (K. Pillay, 5.1)" — empty when no wicket fell. */

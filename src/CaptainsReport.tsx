@@ -543,10 +543,12 @@ const scorecardAnswered = (a?: ScorecardChoice) =>
   !!a && (a.action === 'confirmed' || !!a.feedback?.trim());
 
 /**
- * The match scorecard, between the match details and the umpires: every innings (own side
- * anchored by the report's side) and the confirm-or-correct answer. No stored card yet: the
- * headline result and medicoach's link, with nothing to answer. Nothing at all for a match
- * without a result (an unlisted match, a by-hand filing).
+ * The match scorecard, between the match details and the umpires: every innings as a
+ * collapsible summary — the club's own innings first and open, the opponent's closed (when no
+ * innings carries the club's name, the first one opens) — and, straight under them, the
+ * confirm-or-correct answer, which never collapses. No stored card yet: the headline result
+ * and medicoach's link, with nothing to answer. Nothing at all for a match without a result
+ * (an unlisted match, a by-hand filing).
  */
 function MatchScorecardSection({
   report,
@@ -572,6 +574,14 @@ function MatchScorecardSection({
   const away = report.side === 'home' ? report.opponentName : report.clubName;
   const team = (side: 'home' | 'away', name: string) =>
     report.side === side ? <strong>{name}</strong> : <span>{name}</span>;
+  // Own innings first (stable otherwise); it opens, or the first innings when none is ours.
+  const innings = (card?.innings ?? []).map((inn, i) => ({
+    inn,
+    i,
+    own: sameName(inn.battingTeamName, report.clubName),
+  }));
+  innings.sort((a, b) => Number(b.own) - Number(a.own) || a.i - b.i);
+  const anyOwn = innings.some((x) => x.own);
   return (
     <div
       className="rp-section sc-report"
@@ -586,7 +596,7 @@ function MatchScorecardSection({
         title={<span id={headId}>Match scorecard</span>}
         sub={
           card
-            ? 'Check the stats, then confirm them or tell us what needs correcting.'
+            ? "Please check the scorecard below — confirm the stats or flag anything that's wrong."
             : 'The full scorecard is not available here yet.'
         }
       />
@@ -607,8 +617,8 @@ function MatchScorecardSection({
             </div>
           )}
           <div className="sc-scorecard">
-            {card.innings.map((inn, i) => (
-              <InningsCard key={i} inn={inn} own={sameName(inn.battingTeamName, report.clubName)} />
+            {innings.map(({ inn, i, own }, pos) => (
+              <InningsCard key={i} inn={inn} own={own} defaultOpen={anyOwn ? own : pos === 0} />
             ))}
           </div>
           <ScorecardAnswer value={value} onChange={onChange} disabled={disabled} />

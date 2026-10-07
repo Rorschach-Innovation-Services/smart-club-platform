@@ -8,9 +8,13 @@
  * contradiction. Correction text opens on demand; a stale answer (the card changed after it
  * was given, or the result was withdrawn) carries a ⚠ and is not re-asked — the chip is the
  * workflow.
+ *
+ * Filters: the window (`days`), the status chips (with per-status counts) and the client
+ * (tenant) are server params; club, competition and the search box narrow the loaded rows in
+ * the browser. All compose, and "Clear filters" resets everything but the window.
  */
-import { useState, type CSSProperties } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useMemo, useState, type CSSProperties } from 'react';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { Card, EmptyState, Icon, Pill, ScrollX } from './atoms';
 import { ApiError, listPlatformCaptainsReportScorecards } from './api';
 import { formatStamp, formatWeekdayDay } from './dates';
@@ -156,7 +160,51 @@ function FixtureRow({ tenant, row }: { tenant: string; row: ScorecardConsoleRow 
   );
 }
 
-function TenantSection({ t }: { t: ScorecardConsolePayload['tenants'][number] }) {
+type ConsoleTenant = ScorecardConsolePayload['tenants'][number];
+
+/** Client-side narrowing of the loaded rows: club, competition and free text. */
+export interface LocalFilters {
+  club: string;
+  competition: string;
+  search: string;
+}
+
+const cellsOf = (r: ScorecardConsoleRow) =>
+  [r.home, r.away].filter((c): c is ScorecardConsoleCell => !!c);
+
+/** Everything the search box looks through for one row: teams, clubs, match, refs, client. */
+const haystack = (tenantName: string, r: ScorecardConsoleRow) =>
+  [
+    `${r.homeTeamName} vs ${r.awayTeamName}`,
+    r.competition,
+    tenantName,
+    ...cellsOf(r).flatMap((c) => [c.clubName, c.reportRef ?? '']),
+  ]
+    .join('\n')
+    .toLowerCase();
+
+export function filterConsoleRows(tenants: ConsoleTenant[], f: LocalFilters): ConsoleTenant[] {
+  const needle = f.search.trim().toLowerCase();
+  return tenants
+    .map((t) => ({
+      ...t,
+      rows: t.rows.filter(
+        (r) =>
+          (!f.club ||
+            r.homeTeamName === f.club ||
+            r.awayTeamName === f.club ||
+            cellsOf(r).some((c) => c.clubName === f.club)) &&
+          (!f.competition || r.competition === f.competition) &&
+          (!needle || haystack(t.tenantName, r).includes(needle)),
+      ),
+    }))
+    .filter((t) => t.rows.length > 0);
+}
+
+const sortedUnique = (xs: string[]) =>
+  [...new Set(xs.filter(Boolean))].sort((a, b) => a.localeCompare(b));
+
+function TenantSection({ t }: { t: ConsoleTenant }) {
   return (
     <Card
       title={t.tenantName}
@@ -189,11 +237,58 @@ function TenantSection({ t }: { t: ScorecardConsolePayload['tenants'][number] })
 export function CaptainsReportScorecardsPage() {
   const [days, setDays] = useState<number>(14);
   const [status, setStatus] = useState<ScorecardConsoleFilter>('all');
+  const [tenant, setTenant] = useState('');
+  const [club, setClub] = useState('');
+  const [competition, setCompetition] = useState('');
+  const [search, setSearch] = useState('');
   const q = useQuery({
-    queryKey: qk.platformCaptainsReportScorecards(days, status),
-    queryFn: () => listPlatformCaptainsReportScorecards(days, status),
+    queryKey: qk.platformCaptainsReportScorecards(days, status, tenant),
+    queryFn: () => listPlatformCaptainsReportScorecards(days, status, tenant || undefined),
+    // Keep the last rows (and the chips' counts) on screen while a new filter loads.
+    placeholderData: keepPreviousData,
   });
   const data = q.data;
+
+  const loaded = data?.tenants;
+  const clubOptions = useMemo(
+    () =>
+      sortedUnique(
+        (loaded ?? []).flatMap((t) =>
+          t.rows.flatMap((r) => [
+            r.homeTeamName,
+            r.awayTeamName,
+            ...cellsOf(r).map((c) => c.clubName),
+          ]),
+        ),
+      ),
+    [loaded],
+  );
+  const competitionOptions = useMemo(
+    () => sortedUnique((loaded ?? []).flatMap((t) => t.rows.map((r) => r.competition))),
+    [loaded],
+  );
+  const shown = useMemo(
+    () => filterConsoleRows(loaded ?? [], { club, competition, search }),
+    [loaded, club, competition, search],
+  );
+  const loadedCount = (loaded ?? []).reduce((n, t) => n + t.rows.length, 0);
+  const shownCount = shown.reduce((n, t) => n + t.rows.length, 0);
+  const localActive = !!(club || competition || search.trim());
+  const anyActive = localActive || status !== 'all' || !!tenant;
+
+  const clearFilters = () => {
+    setStatus('all');
+    setTenant('');
+    setClub('');
+    setCompetition('');
+    setSearch('');
+  };
+  // A different client has different clubs and competitions: start those over.
+  const pickTenant = (next: string) => {
+    setTenant(next);
+    setClub('');
+    setCompetition('');
+  };
 
   return (
     <div>
@@ -227,7 +322,57 @@ export function CaptainsReportScorecardsPage() {
         </div>
       </div>
 
-      <div className="cr-filters" style={{ marginBottom: 16 }}>
+      <div className="scc-toolbar" role="search" aria-label="Filter scorecard answers">
+        <input
+          type="search"
+          className="field-input scc-search"
+          aria-label="Search matches"
+          placeholder="Search club, team or match"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+        <select
+          className="field-select"
+          aria-label="Client"
+          value={tenant}
+          onChange={(e) => pickTenant(e.target.value)}
+        >
+          <option value="">All clients</option>
+          {(data?.tenantOptions ?? []).map((t) => (
+            <option key={t.tenant} value={t.tenant}>
+              {t.tenantName}
+            </option>
+          ))}
+        </select>
+        <select
+          className="field-select"
+          aria-label="Club"
+          value={club}
+          onChange={(e) => setClub(e.target.value)}
+        >
+          <option value="">All clubs</option>
+          {clubOptions.map((c) => (
+            <option key={c} value={c}>
+              {c}
+            </option>
+          ))}
+        </select>
+        <select
+          className="field-select"
+          aria-label="Competition"
+          value={competition}
+          onChange={(e) => setCompetition(e.target.value)}
+        >
+          <option value="">All competitions</option>
+          {competitionOptions.map((c) => (
+            <option key={c} value={c}>
+              {c}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="scc-chipbar">
         <div className="cr-chips" role="group" aria-label="Scorecard status">
           {FILTERS.map((f) => (
             <button
@@ -238,9 +383,22 @@ export function CaptainsReportScorecardsPage() {
               onClick={() => setStatus(f.key)}
             >
               {f.label}
+              {data?.counts && (
+                <>
+                  <span className="scc-chip-dot" aria-hidden="true">
+                    ·
+                  </span>
+                  <span className="scc-chip-n">{data.counts[f.key]}</span>
+                </>
+              )}
             </button>
           ))}
         </div>
+        {anyActive && (
+          <button type="button" className="scc-link scc-clear" onClick={clearFilters}>
+            Clear filters
+          </button>
+        )}
       </div>
 
       {q.isLoading ? (
@@ -261,15 +419,37 @@ export function CaptainsReportScorecardsPage() {
               : `No match has a side with this status since ${formatWeekdayDay(data.since)}.`
           }
         />
+      ) : shown.length === 0 ? (
+        <EmptyState
+          icon={Icon.Check}
+          title="No matches fit these filters"
+          sub={`None of the ${loadedCount} loaded ${loadedCount === 1 ? 'match fits' : 'matches fit'} the club, competition or search.`}
+          action={
+            <button
+              type="button"
+              className="btn btn-outline"
+              style={{ marginTop: 12 }}
+              onClick={clearFilters}
+            >
+              Clear filters
+            </button>
+          }
+        />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {data.truncated && (
             <p role="status" style={{ ...MUTED, fontSize: 12.5, margin: 0 }}>
-              Showing the newest {data.tenants.reduce((n, t) => n + t.rows.length, 0)} of{' '}
-              {data.total} matches — narrow the window or filter by status to see the rest.
+              Showing the newest {loadedCount} of {data.total} matches — narrow the window or filter
+              by status to see the rest.
             </p>
           )}
-          {data.tenants.map((t) => (
+          {localActive && (
+            <p aria-live="polite" style={{ ...MUTED, fontSize: 12.5, margin: 0 }}>
+              {shownCount} of {loadedCount} {loadedCount === 1 ? 'match' : 'matches'} fit these
+              filters.
+            </p>
+          )}
+          {shown.map((t) => (
             <TenantSection key={t.tenant} t={t} />
           ))}
         </div>

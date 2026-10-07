@@ -11336,7 +11336,9 @@ app.post('/platform/tenants/:slug/clubs', async (c) => {
  * GET /platform/captains-report-scorecards?days=14&status=all — the scorecard answers in
  * captains reports across every tenant, one row per fixture pairing the home and away sides.
  * `days` (1–60, default 14) is the match-date window back from today; `status` keeps rows where
- * EITHER side has that status. Rows are capped (newest first) with `truncated` when cut.
+ * EITHER side has that status; `tenant` (optional) reads only that tenant (400 when unknown).
+ * Rows are capped (newest first) with `truncated` when cut; `counts` are per status before the
+ * status filter, and `tenantOptions` lists every tenant for the picker.
  */
 app.get('/platform/captains-report-scorecards', async (c) => {
   const daysRaw = c.req.query('days');
@@ -11350,10 +11352,13 @@ app.get('/platform/captains-report-scorecards', async (c) => {
   const statusRaw = c.req.query('status') ?? 'all';
   if (!(CONSOLE_STATUSES as readonly string[]).includes(statusRaw))
     throw new HttpError(400, `status must be one of ${CONSOLE_STATUSES.join(', ')}`);
+  const tenant = c.req.query('tenant') || undefined;
+  if (tenant && !(await repo.getTenantConfig(tenant))) throw new HttpError(400, 'unknown tenant');
   const payload = await loadScorecardConsole(repo, {
     days,
     status: statusRaw as ConsoleStatusFilter,
     now: new Date(),
+    ...(tenant ? { tenant } : {}),
   });
   return c.json(payload);
 });

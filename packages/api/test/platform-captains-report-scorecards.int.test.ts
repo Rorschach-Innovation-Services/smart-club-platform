@@ -9,7 +9,9 @@
  *    card; a draft answer does not count), not-asked (submitted / void without an answer while
  *    a card exists), confirmed, correction (with its text), stale (wins over the answer);
  *  - unlisted matches are left out; the `days` window (default 14, capped at 60) and the
- *    `status` filter (either side matches); the row cap with `truncated`.
+ *    `status` filter (either side matches); the row cap with `truncated`;
+ *  - the `tenant` scope (only that tenant read; 400 for an unknown one), per-status counts taken
+ *    before the status filter, and the tenant picker's options.
  */
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -335,6 +337,76 @@ describe('filters', () => {
     assert.equal((await load('?status=stale')).total, 1);
     assert.equal((await get('?status=n/a')).status, 400);
     assert.equal((await get('?status=bogus')).status, 400);
+  });
+});
+
+describe('tenant scope, counts and options', () => {
+  const ALL_COUNTS = {
+    all: 6,
+    pending: 1,
+    confirmed: 2,
+    correction: 1,
+    stale: 1,
+    'not-asked': 2,
+  };
+
+  test('counts every status filter before the status filter, whichever is active', async () => {
+    assert.deepEqual((await load()).counts, ALL_COUNTS);
+    // A status filter narrows the rows, never the counts.
+    const correction = await load('?status=correction');
+    assert.equal(correction.total, 1);
+    assert.deepEqual(correction.counts, ALL_COUNTS);
+    // The window does move them: two days back holds f1 (+ titans f1) and f2.
+    assert.deepEqual((await load('?days=2')).counts, {
+      all: 3,
+      pending: 1,
+      confirmed: 2,
+      correction: 1,
+      stale: 0,
+      'not-asked': 1,
+    });
+  });
+
+  test('lists every tenant for the picker, by name, scoped or not', async () => {
+    const expected = [
+      { tenant: 'dolphins', tenantName: 'Dolphins Cricket' },
+      { tenant: 'titans', tenantName: 'Titans Cricket' },
+    ];
+    assert.deepEqual((await load()).tenantOptions, expected);
+    assert.deepEqual((await load('?tenant=titans')).tenantOptions, expected);
+  });
+
+  test('tenant= reads only that tenant: its rows, total and counts', async () => {
+    const t = await load('?tenant=titans');
+    assert.equal(t.tenant, 'titans');
+    assert.deepEqual(
+      t.tenants.map((x) => x.tenant),
+      ['titans'],
+    );
+    assert.equal(t.total, 1);
+    assert.deepEqual(t.counts, {
+      all: 1,
+      pending: 0,
+      confirmed: 1,
+      correction: 0,
+      stale: 0,
+      'not-asked': 0,
+    });
+    const d = await load('?tenant=dolphins&status=not-asked');
+    assert.deepEqual(
+      d.tenants.map((x) => [x.tenant, x.rows.map((r) => r.fixtureId)]),
+      [['dolphins', ['f2', 'f4']]],
+    );
+    assert.equal(d.counts.all, 5);
+    assert.equal(d.counts.confirmed, 1);
+    // Unscoped responses carry no tenant.
+    assert.equal((await load()).tenant, undefined);
+  });
+
+  test('an unknown tenant is a 400', async () => {
+    const res = await get('?tenant=nope');
+    assert.equal(res.status, 400);
+    assert.match(((await res.json()) as { error: string }).error, /unknown tenant/);
   });
 });
 

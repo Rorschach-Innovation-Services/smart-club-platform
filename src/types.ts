@@ -223,9 +223,15 @@ export interface ScorecardConsoleRow {
 export interface ScorecardConsolePayload {
   days: number;
   status: ScorecardConsoleFilter;
+  /** The one tenant the response is scoped to (`?tenant=`), when it is. */
+  tenant?: string;
   since: string;
   total: number;
   truncated: boolean;
+  /** Rows per status filter in the window + tenant scope, before the status filter. */
+  counts: Record<ScorecardConsoleFilter, number>;
+  /** Every tenant on the platform, by name — the client picker's options. */
+  tenantOptions: Array<{ tenant: string; tenantName: string }>;
   tenants: Array<{ tenant: string; tenantName: string; rows: ScorecardConsoleRow[] }>;
 }
 /** GET /club/captains-reports/:id — one report plus its match scorecard context. */

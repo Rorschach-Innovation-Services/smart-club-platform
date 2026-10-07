@@ -1544,11 +1544,20 @@ export interface ScorecardConsoleTenant {
 export interface ScorecardConsolePayload {
   days: number;
   status: ConsoleStatusFilter;
+  /** The one tenant the response is scoped to (`?tenant=`), when it is. */
+  tenant?: string;
   /** The first match date in the window (YYYY-MM-DD, tenant time). */
   since: string;
   /** Fixture rows matching the filter before the cap. */
   total: number;
   truncated: boolean;
+  /**
+   * Rows per status filter in the window and tenant scope, BEFORE the status filter and the
+   * cap — so every chip can show its count whichever one is active. `all` = every row.
+   */
+  counts: Record<ConsoleStatusFilter, number>;
+  /** Every tenant on the platform (id + display name, by name), for the client picker. */
+  tenantOptions: Array<{ tenant: string; tenantName: string }>;
   tenants: ScorecardConsoleTenant[];
 }
 
@@ -1633,16 +1642,33 @@ export function consoleRowMatches(row: ScorecardConsoleRow, status: ConsoleStatu
  * Cross-tenant scorecard status of captains reports, for the operator console. Tenants are
  * read one at a time (one CAPREPORT Query each — the partition is not date-keyed, so the
  * window is applied here); scorecards via a projected BatchGet over the window's fixtures.
- * Rows are capped at `rowCap` across tenants, newest match first.
+ * `tenant` scopes the read to that one tenant (the caller has checked it exists). Per-status
+ * counts are taken before the status filter; rows are capped at `rowCap` across tenants,
+ * newest match first.
  */
 export async function loadScorecardConsole(
   repo: Pick<RepoModule, 'listTenants' | 'listCaptainsReports' | 'getFixtureScorecardAvailability'>,
-  opts: { days: number; status: ConsoleStatusFilter; now: Date; rowCap?: number },
+  opts: {
+    days: number;
+    status: ConsoleStatusFilter;
+    now: Date;
+    tenant?: string;
+    rowCap?: number;
+  },
 ): Promise<ScorecardConsolePayload> {
   const since = consoleSince(opts.days, opts.now);
   const rowCap = opts.rowCap ?? CONSOLE_ROW_CAP;
+  const counts = Object.fromEntries(CONSOLE_STATUSES.map((s) => [s, 0])) as Record<
+    ConsoleStatusFilter,
+    number
+  >;
+  const configs = await repo.listTenants();
+  const tenantOptions = configs
+    .map((cfg) => ({ tenant: cfg.tenant, tenantName: orgCopy(cfg).name }))
+    .sort((a, b) => a.tenantName.localeCompare(b.tenantName));
   const all: Array<{ tenant: string; tenantName: string; row: ScorecardConsoleRow }> = [];
-  for (const cfg of await repo.listTenants()) {
+  for (const cfg of configs) {
+    if (opts.tenant && cfg.tenant !== opts.tenant) continue;
     const reports = (await repo.listCaptainsReports(cfg.tenant)).filter(
       (r) =>
         r.matchDate >= since && r.seriesId !== UNLISTED_SERIES_ID && r.source !== 'manual-unlisted',
@@ -1653,8 +1679,10 @@ export async function loadScorecardConsole(
       reports.map((r) => ({ seriesId: r.seriesId, fixtureId: r.fixtureId })),
     );
     const tenantName = orgCopy(cfg).name;
-    for (const row of pairScorecardConsoleRows(reports, cards))
+    for (const row of pairScorecardConsoleRows(reports, cards)) {
+      for (const s of CONSOLE_STATUSES) if (consoleRowMatches(row, s)) counts[s]++;
       if (consoleRowMatches(row, opts.status)) all.push({ tenant: cfg.tenant, tenantName, row });
+    }
   }
   all.sort(
     (a, b) =>
@@ -1670,9 +1698,12 @@ export async function loadScorecardConsole(
   return {
     days: opts.days,
     status: opts.status,
+    ...(opts.tenant ? { tenant: opts.tenant } : {}),
     since,
     total: all.length,
     truncated: all.length > kept.length,
+    counts,
+    tenantOptions,
     tenants: [...byTenant.values()].sort((a, b) => a.tenantName.localeCompare(b.tenantName)),
   };
 }

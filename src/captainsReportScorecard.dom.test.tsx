@@ -149,15 +149,102 @@ describe('the match scorecard section', () => {
     expect(within(sc).getByText('Away')).toBeInTheDocument();
     expect(within(sc).getByText('Umzinto CC', { selector: 'strong' })).toBeInTheDocument();
     expect(
-      within(sc).getByRole('heading', { name: /Umzinto CC — 184\/6 \(20\.0\)/ }),
+      within(sc).getByRole('heading', { name: /^Umzinto CC — 184\/6 \(20 ov\)/ }),
     ).toHaveTextContent('Your innings');
     expect(
-      within(sc).getByRole('heading', { name: 'African Warriors — 161/6 (20.0)' }),
+      within(sc).getByRole('heading', { name: /^African Warriors — 161\/6 \(20 ov\)/ }),
     ).not.toHaveTextContent('Your innings');
+    // The summary carries a one-line hint: top score and best bowling.
+    expect(within(sc).getByRole('button', { name: /^Umzinto CC — 184\/6/ })).toHaveTextContent(
+      'Top score S. Naidoo 64* (41) · Best bowling T. Khumalo 2/31',
+    );
     // Every table scrolls inside its own focusable region (phones).
-    for (const name of ['Umzinto CC batting', 'Bowling to African Warriors'])
+    for (const name of ['Umzinto CC batting', 'Bowling to Umzinto CC'])
       expect(within(sc).getByRole('region', { name })).toHaveAttribute('tabindex', '0');
     expect(screen.getByText(/including the answer on the match scorecard/)).toBeInTheDocument();
+    // The lead-in sets the expectation before the submit gate does.
+    expect(sc).toHaveTextContent(
+      "Please check the scorecard below — confirm the stats or flag anything that's wrong.",
+    );
+  });
+
+  it('own innings first and open; the opponent’s closed until tapped', async () => {
+    // A home report for African Warriors: its innings is second on the card, first here.
+    renderWithProviders(
+      <CaptainsReportForm
+        report={shell({ side: 'home', clubName: 'African Warriors', opponentName: 'Umzinto CC' })}
+        registry={REGISTRY}
+        onSubmit={vi.fn()}
+        scorecardContext={WITH_CARD}
+      />,
+    );
+    const sc = section();
+    const toggles = within(sc).getAllByRole('button', { name: / — \d+\/\d+/ });
+    expect(toggles.map((t) => t.textContent)).toEqual([
+      expect.stringMatching(/^African Warriors — 161\/6 \(20 ov\)Your innings/),
+      expect.stringMatching(/^Umzinto CC — 184\/6 \(20 ov\)/),
+    ]);
+    const [own, theirs] = toggles;
+    expect(own).toHaveAttribute('aria-expanded', 'true');
+    expect(theirs).toHaveAttribute('aria-expanded', 'false');
+    // Disclosure: the button controls a region labelled by it.
+    const ownBody = document.getElementById(own.getAttribute('aria-controls')!)!;
+    expect(ownBody).toHaveAttribute('role', 'region');
+    expect(ownBody).toHaveAccessibleName(expect.stringMatching(/^African Warriors — 161\/6/));
+    expect(within(sc).getByRole('region', { name: 'African Warriors batting' })).toBeVisible();
+    expect(within(sc).queryByRole('region', { name: 'Umzinto CC batting' })).toBeNull();
+    // Sub-headers, the extras line and the emphasised total.
+    for (const h of ['Batting', 'Bowling', 'Fall of wickets'])
+      expect(within(ownBody).getByRole('heading', { name: h })).toBeInTheDocument();
+    expect(within(ownBody).getByRole('row', { name: /^Extras lb 1, w 4 5/ })).toBeInTheDocument();
+    expect(within(ownBody).getByRole('row', { name: /^Total 6 wkts, 20 ov 161\/6/ })).toHaveClass(
+      'sc-total-row',
+    );
+
+    await userEvent.click(theirs);
+    expect(theirs).toHaveAttribute('aria-expanded', 'true');
+    expect(within(sc).getByRole('region', { name: 'Umzinto CC batting' })).toBeVisible();
+    await userEvent.click(own);
+    expect(own).toHaveAttribute('aria-expanded', 'false');
+    expect(within(sc).queryByRole('region', { name: 'African Warriors batting' })).toBeNull();
+  });
+
+  it('the answer never collapses: still there, right under the innings, with every innings shut', async () => {
+    renderWithProviders(
+      <CaptainsReportForm
+        report={shell()}
+        registry={REGISTRY}
+        onSubmit={vi.fn()}
+        scorecardContext={WITH_CARD}
+      />,
+    );
+    const sc = section();
+    await userEvent.click(within(sc).getByRole('button', { name: /^Umzinto CC — 184\/6/ }));
+    for (const t of within(sc).getAllByRole('button', { name: / — \d+\/\d+/ }))
+      expect(t).toHaveAttribute('aria-expanded', 'false');
+    const group = within(sc).getByRole('radiogroup', { name: 'Are these stats correct?' });
+    expect(within(group).getAllByRole('radio')).toHaveLength(2);
+    const lastInnings = within(sc)
+      .getAllByRole('button', { name: / — \d+\/\d+/ })
+      .at(-1)!;
+    expect(
+      lastInnings.compareDocumentPosition(group) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('no innings carries the club’s name: the first one opens', () => {
+    renderWithProviders(
+      <CaptainsReportForm
+        report={shell({ clubName: 'Umzinto Cricket Club' })}
+        registry={REGISTRY}
+        onSubmit={vi.fn()}
+        scorecardContext={WITH_CARD}
+      />,
+    );
+    const [first, second] = within(section()).getAllByRole('button', { name: / — \d+\/\d+/ });
+    expect(first).toHaveAttribute('aria-expanded', 'true');
+    expect(first).not.toHaveTextContent('Your innings');
+    expect(second).toHaveAttribute('aria-expanded', 'false');
   });
 
   it('requires the answer: checklist step, problem, and the card version echoed on submit', async () => {
@@ -179,7 +266,9 @@ describe('the match scorecard section', () => {
       }),
     ).toBeInTheDocument();
 
-    await userEvent.click(within(section()).getByRole('radio', { name: /Confirm/ }));
+    await userEvent.click(
+      within(section()).getByRole('radio', { name: /These stats are correct/ }),
+    );
     expect(step('Confirm the scorecard')).toHaveClass('done');
     expect(submitButton()).toBeEnabled();
     await userEvent.click(submitButton());
@@ -201,9 +290,13 @@ describe('the match scorecard section', () => {
       />,
     );
     await fillTheRest();
-    await userEvent.click(within(section()).getByRole('radio', { name: /Request a correction/ }));
-    const field = within(section()).getByRole('textbox', { name: /What needs correcting/ });
+    await userEvent.click(within(section()).getByRole('radio', { name: /Something's wrong/ }));
+    const field = within(section()).getByRole('textbox', { name: /What's wrong/ });
     expect(field).toHaveFocus();
+    expect(field).toHaveAttribute(
+      'placeholder',
+      "Tell us what's wrong, e.g. 'Nkosi scored 45 not 54'",
+    );
     expect(submitButton()).toBeDisabled();
     // Leaving it blank says why.
     await userEvent.type(field, '   ');
@@ -212,6 +305,7 @@ describe('the match scorecard section', () => {
       'Tell us what needs correcting.',
     );
     expect(field).toHaveAttribute('aria-invalid', 'true');
+    expect(field).toHaveAccessibleDescription(/Tell us what needs correcting\./);
     await userEvent.clear(field);
     await userEvent.type(field, 'S. Naidoo scored 46');
     expect(within(section()).queryByRole('alert')).toBeNull();
@@ -239,9 +333,9 @@ describe('the match scorecard section', () => {
         scorecardContext={WITH_CARD}
       />,
     );
-    await userEvent.click(within(section()).getByRole('radio', { name: /Request a correction/ }));
+    await userEvent.click(within(section()).getByRole('radio', { name: /Something's wrong/ }));
     await userEvent.type(
-      within(section()).getByRole('textbox', { name: /What needs correcting/ }),
+      within(section()).getByRole('textbox', { name: /What's wrong/ }),
       'Extras are wrong',
     );
     first.unmount();
@@ -253,8 +347,8 @@ describe('the match scorecard section', () => {
         scorecardContext={WITH_CARD}
       />,
     );
-    expect(within(section()).getByRole('radio', { name: /Request a correction/ })).toBeChecked();
-    expect(within(section()).getByRole('textbox', { name: /What needs correcting/ })).toHaveValue(
+    expect(within(section()).getByRole('radio', { name: /Something's wrong/ })).toBeChecked();
+    expect(within(section()).getByRole('textbox', { name: /What's wrong/ })).toHaveValue(
       'Extras are wrong',
     );
   });
@@ -268,7 +362,7 @@ describe('the match scorecard section', () => {
         scorecardContext={WITH_CARD}
       />,
     );
-    expect(within(section()).getByRole('radio', { name: /Confirm/ })).toBeChecked();
+    expect(within(section()).getByRole('radio', { name: /These stats are correct/ })).toBeChecked();
   });
 
   it('no card yet: the headline result and medicoach link, nothing to answer, not required', async () => {
@@ -438,7 +532,7 @@ describe('a scorecard that arrives while the form is open', () => {
     // No second banner for the same thing.
     expect(screen.getAllByRole('alert')).toHaveLength(1);
     expect(submitButton()).toBeDisabled();
-    await userEvent.click(within(sc).getByRole('radio', { name: /Confirm/ }));
+    await userEvent.click(within(sc).getByRole('radio', { name: /These stats are correct/ }));
     expect(within(sc).queryByRole('alert')).toBeNull();
     expect(submitButton()).toBeEnabled();
   });
@@ -476,9 +570,9 @@ describe('the success card', () => {
     );
     await screen.findByTestId('report-scorecard');
     await fillTheRest();
-    await userEvent.click(within(section()).getByRole('radio', { name: /Request a correction/ }));
+    await userEvent.click(within(section()).getByRole('radio', { name: /Something's wrong/ }));
     await userEvent.type(
-      within(section()).getByRole('textbox', { name: /What needs correcting/ }),
+      within(section()).getByRole('textbox', { name: /What's wrong/ }),
       'S. Naidoo scored 46',
     );
     await userEvent.click(submitButton());

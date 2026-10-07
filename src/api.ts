@@ -1145,9 +1145,10 @@ export const forwardLinkedCaptainsReport = (token: string, candidateId: string) 
 export const listPlatformCaptainsReportScorecards = (
   days: number,
   status: ScorecardConsoleFilter,
+  tenant?: string,
 ) =>
   request<ScorecardConsolePayload>('/platform/captains-report-scorecards', {
-    query: { days, status },
+    query: { days, status, tenant: tenant || undefined },
   });
 
 // ── Venues (ADR 0008 phase 2) ──

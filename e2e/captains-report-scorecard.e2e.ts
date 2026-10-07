@@ -19,7 +19,8 @@ import {
  * Scorecard confirmation inside the captain's report, end to end: a result pulled from a STUB
  * medicoach (with its full scorecard) opens a report per side with the scorecard attached.
  *
- *  - HOME side, public `/r/` link on a phone: the scorecard renders (its tables scroll inside
+ *  - HOME side, public `/r/` link on a phone: the innings open and close as disclosures with the
+ *    answer always in view, and the scorecard renders (its tables scroll inside
  *    their own wrappers, never the page), the answer is required — submit stays blocked until
  *    it is given — and the confirmation locks in with the report.
  *  - AWAY side, club portal (the chair's path: the form is fed by the report DETAIL route, the
@@ -348,19 +349,35 @@ test('home, by link on a phone: the scorecard is required, then confirmed', asyn
   const p = await ctx.newPage();
   await p.goto(`/r/${token}`);
   const section = p.getByTestId('report-scorecard');
-  await expect(section.getByRole('heading', { name: /^Clares — 152\/6 \(20\.0\)/ })).toBeVisible();
+  await expect(section.getByRole('heading', { name: /^Clares — 152\/6 \(20 ov\)/ })).toBeVisible();
+  // The innings is a disclosure: its summary toggles the tables, and the answer never hides.
+  // (The card's "Clares" is not the club's "Clares CC", so no innings is marked as ours — the
+  // first one opens.)
+  const toggle = section.getByRole('button', { name: /^Clares — 152\/6/ });
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
   const batting = section.getByRole('region', { name: 'Clares batting' });
+  const answer = section.getByRole('radiogroup', { name: 'Are these stats correct?' });
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(batting).toBeHidden();
+  await expect(answer).toBeVisible();
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
   await expect(batting.getByRole('row', { name: new RegExp(`Opener ${RUN}`) })).toContainText(
     'c Keeper b Seamer',
   );
   await expect(section.getByText(`1-44 (Opener ${RUN}, 5.3)`)).toBeVisible();
 
-  // Phone width: each table scrolls inside its own wrapper, never the page.
+  // Phone width: each table scrolls inside its own wrapper, never the page — at phone,
+  // tablet and laptop widths alike.
   expect(await batting.evaluate((el) => getComputedStyle(el).overflowX)).toBe('auto');
-  const pageOverflows = await p.evaluate(
-    () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
-  );
-  expect(pageOverflows).toBe(false);
+  for (const width of [360, 390, 768, 1280, 375]) {
+    await p.setViewportSize({ width, height: 740 });
+    const pageOverflows = await p.evaluate(
+      () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
+    );
+    expect(pageOverflows, `page overflows at ${width}px`).toBe(false);
+  }
 
   // Everything else filled in: submit stays blocked until the scorecard is answered.
   await rateUmpires(p, '4');
@@ -372,7 +389,7 @@ test('home, by link on a phone: the scorecard is required, then confirmed', asyn
     p.getByText('Confirm the scorecard or request a correction.').first(),
   ).toBeAttached();
 
-  await section.getByRole('radio', { name: /Confirm — these stats are correct/ }).check();
+  await section.getByRole('radio', { name: 'These stats are correct' }).check();
   await expect(submit).toBeEnabled();
   await submit.click();
   await expect(p.getByText('Report submitted')).toBeVisible();
@@ -390,15 +407,15 @@ test('away, in the club portal: a correction needs its text, then submits', asyn
 
   // The form is fed by the report's detail route — the only response with the scorecard.
   const section = page.getByTestId('report-scorecard');
-  await expect(section.getByRole('heading', { name: /^Clares — 152\/6 \(20\.0\)/ })).toBeVisible();
+  await expect(section.getByRole('heading', { name: /^Clares — 152\/6 \(20 ov\)/ })).toBeVisible();
 
   await rateUmpires(page, '5');
   await page.getByRole('combobox', { name: "Captain's name" }).fill(`Away captain ${RUN}`);
   await page.getByRole('checkbox').check();
   const submit = page.getByRole('button', { name: 'Submit report' }).first();
 
-  await section.getByRole('radio', { name: 'Request a correction' }).check();
-  const text = section.getByRole('textbox', { name: /what needs correcting/i });
+  await section.getByRole('radio', { name: "Something's wrong — tell us" }).check();
+  const text = section.getByRole('textbox', { name: /what's wrong/i });
   await expect(text).toBeFocused();
   await text.blur();
   await expect(section.getByRole('alert')).toHaveText('Tell us what needs correcting.');
@@ -443,12 +460,23 @@ test('the operator console pairs both answers with the correction text', async (
   const fits = await scroller.evaluate((el) => el.scrollWidth <= el.clientWidth + 1);
   expect(fits).toBe(true);
 
-  // The correction filter keeps the row.
-  await page
+  // The correction filter keeps the row; its chip carries a count.
+  const correctionChip = page
     .getByRole('group', { name: 'Scorecard status' })
-    .getByRole('button', {
-      name: 'Correction requested',
-    })
-    .click();
+    .getByRole('button', { name: /^Correction requested/ });
+  await expect(correctionChip).toHaveText(/^Correction requested·\d+$/);
+  await correctionChip.click();
+  await expect(page.getByTestId(`scc-fixture-${TENANT}-${SERIES_ID}-f1`)).toBeVisible();
+
+  // Filters compose: this client (server-side) + a search for this run's series.
+  await page.getByRole('combobox', { name: 'Client' }).selectOption(TENANT);
+  await page.getByRole('searchbox', { name: 'Search matches' }).fill(SERIES_NAME);
+  await expect(page.getByTestId(`scc-fixture-${TENANT}-${SERIES_ID}-f1`)).toBeVisible();
+  await expect(page.locator('[data-testid^="scc-fixture-"]')).toHaveCount(1);
+  await page.getByRole('searchbox', { name: 'Search matches' }).fill(`no such match ${RUN}`);
+  await expect(page.getByText('No matches fit these filters')).toBeVisible();
+  await page.getByRole('button', { name: 'Clear filters' }).first().click();
+  await expect(page.getByRole('searchbox', { name: 'Search matches' })).toHaveValue('');
+  await expect(page.getByRole('combobox', { name: 'Client' })).toHaveValue('');
   await expect(page.getByTestId(`scc-fixture-${TENANT}-${SERIES_ID}-f1`)).toBeVisible();
 });
