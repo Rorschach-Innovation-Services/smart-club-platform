@@ -37,6 +37,7 @@
     "import-emcu-fixtures": "tsx src/import-emcu-fixtures.ts",
     "bootstrap-emcu-prereqs": "tsx src/bootstrap-emcu-fixture-prereqs.ts",
     "import-titans-fixtures": "tsx src/import-titans-fixtures.ts",
+    "bootstrap-titans-fixture-prereqs": "tsx src/bootstrap-titans-fixture-prereqs.ts",
     "bootstrap-admin": "tsx src/bootstrap-admin.ts",
     "bootstrap-operator": "tsx src/bootstrap-operator.ts",
     "request-cert": "tsx src/request-cert.ts",

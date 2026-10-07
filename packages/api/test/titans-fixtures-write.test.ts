@@ -1,0 +1,479 @@
+/**
+ * Unit tests for the Titans fixtures write steps (A1–A4): the prereqs bootstrap's pure diffs,
+ * the --append-sides side plan (roster matching, the 1→2 seed that keeps the club id, next-free
+ * tm_ ids, women's sides never appended, counters), the live-side series build, the veterans
+ * playoff series, stable fixture ids (held-back reservation, a knockout fixture after "Set
+ * team") and the CLI's flag guards. Pure — no dynalite, no repo.js.
+ */
+import { test, describe } from 'node:test';
+import assert from 'node:assert/strict';
+import ExcelJS from 'exceljs';
+import type { Club, Series } from '../src/types.js';
+
+const { planSides, sideSuffixFor } = await import('../src/titans-sides.js');
+const { leaguePlan, aliasMerge, registryDiff } =
+  await import('../src/bootstrap-titans-fixture-prereqs.js');
+const {
+  buildTitansSeries,
+  buildVeteransKnockouts,
+  clubsFromMap,
+  parseArgs,
+  stabiliseIds,
+  wouldBeRegistry,
+} = await import('../src/import-titans-fixtures.js');
+const { TITANS_FIXTURE_SHEETS, TITANS_VENUE_ALIASES, parseTitansSheet, seriesNameFor } =
+  await import('../src/titans-fixture-map.js');
+const { CLUB_MAP } = await import('../src/titans-import-map.js');
+
+const club = (id: string, extra: Partial<Club> = {}): Club =>
+  ({
+    id,
+    name: CLUB_MAP.find((c) => c.id === id)!.name,
+    version: 3,
+    leagues: [],
+    leagueTeams: {},
+    teamRosters: {},
+    ground: { venue: 'GROUND' },
+    ...extra,
+  }) as unknown as Club;
+
+describe('side suffixes', () => {
+  test('sheet labels and generated roster names reduce to the same side', () => {
+    const tut = CLUB_MAP.find((c) => c.id === 'tut-cricket-club')!;
+    assert.equal(sideSuffixFor('TUT A', tut), 'A');
+    assert.equal(sideSuffixFor('TUT Cricket Club A', tut), 'A');
+    assert.equal(sideSuffixFor('TUT', tut), '');
+    const phsob = CLUB_MAP.find((c) => c.id === 'phsob-cricket-club')!;
+    assert.equal(sideSuffixFor('PHSOB VETERANS 1', phsob), 'VETERANS 1');
+    assert.equal(sideSuffixFor('Something Else', phsob), null);
+  });
+});
+
+describe('planSides — resolution against live rosters', () => {
+  test('a roster entry with the same side wins; a lone side in a no-roster league is the club id', () => {
+    const tut = club('tut-cricket-club', {
+      leagues: ['u13', 'second-league'],
+      leagueTeams: { u13: 2, 'second-league': 1 },
+      teamRosters: {
+        u13: [
+          { id: 'tm_tut-cricket-club_u13_0', name: 'TUT Cricket Club A' },
+          { id: 'tm_tut-cricket-club_u13_1', name: 'TUT Cricket Club B' },
+        ],
+      },
+    });
+    const plan = planSides(
+      [
+        { leagueKey: 'u13', name: 'TUT B' },
+        { leagueKey: 'second-league', name: 'TUT 2' },
+      ],
+      [tut],
+      { allowAppend: false },
+    );
+    assert.deepEqual(plan.fatal, []);
+    assert.equal(plan.resolve.get('u13::TUT B')!.teamId, 'tm_tut-cricket-club_u13_1');
+    assert.equal(plan.resolve.get('second-league::TUT 2')!.teamId, 'tut-cricket-club');
+    assert.equal(plan.patches.length, 0);
+  });
+
+  test('without --append-sides a missing side is listed, never invented', () => {
+    const tuks = club('tuks-cricket-club', { leagues: ['premier-league'] });
+    const plan = planSides(
+      [
+        { leagueKey: 'premier-league', name: 'TUKS 1' },
+        { leagueKey: 'premier-league', name: 'TUKS 2' },
+      ],
+      [tuks],
+      { allowAppend: false },
+    );
+    assert.equal(plan.needsAppend.length, 1);
+    assert.equal(plan.resolve.size, 0);
+  });
+
+  test('growing 1 → 2 seeds roster[0] with the club id and appends the next free tm_ id', () => {
+    const tuks = club('tuks-cricket-club', {
+      leagues: ['premier-league', 'u9'],
+      leagueTeams: { 'premier-league': 1, u9: 2 },
+      teamRosters: {
+        // An id that would collide with the generated one must be skipped.
+        u9: [
+          { id: 'tm_tuks-cricket-club_premier-league_1', name: 'TUKS A' },
+          { id: 'tm_tuks-cricket-club_u9_1', name: 'TUKS B' },
+        ],
+      },
+      teams: 3,
+      women: 0,
+      juniors: 2,
+    });
+    const plan = planSides(
+      [
+        { leagueKey: 'premier-league', name: 'TUKS 2' },
+        { leagueKey: 'premier-league', name: 'TUKS 1' },
+      ],
+      [tuks],
+      { allowAppend: true },
+    );
+    assert.deepEqual(plan.fatal, []);
+    assert.equal(plan.resolve.get('premier-league::TUKS 1')!.teamId, 'tuks-cricket-club');
+    assert.equal(plan.resolve.get('premier-league::TUKS 1')!.how, 'seed');
+    assert.equal(
+      plan.resolve.get('premier-league::TUKS 2')!.teamId,
+      'tm_tuks-cricket-club_premier-league_2',
+    );
+    const p = plan.patches[0];
+    assert.deepEqual(p.teamRosters['premier-league'], [
+      { id: 'tuks-cricket-club', name: 'TUKS 1' },
+      { id: 'tm_tuks-cricket-club_premier-league_2', name: 'TUKS 2' },
+    ]);
+    assert.equal(p.leagueTeams['premier-league'], 2);
+    // u9 roster untouched; counters recomputed (premier 2 + u9 2).
+    assert.equal(p.teamRosters.u9, tuks.teamRosters!.u9);
+    assert.deepEqual([p.teams, p.women, p.juniors], [4, 0, 2]);
+    assert.equal(p.version, 3);
+  });
+
+  test('an existing roster grows at the end; existing ids keep their places', () => {
+    const lau = club('laudium-cricket-club', {
+      leagues: ['veterans-league'],
+      leagueTeams: { 'veterans-league': 2 },
+      teamRosters: {
+        'veterans-league': [
+          { id: 'laudium-cricket-club', name: 'LAUDIUM 1' },
+          { id: 'tm_laudium-cricket-club_veterans-league_1', name: 'LAUDIUM 2' },
+        ],
+      },
+    });
+    const plan = planSides(
+      ['LAUDIUM 1', 'LAUDIUM 2', 'LAUDIUM 3', 'LAUDIUM 4'].map((name) => ({
+        leagueKey: 'veterans-league',
+        name,
+      })),
+      [lau],
+      { allowAppend: true },
+    );
+    assert.deepEqual(plan.fatal, []);
+    assert.deepEqual(
+      plan.patches[0].teamRosters['veterans-league'].map((t) => t.id),
+      [
+        'laudium-cricket-club',
+        'tm_laudium-cricket-club_veterans-league_1',
+        'tm_laudium-cricket-club_veterans-league_2',
+        'tm_laudium-cricket-club_veterans-league_3',
+      ],
+    );
+  });
+
+  test("women's sides are never appended — a missing one is a listed decision", () => {
+    const irene = club('irene-villagers-cricket-club', {
+      leagues: ['womens-premier-league', 'womens-promotion-league'],
+      leagueTeams: { 'womens-premier-league': 1, 'womens-promotion-league': 1 },
+    });
+    const plan = planSides(
+      [
+        { leagueKey: 'womens-premier-league', name: 'IRENE VILLAGERS 1' },
+        { leagueKey: 'womens-premier-league', name: 'IRENE VILLAGERS 2' },
+      ],
+      [irene],
+      { allowAppend: true },
+    );
+    assert.equal(plan.patches.length, 0);
+    assert.ok(
+      plan.fatal.some((f) => /never auto-appended/.test(f)),
+      plan.fatal.join('\n'),
+    );
+    assert.equal(plan.womens[0].verdict, 'DECISION');
+    assert.match(plan.womens[0].promotion, /womens-promotion-league/);
+  });
+
+  test("a club with no women's premier side at all is a decision, not a bare club id", () => {
+    const tut = club('tut-cricket-club', { leagues: ['womens-promotion-league'] });
+    const plan = planSides([{ leagueKey: 'womens-premier-league', name: 'TUT 1' }], [tut], {
+      allowAppend: true,
+    });
+    assert.equal(plan.resolve.size, 0);
+    assert.equal(plan.fatal.length, 1);
+  });
+
+  test('a club the tenant lacks, and a count-2 league with no roster, are fatal', () => {
+    const sin = club('sinoville-cricket-club', {
+      leagues: ['u9'],
+      leagueTeams: { u9: 2 },
+    });
+    const plan = planSides(
+      [
+        { leagueKey: 'u9', name: 'SINOVILLE A' },
+        { leagueKey: 'second-league', name: 'POLICE 1' },
+      ],
+      [sin],
+      { allowAppend: true },
+    );
+    assert.equal(plan.fatal.length, 2, plan.fatal.join('\n'));
+  });
+
+  test('fixtures-only cup sides are left out of the counters', () => {
+    const tuks = club('tuks-cricket-club', {
+      leagues: ['premier-league'],
+      leagueTeams: { 'premier-league': 1 },
+      teams: 1,
+    });
+    const plan = planSides(
+      [
+        { leagueKey: 'mens-t20', name: 'TUKS 1' },
+        { leagueKey: 'mens-t20', name: 'TUKS 2' },
+      ],
+      [tuks],
+      { allowAppend: true, fixturesOnlyKeys: new Set(['mens-t20']) },
+    );
+    assert.equal(plan.patches[0].leagueTeams['mens-t20'], 2);
+    assert.equal(plan.patches[0].teams, 1);
+  });
+});
+
+describe('bootstrap diffs', () => {
+  test('adds only the bootstrap-able leagues; any other missing key is fatal', () => {
+    const r = leaguePlan({ leagues: [{ key: 'premier-league', label: 'P' }] as never });
+    assert.deepEqual(
+      r.add.map((l) => [l.key, l.fixturesOnly ?? false]),
+      [
+        ['mens-t20', true],
+        ['womens-t20', true],
+        ['womens-junior-league', false],
+      ],
+    );
+    assert.ok(r.missing.includes('second-league'));
+    assert.ok(!r.missing.includes('mens-t20'));
+  });
+
+  test('aliases merge missing keys only and report a conflicting one', () => {
+    const [k, v] = Object.entries(TITANS_VENUE_ALIASES)[0];
+    const r = aliasMerge({ competitionDefaults: { venueAliases: { [k]: `${v}x` } } } as never);
+    assert.equal(r.conflicts.length, 1);
+    assert.ok(!(k in r.add));
+    assert.equal(Object.keys(r.add).length, Object.keys(TITANS_VENUE_ALIASES).length - 1);
+  });
+
+  test('registry rows are matched by ground key; homeClubIds are unioned', () => {
+    const r = registryDiff(
+      [
+        { id: 'v-a', name: 'HIGH SCHOOL UITSIG A', homeClubIds: ['c1', 'c2'], surfaces: 1 },
+        { id: 'v-b', name: 'NEW GROUND', homeClubIds: [], surfaces: 1 },
+      ],
+      [{ id: 'old', name: 'High School Uitisg A', homeClubIds: ['c1'], surfaces: 2 }],
+    );
+    assert.deepEqual(
+      r.create.map((v) => v.id),
+      ['v-b'],
+    );
+    assert.equal(r.update[0].venue.id, 'old');
+    assert.equal(r.update[0].venue.surfaces, 2);
+    assert.deepEqual(r.update[0].venue.homeClubIds, ['c1', 'c2']);
+  });
+});
+
+// ── a veterans division with its two playoff rows ──
+const dateCell = (y: number, m: number, d: number): Date => new Date(Date.UTC(y, m - 1, d));
+const timeCell = (h: number, m: number): Date => new Date(Date.UTC(1899, 11, 30, h, m));
+function vetsSheet() {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('V');
+  for (const r of [
+    ['DATE', 'HOME', 'AWAY', 'VENUE', 'TIME'],
+    [dateCell(2026, 9, 13), 'BRITS VETERANS 1', 'PRETORIA 1', 'BRITS OVAL', timeCell(8, 0)],
+    [dateCell(2026, 9, 20), 'PRETORIA 1', 'BRITS VETERANS 1', 'PRETORIA A', timeCell(11, 0)],
+    [dateCell(2026, 11, 15), '2ND PLACE', '3RD PLACE', '2ND PLACE HOME VENUE', timeCell(8, 0)],
+    [
+      dateCell(2026, 11, 22),
+      '1ST PLACE',
+      'SEMI-FINAL WINNER',
+      '1ST PLACE HOME VENUE',
+      timeCell(8, 0),
+    ],
+  ])
+    ws.addRow(r as ExcelJS.CellValue[]);
+  const base = TITANS_FIXTURE_SHEETS.find((s) => s.sheet === 'TITANS VETERANS LEAGUE A')!;
+  return parseTitansSheet(ws, { ...base, series: [{ ...base.series[0], expected: 2 }] });
+}
+
+describe('live build + veterans playoff', () => {
+  const sheet = vetsSheet();
+  const clubs = clubsFromMap();
+  const venues = wouldBeRegistry([sheet], clubs);
+  const live = new Map([
+    ['BRITS VETERANS 1', { teamId: 'brits-cricket-club', name: 'BRITS VETERANS 1' }],
+    ['PRETORIA 1', { teamId: 'tm_pretoria-cricket-club_veterans-league_0', name: 'PRETORIA 1' }],
+  ]);
+  const outcome = buildTitansSeries([sheet], venues, [], {
+    sideOf: (_k, n) => {
+      const s = live.get(n);
+      return (
+        s && {
+          ...s,
+          clubId: s.teamId.includes('pretoria') ? 'pretoria-cricket-club' : 'brits-cricket-club',
+          how: 'roster' as const,
+        }
+      );
+    },
+    labelOf: () => 'Vets',
+  });
+
+  test('participants and fixtures carry the live ids; the name uses the tenant label', () => {
+    const s = outcome.built[0].series;
+    assert.equal(s.name, 'Vets · Division A');
+    assert.deepEqual(s.teams, ['brits-cricket-club', 'tm_pretoria-cricket-club_veterans-league_0']);
+    assert.equal((s.fixtures as Array<{ home: string }>)[0].home, 'brits-cricket-club');
+  });
+
+  test('the playoff series uses pos:/win: sides, real dates, no ground', () => {
+    const { series, errors } = buildVeteransKnockouts([sheet], outcome.built, () => 'Vets');
+    assert.deepEqual(errors, []);
+    const ko = series[0];
+    assert.equal(ko.id, 's-titans-veterans-league-a-ko');
+    assert.equal(ko.name, 'Vets · Division A · Playoff');
+    assert.deepEqual(
+      (ko.fixtures as Array<Record<string, unknown>>).map((f) => [
+        f.id,
+        f.date,
+        f.time,
+        f.home,
+        f.away,
+        f.stage,
+        f.venueStatus,
+      ]),
+      [
+        [
+          'f1',
+          '2026-11-15',
+          '08:00',
+          'pos:s-titans-veterans-league-a:2',
+          'pos:s-titans-veterans-league-a:3',
+          'Semi-final',
+          'unresolved',
+        ],
+        [
+          'f2',
+          '2026-11-22',
+          '08:00',
+          'pos:s-titans-veterans-league-a:1',
+          'win:f1',
+          'Final',
+          'unresolved',
+        ],
+      ],
+    );
+    assert.deepEqual(ko.teams, outcome.built[0].series.teams);
+  });
+
+  test('a single-division series is named by its league label alone', () => {
+    assert.equal(seriesNameFor({ leagueKey: 'second-league', part: '' }), 'Second League');
+    assert.equal(
+      seriesNameFor({ leagueKey: 'premier-league', part: 'Division A' }),
+      'Premier League · Division A',
+    );
+  });
+});
+
+describe('stable ids', () => {
+  test('a first import keeps sheet order, held-back positions included', () => {
+    const inc = [
+      {
+        id: 'f1',
+        date: '2026-10-10',
+        home: 'a',
+        away: 'b',
+        timeSource: 'sheet' as const,
+        round: 1,
+      },
+      {
+        id: 'f2',
+        date: '2026-10-10',
+        home: 'c',
+        away: 'd',
+        timeSource: 'sheet' as const,
+        round: 1,
+      },
+    ];
+    const r = stabiliseIds(inc, undefined);
+    assert.deepEqual(
+      inc.map((f) => f.id),
+      ['f1', 'f2'],
+    );
+    assert.deepEqual(r.removed, []);
+  });
+
+  test('an inserted row keeps the stored ids and takes max + 1', () => {
+    const stored = {
+      id: 's',
+      fixtures: [
+        { id: 'f1', date: '2026-10-10', home: 'a', away: 'b' },
+        { id: 'f2', date: '2026-10-17', home: 'c', away: 'd' },
+      ],
+    } as unknown as Series;
+    const inc = [
+      {
+        id: 'f1',
+        date: '2026-10-10',
+        home: 'a',
+        away: 'b',
+        timeSource: 'sheet' as const,
+        round: 1,
+      },
+      {
+        id: 'f2',
+        date: '2026-10-10',
+        home: 'e',
+        away: 'f',
+        timeSource: 'sheet' as const,
+        round: 1,
+      },
+      {
+        id: 'f3',
+        date: '2026-10-17',
+        home: 'c',
+        away: 'd',
+        timeSource: 'sheet' as const,
+        round: 2,
+      },
+    ];
+    stabiliseIds(inc, stored);
+    assert.deepEqual(
+      inc.map((f) => f.id),
+      ['f1', 'f3', 'f2'],
+    );
+  });
+
+  test('a knockout fixture whose team was set in the console still matches its placeholder', () => {
+    const stored = {
+      id: 'ko',
+      fixtures: [
+        {
+          id: 'f7',
+          date: '2026-11-22',
+          home: 'pretoria-cricket-club',
+          away: 'win:f1',
+          slots: { home: 'pos:s-x:1' },
+        },
+      ],
+    } as unknown as Series;
+    const inc = [
+      {
+        id: 'f2',
+        date: '2026-11-22',
+        home: 'pos:s-x:1',
+        away: 'win:f1',
+        timeSource: 'sheet' as const,
+        round: 2,
+      },
+    ];
+    const r = stabiliseIds(inc, stored);
+    assert.equal(inc[0].id, 'f7');
+    assert.deepEqual(r.removed, []);
+  });
+});
+
+describe('CLI flag guards', () => {
+  test('T20 knockouts cannot be imported in PR A; --parse-only takes no --confirm', () => {
+    assert.throws(() => parseArgs(['--only', 's-titans-mens-t20-ko']), /PR B/);
+    assert.throws(() => parseArgs(['--parse-only', '--confirm']));
+    assert.equal(parseArgs(['--only', 's-titans-veterans-league-a-ko']).only.length, 1);
+    assert.equal(parseArgs(['--append-sides']).mode, 'append-sides');
+  });
+});

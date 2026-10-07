@@ -33,6 +33,17 @@ describe('group-position slot refs', () => {
     expect(slotRefLabel('pos:s-planb-veterans-premier-t20-2:1')).toBe('Group 2 – 1st');
   });
 
+  it('reads letter groups and division suffixes (titans series ids)', () => {
+    expect(groupPositionLabel('pos:s-titans-mens-t20-g-a:1')).toBe('Group A – 1st');
+    expect(groupPositionLabel('pos:s-titans-womens-t20-g-c:2')).toBe('Group C – 2nd');
+    expect(groupPositionLabel('pos:s-titans-veterans-league-a:2')).toBe('Veterans A – 2nd');
+    expect(groupPositionLabel('pos:s-titans-veterans-league-b:1')).toBe('Veterans B – 1st');
+    expect(groupPositionLabel('pos:s-titans-u9-platinum-a:3')).toBe('U9 Platinum A – 3rd');
+    // A single-division id with no suffix stays as-is; numeric groups keep winning.
+    expect(groupPositionLabel('pos:s-titans-second-league:1')).toBe('s-titans-second-league – 1st');
+    expect(groupPositionLabel('pos:s-x-premier-a-2:1')).toBe('Group 2 – 1st');
+  });
+
   it('keeps the win: labels working beside it', () => {
     const fx = [
       { id: 'f1', round: 1, home: 'pos:s-a-1:1', away: 'pos:s-a-2:2' },

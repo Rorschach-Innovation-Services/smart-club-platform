@@ -65,15 +65,32 @@ const ordinal = (n: number): string => {
   return `${n}${['th', 'st', 'nd', 'rd'][n % 10] ?? 'th'}`;
 };
 
+/** "veterans-league" → "Veterans", "u9-platinum" → "U9 Platinum": a league slug as words,
+ * the generic trailing "-league" dropped. */
+const divisionWords = (slug: string): string =>
+  slug
+    .replace(/-league$/i, '')
+    .split('-')
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+
 /**
- * "Group 1 – 1st" for `pos:s-planb-premier-men-t20-1:1`. The group number is read off the
- * series id's trailing group token (`-1`, `-g2`); an id without one is shown as-is.
+ * "Group 1 – 1st" for `pos:s-planb-premier-men-t20-1:1`. The group is read off the series
+ * id's trailing token: a number (`-1`, `-g2`) or a letter group (`-g-a` → "Group A"); a
+ * single-letter division suffix on a `s-<tenant>-<league>-<x>` id names the division
+ * (`s-titans-veterans-league-a` → "Veterans A"). An id with none of these is shown as-is.
  */
 export function groupPositionLabel(id: string): string | null {
   const src = groupPositionSource(id);
   if (!src) return null;
-  const m = /-g?(\d+)$/i.exec(src.seriesId);
-  const group = m ? `Group ${Number(m[1])}` : src.seriesId;
+  const sid = src.seriesId;
+  let group = sid;
+  let m = /-g?(\d+)$/i.exec(sid);
+  if (m) group = `Group ${Number(m[1])}`;
+  else if ((m = /-g-([a-z])$/i.exec(sid))) group = `Group ${m[1].toUpperCase()}`;
+  else if ((m = /^s-[a-z0-9]+-([a-z0-9-]+?)-([a-z])$/i.exec(sid)))
+    group = `${divisionWords(m[1])} ${m[2].toUpperCase()}`;
   return `${group} – ${ordinal(src.rank)}`;
 }
 

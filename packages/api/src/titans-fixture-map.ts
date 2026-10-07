@@ -61,8 +61,10 @@ export function leagueLabel(key: string): string {
 export interface TitansSeriesSpec {
   seriesId: string;
   leagueKey: string;
-  /** `<League label> · <Division/Group>`. */
+  /** `<League label> · <Division/Group>`, or just the league label for a single-division sheet. */
   seriesName: string;
+  /** The division/group half of the name ('' for a single-division sheet). */
+  part: string;
   /** Measured real-fixture count (held-back fixtures included) — any mismatch is fatal. */
   expected: number;
   /** T20 sheets only: the "GROUP X" banner this series is read from. */
@@ -84,6 +86,15 @@ export interface TitansSheetSpec {
   koSeriesId?: string;
 }
 
+/** A series name from a league label (the tenant's own on a real run) and the part. */
+export function seriesNameFor(
+  spec: { leagueKey: string; part: string },
+  labelOf: (key: string) => string = leagueLabel,
+): string {
+  const label = labelOf(spec.leagueKey);
+  return spec.part ? `${label} · ${spec.part}` : label;
+}
+
 function seriesSpec(
   leagueKey: string,
   suffix: string,
@@ -94,7 +105,8 @@ function seriesSpec(
   return {
     seriesId: `${TITANS_SERIES_PREFIX}${leagueKey}${suffix ? `-${suffix}` : ''}`,
     leagueKey,
-    seriesName: `${leagueLabel(leagueKey)} · ${part}`,
+    seriesName: seriesNameFor({ leagueKey, part }),
+    part,
     expected,
     ...(group ? { group } : {}),
   };
@@ -165,11 +177,11 @@ export const TITANS_FIXTURE_SHEETS: TitansSheetSpec[] = [
   flat('PREMIER DIVISION B', 'premier-league', 'b', 'Division B', 56),
   flat('PROMOTION DIVISION A', 'promotion-league', 'a', 'Division A', 56),
   flat('PROMOTION DIVISION B', 'promotion-league', 'b', 'Division B', 56),
-  flat('SECOND', 'second-league', '', 'League', 132),
-  flat('THIRD', 'third-league', '', 'League', 132),
-  flat('FOURTH', 'fourth-league', '', 'League', 90),
-  flat('FIFTH', 'fifth-league', '', 'League', 72),
-  flat('SIXTH (BLIND)', 'sixth-league', '', 'League', 24),
+  flat('SECOND', 'second-league', '', '', 132),
+  flat('THIRD', 'third-league', '', '', 132),
+  flat('FOURTH', 'fourth-league', '', '', 90),
+  flat('FIFTH', 'fifth-league', '', '', 72),
+  flat('SIXTH (BLIND)', 'sixth-league', '', '', 24),
   {
     sheet: 'WOMENS T20',
     layout: 't20',
@@ -184,7 +196,7 @@ export const TITANS_FIXTURE_SHEETS: TitansSheetSpec[] = [
     koRows: 7,
     koSeriesId: `${TITANS_SERIES_PREFIX}womens-t20-ko`,
   },
-  flat('WOMENS LEAGUE', 'womens-premier-league', '', 'League', 66),
+  flat('WOMENS LEAGUE', 'womens-premier-league', '', '', 66),
   flat('TITANS VETERANS LEAGUE A', 'veterans-league', 'a', 'Division A', 45, {
     koRows: 2,
     koSeriesId: `${TITANS_SERIES_PREFIX}veterans-league-a-ko`,
@@ -193,7 +205,7 @@ export const TITANS_FIXTURE_SHEETS: TitansSheetSpec[] = [
     koRows: 2,
     koSeriesId: `${TITANS_SERIES_PREFIX}veterans-league-b-ko`,
   }),
-  { ...flat('WOMENS JUNIOR LEAGUE', 'womens-junior-league', '', 'League', 20), junior: true },
+  { ...flat('WOMENS JUNIOR LEAGUE', 'womens-junior-league', '', '', 20), junior: true },
   junior('U9 PLAT A', 28),
   junior('U9 PLAT B', 28),
   junior('U9 GOLD A', 21),
@@ -227,6 +239,31 @@ export const EXPECTED_TOTAL_FIXTURES = TITANS_FIXTURE_SHEETS.reduce(
 export const KNOWN_SERIES_IDS = TITANS_FIXTURE_SHEETS.flatMap((s) =>
   s.series.map((x) => x.seriesId),
 );
+
+/** Knockout series: veterans playoffs are written by this importer (`pos:`/`win:` only); the
+ * T20 brackets need PR B's `tbd:` slots and are parsed and reported only. */
+export const VETERANS_KO_SERIES_IDS = TITANS_FIXTURE_SHEETS.filter(
+  (s) => s.leagueKey === 'veterans-league' && s.koSeriesId,
+).map((s) => s.koSeriesId!);
+export const T20_KO_SERIES_IDS = TITANS_FIXTURE_SHEETS.filter(
+  (s) => s.layout === 't20' && s.koSeriesId,
+).map((s) => s.koSeriesId!);
+
+/** Every league key the workbook uses — each must exist on the tenant before a write. */
+export const TITANS_LEAGUE_KEYS = [...new Set(TITANS_FIXTURE_SHEETS.map((s) => s.leagueKey))];
+
+/** League keys the prereqs bootstrap adds when absent (every other key must already exist).
+ * The T20 cups are fixtures-only: competitions the clubs' existing sides play. */
+export const TITANS_NEW_LEAGUES: Array<{
+  key: string;
+  label: string;
+  group: string;
+  fixturesOnly?: boolean;
+}> = [
+  { key: 'mens-t20', label: "Men's T20", group: 'T20 Cups', fixturesOnly: true },
+  { key: 'womens-t20', label: "Women's T20", group: 'T20 Cups', fixturesOnly: true },
+  { key: 'womens-junior-league', label: "Women's Junior League", group: 'Junior Leagues' },
+];
 
 // ───────────────────────── 2. Times ─────────────────────────
 
