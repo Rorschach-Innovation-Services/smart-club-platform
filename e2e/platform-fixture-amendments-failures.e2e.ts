@@ -281,7 +281,7 @@ test('sheets that flunk the layout gate are shown as not read, and their rows ne
   await expect(applyBtn(page)).toBeDisabled();
 
   // A workbook made ONLY of refused sheets has no rows at all: the server answers 400
-  // no_rows, which the page shows as a plain error (the per-sheet reasons are not rendered).
+  // no_rows, and the page still shows each sheet's reason for being left out.
   const onlyBad = new ExcelJS.Workbook();
   const ws = addReminderSheet(
     onlyBad,
@@ -293,6 +293,11 @@ test('sheets that flunk the layout gate are shown as not read, and their rows ne
   await page.getByRole('button', { name: 'Choose another file' }).click();
   await upload(page, Buffer.from(await onlyBad.xlsx.writeBuffer()));
   await expect(errorAlert(page)).toHaveText('no fixture rows were recognised in the workbook');
+  const onlySec = page.getByRole('region', { name: 'Sheet Only Wandering' });
+  await expect(onlySec).toContainText('Sheet not read');
+  await expect(onlySec).toContainText(
+    "This sheet was left out: layout not recognised: the 'v' column varies (columns 2, 3).",
+  );
   await expect(applyBtn(page)).toHaveCount(0);
 
   const after = await storedFixtures(request, w.seriesId);
@@ -379,13 +384,15 @@ test('a change onto a ground a released fixture holds blocks the whole upload', 
   await upload(page, buffer);
 
   const blockPanel = page.locator('.insights-callout.alert', { hasText: 'Blocked' });
-  // One double-booking; the gate lists it from each fixture's side, hence no exact count.
+  // One double-booking, listed once (the gate sees it from both fixtures' sides).
   await expect(blockPanel).toContainText(
-    /Blocked — these amendments would introduce \d+ venue clash/,
+    'Blocked — these amendments would introduce 1 venue clash.',
   );
   await expect(blockPanel).toContainText(`${w.date} 13:30 at ${w.ground.moved}`);
   await expect(blockPanel).toContainText('Crusaders CC v Berea Rovers CC');
   await expect(blockPanel).toContainText('Phoenix CC v Verulam CC');
+  // A released fixture holds the ground: relocation can't clear it, so it isn't suggested.
+  await expect(blockPanel).not.toContainText('draft relocation');
   await expect(applyBtn(page)).toHaveText('Apply 2 changes');
   await expect(applyBtn(page)).toBeDisabled();
   await expect(page.getByText('Resolve the blocking clash first.')).toBeVisible();
@@ -449,6 +456,8 @@ test('a change onto a ground a draft fixture holds relocates the draft when opte
   const blockPanel = page.locator('.insights-callout.alert', { hasText: 'Blocked' });
   await expect(blockPanel).toContainText(`${w.date} 13:30 at ${w.ground.moved}`);
   await expect(blockPanel).toContainText('Phoenix CC v Verulam CC');
+  // A DRAFT holds the ground: the panel points at relocation.
+  await expect(blockPanel).toContainText('turn on draft relocation below');
   await expect(applyBtn(page)).toBeDisabled();
 
   // Opt in: the page re-previews and lists the move.

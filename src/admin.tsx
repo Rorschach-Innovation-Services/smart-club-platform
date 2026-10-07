@@ -1554,14 +1554,14 @@ export function FixtureTable({
                         )}
                         <VenueReasonPill reason={f.venueReason} status={f.venueStatus} />
                       </div>
+                      <div className="fix-row-venue-suburb">{home.ground?.suburb || ''}</div>
                       {/* The reason is the whole point of a greedy allocator over a solver:
                           an operator can argue with "home ground closed for maintenance",
-                          not with an objective value. */}
-                      <div className="fix-row-venue-suburb">
-                        {f.venueReason && f.venueStatus !== 'home'
-                          ? f.venueReason
-                          : home.ground?.suburb || ''}
-                      </div>
+                          not with an objective value. A secondary note under the suburb, so a
+                          reason ("Union reminder fixtures upload") never reads as a place. */}
+                      {f.venueReason && f.venueStatus !== 'home' && (
+                        <div className="fix-row-venue-note">{f.venueReason}</div>
+                      )}
                     </div>
                   </td>
                   <td>

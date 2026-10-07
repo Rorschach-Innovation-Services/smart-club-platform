@@ -66,6 +66,22 @@ function makePreview(over: Partial<api.AmendmentPreview> = {}): api.AmendmentPre
         unrecognisedRows: 0,
         competitions: [{ competition: 'Premier Men', seriesIds: ['s-pm'] }],
         alreadyCorrect: 2,
+        alreadyCorrectRows: [
+          {
+            rowId: 'Premier Men:5',
+            sheetRow: 5,
+            home: 'Kloof CC',
+            away: 'Railways CC',
+            date: '2026-10-10',
+          },
+          {
+            rowId: 'Premier Men:6',
+            sheetRow: 6,
+            home: 'Dawn CC',
+            away: 'Berea CC',
+            date: '2026-10-11',
+          },
+        ],
         rows: [
           changeRow(),
           changeRow({
@@ -115,6 +131,7 @@ function makePreview(over: Partial<api.AmendmentPreview> = {}): api.AmendmentPre
         unrecognisedRows: 9,
         competitions: [],
         alreadyCorrect: 0,
+        alreadyCorrectRows: [],
         rows: [],
       },
     ],
@@ -142,6 +159,7 @@ function makePreview(over: Partial<api.AmendmentPreview> = {}): api.AmendmentPre
           ground: 'Crawford NC',
           fixture: 'Railways v Kloof',
           with: 'Premier Women: Dawn v Ilembe',
+          holderDraft: false,
         },
       ],
     },
@@ -201,6 +219,29 @@ async function upload(file = workbook()) {
 
 const applyBtn = () => screen.getByRole('button', { name: /^apply \d+ changes?$/i });
 
+/** A change chip by its whole text (the label and value are separate spans). */
+const chip = (text: string) =>
+  screen.getByText(
+    (_, el) => !!el?.classList.contains('pill') && el.textContent?.replace(/\s+/g, ' ') === text,
+  );
+
+/** An introduced clash whose ground-holder is (or isn't) a draft fixture. */
+const introducedClash = (holderDraft: boolean): api.AmendmentGate => ({
+  ok: false,
+  errors: ['introduced clash'],
+  introduced: [
+    {
+      date: '2026-10-10',
+      time: '13:00',
+      ground: 'Gledhow',
+      fixture: 'Ilembe CC v Crusaders CC',
+      with: 'Premier Women: Dawn v Kloof',
+      holderDraft,
+    },
+  ],
+  preExisting: [],
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(api.platformGetTenant).mockResolvedValue(config);
@@ -217,9 +258,10 @@ describe('FixtureAmendmentsPage', () => {
       relocateDraftClashes: false,
     });
     const changes = screen.getByRole('table', { name: /changes on premier men/i });
-    expect(within(changes).getByText('Venue: Ilembe Oval → Gledhow')).toBeInTheDocument();
-    expect(within(changes).getByText('Time: 10:00 → 13:00')).toBeInTheDocument();
-    expect(within(changes).getByText('Status: scheduled → postponed')).toBeInTheDocument();
+    expect(changes).toContainElement(chip('Venue: Ilembe Oval → Gledhow'));
+    expect(changes).toContainElement(chip('Time: 10:00 → 13:00'));
+    // A postponement with no new date says the date becomes TBC.
+    expect(changes).toContainElement(chip('Status: scheduled → postponed (date TBC)'));
 
     const notApplied = screen.getByRole('table', { name: /rows not applied on premier men/i });
     expect(within(notApplied).getByText('Not matched')).toBeInTheDocument();
@@ -231,6 +273,12 @@ describe('FixtureAmendmentsPage', () => {
     expect(within(notApplied).getByText(/already has a result/i)).toBeInTheDocument();
 
     expect(screen.getByText('Already correct: 2')).toBeInTheDocument();
+    // The already-correct rows themselves are listed under the expandable summary.
+    const correct = screen.getByRole('list', { name: /already correct on premier men/i });
+    expect(
+      within(correct).getByText('Row 5: Kloof CC v Railways CC · 2026-10-10'),
+    ).toBeInTheDocument();
+    expect(within(correct).getByText('Row 6: Dawn CC v Berea CC · 2026-10-11')).toBeInTheDocument();
     expect(screen.getByText(/the v column moves between rows/i)).toBeInTheDocument();
     expect(screen.getByText(/1 clash already on these dates/i)).toBeInTheDocument();
     // Officials on touched fixtures are listed BEFORE confirming, not only in the result.
@@ -299,7 +347,12 @@ describe('FixtureAmendmentsPage', () => {
     expect(screen.getByText(/clubs have not been notified/i)).toBeInTheDocument();
     expect(screen.getByText(/15-minute sync/i)).toHaveTextContent(/sync now/i);
     expect(screen.getByText(/Ilembe CC v Crusaders CC: J Smith, K Naidoo/)).toBeInTheDocument();
-    // The preview is gone once applied.
+    // Same umpire wording as the preview.
+    expect(screen.getByText(/can still make the new date, time or ground/i)).toBeInTheDocument();
+    // The preview is gone once applied, and the picker is cleared for the next sheet.
+    expect((screen.getByLabelText(/reminder fixtures workbook/i) as HTMLInputElement).value).toBe(
+      '',
+    );
     expect(
       screen.queryByRole('table', { name: /changes on premier men/i }),
     ).not.toBeInTheDocument();
@@ -357,7 +410,7 @@ describe('FixtureAmendmentsPage', () => {
     const file = await upload();
     await user.click(applyBtn());
 
-    expect(await screen.findByText('Venue: Ilembe Oval → Crawford NC')).toBeInTheDocument();
+    await waitFor(() => expect(chip('Venue: Ilembe Oval → Crawford NC')).toBeInTheDocument());
     expect(screen.getByRole('alert')).toHaveTextContent(/changed since your preview/i);
     expect(toast).toHaveBeenCalledWith(
       expect.stringMatching(/changed since your preview/i),
@@ -376,30 +429,77 @@ describe('FixtureAmendmentsPage', () => {
 
   it('an introduced clash blocks Confirm and is shown prominently', async () => {
     vi.mocked(api.platformFixtureAmendmentsPreview).mockResolvedValue(
-      makePreview({
-        gate: {
-          ok: false,
-          errors: ['introduced clash'],
-          introduced: [
-            {
-              date: '2026-10-10',
-              time: '13:00',
-              ground: 'Gledhow',
-              fixture: 'Ilembe CC v Crusaders CC',
-              with: 'Premier Women: Dawn v Kloof',
-            },
-          ],
-          preExisting: [],
-        },
-      }),
+      makePreview({ gate: introducedClash(false) }),
     );
     renderPage();
     await upload();
 
     const alert = screen.getByRole('alert');
-    expect(alert).toHaveTextContent(/blocked — these amendments would introduce 1 venue clash/i);
+    expect(alert).toHaveTextContent(/blocked — these amendments would introduce 1 venue clash\./i);
     expect(alert).toHaveTextContent(/Gledhow: Ilembe CC v Crusaders CC and Premier Women/);
+    // A released fixture holds the ground: relocation can't help, so it isn't suggested.
+    expect(alert).toHaveTextContent(/untick the rows involved\./i);
+    expect(alert).not.toHaveTextContent(/draft relocation/i);
     expect(applyBtn()).toBeDisabled();
+  });
+
+  it('suggests draft relocation only when a draft fixture holds the ground', async () => {
+    vi.mocked(api.platformFixtureAmendmentsPreview).mockResolvedValue(
+      makePreview({ gate: introducedClash(true) }),
+    );
+    renderPage();
+    await upload();
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      /turn on draft relocation below — a draft fixture holds the ground/i,
+    );
+  });
+
+  it('chip values keep their case; the competition is named once; the filename shows once', async () => {
+    const preview = makePreview();
+    preview.sheets[0].rows[0] = changeRow({ seriesName: 'Premier Men', group: 'A' });
+    vi.mocked(api.platformFixtureAmendmentsPreview).mockResolvedValue(preview);
+    renderPage();
+    const file = await upload();
+
+    const venue = chip('Venue: Ilembe Oval → Gledhow');
+    const value = within(venue).getByText(/Ilembe Oval → Gledhow/);
+    expect(value).toHaveStyle({ textTransform: 'none' });
+    expect(screen.getByText('Row 7 · Premier Men · Group A')).toBeInTheDocument();
+    // A series named after the competition plus a format suffix also names it once.
+    expect(screen.getByText('Row 8 · Premier Men T20')).toBeInTheDocument();
+    // The native picker names the file; the page doesn't repeat it.
+    expect(screen.queryByText(file.name)).not.toBeInTheDocument();
+  });
+
+  it('when no sheet can be read, shows why for each sheet', async () => {
+    vi.mocked(api.platformFixtureAmendmentsPreview).mockRejectedValue(
+      new ApiError(400, 'no fixture rows were recognised in the workbook', 'no_rows', {
+        sheets: [
+          {
+            sheet: 'Only Wandering',
+            status: 'refused',
+            reason: "layout not recognised: the 'v' column varies (columns 2, 3)",
+            fixtureRows: 0,
+            unrecognisedRows: 2,
+          },
+          { sheet: 'Notes', status: 'empty', fixtureRows: 0, unrecognisedRows: 0 },
+        ],
+      }),
+    );
+    renderPage();
+    const input = screen.getByLabelText(/reminder fixtures workbook/i) as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [workbook()] } });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'no fixture rows were recognised in the workbook',
+    );
+    const refused = screen.getByRole('region', { name: 'Sheet Only Wandering' });
+    expect(refused).toHaveTextContent('Sheet not read');
+    expect(refused).toHaveTextContent(
+      "This sheet was left out: layout not recognised: the 'v' column varies (columns 2, 3).",
+    );
+    expect(screen.getByRole('region', { name: 'Sheet Notes' })).toHaveTextContent('No fixtures');
+    expect(screen.queryByRole('button', { name: /^apply/i })).toBeNull();
   });
 
   it('relocation is opt-in: turning it on re-previews and lists every planned move', async () => {

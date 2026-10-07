@@ -176,14 +176,17 @@ export interface DraftMove {
   registryMiss: boolean;
 }
 
+/** A gate clash plus the series of its subject fixture (`Clash` names only the other side's). */
+export type GateClash = Clash & { subjectSeriesId: string };
+
 export interface PatchGate {
   /** Unique clashes in the would-be tenant, by clashKey. */
   totalAfter: number;
-  introduced: Clash[];
+  introduced: GateClash[];
   /** Clashes on the manifest dates where either side is a released fixture. */
-  weekendReleased: Clash[];
+  weekendReleased: GateClash[];
   /** Clashes on the manifest dates between two drafts — reported, not fatal. */
-  weekendDraftOnly: Clash[];
+  weekendDraftOnly: GateClash[];
 }
 
 /**
@@ -683,9 +686,11 @@ export function planFixturePatches(
   );
   const after = uniqueClashes(next, clubs, venues, aliases);
   const releasedIds = new Set(next.filter((s) => s.released === true).map((s) => String(s.id)));
-  const introduced = after
-    .filter((u) => !before.has(clashKey(u.clash, aliases)))
-    .map((u) => u.clash);
+  const gateClash = (u: { clash: Clash; subjectSeriesId: string }): GateClash => ({
+    ...u.clash,
+    subjectSeriesId: u.subjectSeriesId,
+  });
+  const introduced = after.filter((u) => !before.has(clashKey(u.clash, aliases))).map(gateClash);
   const gateDates = new Set<string | undefined>(
     dates.size ? dates : entries.map((e) => e.expect?.date),
   );
@@ -694,8 +699,8 @@ export function planFixturePatches(
   const onDates = after.filter((u) => gateDates.has(u.clash.date));
   const involvesReleased = (u: { clash: Clash; subjectSeriesId: string }) =>
     releasedIds.has(u.subjectSeriesId) || releasedIds.has(u.clash.with.seriesId);
-  const weekendReleased = onDates.filter(involvesReleased).map((u) => u.clash);
-  const weekendDraftOnly = onDates.filter((u) => !involvesReleased(u)).map((u) => u.clash);
+  const weekendReleased = onDates.filter(involvesReleased).map(gateClash);
+  const weekendDraftOnly = onDates.filter((u) => !involvesReleased(u)).map(gateClash);
   if (introduced.length)
     errors.push(`gate: the change would introduce ${introduced.length} new venue clash(es)`);
   if (gateMode === 'strict' && weekendReleased.length)

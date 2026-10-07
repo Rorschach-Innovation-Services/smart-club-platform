@@ -53,15 +53,55 @@ const optionsKey = (o: api.AmendmentOptions) =>
 const clashLine = (c: api.AmendmentClash) =>
   `${c.date}${c.time ? ` ${c.time}` : ''} at ${c.ground}: ${c.fixture} and ${c.with}`;
 
+/** Chip values keep their real case (ground and team names); only the label is pill-styled. */
+const CHIP_VALUE = { textTransform: 'none', letterSpacing: 'normal' } as const;
+
 function ChangeChips({ changes }: { changes: api.AmendmentRowChange[] }) {
+  // A postponement with no new date on the sheet leaves the fixture's date TBC.
+  const undated =
+    changes.some((ch) => ch.field === 'status' && ch.after === 'postponed') &&
+    !changes.some((ch) => ch.field === 'date');
   return (
     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
       {changes.map((ch) => (
         <Pill key={ch.field} tone={ch.field === 'status' ? 'coral' : 'gold'}>
-          {FIELD[ch.field]}: {ch.before || '—'} → {ch.after || '—'}
+          <span>{FIELD[ch.field]}:</span>{' '}
+          <span style={CHIP_VALUE}>
+            {ch.before || '—'} → {ch.after || '—'}
+            {undated && ch.field === 'status' ? ' (date TBC)' : ''}
+          </span>
         </Pill>
       ))}
     </div>
+  );
+}
+
+const squash = (v: string) => v.trim().replace(/\s+/g, ' ').toLowerCase();
+
+/** "Row 8 · <competition> · Group A · <series>", naming the competition once: a series
+ * named after the sheet's competition ("Premier Men" / "Premier Men · T20") replaces it. */
+function rowSubline(r: api.AmendmentPreviewRow): string {
+  const group = r.group ? ` · Group ${r.group}` : '';
+  if (!r.seriesName) return `Row ${r.sheetRow} · ${r.competition}${group}`;
+  if (squash(r.seriesName).includes(squash(r.competition)))
+    return `Row ${r.sheetRow} · ${r.seriesName}${group}`;
+  return `Row ${r.sheetRow} · ${r.competition}${group} · ${r.seriesName}`;
+}
+
+/** Why each sheet was left out — shown on the preview and when NO sheet could be read. */
+function SheetNotReadNote({ sheet: s }: { sheet: api.AmendmentSheetReport }) {
+  return (
+    <>
+      <h2 className="mcs-heading">
+        {s.sheet} {s.status === 'refused' && <Pill tone="coral">Sheet not read</Pill>}
+        {s.status === 'empty' && <Pill tone="muted">No fixtures</Pill>}
+      </h2>
+      {s.status === 'refused' && (
+        <div className="insights-callout warn">
+          This sheet was left out: {s.reason ?? 'its layout was not recognised'}.
+        </div>
+      )}
+    </>
   );
 }
 
@@ -112,6 +152,8 @@ export function FixtureAmendmentsPage({ toast }: { toast: Toast }) {
   const [previewKey, setPreviewKey] = useState('');
   const [busy, setBusy] = useState<'reading' | 'writing' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** On a 400 `no_rows` (no sheet could be read), the server's per-sheet reports. */
+  const [unreadSheets, setUnreadSheets] = useState<api.AmendmentSheetReport[]>([]);
   const [result, setResult] = useState<{
     out: api.AmendmentConfirmResult;
     preview: api.AmendmentPreview;
@@ -124,6 +166,7 @@ export function FixtureAmendmentsPage({ toast }: { toast: Toast }) {
     const mine = ++seq.current;
     setBusy('reading');
     setError(null);
+    setUnreadSheets([]);
     try {
       const p = await api.platformFixtureAmendmentsPreview(slug, f, o);
       if (mine !== seq.current) return;
@@ -131,6 +174,8 @@ export function FixtureAmendmentsPage({ toast }: { toast: Toast }) {
       setPreviewKey(optionsKey(o));
     } catch (err) {
       if (mine !== seq.current) return;
+      if (err instanceof ApiError && err.code === 'no_rows' && Array.isArray(err.details?.sheets))
+        setUnreadSheets(err.details.sheets as api.AmendmentSheetReport[]);
       setError(
         err instanceof ApiError
           ? err.message
@@ -149,6 +194,7 @@ export function FixtureAmendmentsPage({ toast }: { toast: Toast }) {
     setSkipRowIds([]);
     setRelocate(false);
     setError(null);
+    setUnreadSheets([]);
     setBusy(null);
     if (!f) {
       setFile(null);
@@ -190,6 +236,11 @@ export function FixtureAmendmentsPage({ toast }: { toast: Toast }) {
       const out = await api.platformFixtureAmendmentsConfirm(slug, file, opts, shown.planHash);
       setResult({ out, preview: shown });
       setPreview(null);
+      // The sheet is done with: a further upload starts from an empty picker.
+      if (inputRef.current) inputRef.current.value = '';
+      setFile(null);
+      setSkipRowIds([]);
+      setRelocate(false);
       toast(`Amended ${plural(out.fixturesAmended, 'fixture')}`);
     } catch (err) {
       if (!(err instanceof ApiError)) {
@@ -257,7 +308,6 @@ export function FixtureAmendmentsPage({ toast }: { toast: Toast }) {
           disabled={busy === 'writing'}
           onChange={(e) => choose(e.target.files?.[0])}
         />
-        {file && p && <span className="ump-sub">{file.name}</span>}
       </div>
 
       {busy === 'reading' && (
@@ -270,6 +320,11 @@ export function FixtureAmendmentsPage({ toast }: { toast: Toast }) {
           {error}
         </div>
       )}
+      {unreadSheets.map((s) => (
+        <section key={s.sheet} style={{ marginTop: 18 }} aria-label={`Sheet ${s.sheet}`}>
+          <SheetNotReadNote sheet={s} />
+        </section>
+      ))}
 
       {result && (
         <AmendmentResult
@@ -292,8 +347,9 @@ export function FixtureAmendmentsPage({ toast }: { toast: Toast }) {
                 Blocked — these amendments would introduce{' '}
                 {plural(p.gate.introduced.length, 'venue clash', 'venue clashes')}.
               </strong>{' '}
-              Nothing can be applied until they are gone: untick the rows involved, or turn on draft
-              relocation below if a draft fixture holds the ground.
+              {p.gate.introduced.some((c) => c.holderDraft)
+                ? 'Nothing can be applied until they are gone: untick the rows involved, or turn on draft relocation below — a draft fixture holds the ground.'
+                : 'Nothing can be applied until they are gone: untick the rows involved.'}
               <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
                 {p.gate.introduced.map((c, i) => (
                   <li key={i}>{clashLine(c)}</li>
@@ -527,15 +583,7 @@ function SheetSection({
   const others = s.rows.filter((r) => r.outcome !== 'matched-change');
   return (
     <section style={{ marginTop: 18 }} aria-label={`Sheet ${s.sheet}`}>
-      <h2 className="mcs-heading">
-        {s.sheet} {s.status === 'refused' && <Pill tone="coral">Sheet not read</Pill>}
-        {s.status === 'empty' && <Pill tone="muted">No fixtures</Pill>}
-      </h2>
-      {s.status === 'refused' && (
-        <div className="insights-callout warn">
-          This sheet was left out: {s.reason ?? 'its layout was not recognised'}.
-        </div>
-      )}
+      <SheetNotReadNote sheet={s} />
       {s.competitions.length > 0 && (
         <p className="mcs-note">
           {s.competitions
@@ -577,11 +625,7 @@ function SheetSection({
                           ? `${r.fixture.home} v ${r.fixture.away}`
                           : `${r.sheet.home} v ${r.sheet.away}`}
                       </div>
-                      <div className="ump-sub">
-                        Row {r.sheetRow} · {r.competition}
-                        {r.group ? ` · Group ${r.group}` : ''}
-                        {r.seriesName ? ` · ${r.seriesName}` : ''}
-                      </div>
+                      <div className="ump-sub">{rowSubline(r)}</div>
                       {r.warnings.map((w) => (
                         <div key={w} className="ump-sub">
                           ⚠ {w}
@@ -607,6 +651,13 @@ function SheetSection({
             {plural(s.alreadyCorrect, 'row')} on this sheet already match the fixtures — nothing to
             change.
           </p>
+          <ul className="mcs-note" aria-label={`Already correct on ${s.sheet}`}>
+            {(s.alreadyCorrectRows ?? []).map((r) => (
+              <li key={r.rowId}>
+                Row {r.sheetRow}: {r.home} v {r.away} · {r.date}
+              </li>
+            ))}
+          </ul>
         </details>
       )}
 
@@ -754,12 +805,14 @@ function AmendmentResult({
       </div>
 
       {officials.length > 0 && (
-        <Card
-          title="Check the umpire appointments"
-          sub="These amended fixtures already have officials appointed. Make sure they can still make the new time or ground."
-        >
-          <OfficialsList preview={preview} />
-        </Card>
+        <div style={{ marginTop: 14 }}>
+          <Card
+            title="Check the umpire appointments"
+            sub="These amended fixtures already have officials appointed. Make sure they can still make the new date, time or ground."
+          >
+            <OfficialsList preview={preview} />
+          </Card>
+        </div>
       )}
 
       <div className="upl-confirm">

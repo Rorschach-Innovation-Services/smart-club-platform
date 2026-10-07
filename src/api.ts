@@ -1466,12 +1466,15 @@ export interface AmendmentPreviewRow {
   };
   changes?: AmendmentRowChange[];
 }
+/** One double-booked slot: `fixture` is the side the sheet amends, `with` the ground-holder. */
 export interface AmendmentClash {
   date: string;
   time?: string;
   ground: string;
   fixture: string;
   with: string;
+  /** The ground-holder is a DRAFT fixture — draft relocation could clear the clash. */
+  holderDraft: boolean;
 }
 export interface AmendmentGate {
   ok: boolean;
@@ -1480,19 +1483,31 @@ export interface AmendmentGate {
   /** Pre-existing clashes on the sheet dates — reported, never blocking. */
   preExisting: AmendmentClash[];
 }
+/** How one sheet of the workbook read (also on a 400 `no_rows`, as `details.sheets`). */
+export interface AmendmentSheetReport {
+  sheet: string;
+  status: 'ok' | 'empty' | 'refused';
+  reason?: string;
+  fixtureRows: number;
+  unrecognisedRows: number;
+  vColumn?: number;
+}
 export interface AmendmentPreview {
   planHash: string;
-  sheets: Array<{
-    sheet: string;
-    status: 'ok' | 'empty' | 'refused';
-    reason?: string;
-    fixtureRows: number;
-    unrecognisedRows: number;
-    vColumn?: number;
-    competitions: Array<{ competition: string; seriesIds: string[] }>;
-    rows: AmendmentPreviewRow[];
-    alreadyCorrect: number;
-  }>;
+  sheets: Array<
+    AmendmentSheetReport & {
+      competitions: Array<{ competition: string; seriesIds: string[] }>;
+      rows: AmendmentPreviewRow[];
+      alreadyCorrect: number;
+      alreadyCorrectRows: Array<{
+        rowId: string;
+        sheetRow: number;
+        home: string;
+        away: string;
+        date: string;
+      }>;
+    }
+  >;
   skippedRows: Array<{ sheet: string; sheetRow: number; text: string; reason: string }>;
   counts: Record<AmendmentRowOutcome, number> & { applicable: number; applied: number };
   moves: Array<{

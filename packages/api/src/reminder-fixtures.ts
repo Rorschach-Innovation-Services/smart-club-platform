@@ -41,6 +41,7 @@ import {
   planFixturePatches,
   type DraftMove,
   type FixtureDiff,
+  type GateClash,
   type PatchEntry,
   type PatchManifest,
   type PatchPlan,
@@ -934,17 +935,44 @@ export interface ClashView {
   date: string;
   time?: string;
   ground: string;
+  /** The side this upload amends (when one of the two is). */
   fixture: string;
+  /** The side holding the ground. */
   with: string;
+  /** The ground-holder (`with`) is in a DRAFT series — draft relocation could clear it. */
+  holderDraft: boolean;
 }
 
-const clashView = (c: Clash): ClashView => ({
+const clashView = (c: Clash, released: Set<string>): ClashView => ({
   date: c.date,
   ...(c.time ? { time: c.time } : {}),
   ground: c.ground,
   fixture: `${c.home ?? '?'} v ${c.away ?? '?'}${c.round !== undefined ? ` (R${c.round})` : ''}`,
   with: `${c.with.seriesName ?? c.with.seriesId}: ${c.with.home ?? '?'} v ${c.with.away ?? '?'}`,
+  holderDraft: !released.has(c.with.seriesId),
 });
+
+/**
+ * One entry per double-booked pair. The gate checks every series as the subject, so a single
+ * double-booking comes back once from each fixture's side (A clashes with B, B with A). Keep
+ * the side whose SUBJECT this upload amends, so `fixture` is the amended one and `with` the
+ * ground-holder. The CLI report keeps the gate's raw per-side list.
+ */
+function onePerPair(clashes: GateClash[], amended: Set<string>): GateClash[] {
+  const byPair = new Map<string, GateClash>();
+  for (const c of clashes) {
+    const subject = `${c.subjectSeriesId}/${c.fixtureId}`;
+    const holder = `${c.with.seriesId}/${c.with.fixtureId}`;
+    const key = `${c.date}|${[subject, holder].sort().join('|')}`;
+    const kept = byPair.get(key);
+    if (
+      !kept ||
+      (!amended.has(`${kept.subjectSeriesId}/${kept.fixtureId}`) && amended.has(subject))
+    )
+      byPair.set(key, c);
+  }
+  return [...byPair.values()];
+}
 
 export interface PreviewRow {
   rowId: string;
@@ -969,8 +997,16 @@ export interface ReminderPreview {
     SheetReport & {
       competitions: Array<{ competition: string; seriesIds: string[] }>;
       rows: PreviewRow[];
-      /** matched-no-change rows, collapsed. */
+      /** matched-no-change rows (no note), collapsed out of `rows`. */
       alreadyCorrect: number;
+      /** Those rows, for the expandable list. */
+      alreadyCorrectRows: Array<{
+        rowId: string;
+        sheetRow: number;
+        home: string;
+        away: string;
+        date: string;
+      }>;
     }
   >;
   skippedRows: SkippedSheetRow[];
@@ -1031,10 +1067,15 @@ export function reminderPreview(
         away: sideName(s, f.away, clubsById),
       });
   const gate = rp.plan.gate;
+  const released = new Set(series.filter((s) => s.released === true).map((s) => String(s.id)));
+  const amended = new Set(
+    rp.plan.diffs.filter((d) => d.kind === 'patch').map((d) => `${d.seriesId}/${d.fixtureId}`),
+  );
   return {
     planHash: rp.planHash,
     sheets: rp.sheets.map((rep) => {
       const ms = rp.match.matches.filter((m) => m.row.sheet === rep.sheet);
+      const correct = ms.filter((m) => m.outcome === 'matched-no-change' && !m.reason);
       return {
         ...rep,
         competitions: rp.match.competitions
@@ -1042,7 +1083,14 @@ export function reminderPreview(
           .map(({ competition, seriesIds }) => ({ competition, seriesIds })),
         // A no-change row WITH a reason (a benign duplicate, an already-moved postponement)
         // is listed so the note is seen; plain already-correct rows are only counted.
-        alreadyCorrect: ms.filter((m) => m.outcome === 'matched-no-change' && !m.reason).length,
+        alreadyCorrect: correct.length,
+        alreadyCorrectRows: correct.map((m) => ({
+          rowId: m.row.rowId,
+          sheetRow: m.row.sheetRow,
+          home: m.fixture?.home ?? m.row.home,
+          away: m.fixture?.away ?? m.row.away,
+          date: m.fixture?.date || m.row.date,
+        })),
         rows: ms
           .filter((m) => m.outcome !== 'matched-no-change' || m.reason)
           .map((m) => ({
@@ -1089,11 +1137,14 @@ export function reminderPreview(
     gate: {
       ok: rp.gateVerdict.ok,
       errors: rp.gateVerdict.errors,
-      introduced: (gate?.introduced ?? []).map(clashView),
+      introduced: onePerPair(gate?.introduced ?? [], amended).map((c) => clashView(c, released)),
       // The gate's weekend lists are the AFTER state; drop what the plan itself introduces.
-      preExisting: [...(gate?.weekendReleased ?? []), ...(gate?.weekendDraftOnly ?? [])]
-        .filter((c) => !introducedKeys.has(clashKey(c, aliases)))
-        .map(clashView),
+      preExisting: onePerPair(
+        [...(gate?.weekendReleased ?? []), ...(gate?.weekendDraftOnly ?? [])].filter(
+          (c) => !introducedKeys.has(clashKey(c, aliases)),
+        ),
+        amended,
+      ).map((c) => clashView(c, released)),
     },
     touchedSeries: Object.entries(rp.touchedSeriesVersions).map(([id, version]) => ({
       id,

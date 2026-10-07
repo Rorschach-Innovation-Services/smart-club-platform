@@ -11256,7 +11256,10 @@ app.post('/platform/tenants/:slug/fixture-amendments/confirm', async (c) => {
   if (rp.gateVerdict.introduced.length)
     throw new HttpError(
       409,
-      `Blocked — the amendments would introduce ${preview.gate.introduced.length} venue clash(es). Untick the rows involved (or turn on draft relocation) and preview again.`,
+      `Blocked — the amendments would introduce ${preview.gate.introduced.length} venue clash(es). Untick the rows involved${
+        // Relocation only moves drafts: offer it only when a draft holds a blocking ground.
+        preview.gate.introduced.some((x) => x.holderDraft) ? ' (or turn on draft relocation)' : ''
+      } and preview again.`,
       { code: 'clash_gate', details: preview.gate },
     );
   if (!rp.gateVerdict.ok)

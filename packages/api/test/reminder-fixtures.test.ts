@@ -780,6 +780,35 @@ describe('planReminderAmendments', () => {
     assert.equal(strict.gateVerdict.ok, false, 'the CLI default stays strict');
   });
 
+  test('the preview lists one entry per double-booking and says whether its holder is a draft', () => {
+    // f2 (Gamma v Delta) moves onto Delta Fields 13:30 SUN; f4 is out of the way on SAT.
+    const rows = [rowOf({ home: 'Gamma', away: 'Delta', time: '13:30', venue: 'Delta Fields' })];
+    const holder = (released: boolean) =>
+      series('s-hold', 'Holder Cup · T20', released, [
+        {
+          id: 'h1',
+          date: SUN,
+          time: '13:30',
+          home: 'gamma',
+          away: 'alpha',
+          venueName: 'Delta Fields',
+        },
+      ]);
+    for (const released of [true, false]) {
+      const all = [premier({ f4: { date: SAT } }), holder(released)];
+      const rp = plan(parsedOf(rows), all);
+      // The gate sees the pair from both sides; the preview shows it once.
+      assert.equal(rp.plan.gate!.introduced.length, 2);
+      const pv = reminderPreview(rp, all, clubs);
+      assert.equal(pv.gate.introduced.length, 1);
+      const [c] = pv.gate.introduced;
+      assert.equal(c.ground, 'Delta Fields');
+      assert.equal(c.fixture, 'Gamma CC v Delta CC', 'the amended side');
+      assert.equal(c.with, 'Holder Cup · T20: Gamma CC v Alpha CC', 'the ground-holder');
+      assert.equal(c.holderDraft, !released);
+    }
+  });
+
   test('skip toggles drop the row from the manifest and change the hash', async () => {
     const parsed = await premierSheet();
     const all = [premier(), veterans()];
@@ -855,6 +884,12 @@ describe('planReminderAmendments', () => {
     assert.equal(pv.counts['matched-change'], 3);
     assert.equal(pv.counts['matched-no-change'], 1);
     assert.equal(pv.sheets[0].alreadyCorrect, 1);
+    // The already-correct rows themselves are listed (no fixture body, just who/when).
+    assert.equal(pv.sheets[0].alreadyCorrectRows.length, 1);
+    const ok = pv.sheets[0].alreadyCorrectRows[0];
+    assert.deepEqual(Object.keys(ok).sort(), ['away', 'date', 'home', 'rowId', 'sheetRow']);
+    assert.ok(ok.home && ok.away && ok.date && ok.rowId.includes(':'));
+    assert.ok(!pv.sheets[0].rows.some((r) => r.rowId === ok.rowId), 'not listed twice');
     assert.equal(pv.sheets[0].rows.length, 3);
     assert.deepEqual(pv.touchedSeries, [
       { id: 's-prem', name: 'Premier League · T20 · Group 1', version: 3 },
