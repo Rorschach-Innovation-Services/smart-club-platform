@@ -452,17 +452,38 @@ describe('the Monday cron', () => {
   test('send claim lease: a fresh in_progress claim blocks; one older than 15 minutes is taken over; a completed one never is', async () => {
     const t0 = new Date('2026-01-05T05:00:00.000Z');
     const at = (min: number) => ({ now: new Date(t0.getTime() + min * 60_000) });
-    assert.equal(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(0)), true);
-    assert.equal(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(1)), false);
-    assert.equal(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(14)), false);
+    const iso = (min: number) => at(min).now.toISOString();
+    assert.equal(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(0)), iso(0));
+    assert.equal(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(1)), null);
+    assert.equal(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(14)), null);
     // The first run crashed between claim and release: a later run takes the stuck claim over…
-    assert.equal(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(16)), true);
+    assert.equal(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(16)), iso(16));
     // …and its own fresh lease blocks again.
-    assert.equal(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(17)), false);
+    assert.equal(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(17)), null);
     await repo.completeScorecardConfirmNotify(T, WEEK, 'umzinto', [
       { channel: 'email', status: 'sent' },
     ]);
-    assert.equal(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(24 * 60)), false);
+    assert.equal(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(24 * 60)), null);
+  });
+
+  test("a release only frees the releasing run's own claim: a stale startedAt leaves a newer holder's claim in place", async () => {
+    const t0 = new Date('2026-01-05T05:00:00.000Z');
+    const at = (min: number) => ({ now: new Date(t0.getTime() + min * 60_000) });
+    // Normal path: claim → release → the next run can claim again.
+    const mine = await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(0));
+    assert.ok(mine);
+    await repo.releaseScorecardConfirmNotify(T, WEEK, 'umzinto', mine);
+    // A paused run loses its claim to the 15-minute lease takeover…
+    const paused = await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(1));
+    assert.ok(paused);
+    const newer = await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(17));
+    assert.ok(newer);
+    // …then wakes and releases: a no-op, the newer holder's claim stays and still blocks.
+    await repo.releaseScorecardConfirmNotify(T, WEEK, 'umzinto', paused);
+    assert.equal(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(18)), null);
+    // The newer holder's own release still frees it.
+    await repo.releaseScorecardConfirmNotify(T, WEEK, 'umzinto', newer);
+    assert.ok(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(19)));
   });
 
   test('a total send failure releases the claim so the next run retries', async () => {
@@ -1245,6 +1266,12 @@ describe('erasure', () => {
 
     const counts = await repo.erasePlayerData(T, NK, { by: 'admin@union.test' });
     assert.ok(counts);
+    assert.equal(counts.scorecardsScrubbed, 1);
+    assert.equal(counts.feedbackScrubbed, 1);
+    // Recorded in the PLAYERERASE# audit row like the other counts.
+    const [log] = await repo.listPlayerEraseLogs(T);
+    assert.equal(log.counts.scorecardsScrubbed, 1);
+    assert.equal(log.counts.feedbackScrubbed, 1);
 
     const scrubbed = (await repo.getFixtureScorecard(T, S1, 'f1'))!;
     assert.equal(scrubbed.terminal, true);
@@ -1295,7 +1322,9 @@ describe('erasure', () => {
       available: true,
       innings: innings(),
     });
-    assert.ok(await repo.erasePlayerData(T, 'nk-other', { by: 'admin@union.test' }));
+    const counts = await repo.erasePlayerData(T, 'nk-other', { by: 'admin@union.test' });
+    assert.equal(counts?.scorecardsScrubbed, 0);
+    assert.equal(counts?.feedbackScrubbed, 0);
     const card = (await repo.getFixtureScorecard(T, S1, 'f1'))!;
     assert.equal(card.terminal, undefined);
     assert.deepEqual(card.innings, innings());

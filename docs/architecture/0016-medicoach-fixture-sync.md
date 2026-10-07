@@ -320,3 +320,6 @@ number — effectively the ID number. So:
   batter, bowler and fall-of-wicket names in every cached scorecard with `[removed]` and marks
   that card `terminal`, so the sweep never re-fetches the name from medicoach. Cards outside the
   sweep window were already stable (never re-fetched), so the scrub holds for them as well.
+  Residual, accepted: a NEW result push from medicoach for the same fixture still re-fetches
+  the scorecard, overwriting the scrubbed card and clearing `terminal`; a result push after an
+  erasure is considered unlikely.

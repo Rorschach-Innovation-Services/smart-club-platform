@@ -259,7 +259,8 @@ export async function runScorecardConfirmations(
       const orgName = orgCopy(cfg).name;
 
       for (const club of clubs) {
-        let claimed = false;
+        // The claim's startedAt once this run holds it: releases are conditioned on it.
+        let claimedAt: string | null = null;
         let sent = false;
         try {
           const entries = clubScorecardEntries(
@@ -345,11 +346,11 @@ export async function runScorecardConfirmations(
           }
           // Everything that can throw before a send is resolved before the claim.
           const { token, url } = scorecardLink(tenant, record, deps.linkSecret(), deps.linkBase());
-          if (!(await repo.claimScorecardConfirmNotify(tenant, weekKey, club.id))) {
+          claimedAt = await repo.claimScorecardConfirmNotify(tenant, weekKey, club.id);
+          if (!claimedAt) {
             summary.skipped++;
             continue;
           }
-          claimed = true;
           const current = (await repo.getScorecardConfirmation(tenant, weekKey, club.id)) ?? record;
           const matchCount = Object.values(current.entries).filter(
             (e) => e.status !== 'void',
@@ -397,7 +398,7 @@ export async function runScorecardConfirmations(
           if (!delivered) {
             // Reached nobody (failed or skipped on every channel): free the claim so the next
             // run (or the operator) sends once the cause is fixed.
-            await repo.releaseScorecardConfirmNotify(tenant, weekKey, club.id);
+            await repo.releaseScorecardConfirmNotify(tenant, weekKey, club.id, claimedAt);
           } else {
             await repo.completeScorecardConfirmNotify(
               tenant,
@@ -428,12 +429,14 @@ export async function runScorecardConfirmations(
           );
           // Nothing reached the chair: free the claim so a retry can send. Once a channel
           // delivered the claim stays, so a bookkeeping fault never double-sends.
-          if (claimed && !sent) {
-            await repo.releaseScorecardConfirmNotify(tenant, weekKey, club.id).catch(() => {
-              console.error(
-                `scorecard-confirmations: could not release the claim for ${tenant}/${club.id}`,
-              );
-            });
+          if (claimedAt && !sent) {
+            await repo
+              .releaseScorecardConfirmNotify(tenant, weekKey, club.id, claimedAt)
+              .catch(() => {
+                console.error(
+                  `scorecard-confirmations: could not release the claim for ${tenant}/${club.id}`,
+                );
+              });
           }
         }
       }

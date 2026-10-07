@@ -2752,8 +2752,9 @@ export async function rotateScorecardConfirmMemberId(
 export const SCORECARD_CLAIM_LEASE_MS = 15 * 60_000;
 
 /**
- * Claim the right to send a club's digest for a week. True ⇒ the caller sends; false ⇒ a send
- * was already claimed (a re-run, the operator "Run now") and nothing must go out again.
+ * Claim the right to send a club's digest for a week. Returns the claim's `startedAt` ⇒ the
+ * caller sends (and passes it back to {@link releaseScorecardConfirmNotify}); null ⇒ a send was
+ * already claimed (a re-run, the operator "Run now") and nothing must go out again.
  *
  * Lease takeover: an `in_progress` claim older than {@link SCORECARD_CLAIM_LEASE_MS} is a run
  * that crashed between claim and complete/release — it is re-claimed, so it cannot block the
@@ -2764,8 +2765,9 @@ export async function claimScorecardConfirmNotify(
   weekKey: string,
   clubId: string,
   opts: { now?: Date } = {},
-): Promise<boolean> {
+): Promise<string | null> {
   const now = opts.now ?? new Date();
+  const startedAt = now.toISOString();
   try {
     await ddb.send(
       new PutCommand({
@@ -2773,7 +2775,7 @@ export async function claimScorecardConfirmNotify(
         Item: {
           ...scorecardConfirmNotifyKey(tenant, weekKey, clubId),
           status: 'in_progress',
-          startedAt: now.toISOString(),
+          startedAt,
           expiresAt: Math.floor(now.getTime() / 1000) + NOTIFY_LEDGER_TTL_SECONDS,
         },
         ConditionExpression: 'attribute_not_exists(pk) OR (#s = :ip AND startedAt < :stale)',
@@ -2784,9 +2786,9 @@ export async function claimScorecardConfirmNotify(
         },
       }),
     );
-    return true;
+    return startedAt;
   } catch (err) {
-    if (isCcf(err)) return false;
+    if (isCcf(err)) return null;
     throw err;
   }
 }
@@ -2813,20 +2815,25 @@ export async function completeScorecardConfirmNotify(
   );
 }
 
-/** Release a claimed digest send that reached nobody, so the next run may try again. */
+/**
+ * Release a claimed digest send that reached nobody, so the next run may try again. Only the
+ * caller's OWN claim is released (`claimedAt` = the `startedAt` its claim returned): a run that
+ * lost its claim to a lease takeover leaves the newer holder's claim in place (a no-op).
+ */
 export async function releaseScorecardConfirmNotify(
   tenant: string,
   weekKey: string,
   clubId: string,
+  claimedAt: string,
 ): Promise<void> {
   try {
     await ddb.send(
       new DeleteCommand({
         TableName: TABLE,
         Key: scorecardConfirmNotifyKey(tenant, weekKey, clubId),
-        ConditionExpression: '#s = :p',
+        ConditionExpression: '#s = :p AND startedAt = :mine',
         ExpressionAttributeNames: { '#s': 'status' },
-        ExpressionAttributeValues: { ':p': 'in_progress' },
+        ExpressionAttributeValues: { ':p': 'in_progress', ':mine': claimedAt },
       }),
     );
   } catch (err) {
@@ -8352,6 +8359,7 @@ export async function erasePlayerData(
   // A modified card is also marked `terminal` so the sweep never re-fetches it (and with it the
   // name) from medicoach. Conditional on the card not having been replaced meanwhile; a
   // replaced card is re-read and scrubbed afresh.
+  let scorecardsScrubbed = 0;
   for (const listed of await listFixtureScorecards(tenant)) {
     let card: StoredFixtureScorecard | null = listed;
     for (let attempt = 0; card && attempt < 3; attempt++) {
@@ -8370,6 +8378,7 @@ export async function erasePlayerData(
             ExpressionAttributeValues: { ':f': card.fetchedAt },
           }),
         );
+        scorecardsScrubbed++;
         break;
       } catch (err: unknown) {
         if (!isCcf(err)) throw err;
@@ -8390,6 +8399,7 @@ export async function erasePlayerData(
       ),
   );
   const scrubText = (s: string) => namePatterns.reduce((t, re) => t.replace(re, ERASED_NAME), s);
+  let feedbackScrubbed = 0;
   for (const listed of await listScorecardConfirmations(tenant)) {
     // Conditional on each scrubbed feedback being unchanged; a digest changed meanwhile (an
     // entry re-answered after a clear) is re-read and scrubbed afresh.
@@ -8422,6 +8432,7 @@ export async function erasePlayerData(
             ExpressionAttributeValues: { ...values, ':now': at },
           }),
         );
+        feedbackScrubbed += sets.length;
         break;
       } catch (err: unknown) {
         if (!isCcf(err)) throw err;
@@ -8452,6 +8463,8 @@ export async function erasePlayerData(
     documents: new Set([...uniqueObjects, ...rowDocs]).size,
     certificates,
     captainsReportsScrubbed,
+    scorecardsScrubbed,
+    feedbackScrubbed,
     reportOpenMarkers,
   };
   await putPlayerEraseLog(tenant, {

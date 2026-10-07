@@ -667,6 +667,10 @@ export interface PlayerErasureCounts {
   certificates: number;
   /** Captain's reports that named the person and were scrubbed in place (not deleted). */
   captainsReportsScrubbed: number;
+  /** Cached medicoach scorecards (FIXSCORECARD#) that named the person: scrubbed and marked terminal. */
+  scorecardsScrubbed: number;
+  /** Scorecard-digest entries whose chair feedback named the person and was scrubbed in place. */
+  feedbackScrubbed: number;
   /**
    * Pending REPORTOPEN# markers whose captain ref was this person: the ref is scrubbed, the
    * marker kept (its retry then addresses the scoring side's chair instead).
@@ -1313,12 +1317,14 @@ export interface StoredFixtureResult {
 
 /**
  * A medicoach scorecard for one fixture (FIXSCORECARD#), fetched by the sync after a result
- * is stored and re-fetched by the sweep while it may still change. Written ONLY by the sync
- * (medicoach-sync/scorecard-fetch.ts). Holds player names — personal data, erased with the
+ * is stored and re-fetched by the sweep while it may still change. Written by the sync
+ * (medicoach-sync/scorecard-fetch.ts) and, to scrub names, by player erasure. Holds player names — personal data, erased with the
  * tenant / cohort / series like FIXRESULT#.
  *
  * `terminal: true` = this fixture can never have a scorecard (medicoach answered 404 or
  * `available: false`): the sweep stops retrying. A newly stored result still re-fetches.
+ * Player erasure also sets it on an AVAILABLE card it scrubbed, so the sweep never re-fetches
+ * the card (and with it the erased name) from medicoach.
  */
 export interface StoredFixtureScorecard {
   seriesId: string;

@@ -348,6 +348,8 @@ describe('full erasure across every category', () => {
       documents: 3,
       certificates: 1,
       captainsReportsScrubbed: 1,
+      scorecardsScrubbed: 0,
+      feedbackScrubbed: 0,
       reportOpenMarkers: 1,
     });
   });
