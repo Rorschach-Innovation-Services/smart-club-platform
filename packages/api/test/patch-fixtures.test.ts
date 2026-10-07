@@ -566,7 +566,7 @@ describe('planFixturePatches — set.date, postponements and gate mode', () => {
     assert.equal(fx(again.next, 's-rel', 'f2').originalDate, '2026-10-04');
   });
 
-  test('postponed without a date: status only, slot freed for another entry', () => {
+  test('postponed without a date: postponed + dateTbc (allowed on released), slot freed for another entry', () => {
     // f1 (alpha v beta, Beta Park 09:00) postponed undated; f2 moves onto Beta Park 09:00.
     const plan = planFixturePatches(
       [released()],
@@ -591,7 +591,52 @@ describe('planFixturePatches — set.date, postponements and gate mode', () => {
     assert.equal(f1.status, 'postponed');
     assert.equal(f1.date, DATE);
     assert.equal(f1.originalDate, undefined);
+    assert.equal(f1.dateTbc, true, 'the undated shape rides the existing dateTbc exemption');
     assert.deepEqual(plan.gate!.introduced, []);
+  });
+
+  test('a bare set.dateTbc stays draft-only even though postponed + dateTbc is allowed', () => {
+    const plan = planFixturePatches(
+      [released()],
+      clubs,
+      venues,
+      manifest([entry({ set: { dateTbc: true } })], false),
+    );
+    assert.match(plan.errors[0], /only allowed on a draft series/);
+  });
+
+  test('re-dating an undated (dateTbc) postponement clears dateTbc, stamps originalDate, books its slot', () => {
+    const rel = released();
+    Object.assign((rel.fixtures as Fx[])[1], { status: 'postponed', dateTbc: true });
+    const plan = planFixturePatches(
+      [rel, nextWeek()],
+      clubs,
+      venues,
+      manifest([entry({ set: { date: '2026-10-18', postponed: true } })], false),
+      undefined,
+      { gateMode: 'introduced' },
+    );
+    const f2 = fx(plan.next, 's-rel', 'f2');
+    assert.equal(f2.status, 'postponed');
+    assert.equal(f2.date, '2026-10-18');
+    assert.equal(f2.dateTbc, undefined);
+    assert.equal(f2.originalDate, DATE);
+    // Back in the ledger: the new slot (s-next/n1's) is an introduced clash.
+    assert.ok(plan.errors.some((e) => /introduce/.test(e)));
+
+    // A plain set.date (no set.postponed) on a postponed fixture is still a reschedule.
+    const rel2 = released();
+    Object.assign((rel2.fixtures as Fx[])[1], { status: 'postponed', dateTbc: true });
+    const plain = planFixturePatches(
+      [rel2],
+      clubs,
+      venues,
+      manifest([entry({ set: { date: '2026-10-25' } })], false),
+    );
+    assert.deepEqual(plain.errors, []);
+    const g = fx(plain.next, 's-rel', 'f2');
+    assert.equal(g.dateTbc, undefined);
+    assert.equal(g.originalDate, DATE);
   });
 
   test('set.date / set.postponed validation', () => {

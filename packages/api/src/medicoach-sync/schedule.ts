@@ -637,8 +637,12 @@ export function buildInboundFixture(
     changed.push('status');
   }
   // A postponement that lands on a new date is a RESCHEDULED one: stamp the date being left
-  // (only if absent — ADR 0015 `postponedFixture` semantics), or `isClashExempt` would read it
-  // as undated and the clash gate would never see its new slot.
+  // (only if absent — ADR 0015 `postponedFixture` semantics). An undated postponement's
+  // `dateTbc` needs no handling here: it mirrors `schedule.dateTbc` above, so a dated change
+  // already clears it. A fixture that LEAVES postponed drops `originalDate`, so a stale one
+  // never resurfaces on a later postponement.
+  if (statusFlag(ours) === 'postponed' && next.status !== 'postponed' && next.originalDate)
+    delete next.originalDate;
   if (
     next.status === 'postponed' &&
     !next.originalDate &&

@@ -94,8 +94,10 @@ export interface PatchSet {
    *  - with `date`: the ADR 0015 `postponedFixture` shape — new date, `status: 'postponed'`,
    *    `originalDate` kept from a first postponement or set to the date it leaves. It keeps
    *    booking its NEW slot, so the gate sees it there.
-   *  - without `date`: what the admin editor's status flip writes — `status: 'postponed'`,
-   *    date untouched, no `originalDate`. `isClashExempt` treats that as holding no slot.
+   *  - without `date`: an UNDATED postponement — `status: 'postponed'` + `dateTbc: true`,
+   *    date untouched (it stays the date the match left). The existing `dateTbc` exemption
+   *    (`isClashExempt`) takes it out of every ground ledger until it gets a new date. This
+   *    combination is allowed on a released series (a bare `set.dateTbc` is not).
    * Only `true`.
    */
   postponed?: true;
@@ -523,14 +525,19 @@ export function planFixturePatches(
     const f = findFixture(s, e.fixtureId)!;
     if (set.home !== undefined) f.home = set.home;
     if (set.time !== undefined) f.time = set.time;
-    if (set.date !== undefined) {
-      // A rescheduled postponement keeps pointing at its FIRST schedule (postponedFixture).
-      if (set.postponed === true) f.originalDate = of.originalDate ?? of.date;
-      f.date = set.date;
-    }
-    // Without a date this is the admin editor's status flip: no originalDate, the fixture
-    // stays on its date and isClashExempt drops it from every ledger.
     if (set.postponed === true) f.status = 'postponed';
+    if (set.date !== undefined) {
+      f.date = set.date;
+      if (f.status === 'postponed') {
+        // A rescheduled postponement keeps pointing at its FIRST schedule (postponedFixture),
+        // and a TBC postponement that gains a date books its new slot again.
+        f.originalDate = of.originalDate ?? of.date;
+        if (of.status === 'postponed') delete f.dateTbc;
+      }
+    } else if (set.postponed === true) {
+      // Undated postponement: the date stays, the dateTbc exemption drops it from every ledger.
+      f.dateTbc = true;
+    }
     // A TBC date is clash-exempt (isClashExempt), so mover detection and the gate below
     // no longer see this fixture. Its date value is left as it was.
     if (set.dateTbc === true) f.dateTbc = true;

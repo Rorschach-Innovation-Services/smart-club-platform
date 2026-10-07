@@ -365,7 +365,7 @@ describe('release clash gate', () => {
     assert.equal(res.status, 200);
   });
 
-  test('an undated postponement does not book the ground; a rescheduled one still does', async () => {
+  test('an undated (dateTbc) postponement does not book the ground; legacy and rescheduled ones still do', async () => {
     const fixture = (extra: Record<string, unknown>) => ({
       id: 'f1',
       round: 1,
@@ -378,7 +378,9 @@ describe('release clash gate', () => {
     });
     await repo.putSeries(
       'dolphins',
-      series('s-gate-pp-undated', { fixtures: [fixture({ status: 'postponed' })] }),
+      series('s-gate-pp-undated', {
+        fixtures: [fixture({ status: 'postponed', dateTbc: true })],
+      }),
     );
     await repo.putSeries(
       'dolphins',
@@ -387,6 +389,22 @@ describe('release clash gate', () => {
       }),
     );
     assert.equal((await patchRelease('s-gate-pp-subject', 1)).status, 200);
+
+    // Pre-existing prod data (postponed, no originalDate, no dateTbc) still books its slot.
+    await repo.putSeries(
+      'dolphins',
+      series('s-gate-pp-legacy', {
+        fixtures: [fixture({ date: '2026-11-15', status: 'postponed' })],
+      }),
+    );
+    await repo.putSeries(
+      'dolphins',
+      series('s-gate-pp-subject3', {
+        fixtures: [fixture({ date: '2026-11-15', home: 'away-club', away: 'home-club' })],
+      }),
+    );
+    const legacy = await patchRelease('s-gate-pp-subject3', 1);
+    assert.equal(legacy.status, 409);
 
     await repo.putSeries(
       'dolphins',

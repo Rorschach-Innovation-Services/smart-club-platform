@@ -4727,9 +4727,9 @@ async function applySeriesPatch(
   if (patch.version !== undefined && patch.version !== current.version)
     throw new HttpError(409, 'series changed; refetch');
 
-  // A postponed fixture this write moves to a new date is a RESCHEDULED postponement: stamp
-  // `originalDate` before either clash gate runs, or `isClashExempt` would read it as undated
-  // and let it double-book its new slot unseen.
+  // Postponement bookkeeping before either clash gate runs: a postponed fixture moved to a new
+  // date gets `originalDate` (and loses an undated postponement's `dateTbc`, so the gates see
+  // its new slot); a reinstated one loses both.
   if (Array.isArray(patch.fixtures))
     patch.fixtures = stampRescheduledPostponements(current, patch.fixtures as PostponableFixture[]);
 
@@ -5291,6 +5291,8 @@ interface PostponableFixture {
   away?: string;
   status?: string;
   originalDate?: string;
+  /** With `status: 'postponed'`: an undated postponement (clash-exempt via dateTbc). */
+  dateTbc?: boolean;
   postponementId?: string;
   [key: string]: unknown;
 }
@@ -5299,13 +5301,19 @@ const fixturesOf = (series: Series): PostponableFixture[] =>
   (series.fixtures as PostponableFixture[]) ?? [];
 
 /**
- * `next` with `originalDate` stamped on every fixture that ends up `status: 'postponed'` on a
- * date different from the one `current` stores for it (matched by id) — the admin editor's
- * one-save "postpone to <date>", or a date change on an already-postponed fixture. Same
- * only-if-absent rule as `postponedFixture` (ADR 0015): an existing `originalDate` (on the
- * incoming fixture, else the stored one) is kept, so a fixture moved twice keeps pointing at
- * its first schedule. Without it `isClashExempt` would treat the moved fixture as an undated
- * postponement and leave its new slot out of every ground ledger.
+ * `next` with the postponement bookkeeping kept consistent with what `current` stores for each
+ * fixture (matched by id):
+ *  - a fixture that ends up `status: 'postponed'` on a NEW date (the admin editor's one-save
+ *    "postpone to <date>", or a date change on an already-postponed fixture) gets
+ *    `originalDate` stamped — the only-if-absent rule of `postponedFixture` (ADR 0015): an
+ *    existing one (incoming, else stored) is kept, so a fixture moved twice keeps pointing at
+ *    its first schedule — and an undated postponement's `dateTbc` is dropped, so it books its
+ *    new slot;
+ *  - a fixture that LEAVES `postponed` loses `originalDate`, and an undated postponement's
+ *    `dateTbc`, so stale bookkeeping never resurfaces on a later postponement.
+ * An undated postponement is `status: 'postponed'` + `dateTbc: true` (the reminder upload,
+ * the patch engine). Only THAT `dateTbc` is cleared here — never the placeholder flag of a
+ * fixture that was not postponed (a draft knockout awaiting its date).
  */
 function stampRescheduledPostponements(
   current: Series,
@@ -5314,9 +5322,20 @@ function stampRescheduledPostponements(
   const before = new Map(fixturesOf(current).map((f) => [f?.id, f]));
   return next.map((f) => {
     const prev = f?.id ? before.get(f.id) : undefined;
-    if (!prev || f.status !== 'postponed' || f.originalDate) return f;
+    if (!prev) return f;
+    const tbcPostponement = prev.status === 'postponed' && prev.dateTbc === true;
+    if (f.status !== 'postponed') {
+      if (prev.status !== 'postponed') return f;
+      // Reinstated (or cancelled): drop the postponement's bookkeeping.
+      const out = { ...f };
+      delete out.originalDate;
+      if (tbcPostponement) delete out.dateTbc;
+      return out;
+    }
     if (!f.date || !prev.date || f.date === prev.date) return f;
-    return { ...f, originalDate: prev.originalDate ?? prev.date };
+    const out = { ...f, originalDate: f.originalDate ?? prev.originalDate ?? prev.date };
+    if (tbcPostponement) delete out.dateTbc;
+    return out;
   });
 }
 
@@ -5593,6 +5612,8 @@ function postponedFixture(
     originalDate: fixture.originalDate ?? fixture.date,
     postponementId: requestId,
   };
+  // An undated postponement (`dateTbc`) that gets its new date books its slot again.
+  if (fixture.status === 'postponed' && fixture.dateTbc === true) delete next.dateTbc;
   if (move.venue) {
     next.venueId = move.venue.id;
     next.venueName = move.venue.name;

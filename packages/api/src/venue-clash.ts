@@ -115,34 +115,16 @@ interface StoredFixture {
   venueOverride?: string;
   venueName?: string;
   dateTbc?: boolean;
-  originalDate?: string;
 }
 
 /**
- * Whether a fixture stays OUT of every ground ledger: no date, cancelled, its date is only a
- * placeholder (`dateTbc` — a recipe knockout created before the union set its date), or it
- * is postponed WITHOUT a new date. A TBC fixture holds no real slot, so it can neither clash
- * nor be clashed with until it gets a date.
- *
- * Postponed: only the undated shape is exempt — `status: 'postponed'` with no
- * `originalDate` (the admin editor's status flip, the reminder upload's "postponed" row). A
- * rescheduled postponement (ADR 0015 `postponedFixture`, the upload's postponement with a new
- * date) always carries `originalDate` and keeps booking its NEW slot: exempting it would let
- * a moved match double-book a ground unseen. Shared by the release gate, the in-season subset
- * gate and the medicoach inbound gate (all via `findClashes`).
+ * Whether a fixture stays OUT of every ground ledger: no date, cancelled, or its date is
+ * only a placeholder (`dateTbc` — a recipe knockout created before the union set its
+ * date). A TBC fixture holds no real slot, so it can neither clash nor be clashed with
+ * until it gets a date.
  */
-export function isClashExempt(f: {
-  date?: string;
-  status?: string;
-  dateTbc?: boolean;
-  originalDate?: string;
-}): boolean {
-  return (
-    !f.date ||
-    f.status === 'cancelled' ||
-    f.dateTbc === true ||
-    (f.status === 'postponed' && !f.originalDate)
-  );
+export function isClashExempt(f: { date?: string; status?: string; dateTbc?: boolean }): boolean {
+  return !f.date || f.status === 'cancelled' || f.dateTbc === true;
 }
 
 /** A fixture's effective ground: explicit venue fields, else the home side's club
