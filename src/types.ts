@@ -179,6 +179,55 @@ export interface ScorecardContext {
   };
   medicoachMatchUrl?: string;
 }
+/**
+ * Operator console: GET /platform/captains-report-scorecards (MIRRORS the API's
+ * ScorecardConsole* types). `n/a` = no available card; `pending` = report open + card;
+ * `not-asked` = report closed without an answer while a card exists; `stale` = a submitted
+ * answer against a card that has since changed (wins over confirmed / correction).
+ */
+export type ScorecardConsoleStatus =
+  | 'n/a'
+  | 'pending'
+  | 'not-asked'
+  | 'confirmed'
+  | 'correction'
+  | 'stale';
+export type ScorecardConsoleFilter =
+  | 'all'
+  | 'pending'
+  | 'confirmed'
+  | 'correction'
+  | 'stale'
+  | 'not-asked';
+export interface ScorecardConsoleCell {
+  reportId: string;
+  reportRef?: string;
+  clubId: string;
+  clubName: string;
+  reportStatus: CaptainsReport['status'];
+  scorecardStatus: ScorecardConsoleStatus;
+  answeredAction?: CaptainsReportScorecardAnswer['action'];
+  feedback?: string;
+  submittedAt?: string;
+}
+export interface ScorecardConsoleRow {
+  seriesId: string;
+  fixtureId: string;
+  matchDate: string;
+  competition: string;
+  homeTeamName: string;
+  awayTeamName: string;
+  home?: ScorecardConsoleCell;
+  away?: ScorecardConsoleCell;
+}
+export interface ScorecardConsolePayload {
+  days: number;
+  status: ScorecardConsoleFilter;
+  since: string;
+  total: number;
+  truncated: boolean;
+  tenants: Array<{ tenant: string; tenantName: string; rows: ScorecardConsoleRow[] }>;
+}
 /** GET /club/captains-reports/:id — one report plus its match scorecard context. */
 export interface ClubCaptainsReportDetail extends CaptainsReport {
   scorecardContext?: ScorecardContext;

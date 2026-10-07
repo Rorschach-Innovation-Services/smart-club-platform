@@ -42,7 +42,7 @@ import { captainsReportLinkBase, captainsReportLinkSecret } from './env.js';
 import { hasFeature } from './features.js';
 import { toE164 } from './notify/e164.js';
 import { isWithheld } from './series-projection.js';
-import { TENANT_UTC_OFFSET_MINUTES } from './tenant-time.js';
+import { TENANT_UTC_OFFSET_MINUTES, tenantDate } from './tenant-time.js';
 import type {
   CaptainsReport,
   CaptainsReportDelivery,
@@ -1509,4 +1509,209 @@ export function reportFixtureLine(
     (r.competition ? ` (${r.competition})` : '') +
     `, ${formatWeekdayDayYear(r.matchDate)}`
   );
+}
+
+// ───────────────────────── Operator console ─────────────────────────
+
+/** The console's window: `days` back from the tenant's today (default 14, capped at 60). */
+export const CONSOLE_DAYS_DEFAULT = 14;
+export const CONSOLE_DAYS_MAX = 60;
+/** At most this many fixture rows per response (newest first); `truncated` says when cut. */
+export const CONSOLE_ROW_CAP = 500;
+
+export const CONSOLE_STATUSES = [
+  'all',
+  'pending',
+  'confirmed',
+  'correction',
+  'stale',
+  'not-asked',
+] as const;
+export type ConsoleStatusFilter = (typeof CONSOLE_STATUSES)[number];
+
+/**
+ * One side's scorecard state:
+ * - `n/a` — no available card for the match (nothing to confirm against);
+ * - `pending` — the report is still open and a card is there to answer;
+ * - `not-asked` — the report closed (submitted / void) without an answer while a card exists
+ *   (incl. reports submitted before the card arrived, and pre-pivot submissions);
+ * - `confirmed` / `correction` — the SUBMITTED answer;
+ * - `stale` — a submitted answer against a card that has since changed (wins over both).
+ * A draft answer on an open report does not count — only a submitted one does.
+ */
+export type ScorecardConsoleStatus =
+  | 'n/a'
+  | 'pending'
+  | 'not-asked'
+  | 'confirmed'
+  | 'correction'
+  | 'stale';
+
+export interface ScorecardConsoleCell {
+  reportId: string;
+  /** `CR-YYYY-NNNN` — only once submitted. */
+  reportRef?: string;
+  clubId: string;
+  clubName: string;
+  reportStatus: CaptainsReport['status'];
+  scorecardStatus: ScorecardConsoleStatus;
+  /** The submitted answer behind a `stale` status. */
+  answeredAction?: CaptainsReportScorecardAnswer['action'];
+  /** A submitted correction's text. */
+  feedback?: string;
+  submittedAt?: string;
+}
+
+export interface ScorecardConsoleRow {
+  seriesId: string;
+  fixtureId: string;
+  matchDate: string;
+  competition: string;
+  homeTeamName: string;
+  awayTeamName: string;
+  home?: ScorecardConsoleCell;
+  away?: ScorecardConsoleCell;
+}
+
+export interface ScorecardConsoleTenant {
+  tenant: string;
+  tenantName: string;
+  rows: ScorecardConsoleRow[];
+}
+
+export interface ScorecardConsolePayload {
+  days: number;
+  status: ConsoleStatusFilter;
+  /** The first match date in the window (YYYY-MM-DD, tenant time). */
+  since: string;
+  /** Fixture rows matching the filter before the cap. */
+  total: number;
+  truncated: boolean;
+  tenants: ScorecardConsoleTenant[];
+}
+
+export function scorecardConsoleStatus(
+  r: Pick<CaptainsReport, 'status' | 'scorecard'>,
+  cardAvailable: boolean,
+): ScorecardConsoleStatus {
+  if (r.status === 'submitted' && r.scorecard) {
+    return r.scorecard.stale ? 'stale' : r.scorecard.action;
+  }
+  if (!cardAvailable) return 'n/a';
+  return r.status === 'pending' ? 'pending' : 'not-asked';
+}
+
+export function scorecardConsoleCell(
+  r: CaptainsReport,
+  cardAvailable: boolean,
+): ScorecardConsoleCell {
+  const scorecardStatus = scorecardConsoleStatus(r, cardAvailable);
+  const answered = r.status === 'submitted' ? r.scorecard : undefined;
+  return {
+    reportId: r.id,
+    ...(r.ref ? { reportRef: r.ref } : {}),
+    clubId: r.clubId,
+    clubName: r.clubName,
+    reportStatus: r.status,
+    scorecardStatus,
+    ...(scorecardStatus === 'stale' && answered ? { answeredAction: answered.action } : {}),
+    ...(answered?.action === 'correction' && answered.feedback
+      ? { feedback: answered.feedback }
+      : {}),
+    ...(r.submittedAt ? { submittedAt: r.submittedAt } : {}),
+  };
+}
+
+/** The first match date a `days` window covers, in tenant time. */
+export function consoleSince(days: number, now: Date): string {
+  return tenantDate(new Date(now.getTime() - days * 24 * 3600 * 1000));
+}
+
+/**
+ * One tenant's reports → fixture rows pairing both sides (home / away), newest first. Reports
+ * outside the window and unlisted matches (no fixture, never a card) are left out.
+ */
+export function pairScorecardConsoleRows(
+  reports: CaptainsReport[],
+  cards: Map<string, { available: boolean }>,
+  since: string,
+): ScorecardConsoleRow[] {
+  const rows = new Map<string, ScorecardConsoleRow>();
+  for (const r of reports) {
+    if (r.seriesId === UNLISTED_SERIES_ID || r.source === 'manual-unlisted') continue;
+    if (r.matchDate < since) continue;
+    const key = `${r.seriesId}#${r.fixtureId}`;
+    let row = rows.get(key);
+    if (!row) {
+      row = {
+        seriesId: r.seriesId,
+        fixtureId: r.fixtureId,
+        matchDate: r.matchDate,
+        competition: r.competition,
+        homeTeamName: r.side === 'home' ? r.clubName : r.opponentName,
+        awayTeamName: r.side === 'home' ? r.opponentName : r.clubName,
+      };
+      rows.set(key, row);
+    }
+    row[r.side] = scorecardConsoleCell(r, cards.get(key)?.available === true);
+  }
+  return [...rows.values()].sort(
+    (a, b) =>
+      b.matchDate.localeCompare(a.matchDate) ||
+      `${a.seriesId}#${a.fixtureId}`.localeCompare(`${b.seriesId}#${b.fixtureId}`),
+  );
+}
+
+/** A row matches a status filter when EITHER side has that status. */
+export function consoleRowMatches(row: ScorecardConsoleRow, status: ConsoleStatusFilter) {
+  if (status === 'all') return true;
+  return row.home?.scorecardStatus === status || row.away?.scorecardStatus === status;
+}
+
+/**
+ * Cross-tenant scorecard status of captains reports, for the operator console. Tenants are
+ * read one at a time (one CAPREPORT Query each — the partition is not date-keyed, so the
+ * window is applied here); scorecards via a projected BatchGet over the window's fixtures.
+ * Rows are capped at `rowCap` across tenants, newest match first.
+ */
+export async function loadScorecardConsole(
+  repo: Pick<RepoModule, 'listTenants' | 'listCaptainsReports' | 'getFixtureScorecardAvailability'>,
+  opts: { days: number; status: ConsoleStatusFilter; now: Date; rowCap?: number },
+): Promise<ScorecardConsolePayload> {
+  const since = consoleSince(opts.days, opts.now);
+  const rowCap = opts.rowCap ?? CONSOLE_ROW_CAP;
+  const all: Array<{ tenant: string; tenantName: string; row: ScorecardConsoleRow }> = [];
+  for (const cfg of await repo.listTenants()) {
+    const reports = (await repo.listCaptainsReports(cfg.tenant)).filter(
+      (r) =>
+        r.matchDate >= since && r.seriesId !== UNLISTED_SERIES_ID && r.source !== 'manual-unlisted',
+    );
+    if (!reports.length) continue;
+    const cards = await repo.getFixtureScorecardAvailability(
+      cfg.tenant,
+      reports.map((r) => ({ seriesId: r.seriesId, fixtureId: r.fixtureId })),
+    );
+    const tenantName = orgCopy(cfg).name;
+    for (const row of pairScorecardConsoleRows(reports, cards, since))
+      if (consoleRowMatches(row, opts.status)) all.push({ tenant: cfg.tenant, tenantName, row });
+  }
+  all.sort(
+    (a, b) =>
+      b.row.matchDate.localeCompare(a.row.matchDate) || a.tenantName.localeCompare(b.tenantName),
+  );
+  const kept = all.slice(0, rowCap);
+  const byTenant = new Map<string, ScorecardConsoleTenant>();
+  for (const { tenant, tenantName, row } of kept) {
+    let t = byTenant.get(tenant);
+    if (!t) byTenant.set(tenant, (t = { tenant, tenantName, rows: [] }));
+    t.rows.push(row);
+  }
+  return {
+    days: opts.days,
+    status: opts.status,
+    since,
+    total: all.length,
+    truncated: all.length > kept.length,
+    tenants: [...byTenant.values()].sort((a, b) => a.tenantName.localeCompare(b.tenantName)),
+  };
 }

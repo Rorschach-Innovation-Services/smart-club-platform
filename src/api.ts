@@ -37,6 +37,8 @@ import type {
   CaptainsReportFields,
   ClubCaptainsReportDetail,
   LinkedCaptainsReport,
+  ScorecardConsoleFilter,
+  ScorecardConsolePayload,
   SendResult,
   PlayerErasureCounts,
   LogoUploadPost,
@@ -1137,6 +1139,15 @@ export const forwardLinkedCaptainsReport = (token: string, candidateId: string) 
     method: 'POST',
     body: { candidateId },
     auth: false,
+  });
+
+/** Operator console: scorecard answers in captains reports across every tenant. */
+export const listPlatformCaptainsReportScorecards = (
+  days: number,
+  status: ScorecardConsoleFilter,
+) =>
+  request<ScorecardConsolePayload>('/platform/captains-report-scorecards', {
+    query: { days, status },
   });
 
 // ── Venues (ADR 0008 phase 2) ──

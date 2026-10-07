@@ -80,4 +80,10 @@ export const qk = {
   platformTenant: (slug: string) => ['platform-tenant', slug],
   platformTenantOverview: (slug: string) => ['platform-tenant-overview', slug],
   platformTenantReps: (slug: string) => ['platform-tenant-reps', slug],
+  // Cross-tenant.
+  platformCaptainsReportScorecards: (days: number, status: string) => [
+    'platform-captains-report-scorecards',
+    days,
+    status,
+  ],
 };

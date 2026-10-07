@@ -34,6 +34,7 @@ import { HelpLink, HelpProvider } from './help/HelpDrawer';
 import { TutorialsCard } from './platform-tutorials';
 import { RequiredDocsCard } from './platform-required-docs';
 import { FixtureRemindersCard } from './platform-fixture-reminders';
+import { CaptainsReportScorecardsPage } from './platform-captains-report-scorecards';
 import { TransferWindowCard } from './platform-transfer-windows';
 import { DocIntakeWizard } from './platform-intake';
 import { FixtureAmendmentsPage } from './platform-fixture-amendments';
@@ -463,6 +464,15 @@ export function PlatformPortal({
               </span>
               <span className="ni-label">New client</span>
             </button>
+            <button
+              className={`nav-item ${path === '/platform/captains-report-scorecards' ? 'active' : ''}`}
+              onClick={() => navigate('/platform/captains-report-scorecards')}
+            >
+              <span className="ni-icon">
+                <Icon.Check />
+              </span>
+              <span className="ni-label">Scorecard answers</span>
+            </button>
 
             {hasTenantConsole && (
               <>
@@ -493,6 +503,10 @@ export function PlatformPortal({
             <Routes>
               <Route path="/platform" element={<TenantListPage />} />
               <Route path="/platform/new" element={<CreateTenantWizard toast={toastShow} />} />
+              <Route
+                path="/platform/captains-report-scorecards"
+                element={<CaptainsReportScorecardsPage />}
+              />
               <Route
                 path="/platform/tenants/:slug"
                 element={<TenantEditPage toast={toastShow} />}

@@ -257,6 +257,11 @@ import {
   reportView,
   stampScorecardAnswer,
   UNLISTED_SERIES_ID,
+  CONSOLE_DAYS_DEFAULT,
+  CONSOLE_DAYS_MAX,
+  CONSOLE_STATUSES,
+  type ConsoleStatusFilter,
+  loadScorecardConsole,
 } from './captains-reports.js';
 import { applyWhatsAppStatuses, parseStatuses } from './notify/whatsapp-status.js';
 import {
@@ -11324,6 +11329,32 @@ app.post('/platform/tenants/:slug/clubs', async (c) => {
     .catch(() => ({}) as { name?: string; district?: string });
   const club = await createOperatorClub(slug, cfg, body);
   return c.json(club, 201);
+});
+
+/**
+ * GET /platform/captains-report-scorecards?days=14&status=all — the scorecard answers in
+ * captains reports across every tenant, one row per fixture pairing the home and away sides.
+ * `days` (1–60, default 14) is the match-date window back from today; `status` keeps rows where
+ * EITHER side has that status. Rows are capped (newest first) with `truncated` when cut.
+ */
+app.get('/platform/captains-report-scorecards', async (c) => {
+  const daysRaw = c.req.query('days');
+  let days = CONSOLE_DAYS_DEFAULT;
+  if (daysRaw !== undefined) {
+    const n = Number(daysRaw);
+    if (!Number.isInteger(n) || n < 1)
+      throw new HttpError(400, 'days must be a positive whole number');
+    days = Math.min(n, CONSOLE_DAYS_MAX);
+  }
+  const statusRaw = c.req.query('status') ?? 'all';
+  if (!(CONSOLE_STATUSES as readonly string[]).includes(statusRaw))
+    throw new HttpError(400, `status must be one of ${CONSOLE_STATUSES.join(', ')}`);
+  const payload = await loadScorecardConsole(repo, {
+    days,
+    status: statusRaw as ConsoleStatusFilter,
+    now: new Date(),
+  });
+  return c.json(payload);
 });
 
 /**
