@@ -73,6 +73,7 @@ export type {
 } from '../../engine/src/umpires.js';
 export type { ReportUmpireEntry, AppointedUmpire } from '../../engine/src/captainsReport.js';
 import type { ReportUmpireEntry, AppointedUmpire } from '../../engine/src/captainsReport.js';
+import type { InningsScorecardWire } from './medicoach-sync-contract.js';
 
 export type Role = 'admin' | 'rep' | 'operator';
 
@@ -1294,7 +1295,34 @@ export interface StoredFixtureResult {
   recordedAt?: string;
   scoringSide?: 'home' | 'away' | null;
   medicoachMatchUrl?: string | null;
+  /** The medicoach match (PostMatchAnalysis) id, when the sender gave one — scorecard key. */
+  medicoachMatchId?: string;
+  /** The medicoach tournament id of that match — required alongside it for the scorecard. */
+  medicoachTournamentId?: string;
   storedAt: string;
+}
+
+/**
+ * A medicoach scorecard for one fixture (FIXSCORECARD#), fetched by the sync after a result
+ * is stored and re-fetched by the sweep while it may still change. Written ONLY by the sync
+ * (medicoach-sync/scorecard-fetch.ts). Holds player names — personal data, erased with the
+ * tenant / cohort / series like FIXRESULT#.
+ *
+ * `terminal: true` = this fixture can never have a scorecard (medicoach answered 404 or
+ * `available: false`): the sweep stops retrying. A newly stored result still re-fetches.
+ */
+export interface StoredFixtureScorecard {
+  seriesId: string;
+  fixtureId: string;
+  medicoachMatchId: string;
+  medicoachTournamentId: string;
+  schemaVersion: 1;
+  /** ISO instant of the fetch that produced this row. */
+  fetchedAt: string;
+  available: boolean;
+  matchState?: string;
+  innings?: InningsScorecardWire[];
+  terminal?: boolean;
 }
 
 /** The read-only result joined onto a fixture in GET /series (no captain/player data). */

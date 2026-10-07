@@ -20,6 +20,8 @@
  *                   schedule.ts): most-recent-wins, then the clash gate, then apply or hold
  *                   as SYNCCONFLICT#.
  *   - unknown ref → counted as "unmapped" (no ref values logged).
+ *   - scorecard   → a newly stored non-import result with both medicoach ids fetches its
+ *                   scorecard (FIXSCORECARD#, scorecard-fetch.ts); a stored clear deletes it.
  *
  * A newly stored result is first marked `REPORTOPEN#<ref>`; the marker is deleted once the
  * hook succeeded, so a report/notify failure is retried by the next run
@@ -63,6 +65,7 @@ import {
 } from '../medicoach-sync-contract.js';
 import type { Series, StoredFixtureResult, SyncLogEntry, TenantConfig } from '../types.js';
 import { explainSyncError } from './explain.js';
+import { fetchAndStoreScorecard } from './scorecard-fetch.js';
 import {
   applyInboundSchedule,
   wallClock,
@@ -263,6 +266,9 @@ function resultItem(
     // No captainRef: a player ref is never kept on the result (POPIA). It rides only on the
     // REPORTOPEN# marker while the reports are pending.
     medicoachMatchUrl: r.medicoachMatchUrl,
+    // The scorecard key (both ids or the fetch is skipped); empty strings are not ids.
+    ...(r.medicoachMatchId ? { medicoachMatchId: r.medicoachMatchId } : {}),
+    ...(r.medicoachTournamentId ? { medicoachTournamentId: r.medicoachTournamentId } : {}),
     storedAt: now,
   };
 }
@@ -479,6 +485,17 @@ export async function runMedicoachSync(
                 `[medicoach-sync] ${tenant}: captain's reports for ${seriesId}/${fixtureId} will be retried`,
               );
             }
+            // The scorecard behind it (never for migrations/backfills). Never throws: a
+            // failed fetch is retried by the run's scorecard sweep.
+            if (change.result.source !== 'import')
+              await fetchAndStoreScorecard(
+                { repo, url: deps.url, secret: deps.secret, fetch: doFetch, now, log },
+                tenant,
+                seriesId,
+                fixtureId,
+                change.result.medicoachMatchId,
+                change.result.medicoachTournamentId,
+              );
           } else {
             counts.resultsStale++;
             if (mayStore) await repo.deleteReportOpenMarker(tenant, change.ref);
@@ -496,6 +513,8 @@ export async function runMedicoachSync(
           if (cleared) {
             counts.resultsCleared++;
             await clearedHook({ tenant, seriesId, fixtureId, ref: change.ref });
+            // A cleared result has no scorecard to confirm.
+            await repo.deleteFixtureScorecard(tenant, seriesId, fixtureId);
           } else counts.resultsStale++;
         }
 

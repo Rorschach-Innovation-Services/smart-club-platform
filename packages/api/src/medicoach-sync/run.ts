@@ -10,6 +10,9 @@
  *      even when the pull failed, since it needs nothing from medicoach;
  *   4. send the one reminder for pending reports whose link expires within 2 days.
  *
+ * Last, after a pull that did not throw, `sweepScorecards` fetches the medicoach scorecards
+ * recent results still lack (best-effort: a failure is a log line + Sentry, never the run's).
+ *
  * After step 3, a run with captain's-report activity (reports opened, notices sent or failed)
  * sends ONE ops-digest WhatsApp to the union-admin cell (`OpsDigestCell`); a quiet run sends
  * nothing. The digest is best-effort and outside the report retry: it never fails the run.
@@ -37,11 +40,13 @@ import {
   type SyncRunSummary,
 } from './puller.js';
 import { flushScheduleOutbox, type FlushSummary } from './schedule.js';
+import { sweepScorecards, type ScorecardSweepSummary } from './scorecard-fetch.js';
 
 export interface TenantSyncSummary extends SyncRunSummary {
   push?: FlushSummary;
   reports?: ReportRetrySummary;
   reminders?: ReminderSummary;
+  scorecards?: ScorecardSweepSummary;
 }
 
 export interface TenantSyncDeps extends PullerDeps {
@@ -198,5 +203,35 @@ export async function runTenantSync(
       `[medicoach-sync] ${tenant}: report reminders failed — ${err instanceof Error ? err.message : 'error'}`,
     );
   }
-  return { ...summary, ...(push ? { push } : {}), reports, ...(reminders ? { reminders } : {}) };
+  let scorecards: ScorecardSweepSummary | undefined;
+  try {
+    scorecards = await sweepScorecards(
+      {
+        repo,
+        url: deps.url,
+        secret: deps.secret,
+        ...(deps.fetch ? { fetch: deps.fetch } : {}),
+        ...(deps.now ? { now: deps.now } : {}),
+        ...(deps.log ? { log: deps.log } : {}),
+      },
+      tenant,
+    );
+  } catch (err) {
+    // A scorecard sweep failure never fails the sync run; the next run sweeps again.
+    console.warn(
+      `[medicoach-sync] ${tenant}: scorecard sweep failed — ${err instanceof Error ? err.message : 'error'}`,
+    );
+    await import('../instrument.js')
+      .then(({ Sentry }) =>
+        Sentry.captureException(err, { tags: { job: 'scorecard-sweep', tenant } }),
+      )
+      .catch(() => {});
+  }
+  return {
+    ...summary,
+    ...(push ? { push } : {}),
+    reports,
+    ...(reminders ? { reminders } : {}),
+    ...(scorecards ? { scorecards } : {}),
+  };
 }

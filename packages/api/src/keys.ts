@@ -467,6 +467,22 @@ export const fixtureResultsListKey = (tenant: string) => ({
   skPrefix: 'FIXRESULT#',
 });
 
+/**
+ * A medicoach SCORECARD for one fixture (FIXSCORECARD#), next to its FIXRESULT#. Its own
+ * partition so the sweep lists a tenant's scorecards with one Query. Holds player names
+ * (personal data): erased explicitly with the tenant / cohort / series.
+ */
+export const fixtureScorecardKey = (tenant: string, seriesId: string, fixtureId: string) => ({
+  pk: `${tenantPrefix(tenant)}#FIXSCORECARD`,
+  sk: `FIXSCORECARD#${seriesId}#${fixtureId}`,
+});
+
+/** pk + sk-prefix to query every scorecard in a tenant. */
+export const fixtureScorecardsListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#FIXSCORECARD`,
+  skPrefix: 'FIXSCORECARD#',
+});
+
 /** The medicoach sync puller's cursor (the last `nextCursor` it fully processed). */
 export const syncCursorKey = (tenant: string) => ({
   pk: `${tenantPrefix(tenant)}#SYNC`,

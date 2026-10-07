@@ -82,6 +82,8 @@ import {
   OPERATORS_GSI1PK,
   fixtureResultKey,
   fixtureResultsListKey,
+  fixtureScorecardKey,
+  fixtureScorecardsListKey,
   syncCursorKey,
   syncHealthKey,
   syncLogKey,
@@ -135,6 +137,7 @@ import type {
   RegistrationReview,
   RegistrationReviewResolution,
   StoredFixtureResult,
+  StoredFixtureScorecard,
   SyncHealth,
   SyncLogEntry,
   SyncConflict,
@@ -1144,6 +1147,70 @@ export async function removeFixtureResultCaptainRef(
 
 async function listFixtureResultKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
   const { pk, skPrefix } = fixtureResultsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+// ── Medicoach sync: fixture scorecards (FIXSCORECARD#) ──
+
+/** Store (replace) a fixture's scorecard row — the latest fetch always wins. */
+export async function putFixtureScorecard(
+  tenant: string,
+  scorecard: StoredFixtureScorecard,
+): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...scorecard,
+        ...fixtureScorecardKey(tenant, scorecard.seriesId, scorecard.fixtureId),
+      },
+    }),
+  );
+}
+
+export async function getFixtureScorecard(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+): Promise<StoredFixtureScorecard | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: fixtureScorecardKey(tenant, seriesId, fixtureId) }),
+  );
+  return stripKeys<StoredFixtureScorecard>(res.Item);
+}
+
+/** Every stored scorecard for a tenant — one Query on one partition. */
+export async function listFixtureScorecards(tenant: string): Promise<StoredFixtureScorecard[]> {
+  const { pk, skPrefix } = fixtureScorecardsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<StoredFixtureScorecard>(i)!);
+}
+
+/** Delete a fixture's scorecard row (idempotent — a missing row is fine). */
+export async function deleteFixtureScorecard(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+): Promise<void> {
+  await ddb.send(
+    new DeleteCommand({ TableName: TABLE, Key: fixtureScorecardKey(tenant, seriesId, fixtureId) }),
+  );
+}
+
+async function listFixtureScorecardKeys(
+  tenant: string,
+): Promise<Array<{ pk: string; sk: string }>> {
+  const { pk, skPrefix } = fixtureScorecardsListKey(tenant);
   const items = await queryAll({
     TableName: TABLE,
     KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
@@ -2249,9 +2316,9 @@ async function listCaptainsReportNotifyKeys(
 }
 
 /**
- * A deleted series' medicoach-sync state (ADR 0016): its FIXRESULT# results, the outbox rows
- * (PENDINGSYNC#), held conflicts (SYNCCONFLICT#) and report-open markers (REPORTOPEN#) of its
- * fixtures are deleted, and its still-PENDING captain's reports are voided (their links die;
+ * A deleted series' medicoach-sync state (ADR 0016): its FIXRESULT# results and FIXSCORECARD#
+ * scorecards, the outbox rows (PENDINGSYNC#), held conflicts (SYNCCONFLICT#) and report-open
+ * markers (REPORTOPEN#) of its fixtures are deleted, and its still-PENDING captain's reports are voided (their links die;
  * submitted ones are kept as filed). Idempotent.
  */
 export async function deleteSeriesSyncState(
@@ -2270,6 +2337,17 @@ export async function deleteSeriesSyncState(
       ProjectionExpression: 'pk, sk',
     })
   ).map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+  const scorecards = fixtureScorecardsListKey(tenant);
+  for (const i of await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: {
+      ':p': scorecards.pk,
+      ':s': `${scorecards.skPrefix}${seriesId}#`,
+    },
+    ProjectionExpression: 'pk, sk',
+  }))
+    keys.push({ pk: i.pk as string, sk: i.sk as string });
   const [pending, conflicts, markers, reports] = await Promise.all([
     listPendingSync(tenant),
     listSyncConflicts(tenant),
@@ -7226,6 +7304,8 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   // Medicoach sync (ADR 0016): results (may hold a captain's player ref — PII) and the
   // SYNC partition (cursor + audit rows) have no gsi1/META listing; enumerate them.
   for (const k of await listFixtureResultKeys(tenant)) keys.push(k);
+  // Scorecards (FIXSCORECARD#) carry player names and hang off the same results.
+  for (const k of await listFixtureScorecardKeys(tenant)) keys.push(k);
   for (const k of await listSyncPartitionKeys(tenant)) keys.push(k);
   // Umpires carry contact details; officials are per-fixture rows. Neither is in a club
   // partition or the series listing, so enumerate both explicitly.
@@ -7302,6 +7382,8 @@ export async function clearCohort(tenant: string): Promise<number> {
   // Results belong to the series being cleared (and may hold a player ref — PII). The SYNC
   // partition goes too: a surviving cursor would stop the next pull re-fetching the results.
   for (const k of await listFixtureResultKeys(tenant)) keys.push(k);
+  // Scorecards (FIXSCORECARD#) carry player names and hang off the same results.
+  for (const k of await listFixtureScorecardKeys(tenant)) keys.push(k);
   for (const k of await listSyncPartitionKeys(tenant)) keys.push(k);
   // Officials hang off the series being cleared; the umpire registry itself is union data,
   // not cohort data, so it stays.
