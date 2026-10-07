@@ -116,6 +116,94 @@ A `changedAt` more than 5 minutes ahead of medicoach's clock is refused with `er
 Every applied change is audited in medicoach under the `smartclub-sync` principal.
 `stale`/`unchanged`/`unmapped` are success outcomes for the caller (drop from outbox); `error` = retry later.
 
+## 3. POST /integrations/smartclub/players
+Desired-state player push: each entry carries the player's FULL current desired placement
+(details + the smart-club-mapped teams they should be on), or asks for removal/erasure.
+Replays and out-of-order deliveries are harmless; ordering is guarded by `changedAt` per player
+(compare-and-set against the player's stored `smartClubSyncChangedAt`, `>` strictly, one retry —
+same discipline as /schedule). PERSONAL DATA: never log payload bodies; log refs only as counts.
+
+Body:
+```ts
+{
+  version: 1,
+  tenant: string,
+  dryRun?: boolean,              // true ⇒ compute and return outcomes, write NOTHING
+  players: Array<{
+    ref: string,                 // player ref (see Refs)
+    op: "upsert" | "remove" | "erase",
+    changedAt: string,           // ISO-8601 UTC: when this desired state was produced in smart club
+    // upsert only (omitted for remove/erase):
+    institutionRef?: string,     // primary club ref
+    firstName?: string, lastName?: string,
+    dob?: string,                // "YYYY-MM-DD"
+    gender?: string,
+    email?: string,              // may be absent; see email rules below
+    cell?: string,
+    isMinor?: boolean,
+    guardianName?: string,
+    teamRefs?: string[],         // the COMPLETE set of smart-club-mapped teams the player belongs on
+    veteransInstitutionRef?: string,
+    resolution?:                 // admin's answer to an earlier needs-review, rides on the re-push
+      | { action: "link", playerId: string }
+      | { action: "create", acknowledgedCandidates: string[] }   // medicoach player ids the admin saw
+  }>                             // max 50
+}
+```
+Response 200:
+```ts
+{
+  version: 1,
+  results: Array<{
+    ref: string,
+    status: "created" | "linked" | "updated" | "unchanged" | "removed" | "erased"
+          | "stale" | "needs-review" | "unmapped-team" | "error",
+    message?: string,
+    candidates?: Array<{         // needs-review only
+      playerId: string, name: string, dob: string | null, institutionName: string | null
+    }>,
+    missingTeamRefs?: string[],  // unmapped-team only
+    fieldDiffs?: Array<{ field: string, from: string | null, to: string | null }>
+                                 // dryRun+updated only: what a real push would change (values redacted
+                                 //   to "<set>"/"<cleared>" for email/cell/guardianName)
+  }>
+}
+```
+Medicoach rules:
+- Resolve `ref` → player id via the external-ref table. On a miss, match in this order:
+  1. SA-ID-hash equality (ref's natural key vs hashed `idNumber`) across ALL of the tenant's
+     smart-club-mapped institutions → link.
+  2. Exact normalised name + dob WITHIN the target institution only → link. The same match at a
+     DIFFERENT institution → `needs-review`.
+  3. Anything weaker, or MORE THAN ONE candidate at any tier → `needs-review` with `candidates`.
+  4. No candidate → create. A 409 identity-claim conflict on create is NOT a link: link only when
+     the claim-holder's dob or SA-ID hash agrees AND the holder belongs to one of the tenant's
+     smart-club-mapped institutions; otherwise `needs-review` with the holder as candidate.
+  A `resolution` skips matching: `link` binds the ref to that player id; `create` creates unless
+  new tier-1/2 candidates have appeared since (then `needs-review` again).
+- Creation is race-safe: reserve the ref with a conditional put (pending), create, finalise.
+  A lost race reads the winner and links. Pending reservations older than 10 min may be taken over.
+- On link/create, write both the forward and reverse ref rows (with institution ids).
+- Teams: resolve every `teamRefs` entry via the external-ref table; ANY miss ⇒ `unmapped-team`
+  with `missingTeamRefs` and NO writes for that player. Otherwise add the player to each desired
+  team (idempotent; reactivates soft-deleted memberships) and soft-remove memberships ONLY on
+  smart-club-mapped teams no longer desired. Teams without a smart club ref are NEVER touched.
+- Where a linked league/competition team keeps a projection player list, append/remove the player
+  there too (new entries unticked), preserving existing squad ticks.
+- Details: update only name, dob, contact and guardian fields. Name/email changes go through the
+  identity-claim rekey in the same transaction. Email is asymmetric: fill a placeholder, never
+  replace a real email (and never once the player's account is active). Names compare normalised
+  (single `name` vs "firstName lastName"; case/space/middle-name tolerant).
+- `remove`: soft-remove all smart-club-mapped memberships; the player row is untouched.
+- `erase`: soft-remove mapped memberships; anonymise the player (name → "Erased player"; clear
+  dob/contact/guardian/idNumber/email); release identity claims; delete BOTH ref rows. Stats stay
+  on the anonymised id. An erase whose ref is already gone is `erased` (idempotent no-op), never
+  a matcher run.
+- `stale`, `unchanged`, `removed`, `erased` are success outcomes for the caller (drop from outbox);
+  `needs-review` drops to the caller's review queue; `unmapped-team` parks; `error` = retry later.
+- A `changedAt` more than 5 minutes ahead of medicoach's clock is refused with `error`.
+- Every write is audited under the `smartclub-sync` principal.
+
 ## WhatsApp status forwarding (medicoach → smart club)
 
 Smart club sends its WhatsApp notices through medicoach's Meta app/WABA, and a Meta app

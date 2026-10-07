@@ -6,13 +6,16 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ChangesResponseSchema,
   MEDICOACH_SYNC_VERSION,
+  PLAYER_PUSH_MAX,
+  PlayerPushRequestSchema,
+  PlayerPushResponseSchema,
   SchedulePushRequestSchema,
   SchedulePushResponseSchema,
   VENUE_MAX_LENGTH,
@@ -37,16 +40,22 @@ const schemaFor = (file: string) =>
       ? SchedulePushRequestSchema
       : file === 'schedule-push-response.json'
         ? SchedulePushResponseSchema
-        : null;
+        : file === 'player-push-request.json'
+          ? PlayerPushRequestSchema
+          : file === 'player-push-response.json'
+            ? PlayerPushResponseSchema
+            : null;
 
 describe('contract examples', () => {
   const files = readdirSync(EXAMPLES).filter((f) => f.endsWith('.json'));
 
-  test('all five shared examples are present', () => {
+  test('all seven shared examples are present', () => {
     assert.deepEqual(files.sort(), [
       'changes-knockout-reschedule.json',
       'changes-live-result.json',
       'changes-manual-and-cleared.json',
+      'player-push-request.json',
+      'player-push-response.json',
       'schedule-push-request.json',
       'schedule-push-response.json',
     ]);
@@ -120,6 +129,64 @@ describe('contract examples', () => {
     assert.ok(capped.length <= VENUE_MAX_LENGTH);
     assert.equal(capped, 'a'.repeat(199));
   });
+});
+
+describe('player push (contract §3)', () => {
+  const read = (file: string) => JSON.parse(readFileSync(path.join(EXAMPLES, file), 'utf8'));
+
+  test('remove/erase carry no details; upsert needs its core fields', () => {
+    const raw = read('player-push-request.json');
+    const remove = structuredClone(raw);
+    remove.players[2].firstName = 'Leaked';
+    assert.equal(PlayerPushRequestSchema.safeParse(remove).success, false);
+    const upsert = structuredClone(raw);
+    delete upsert.players[0].teamRefs;
+    assert.equal(PlayerPushRequestSchema.safeParse(upsert).success, false);
+  });
+
+  test('a dob that is not YYYY-MM-DD, an unknown op or a 51-player batch is rejected', () => {
+    const raw = read('player-push-request.json');
+    const dob = structuredClone(raw);
+    dob.players[0].dob = '14/03/2008';
+    assert.equal(PlayerPushRequestSchema.safeParse(dob).success, false);
+    const op = structuredClone(raw);
+    op.players[2].op = 'delete';
+    assert.equal(PlayerPushRequestSchema.safeParse(op).success, false);
+    const big = structuredClone(raw);
+    big.players = Array.from({ length: PLAYER_PUSH_MAX + 1 }, () => raw.players[2]);
+    assert.equal(PlayerPushRequestSchema.safeParse(big).success, false);
+  });
+
+  test('an unknown result status fails the response contract', () => {
+    const raw = read('player-push-response.json');
+    raw.results[1].status = 'merged';
+    assert.equal(PlayerPushResponseSchema.safeParse(raw).success, false);
+  });
+});
+
+/**
+ * The contract doc and the player examples are copied byte-for-byte into the medicoach repo,
+ * whose contract test pins the SAME hashes. Editing either copy without the other fails CI on
+ * that side; change both copies and both pins together.
+ */
+describe('shared contract checksum', () => {
+  const DOCS = path.resolve(EXAMPLES, '..');
+  const PINNED: Record<string, string> = {
+    'medicoach-sync-contract.md':
+      'abff40ee91ff23c17d992b195dd39f5d821304e89fd338fda1a0170f984e8231',
+    'medicoach-sync-examples/player-push-request.json':
+      '27effdde2b8883acd4f1e8017bf038da84c55b866b206fe78c401722c02eb01c',
+    'medicoach-sync-examples/player-push-response.json':
+      'b2bfb563d61e6b1f1d777e0f968968678aad5fc55cd42c5e0b154d87bf9112ad',
+  };
+  for (const [file, sha] of Object.entries(PINNED)) {
+    test(`${file} is byte-identical to the pinned shared copy`, () => {
+      const actual = createHash('sha256')
+        .update(readFileSync(path.join(DOCS, file)))
+        .digest('hex');
+      assert.equal(actual, sha);
+    });
+  }
 });
 
 describe('request signing', () => {

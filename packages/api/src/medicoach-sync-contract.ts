@@ -7,7 +7,8 @@
  * each repo's test parses every one with its own schema, so drift fails CI on either side.
  *
  * Direction: smart club is always the CALLER (it pulls `GET /integrations/smartclub/changes`
- * and, from Slice 4, pushes `POST /integrations/smartclub/schedule`); medicoach never calls
+ * and, from Slice 4, pushes `POST /integrations/smartclub/schedule`, and from ADR 0018
+ * `POST /integrations/smartclub/players`); medicoach never calls
  * smart club. Requests are HMAC-SHA256 signed with one shared secret (smart club SST secret
  * `MedicoachSyncSecret` == medicoach `SmartClubSyncSecret`).
  *
@@ -27,12 +28,15 @@ export const SYNC_SIGNATURE_HEADER = 'X-Sync-Signature';
 
 export const CHANGES_PATH = '/integrations/smartclub/changes';
 export const SCHEDULE_PATH = '/integrations/smartclub/schedule';
+export const PLAYERS_PATH = '/integrations/smartclub/players';
 
 /** Page size bounds for the changes endpoint. */
 export const CHANGES_LIMIT_DEFAULT = 200;
 export const CHANGES_LIMIT_MAX = 500;
 /** Max schedule changes per push request. */
 export const SCHEDULE_PUSH_MAX = 100;
+/** Max players per player push request (contract §3). */
+export const PLAYER_PUSH_MAX = 50;
 
 /* ─────────────────────────── Schemas ─────────────────────────── */
 
@@ -150,6 +154,121 @@ export const SchedulePushResponseSchema = z.object({
   ),
 });
 
+/* ─────────────── Player push (contract §3, POST /integrations/smartclub/players) ─────────────── */
+
+/** `YYYY-MM-DD` — the same shape the migration bundle's PlayerSchema uses for `dob`. */
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'expected YYYY-MM-DD');
+
+/**
+ * The admin's answer to an earlier `needs-review`, riding on the re-push: bind the ref to an
+ * existing medicoach player, or create a new one having seen these candidates.
+ */
+export const PlayerResolutionSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('link'), playerId: z.string().min(1) }),
+  z.object({ action: z.literal('create'), acknowledgedCandidates: z.array(z.string()) }),
+]);
+
+/** Fields only an `upsert` carries; a `remove`/`erase` omits all of them. */
+const PLAYER_DETAIL_FIELDS = [
+  'institutionRef',
+  'firstName',
+  'lastName',
+  'dob',
+  'gender',
+  'email',
+  'cell',
+  'isMinor',
+  'guardianName',
+  'teamRefs',
+  'veteransInstitutionRef',
+  'resolution',
+] as const;
+
+/**
+ * One player's FULL desired state. PERSONAL DATA (name, dob, contact, guardian) — never log a
+ * payload; the ref is a hashed ID number, also never logged. No raw ID number is ever sent
+ * (same rule as the bundle's PlayerSchema).
+ */
+export const PlayerPushEntrySchema = z
+  .object({
+    ref,
+    op: z.enum(['upsert', 'remove', 'erase']),
+    changedAt: isoUtc,
+    institutionRef: ref.optional(),
+    firstName: z.string().optional(),
+    lastName: z.string().optional(),
+    dob: isoDate.optional(),
+    gender: z.string().optional(),
+    email: z.string().optional(),
+    cell: z.string().optional(),
+    isMinor: z.boolean().optional(),
+    guardianName: z.string().optional(),
+    teamRefs: z.array(ref).optional(),
+    veteransInstitutionRef: ref.optional(),
+    resolution: PlayerResolutionSchema.optional(),
+  })
+  .superRefine((p, ctx) => {
+    if (p.op === 'upsert') {
+      for (const f of ['institutionRef', 'firstName', 'lastName', 'teamRefs'] as const)
+        if (p[f] === undefined)
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [f], message: `upsert needs ${f}` });
+      return;
+    }
+    for (const f of PLAYER_DETAIL_FIELDS)
+      if (p[f] !== undefined)
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [f],
+          message: `${p.op} carries no ${f}`,
+        });
+  });
+
+export const PlayerPushRequestSchema = z.object({
+  version: z.literal(MEDICOACH_SYNC_VERSION),
+  tenant: z.string().min(1),
+  dryRun: z.boolean().optional(),
+  players: z.array(PlayerPushEntrySchema).max(PLAYER_PUSH_MAX),
+});
+
+export const PLAYER_PUSH_STATUSES = [
+  'created',
+  'linked',
+  'updated',
+  'unchanged',
+  'removed',
+  'erased',
+  'stale',
+  'needs-review',
+  'unmapped-team',
+  'error',
+] as const;
+
+/** A medicoach player the admin must choose between (needs-review only). PERSONAL DATA. */
+export const PlayerCandidateSchema = z.object({
+  playerId: z.string().min(1),
+  name: z.string(),
+  dob: z.string().nullable(),
+  institutionName: z.string().nullable(),
+});
+
+export const PlayerPushResponseSchema = z.object({
+  version: z.literal(MEDICOACH_SYNC_VERSION),
+  results: z.array(
+    z.object({
+      ref,
+      status: z.enum(PLAYER_PUSH_STATUSES),
+      message: z.string().optional(),
+      candidates: z.array(PlayerCandidateSchema).optional(),
+      missingTeamRefs: z.array(ref).optional(),
+      fieldDiffs: z
+        .array(
+          z.object({ field: z.string(), from: z.string().nullable(), to: z.string().nullable() }),
+        )
+        .optional(),
+    }),
+  ),
+});
+
 export type SyncSchedule = z.infer<typeof SyncScheduleSchema>;
 export type SyncTeams = z.infer<typeof SyncTeamsSchema>;
 export type SyncResult = z.infer<typeof SyncResultSchema>;
@@ -157,6 +276,12 @@ export type FixtureChange = z.infer<typeof FixtureChangeSchema>;
 export type ChangesResponse = z.infer<typeof ChangesResponseSchema>;
 export type SchedulePushRequest = z.infer<typeof SchedulePushRequestSchema>;
 export type SchedulePushResponse = z.infer<typeof SchedulePushResponseSchema>;
+export type PlayerResolution = z.infer<typeof PlayerResolutionSchema>;
+export type PlayerPushEntry = z.infer<typeof PlayerPushEntrySchema>;
+export type PlayerPushRequest = z.infer<typeof PlayerPushRequestSchema>;
+export type PlayerPushResponse = z.infer<typeof PlayerPushResponseSchema>;
+export type PlayerPushStatus = (typeof PLAYER_PUSH_STATUSES)[number];
+export type PlayerCandidate = z.infer<typeof PlayerCandidateSchema>;
 
 /* ─────────────────────────── Request paths ─────────────────────────── */
 
