@@ -377,7 +377,8 @@ export async function flushPlayerOutbox(
   for (const row of rows) {
     const erasing = row.op === 'erase' || row.eraseFirst === true;
     const intent = erasing ? null : intentOf(snap, row.naturalKey);
-    if (intent?.op === 'upsert') {
+    // An admin's link/create resolution already decided who this is: the guard never discards it.
+    if (intent?.op === 'upsert' && !row.resolution) {
       const dups = possibleDuplicates(snap, row.naturalKey, intent.primary);
       if (dups.length) {
         await repo.putPlayerReview(tenant, {
