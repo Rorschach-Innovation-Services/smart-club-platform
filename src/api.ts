@@ -362,6 +362,8 @@ export type ChairRegisterOutcome = 'created' | 'clearance-opened' | 'review-open
 export type RegisterPlayerResponse = PlayerRegistration & {
   outcome: ChairRegisterOutcome;
   clearance?: { id: string; fromClubId: string; fromClubName: string };
+  /** Clubs where the same name + date of birth is registered under another ID (a soft warning). */
+  possibleExistingAt?: string[];
 };
 export const registerPlayer = (clubId: string, body: Record<string, unknown>) =>
   request<RegisterPlayerResponse>(`/clubs/${clubId}/players`, { method: 'POST', body });
@@ -396,6 +398,8 @@ export interface ChairBulkResult {
   outcome: ChairBulkOutcome;
   naturalKey?: string;
   fromClubName?: string;
+  /** Clubs where the same name + date of birth is registered under another ID (a soft warning). */
+  possibleExistingAt?: string[];
   error?: string;
 }
 export interface ChairBulkResponse {
@@ -967,7 +971,7 @@ export interface MedicoachSyncLog {
   id: string;
   at: string;
   trigger: 'cron' | 'manual' | 'write' | 'cli';
-  kind?: 'pull' | 'push' | 'new-fixtures';
+  kind?: 'pull' | 'push' | 'new-fixtures' | 'player-push';
   /** Refs of fixtures added in smart club that medicoach does not have (`new-fixtures`). */
   newFixtureRefs?: string[];
   outcome: 'ok' | 'error';
@@ -975,6 +979,8 @@ export interface MedicoachSyncLog {
   fixtures: number;
   counts: Record<string, number | undefined>;
   push?: Record<string, number>;
+  /** Player push outcome counts (`player-push` rows, ADR 0018). */
+  playerPush?: Record<string, number>;
   /** Technical failure text (shown under "Details"). */
   error?: string;
   /** The failure in plain language. */
@@ -1029,7 +1035,47 @@ export interface MedicoachSyncStatus {
   pendingReports?: number;
   /** Captain's-report notices that failed on every channel and are waiting on a retry. */
   noticesFailed?: number;
+  /** The player sync (ADR 0018) — counts only. */
+  players?: MedicoachPlayerSyncStatus;
 }
+export type MedicoachPlayerSyncStatus =
+  | { enabled: false }
+  | {
+      enabled: true;
+      /** People waiting to be sent (not parked). */
+      pending: number;
+      /** Waiting on a team medicoach doesn't have yet (bundle top-up), not resent every run. */
+      parked: number;
+      /** Failed 5+ pushes; still retried every run. */
+      stuck: number;
+      /** Held for an admin decision. */
+      reviews: number;
+      /** The medicoach team refs parked players need (no personal data). */
+      missingTeamRefs: string[];
+      lastError?: string;
+      lastErrorText?: string;
+    };
+/** One held player (PERSONAL DATA — admin only). */
+export interface MedicoachPlayerReview {
+  naturalKey: string;
+  reason: 'medicoach-needs-review' | 'smartclub-possible-duplicate';
+  message?: string;
+  detectedAt: string;
+  playerName: string;
+  dob: string | null;
+  clubName: string | null;
+  candidates: Array<{
+    playerId?: string;
+    name: string;
+    dob: string | null;
+    institutionName: string | null;
+  }>;
+}
+export type MedicoachPlayerResolution =
+  | { action: 'link'; medicoachPlayerId: string }
+  | { action: 'create'; acknowledgedCandidates: string[] }
+  | { action: 'distinct' }
+  | { action: 'dismiss' };
 export const getMedicoachSyncStatus = () =>
   request<MedicoachSyncStatus>('/integrations/medicoach/status');
 export const medicoachSyncNow = () =>
@@ -1057,6 +1103,23 @@ export const dropMedicoachOutbox = (ref: string) =>
   request<{ status: string }>('/integrations/medicoach/outbox/drop', {
     method: 'POST',
     body: { ref },
+  });
+
+export const getMedicoachPlayerReviews = () =>
+  request<MedicoachPlayerReview[]>('/integrations/medicoach/player-reviews');
+export const resolveMedicoachPlayerReview = (
+  naturalKey: string,
+  resolution: MedicoachPlayerResolution,
+) =>
+  request<{ status: string }>(
+    `/integrations/medicoach/player-reviews/${encodeURIComponent(naturalKey)}/resolve`,
+    { method: 'POST', body: resolution },
+  );
+/** Un-park / restart player rows so the next sync sends them again. */
+export const retryMedicoachPlayers = (scope: 'parked' | 'stuck' | 'all') =>
+  request<{ requeued: number }>('/integrations/medicoach/players/retry', {
+    method: 'POST',
+    body: { scope },
   });
 
 // ── Captain's reports (ADR 0016) ──

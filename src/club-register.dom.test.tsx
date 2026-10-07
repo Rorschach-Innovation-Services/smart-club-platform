@@ -31,6 +31,7 @@ import {
   saIdValid,
   gridRowProblem,
   registerOutcomeMessage,
+  BulkOutcomePill,
 } from './club-register';
 import { ClubPlayersView } from './club';
 import {
@@ -114,6 +115,14 @@ describe('registerOutcomeMessage', () => {
       registerOutcomeMessage(player({ outcome: 'review-opened' }) as never, 'Old Boys'),
     ).toMatch(/Old Boys isn’t on the system.*union office/);
     expect(registerOutcomeMessage(player() as never)).toBe('Sipho Ndlovu registered.');
+  });
+
+  it('appends the soft possible-existing-registration warning', () => {
+    expect(
+      registerOutcomeMessage(player({ possibleExistingAt: ['Kloof CC', 'Savages CC'] }) as never),
+    ).toBe(
+      'Sipho Ndlovu registered. Possible existing registration at Kloof CC, Savages CC — check it isn’t the same person under another ID.',
+    );
   });
 });
 
@@ -412,5 +421,24 @@ describe('ClubPlayersView — chair registration entry points', () => {
     expect(
       within(await findByRole('dialog')).getByRole('link', { name: /download template/i }),
     ).toHaveAttribute('href', '/roster-template.xlsx');
+  });
+});
+
+describe('BulkOutcomePill — soft duplicate warning', () => {
+  it('a registered row with a same-name+dob match elsewhere carries the note', () => {
+    const { getByRole, getByText } = renderWithProviders(
+      <BulkOutcomePill
+        result={{ index: 0, outcome: 'created', possibleExistingAt: ['Kloof CC'] }}
+      />,
+    );
+    expect(getByText('Registered')).toBeInTheDocument();
+    expect(getByRole('note')).toHaveTextContent('Possible existing registration at Kloof CC');
+  });
+
+  it('no note without a match', () => {
+    const { queryByRole } = renderWithProviders(
+      <BulkOutcomePill result={{ index: 0, outcome: 'created' }} />,
+    );
+    expect(queryByRole('note')).toBeNull();
   });
 });

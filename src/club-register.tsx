@@ -154,6 +154,18 @@ const EMPTY_PLAYER = {
 
 /** The toast line for a successful single registration — one per server outcome. */
 export function registerOutcomeMessage(res: RegisterPlayerResponse, previousClub?: string): string {
+  const base = registerOutcomeBase(res, previousClub);
+  return res.possibleExistingAt?.length
+    ? `${base} ${possibleExistingText(res.possibleExistingAt)}`
+    : base;
+}
+
+/** The soft duplicate warning: same name + date of birth under another ID elsewhere. */
+export function possibleExistingText(clubs: string[]): string {
+  return `Possible existing registration at ${clubs.join(', ')} — check it isn’t the same person under another ID.`;
+}
+
+function registerOutcomeBase(res: RegisterPlayerResponse, previousClub?: string): string {
   const name = `${res.firstName} ${res.lastName}`.trim();
   if (res.outcome === 'clearance-opened')
     return `${name} registered as clearance pending — a clearance was opened from ${
@@ -318,7 +330,9 @@ export function RegisterPlayerForm({
     }
     invalidate();
     setBusy(false);
-    toast?.(registerOutcomeMessage(res, previousClubName));
+    if (res.possibleExistingAt?.length)
+      toast?.(registerOutcomeMessage(res, previousClubName), 'warn');
+    else toast?.(registerOutcomeMessage(res, previousClubName));
     if (docFailed)
       toast?.(
         'The player is registered, but the ID document did not upload — the roster shows it as missing.',
@@ -742,6 +756,19 @@ export function RegisterPlayerForm({
 /* ─── Bulk outcome badge (shared by the grid and the spreadsheet summary) ─── */
 
 export function BulkOutcomePill({ result }: { result: ChairBulkResult }) {
+  const pill = <OutcomePill result={result} />;
+  if (!result.possibleExistingAt?.length) return pill;
+  return (
+    <>
+      {pill}
+      <div className="rost-sub" role="note">
+        {possibleExistingText(result.possibleExistingAt)}
+      </div>
+    </>
+  );
+}
+
+function OutcomePill({ result }: { result: ChairBulkResult }) {
   switch (result.outcome) {
     case 'created':
       return (
@@ -1281,6 +1308,10 @@ export function ClubRosterUpload({
     const pct = committing.total ? Math.round((committing.done / committing.total) * 100) : 0;
     const errors = results.filter((r) => r.outcome === 'error');
     const clearances = results.filter((r) => r.outcome === 'clearance-opened');
+    // Registered fine, but someone with the same name + dob is on the system under another ID.
+    const warned = results.filter(
+      (r) => r.outcome === 'created' && (r.possibleExistingAt?.length ?? 0) > 0,
+    );
     return (
       <div className="rp-form">
         {!finished && (
@@ -1319,7 +1350,7 @@ export function ClubRosterUpload({
             )}
           </div>
         )}
-        {(errors.length > 0 || clearances.length > 0) && (
+        {(errors.length > 0 || clearances.length > 0 || warned.length > 0) && (
           <div className="tbl-w" style={{ marginTop: 10 }}>
             <table className="tbl">
               <thead>
@@ -1329,7 +1360,7 @@ export function ClubRosterUpload({
                 </tr>
               </thead>
               <tbody>
-                {[...errors, ...clearances].map((r) => (
+                {[...errors, ...clearances, ...warned].map((r) => (
                   <tr key={`${r.sheet}:${r.rowNumber}:${r.index}`}>
                     <td>
                       <span className="rost-sub">
