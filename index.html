@@ -1904,6 +1904,17 @@
   .fix-status::before{
     content:'';width:5px;height:5px;border-radius:50%;
   }
+  /* Never let the status badge wrap or shrink: it is the column people scan for. */
+  .fix-status{white-space:nowrap}
+  /* Laptop widths (the console content area is ~960px at a 1280px viewport): tighten the
+     cell padding so the whole row — Status and the row actions included — fits without a
+     sideways scroll. Wider screens keep the roomier padding. */
+  @media (max-width: 1440px){
+    .fix-table thead th{padding:14px 10px}
+    .fix-table td{padding:15px 10px}
+    .fix-table th:first-child,.fix-table td:first-child{padding-left:16px}
+    .fix-table th:last-child,.fix-table td:last-child{padding-right:16px}
+  }
   .fix-status.scheduled{background:var(--paper2);color:var(--ink);border-color:var(--line)}
   .fix-status.scheduled::before{background:var(--ink3)}
   .fix-status.completed{background:var(--green-pale);color:var(--green)}
