@@ -1,35 +1,106 @@
 /**
- * The chair scorecard page's text lines and rules, and the operator console's week stepping.
+ * The scorecard's text lines and the correction-feedback rule.
  */
 import { describe, it, expect } from 'vitest';
 import {
   FEEDBACK_MAX,
-  extrasLine,
+  extrasDetail,
   fallOfWicketsLine,
   feedbackProblem,
   fmtRate,
   headlineScore,
   inningsHeading,
-  isWeekKey,
-  lastCompletedWeekKey,
-  ownSide,
-  shiftWeek,
+  inningsHint,
+  isOwnTeam,
+  ownInningsFlags,
+  totalDetail,
 } from './scorecardConfirmHelpers';
 
 describe('scorecard lines', () => {
   it('heads an innings with the total, wickets and overs', () => {
     expect(
       inningsHeading({ battingTeamName: 'UKZN CC', totalRuns: 156, wickets: 7, overs: '20.0' }),
-    ).toBe('UKZN CC — 156/7 (20.0)');
+    ).toBe('UKZN CC — 156/7 (20 ov)');
+    expect(
+      inningsHeading({ battingTeamName: 'UKZN CC', totalRuns: 98, wickets: 10, overs: '18.3' }),
+    ).toBe('UKZN CC — 98/10 (18.3 ov)');
+  });
+
+  it('hints at the top scorer and the best bowling', () => {
+    const batter = (order: number, name: string, runs: number, balls: number, howOut: string) => ({
+      order,
+      name,
+      runs,
+      ballsFaced: balls,
+      fours: 0,
+      sixes: 0,
+      strikeRate: 0,
+      howOut,
+    });
+    const bowler = (order: number, name: string, wickets: number, runs: number) => ({
+      order,
+      name,
+      overs: '4.0',
+      maidens: 0,
+      runsConceded: runs,
+      wickets,
+      economy: 0,
+      wides: 0,
+      noBalls: 0,
+    });
+    expect(
+      inningsHint({
+        batters: [
+          batter(1, 'K. Pillay', 30, 20, 'b Khumalo'),
+          batter(2, 'S. Naidoo', 64, 41, 'not out'),
+          batter(3, 'A. Slow', 64, 60, 'run out'),
+        ],
+        bowlers: [bowler(1, 'T. Khumalo', 2, 31), bowler(2, 'M. Dlamini', 2, 24)],
+      }),
+    ).toBe('Top score S. Naidoo 64* (41) · Best bowling M. Dlamini 2/24');
+    expect(inningsHint({ batters: [], bowlers: [] })).toBe('');
+  });
+
+  it('stars a top scorer who was not out, retired not out included', () => {
+    const top = (howOut: string) =>
+      inningsHint({
+        batters: [
+          {
+            order: 1,
+            name: 'S. Naidoo',
+            runs: 64,
+            ballsFaced: 41,
+            fours: 0,
+            sixes: 0,
+            strikeRate: 0,
+            howOut,
+          },
+        ],
+        bowlers: [],
+      });
+    expect(top('not out')).toBe('Top score S. Naidoo 64* (41)');
+    expect(top('Not Out ')).toBe('Top score S. Naidoo 64* (41)');
+    expect(top('retired not out')).toBe('Top score S. Naidoo 64* (41)');
+    expect(top('retired hurt')).toBe('Top score S. Naidoo 64 (41)');
+    expect(top('c Pillay b Khumalo')).toBe('Top score S. Naidoo 64 (41)');
+  });
+
+  it('describes the total and the extras parts', () => {
+    expect(totalDetail({ wickets: 6, overs: '20.0' })).toBe('6 wkts, 20 ov');
+    expect(totalDetail({ wickets: 1, overs: '12.4' })).toBe('1 wkt, 12.4 ov');
+    expect(totalDetail({ wickets: 10, overs: '17.2' })).toBe('all out, 17.2 ov');
+    expect(
+      extrasDetail({ byes: 0, legByes: 2, wides: 0, noBalls: 1, penalties: 0, total: 3 }),
+    ).toBe('lb 2, nb 1');
   });
 
   it('lists only the extras that happened', () => {
-    expect(extrasLine({ byes: 1, legByes: 0, wides: 6, noBalls: 2, penalties: 0, total: 9 })).toBe(
-      'Extras 9 (b 1, w 6, nb 2)',
-    );
-    expect(extrasLine({ byes: 0, legByes: 0, wides: 0, noBalls: 0, penalties: 0, total: 0 })).toBe(
-      'Extras 0',
-    );
+    expect(
+      extrasDetail({ byes: 1, legByes: 0, wides: 6, noBalls: 2, penalties: 1, total: 10 }),
+    ).toBe('b 1, w 6, nb 2, pen 1');
+    expect(
+      extrasDetail({ byes: 0, legByes: 0, wides: 0, noBalls: 0, penalties: 0, total: 0 }),
+    ).toBe('');
   });
 
   it('writes the fall of wickets in wicket order', () => {
@@ -65,41 +136,41 @@ describe('feedbackProblem', () => {
   });
 });
 
-describe('ownSide', () => {
-  it("finds the chair's club by name, ignoring CC and team suffixes", () => {
-    expect(ownSide({ homeTeamName: 'UKZN', awayTeamName: 'Crusaders CC' }, 'UKZN CC')).toBe('home');
-    expect(
-      ownSide({ homeTeamName: 'Berea Rovers CC', awayTeamName: 'UKZN CC 2nd XI' }, 'UKZN CC'),
-    ).toBe('away');
-  });
-  it('gives up when neither or both sides match', () => {
-    expect(ownSide({ homeTeamName: 'A CC', awayTeamName: 'B CC' }, 'UKZN CC')).toBeNull();
-    expect(
-      ownSide({ homeTeamName: 'UKZN 1st XI', awayTeamName: 'UKZN 2nd XI' }, 'UKZN'),
-    ).toBeNull();
-  });
-});
-
-describe('weeks', () => {
-  it('accepts only real Sundays', () => {
-    expect(isWeekKey('2026-10-04')).toBe(true);
-    expect(isWeekKey('2026-10-05')).toBe(false);
-    expect(isWeekKey('2026-02-30')).toBe(false);
+describe('own innings matching', () => {
+  it('matches the same name, ignoring case and spacing', () => {
+    expect(isOwnTeam('  clares   cc ', 'Clares CC')).toBe(true);
   });
 
-  it('steps a week at a time across month ends', () => {
-    expect(shiftWeek('2026-10-04', -1)).toBe('2026-09-27');
-    expect(shiftWeek('2026-09-27', 1)).toBe('2026-10-04');
+  it('strips the "CC" / "Cricket Club" suffix on either side', () => {
+    expect(isOwnTeam('Clares', 'Clares CC')).toBe(true);
+    expect(isOwnTeam('Clares CC', 'Clares Cricket Club')).toBe(true);
   });
 
-  it('picks the last completed Mon–Sun week in SAST', () => {
-    // Wednesday 7 Oct → the week that ended Sunday 4 Oct.
-    expect(lastCompletedWeekKey(new Date('2026-10-07T10:00:00Z'))).toBe('2026-10-04');
-    // Monday 5 Oct 06:00 SAST (04:00 UTC) → that Sunday's week just ended.
-    expect(lastCompletedWeekKey(new Date('2026-10-05T04:00:00Z'))).toBe('2026-10-04');
-    // Sunday 4 Oct (still running) → the week before.
-    expect(lastCompletedWeekKey(new Date('2026-10-04T12:00:00Z'))).toBe('2026-09-27');
-    // Sunday 23:30 UTC is already Monday in SAST.
-    expect(lastCompletedWeekKey(new Date('2026-10-04T23:30:00Z'))).toBe('2026-10-04');
+  it('accepts a team named for the club ("Clares 2nd XI")', () => {
+    expect(isOwnTeam('Clares 2nd XI', 'Clares CC')).toBe(true);
+  });
+
+  it('matches nothing else: another club, a mere letter prefix, a blank club', () => {
+    expect(isOwnTeam('Chatsworth', 'Clares CC')).toBe(false);
+    expect(isOwnTeam('Claresholm', 'Clares CC')).toBe(false);
+    expect(isOwnTeam('Clares', '  ')).toBe(false);
+  });
+
+  it('flags every innings the club batted, none when it batted in none', () => {
+    expect(ownInningsFlags(['Chatsworth', 'Clares', 'Chatsworth', 'Clares'], 'Clares CC')).toEqual([
+      false,
+      true,
+      false,
+      true,
+    ]);
+    expect(ownInningsFlags(['Chatsworth', 'Umzinto'], 'Clares CC')).toEqual([false, false]);
+  });
+
+  it('a derby of two sides named for the club keeps only the exact name, else none', () => {
+    expect(ownInningsFlags(['Clares 2nd XI', 'Clares'], 'Clares CC')).toEqual([false, true]);
+    expect(ownInningsFlags(['Clares 2nd XI', 'Clares 3rd XI'], 'Clares CC')).toEqual([
+      false,
+      false,
+    ]);
   });
 });

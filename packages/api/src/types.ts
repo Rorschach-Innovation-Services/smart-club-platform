@@ -376,12 +376,6 @@ export interface TenantConfig {
    */
   fixtureReminders?: FixtureRemindersConfig;
   /**
-   * The Monday chair scorecard-confirmation digest (ScorecardConfirmations cron). Absent or
-   * `enabled` not true ⇒ off. Also needs `features.medicoachSync` + a medicoach goLiveDate.
-   * Operator-only: PUT /tenant/config strips it, only PUT /platform/tenants/:slug writes it.
-   */
-  scorecardConfirmations?: ScorecardConfirmationsConfig;
-  /**
    * Transfer windows: inclusive tenant wall-clock date ranges (ADR 0008) in which a clearance may
    * be opened. Absent OR empty ⇒ no restriction (an empty list must never lock a tenant out).
    * Outside every window a rep-initiated request 409s and a public registration that would open
@@ -602,10 +596,7 @@ export interface ClubCommEvent {
     | 'clearance-inbound'
     // Pending-clearance nudge to the source chair (admin "Send reminder" or the ClearanceReminders
     // cron), keyed `clearance-<id>-reminder-<date>-<channel>`. Bypasses the daily cap.
-    | 'clearance-reminder'
-    // The Monday scorecard-confirmation digest to the chair (ScorecardConfirmations cron), one
-    // row per channel, keyed `scorecard-confirm-<weekKey>-<channel>`.
-    | 'scorecard-confirm';
+    | 'clearance-reminder';
   /** Aggregate, PII-free outcome for a broadcast send, e.g. "8 sent · 2 skipped" (sent · skipped · failed; zero parts omitted). */
   summary?: string;
 }
@@ -669,8 +660,11 @@ export interface PlayerErasureCounts {
   captainsReportsScrubbed: number;
   /** Cached medicoach scorecards (FIXSCORECARD#) that named the person: scrubbed and marked terminal. */
   scorecardsScrubbed: number;
-  /** Scorecard-digest entries whose chair feedback named the person and was scrubbed in place. */
-  feedbackScrubbed: number;
+  /**
+   * Captain's reports whose scorecard correction `feedback` named the person and was scrubbed
+   * in place (also counted in `captainsReportsScrubbed`). Absent on audit rows written before.
+   */
+  reportScorecardFeedbackScrubbed: number;
   /**
    * Pending REPORTOPEN# markers whose captain ref was this person: the ref is scrubbed, the
    * marker kept (its retry then addresses the scoring side's chair instead).
@@ -1321,8 +1315,10 @@ export interface StoredFixtureResult {
  * (medicoach-sync/scorecard-fetch.ts) and, to scrub names, by player erasure. Holds player
  * names — personal data, erased with the tenant / cohort / series like FIXRESULT#.
  *
- * `terminal: true` = this fixture can never have a scorecard (medicoach answered 404 or
- * `available: false`): the sweep stops retrying. A newly stored result still re-fetches.
+ * `terminal: true` = this fixture can never have a scorecard (medicoach answered 404, or kept
+ * answering `available: false` for 3 days — until then such a stub is re-checked, with
+ * `fetchedAt` the first `available: false` and `lastCheckedAt` the latest): the sweep stops
+ * retrying. A newly stored result still re-fetches.
  * Player erasure also sets it on an AVAILABLE card it scrubbed, so the sweep never re-fetches
  * the card (and with it the erased name) from medicoach.
  */
@@ -1549,6 +1545,14 @@ export interface CaptainsReportDelivery {
   providerError?: string;
 }
 
+/** A captain's report's answer on the match scorecard (see `CaptainsReport.scorecard`). */
+export interface CaptainsReportScorecardAnswer {
+  action: 'confirmed' | 'correction';
+  feedback?: string;
+  againstFetchedAt?: string;
+  stale?: true;
+}
+
 /**
  * A captain's report: `CAPREPORT#<seriesId>#<fixtureId>#<clubId>`, one per fixture side.
  * Opened `pending` when medicoach reports a result (or created by hand from the portal),
@@ -1586,6 +1590,14 @@ export interface CaptainsReport {
   umpires: ReportUmpireEntry[];
   general: string;
   declaration?: boolean;
+  /**
+   * The answer on the match scorecard (FIXSCORECARD#): asked — and required to submit —
+   * whenever an available scorecard is attached. `feedback` (≤ 2,000 chars) is required for a
+   * correction, which emails the platform operators. `againstFetchedAt` is the card version
+   * answered against (server-clamped, set at submission). `stale`: a newer card arrived after
+   * that version — server-only, set at submission or by the scorecard sweep.
+   */
+  scorecard?: CaptainsReportScorecardAnswer;
   /** `CR-YYYY-NNNN`, assigned from the per-tenant counter at submission. */
   ref?: string;
   submittedBy?: string;
@@ -1621,63 +1633,4 @@ export interface CaptainsReport {
   recipientContact?: { email?: string; cell?: string };
   createdAt: string;
   updatedAt: string;
-}
-
-/** Per-tenant chair scorecard confirmation settings (see TenantConfig.scorecardConfirmations). */
-export interface ScorecardConfirmationsConfig {
-  /** The operator's master switch for the Monday digest. Absent/false ⇒ off. */
-  enabled?: boolean;
-}
-
-/** Where one fixture of a scorecard digest stands. */
-export type ScorecardConfirmEntryStatus = 'pending' | 'confirmed' | 'correction' | 'void';
-
-/** One fixture of a club's weekly scorecard digest (keyed `<seriesId>#<fixtureId>`). */
-export interface ScorecardConfirmEntry {
-  seriesId: string;
-  fixtureId: string;
-  homeTeamName: string;
-  awayTeamName: string;
-  /** YYYY-MM-DD */
-  fixtureDate: string;
-  competition?: string;
-  venue?: string;
-  /** Which side the digest's club played (the operator console lists the home side first). */
-  side?: 'home' | 'away';
-  status: ScorecardConfirmEntryStatus;
-  /** The chair's correction request, verbatim (≤ 2,000 chars). */
-  feedback?: string;
-  submittedAt?: string;
-  submittedVia?: 'link';
-  /**
-   * The FIXSCORECARD# `fetchedAt` the chair ANSWERED against — set for a confirm AND a
-   * correction alike, despite the name (kept for storage compatibility). Absent ⇒ no
-   * scorecard was available (headline only); the stale check then uses `submittedAt`.
-   */
-  confirmedAgainstFetchedAt?: string;
-  /** A newer scorecard arrived after the chair submitted: the answer may be out of date. */
-  staleConfirmation?: boolean;
-}
-
-/**
- * A club's weekly scorecard confirmation digest (`SCORECONF#<weekKey>#<clubId>`): one per club
- * per Mon–Sun week (`weekKey` = that Sunday, SAST), one link, one `SC-YYYY-NNNN` ref, the
- * notice outcomes, and one entry per played fixture. The cron TOPS UP entries for results that
- * arrive late; each entry is answered once (first submit wins). Rotating `memberId` revokes
- * the link.
- */
-export interface ScorecardConfirmation {
-  tenant: string;
-  clubId: string;
-  clubName: string;
-  weekKey: string;
-  ref: string;
-  /** Opaque, random — bound into the link token. Server-only, never served. */
-  memberId: string;
-  linkExpiresAt: string;
-  createdAt: string;
-  updatedAt?: string;
-  deliveries?: CaptainsReportDelivery[];
-  notifiedAt?: string;
-  entries: Record<string, ScorecardConfirmEntry>;
 }

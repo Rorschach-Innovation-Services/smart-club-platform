@@ -1,23 +1,48 @@
 /**
- * Pure helpers for the chair scorecard confirmation page (`/sc/<token>`, ScorecardConfirm.tsx)
- * and the operator console (platform-scorecard-confirmations.tsx): scorecard text lines,
- * status labels, the correction-feedback rule and the Sunday week arithmetic. No React, no I/O.
+ * Pure helpers for the scorecard the captain's report shows (ScorecardView.tsx): scorecard text
+ * lines and the correction-feedback rule. No React, no I/O.
  */
-import type { InningsScorecard, ScorecardConfirmEntry, ScorecardConfirmEntryStatus } from './types';
+import type { InningsScorecard } from './types';
 
 /** A correction request is capped at this many characters (the API's SCORECARD_FEEDBACK_MAX). */
 export const FEEDBACK_MAX = 2000;
 
-/** "UKZN CC — 156/7 (20.0)" */
+/** "20 ov" for a completed "20.0", "18.3 ov" otherwise. */
+export function fmtOvers(overs: string): string {
+  return `${overs.replace(/\.0$/, '')} ov`;
+}
+
+/** "UKZN CC — 156/7 (20 ov)" */
 export function inningsHeading(
   inn: Pick<InningsScorecard, 'battingTeamName' | 'totalRuns' | 'wickets' | 'overs'>,
 ) {
-  return `${inn.battingTeamName} — ${inn.totalRuns}/${inn.wickets} (${inn.overs})`;
+  return `${inn.battingTeamName} — ${inn.totalRuns}/${inn.wickets} (${fmtOvers(inn.overs)})`;
 }
 
-/** "Extras 12 (b 1, lb 2, w 6, nb 2, pen 1)" — zero parts left out; "Extras 0" when none. */
-export function extrasLine(e: InningsScorecard['extras']): string {
-  const parts = (
+/**
+ * The innings' one-line hint under its summary: the top scorer (most runs, then fewest balls;
+ * `*` when not out, retired not out included) and the best bowling (most wickets, then fewest runs). Either half is left
+ * out when there is no one to name; empty when neither is.
+ */
+export function inningsHint(inn: Pick<InningsScorecard, 'batters' | 'bowlers'>): string {
+  const bat = [...byOrder(inn.batters)].sort(
+    (a, b) => b.runs - a.runs || a.ballsFaced - b.ballsFaced,
+  )[0];
+  const bowl = [...byOrder(inn.bowlers)].sort(
+    (a, b) => b.wickets - a.wickets || a.runsConceded - b.runsConceded,
+  )[0];
+  const parts: string[] = [];
+  if (bat)
+    parts.push(
+      `Top score ${bat.name} ${bat.runs}${/\bnot out$/i.test(bat.howOut.trim()) ? '*' : ''} (${bat.ballsFaced})`,
+    );
+  if (bowl) parts.push(`Best bowling ${bowl.name} ${bowl.wickets}/${bowl.runsConceded}`);
+  return parts.join(' · ');
+}
+
+/** "b 1, lb 2, w 6, nb 2, pen 1" — zero parts left out; empty when there were none. */
+export function extrasDetail(e: InningsScorecard['extras']): string {
+  return (
     [
       ['b', e.byes],
       ['lb', e.legByes],
@@ -27,8 +52,14 @@ export function extrasLine(e: InningsScorecard['extras']): string {
     ] as const
   )
     .filter(([, n]) => n > 0)
-    .map(([k, n]) => `${k} ${n}`);
-  return parts.length ? `Extras ${e.total} (${parts.join(', ')})` : `Extras ${e.total}`;
+    .map(([k, n]) => `${k} ${n}`)
+    .join(', ');
+}
+
+/** "6 wkts, 20 ov" — "all out" at ten wickets, "1 wkt" for one. */
+export function totalDetail(inn: Pick<InningsScorecard, 'wickets' | 'overs'>): string {
+  const w = inn.wickets >= 10 ? 'all out' : `${inn.wickets} ${inn.wickets === 1 ? 'wkt' : 'wkts'}`;
+  return `${w}, ${fmtOvers(inn.overs)}`;
 }
 
 /** "1-23 (S. Naidoo, 2.6), 2-40 (K. Pillay, 5.1)" — empty when no wicket fell. */
@@ -47,21 +78,6 @@ export function fmtRate(n: number): string {
 /** Batters in batting order, bowlers in bowling order (the wire is already ordered; be sure). */
 export const byOrder = <T extends { order: number }>(rows: T[]): T[] =>
   [...rows].sort((a, b) => a.order - b.order);
-
-export const STATUS_LABEL: Record<ScorecardConfirmEntryStatus, string> = {
-  pending: 'Awaiting answer',
-  confirmed: 'Confirmed',
-  correction: 'Correction requested',
-  void: 'Result withdrawn',
-};
-
-/** Pill tone per status (index.html .pill-*): done = teal, needs attention = coral. */
-export const STATUS_TONE: Record<ScorecardConfirmEntryStatus, string> = {
-  pending: 'navy',
-  confirmed: 'teal',
-  correction: 'coral',
-  void: 'muted',
-};
 
 /**
  * Why a correction can't be sent yet, or null when it can. Same rule as the API: required
@@ -84,67 +100,38 @@ function normName(name: string): string {
 }
 
 /**
- * Which side of the match the chair's club is, from the names alone (the digest carries team
- * names, not ids): a team named for the club ("UKZN CC", "UKZN 2nd XI") matches "UKZN CC".
- * null when neither or both sides match — the page then just shows the fixture as listed.
+ * Whether a scorecard team name is the club's own side: "Clares", "Clares CC" and
+ * "Clares 2nd XI" all match the club "Clares CC" (suffixes stripped, then equal or a
+ * word-boundary prefix). A blank club name matches nothing.
  */
-export function ownSide(
-  entry: Pick<ScorecardConfirmEntry, 'homeTeamName' | 'awayTeamName'>,
-  clubName: string,
-): 'home' | 'away' | null {
+export function isOwnTeam(teamName: string, clubName: string): boolean {
   const club = normName(clubName);
-  if (!club) return null;
-  const matches = (team: string) => {
-    const t = normName(team);
-    return t === club || t.startsWith(`${club} `);
-  };
-  const home = matches(entry.homeTeamName);
-  const away = matches(entry.awayTeamName);
-  if (home === away) return null;
-  return home ? 'home' : 'away';
-}
-
-/** "UKZN CC 156/7 · Crusaders CC 149/9" — a missing score reads "—". */
-export function headlineScore(
-  entry: Pick<ScorecardConfirmEntry, 'homeTeamName' | 'awayTeamName' | 'result'>,
-): string | null {
-  const r = entry.result;
-  if (!r || (r.homeScore == null && r.awayScore == null)) return null;
-  return `${entry.homeTeamName} ${r.homeScore ?? '—'} · ${entry.awayTeamName} ${r.awayScore ?? '—'}`;
-}
-
-/* ─── Weeks (operator console) ─── */
-
-const WEEK_RE = /^\d{4}-\d{2}-\d{2}$/;
-const SAST_OFFSET_MS = 120 * 60_000;
-const DAY_MS = 24 * 3600_000;
-
-/** A real YYYY-MM-DD that falls on a Sunday — the only week keys the API accepts. */
-export function isWeekKey(v: string): boolean {
-  if (!WEEK_RE.test(v)) return false;
-  const d = new Date(`${v}T00:00:00Z`);
-  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v && d.getUTCDay() === 0;
-}
-
-/** The Sunday `weeks` weeks before (negative) or after (positive) `weekKey`. */
-export function shiftWeek(weekKey: string, weeks: number): string {
-  return new Date(Date.parse(`${weekKey}T00:00:00Z`) + weeks * 7 * DAY_MS)
-    .toISOString()
-    .slice(0, 10);
+  if (!club) return false;
+  const team = normName(teamName);
+  return team === club || team.startsWith(`${club} `);
 }
 
 /**
- * The most recent COMPLETED Mon–Sun week at `now`, SAST — mirrors the API's
- * lastCompletedWeekKey: on a Monday the week that ended yesterday; on a Sunday, the week
- * that ended a week ago (today's is still running).
+ * Per innings, whether the club batted in it. When the loose match claims more than one
+ * distinct batting side (a derby — "Clares" vs "Clares 2nd XI"), only an exact (normalized)
+ * name keeps the mark; still ambiguous → nothing is marked.
  */
-export function lastCompletedWeekKey(now: Date = new Date()): string {
-  const sast = new Date(now.getTime() + SAST_OFFSET_MS);
-  const day = sast.toISOString().slice(0, 10);
-  const closingSunday = shiftDays(day, (7 - sast.getUTCDay()) % 7);
-  return shiftWeek(closingSunday, -1);
+export function ownInningsFlags(battingTeamNames: string[], clubName: string): boolean[] {
+  const loose = battingTeamNames.map((n) => isOwnTeam(n, clubName));
+  const sides = new Set(battingTeamNames.filter((_, i) => loose[i]).map(normName));
+  if (sides.size <= 1) return loose;
+  const club = normName(clubName);
+  const exact = battingTeamNames.map((n) => normName(n) === club);
+  return exact.some(Boolean) ? exact : battingTeamNames.map(() => false);
 }
 
-function shiftDays(day: string, days: number): string {
-  return new Date(Date.parse(`${day}T00:00:00Z`) + days * DAY_MS).toISOString().slice(0, 10);
+/** "UKZN CC 156/7 · Crusaders CC 149/9" — a missing score reads "—". */
+export function headlineScore(entry: {
+  homeTeamName: string;
+  awayTeamName: string;
+  result?: { homeScore: string | null; awayScore: string | null };
+}): string | null {
+  const r = entry.result;
+  if (!r || (r.homeScore == null && r.awayScore == null)) return null;
+  return `${entry.homeTeamName} ${r.homeScore ?? '—'} · ${entry.awayTeamName} ${r.awayScore ?? '—'}`;
 }

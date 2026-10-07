@@ -42,18 +42,24 @@ import { captainsReportLinkBase, captainsReportLinkSecret } from './env.js';
 import { hasFeature } from './features.js';
 import { toE164 } from './notify/e164.js';
 import { isWithheld } from './series-projection.js';
-import { TENANT_UTC_OFFSET_MINUTES } from './tenant-time.js';
+import { TENANT_UTC_OFFSET_MINUTES, tenantDate } from './tenant-time.js';
 import type {
   CaptainsReport,
   CaptainsReportDelivery,
   CaptainsReportDeliveryReason,
   CaptainsReportRecipient,
+  CaptainsReportScorecardAnswer,
   Club,
   Series,
   StoredFixtureResult,
+  StoredFixtureScorecard,
   TenantConfig,
 } from './types.js';
-import type { SyncResult } from './medicoach-sync-contract.js';
+import {
+  httpUrlOrNull,
+  type InningsScorecardWire,
+  type SyncResult,
+} from './medicoach-sync-contract.js';
 
 type RepoModule = typeof import('./repo.js');
 
@@ -300,12 +306,41 @@ const str = (v: unknown, max: number, field: string): string => {
 const RATING_KEYS = new Set<string>(RATING_CRITERIA.map((c) => c.key));
 const CONCERN_KEYS = new Set<string>(CONCERN_AREAS.map((c) => c.key));
 
+/**
+ * The scorecard answer from a request body: `{action: 'confirmed' | 'correction', feedback?,
+ * againstFetchedAt?}` (the `fetchedAt` of the card the form rendered, echoed back). `stale` is
+ * server-only and dropped. Feedback is kept for a correction only; whether a correction has
+ * its text is a submission rule (drafts save partial answers).
+ */
+function parseScorecardField(v: unknown): CaptainsReportScorecardAnswer | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== 'object' || Array.isArray(v))
+    throw new ReportInputError('scorecard must be an object');
+  const x = v as Record<string, unknown>;
+  if (x.action !== 'confirmed' && x.action !== 'correction')
+    throw new ReportInputError("scorecard action must be 'confirmed' or 'correction'");
+  const feedback = str(x.feedback, SCORECARD_FEEDBACK_MAX, 'the scorecard correction');
+  const fa = x.againstFetchedAt;
+  if (
+    fa !== undefined &&
+    fa !== null &&
+    (typeof fa !== 'string' || fa.length > 40 || !Number.isFinite(Date.parse(fa)))
+  )
+    throw new ReportInputError('scorecard againstFetchedAt must be an ISO timestamp');
+  return {
+    action: x.action,
+    ...(x.action === 'correction' && feedback ? { feedback } : {}),
+    ...(typeof fa === 'string' ? { againstFetchedAt: fa } : {}),
+  };
+}
+
 /** The editable fields of a report from a request body (unknown keys are dropped). */
 export function parseReportFields(raw: unknown): {
   captainName: string;
   umpires: ReportUmpireEntry[];
   general: string;
   declaration: boolean;
+  scorecard?: CaptainsReportScorecardAnswer;
 } {
   if (!raw || typeof raw !== 'object') throw new ReportInputError('body must be an object');
   const b = raw as Record<string, unknown>;
@@ -340,11 +375,13 @@ export function parseReportFields(raw: unknown): {
       comments: str(x.comments, 2000, 'comments'),
     };
   });
+  const scorecard = parseScorecardField(b.scorecard);
   return {
     captainName: str(b.captainName, 120, "captain's name"),
     umpires,
     general: str(b.general, 4000, 'general comments'),
     declaration: b.declaration === true,
+    ...(scorecard ? { scorecard } : {}),
   };
 }
 
@@ -1247,4 +1284,426 @@ export async function sendReportReminders(
     else if (sent !== 'already') out.undelivered++;
   }
   return out;
+}
+
+// ───────────────────────── Scorecard confirmation ─────────────────────────
+
+/** A correction request is capped at this many characters. */
+export const SCORECARD_FEEDBACK_MAX = 2000;
+
+/**
+ * The card version an answer (confirm OR correction) was given against, stored as the entry's
+ * `confirmedAgainstFetchedAt`. The page echoes the `scorecardFetchedAt` it rendered; that echo
+ * is client-supplied, so it is trusted only as a plausible PAST value no later than the card
+ * stored now — a forged future echo would otherwise defeat every later stale check. Anything
+ * else (later than the stored card, in the future, or no echo) falls back to the stored
+ * card's `fetchedAt`. No available card stored ⇒ undefined (the stale check then uses
+ * `submittedAt`). Returned in `toISOString()` form so DynamoDB's string compare stays sound.
+ */
+export function answeredAgainstFetchedAt(
+  echo: string | undefined,
+  card: { available: boolean; fetchedAt?: string } | null,
+  now: Date,
+): string | undefined {
+  const stored = card?.available && card.fetchedAt ? card.fetchedAt : undefined;
+  if (!stored) return undefined;
+  if (echo === undefined) return stored;
+  const ms = Date.parse(echo);
+  if (!Number.isFinite(ms) || ms > Date.parse(stored) || ms > now.getTime()) return stored;
+  return new Date(ms).toISOString();
+}
+
+// ───────────────────────── Scorecard correction → operators ─────────────────────────
+
+export interface ScorecardCorrectionNotice {
+  to: string;
+  tenantName: string;
+  clubName: string;
+  ref: string;
+  fixtureLine: string;
+  feedback: string;
+  consoleLink?: string;
+}
+
+let defaultCorrectionSender: (
+  n: ScorecardCorrectionNotice,
+) => Promise<{ messageId: string }> = async (n) =>
+  (await import('./notify/email.js')).sendScorecardCorrectionEmail(n);
+
+/** The operator-email sender for correction requests. Tests/local only; `undefined` restores. */
+export function setDefaultScorecardCorrectionSender(
+  fn: ((n: ScorecardCorrectionNotice) => Promise<{ messageId: string }>) | undefined,
+): void {
+  defaultCorrectionSender =
+    fn ?? (async (n) => (await import('./notify/email.js')).sendScorecardCorrectionEmail(n));
+}
+
+/**
+ * Email every platform operator about a scorecard correction request. Best-effort: the caller
+ * never fails the submit on it; failures are counted and logged (no address, no feedback).
+ */
+export async function notifyOperatorsOfCorrection(
+  deps: {
+    repo: Pick<RepoModule, 'listOperators'>;
+    send?: (n: ScorecardCorrectionNotice) => Promise<{ messageId: string }>;
+    log?: (line: string) => void;
+  },
+  input: Omit<ScorecardCorrectionNotice, 'to'>,
+): Promise<{ sent: number; failed: number }> {
+  const { listOperatorEmails } = await import('./notify/operator-emails.js');
+  const log = deps.log ?? ((l: string) => console.warn(l));
+  const send = deps.send ?? defaultCorrectionSender;
+  const out = { sent: 0, failed: 0 };
+  for (const to of await listOperatorEmails({ repo: deps.repo })) {
+    try {
+      await send({ ...input, to });
+      out.sent++;
+    } catch (err) {
+      out.failed++;
+      log(
+        `[scorecard-correction] correction notice ${input.ref}: an operator email failed — ${
+          err instanceof Error ? err.name : 'error'
+        }`,
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * A submitted scorecard answer, stamped by the server: `againstFetchedAt` is the card version
+ * answered against, from the client's echo clamped by {@link answeredAgainstFetchedAt} (an
+ * echo later than the stored card or in the future, or no echo ⇒ the stored card's
+ * `fetchedAt`). An echo OLDER than the stored card means the captain answered a card that has
+ * since been replaced, so the answer is stored `stale` straight away. No available card ⇒ no
+ * `againstFetchedAt` (the answer is kept as given). `stale` from the client never survives.
+ */
+export function stampScorecardAnswer(
+  answer: CaptainsReportScorecardAnswer,
+  card: Pick<StoredFixtureScorecard, 'available' | 'fetchedAt'> | null,
+  now: Date,
+): CaptainsReportScorecardAnswer {
+  const { againstFetchedAt: echo, stale: _s, ...rest } = answer;
+  const against = answeredAgainstFetchedAt(echo, card, now);
+  if (!against) return rest;
+  const stale = !!card?.available && Date.parse(against) < Date.parse(card.fetchedAt);
+  return { ...rest, againstFetchedAt: against, ...(stale ? { stale: true as const } : {}) };
+}
+
+/** A draft's scorecard answer: as given, without the submission-only stamps. */
+export function draftScorecardAnswer(
+  answer: CaptainsReportScorecardAnswer | undefined,
+): CaptainsReportScorecardAnswer | undefined {
+  if (!answer) return undefined;
+  const { againstFetchedAt: _a, stale: _s, ...rest } = answer;
+  return rest;
+}
+
+/** The match scorecard a report's form shows, and what to show when there is none. */
+export interface ScorecardContext {
+  /** An AVAILABLE stored card only; `fetchedAt` is echoed back with the answer. */
+  scorecard?: { matchState?: string; innings: InningsScorecardWire[]; fetchedAt: string };
+  /** The headline result — only a recorded result that was not cleared. */
+  result?: {
+    homeScore: string | null;
+    awayScore: string | null;
+    summary?: string;
+    winner?: 'home' | 'away' | 'tie' | 'none';
+  };
+  /** Medicoach's own match page (http(s) only). */
+  medicoachMatchUrl?: string;
+}
+
+/**
+ * The scorecard context for ONE report's detail view (the `/r/` link and the portal's report
+ * route — never lists): two GetItems, or one when the caller already holds the card
+ * (`preloaded.card`, `null` meaning "fetched, none stored"). Empty for an unlisted match (it
+ * has no fixture).
+ */
+export async function attachScorecardContext(
+  repo: Pick<RepoModule, 'getFixtureScorecard' | 'getFixtureResult'>,
+  tenant: string,
+  report: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'source'>,
+  preloaded?: { card: StoredFixtureScorecard | null },
+): Promise<ScorecardContext> {
+  if (report.seriesId === UNLISTED_SERIES_ID || report.source === 'manual-unlisted') return {};
+  const [card, res] = await Promise.all([
+    preloaded
+      ? preloaded.card
+      : repo.getFixtureScorecard(tenant, report.seriesId, report.fixtureId),
+    repo.getFixtureResult(tenant, report.seriesId, report.fixtureId),
+  ]);
+  const live = res && !res.cleared && res.recordedAt ? res : null;
+  const url = live ? httpUrlOrNull(live.medicoachMatchUrl) : null;
+  return {
+    ...(card?.available
+      ? {
+          scorecard: {
+            ...(card.matchState !== undefined ? { matchState: card.matchState } : {}),
+            innings: card.innings ?? [],
+            fetchedAt: card.fetchedAt,
+          },
+        }
+      : {}),
+    ...(live
+      ? {
+          result: {
+            homeScore: live.homeScore ?? null,
+            awayScore: live.awayScore ?? null,
+            ...(live.summary ? { summary: live.summary } : {}),
+            ...(live.winner ? { winner: live.winner } : {}),
+          },
+        }
+      : {}),
+    ...(url ? { medicoachMatchUrl: url } : {}),
+  };
+}
+
+/** "Umzinto CC v African Warriors (Premier T20), Sun 4 Oct 2026" — home side first. */
+export function reportFixtureLine(
+  r: Pick<CaptainsReport, 'side' | 'clubName' | 'opponentName' | 'competition' | 'matchDate'>,
+): string {
+  const home = r.side === 'home' ? r.clubName : r.opponentName;
+  const away = r.side === 'home' ? r.opponentName : r.clubName;
+  return (
+    `${home} v ${away}` +
+    (r.competition ? ` (${r.competition})` : '') +
+    `, ${formatWeekdayDayYear(r.matchDate)}`
+  );
+}
+
+// ───────────────────────── Operator console ─────────────────────────
+
+/** The console's window: `days` back from the tenant's today (default 14, capped at 60). */
+export const CONSOLE_DAYS_DEFAULT = 14;
+export const CONSOLE_DAYS_MAX = 60;
+/** At most this many fixture rows per response (newest first); `truncated` says when cut. */
+export const CONSOLE_ROW_CAP = 500;
+
+export const CONSOLE_STATUSES = [
+  'all',
+  'pending',
+  'confirmed',
+  'correction',
+  'stale',
+  'not-asked',
+] as const;
+export type ConsoleStatusFilter = (typeof CONSOLE_STATUSES)[number];
+
+/**
+ * One side's scorecard state:
+ * - `n/a` — no available card for the match (nothing to confirm against);
+ * - `pending` — the report is still open and a card is there to answer;
+ * - `not-asked` — the report closed (submitted / void) without an answer while a card exists
+ *   (incl. reports submitted before the card arrived, and pre-pivot submissions);
+ * - `confirmed` / `correction` — the SUBMITTED answer;
+ * - `stale` — a submitted answer against a card that has since changed, or whose result was
+ *   withdrawn (the report is `flagged`, or no available card is left) — wins over both.
+ * A draft answer on an open report does not count — only a submitted one does.
+ */
+export type ScorecardConsoleStatus =
+  | 'n/a'
+  | 'pending'
+  | 'not-asked'
+  | 'confirmed'
+  | 'correction'
+  | 'stale';
+
+export interface ScorecardConsoleCell {
+  reportId: string;
+  /** `CR-YYYY-NNNN` — only once submitted. */
+  reportRef?: string;
+  clubId: string;
+  clubName: string;
+  reportStatus: CaptainsReport['status'];
+  scorecardStatus: ScorecardConsoleStatus;
+  /** The submitted answer behind a `stale` status. */
+  answeredAction?: CaptainsReportScorecardAnswer['action'];
+  /** A submitted correction's text. */
+  feedback?: string;
+  submittedAt?: string;
+}
+
+export interface ScorecardConsoleRow {
+  seriesId: string;
+  fixtureId: string;
+  matchDate: string;
+  competition: string;
+  homeTeamName: string;
+  awayTeamName: string;
+  home?: ScorecardConsoleCell;
+  away?: ScorecardConsoleCell;
+}
+
+export interface ScorecardConsoleTenant {
+  tenant: string;
+  tenantName: string;
+  rows: ScorecardConsoleRow[];
+}
+
+export interface ScorecardConsolePayload {
+  days: number;
+  status: ConsoleStatusFilter;
+  /** The one tenant the response is scoped to (`?tenant=`), when it is. */
+  tenant?: string;
+  /** The first match date in the window (YYYY-MM-DD, tenant time). */
+  since: string;
+  /** Fixture rows matching the filter before the cap. */
+  total: number;
+  truncated: boolean;
+  /**
+   * Rows per status filter in the window and tenant scope, BEFORE the status filter and the
+   * cap — so every chip can show its count whichever one is active. `all` = every row.
+   */
+  counts: Record<ConsoleStatusFilter, number>;
+  /** Every tenant on the platform (id + display name, by name), for the client picker. */
+  tenantOptions: Array<{ tenant: string; tenantName: string }>;
+  tenants: ScorecardConsoleTenant[];
+}
+
+export function scorecardConsoleStatus(
+  r: Pick<CaptainsReport, 'status' | 'scorecard' | 'flagged'>,
+  cardAvailable: boolean,
+): ScorecardConsoleStatus {
+  if (r.status === 'submitted' && r.scorecard) {
+    // A cleared result (report flagged, card gone) leaves the answer about nothing current.
+    return r.scorecard.stale || r.flagged || !cardAvailable ? 'stale' : r.scorecard.action;
+  }
+  if (!cardAvailable) return 'n/a';
+  return r.status === 'pending' ? 'pending' : 'not-asked';
+}
+
+export function scorecardConsoleCell(
+  r: CaptainsReport,
+  cardAvailable: boolean,
+): ScorecardConsoleCell {
+  const scorecardStatus = scorecardConsoleStatus(r, cardAvailable);
+  const answered = r.status === 'submitted' ? r.scorecard : undefined;
+  return {
+    reportId: r.id,
+    ...(r.ref ? { reportRef: r.ref } : {}),
+    clubId: r.clubId,
+    clubName: r.clubName,
+    reportStatus: r.status,
+    scorecardStatus,
+    ...(scorecardStatus === 'stale' && answered ? { answeredAction: answered.action } : {}),
+    ...(answered?.action === 'correction' && answered.feedback
+      ? { feedback: answered.feedback }
+      : {}),
+    ...(r.submittedAt ? { submittedAt: r.submittedAt } : {}),
+  };
+}
+
+/** The first match date a `days` window covers, in tenant time. */
+export function consoleSince(days: number, now: Date): string {
+  return tenantDate(new Date(now.getTime() - days * 24 * 3600 * 1000));
+}
+
+/**
+ * One tenant's reports → fixture rows pairing both sides (home / away), newest first. Pairs
+ * what it is given: the caller ({@link loadScorecardConsole}) has already dropped reports
+ * outside the window and unlisted matches (no fixture, never a card).
+ */
+export function pairScorecardConsoleRows(
+  reports: CaptainsReport[],
+  cards: Map<string, { available: boolean }>,
+): ScorecardConsoleRow[] {
+  const rows = new Map<string, ScorecardConsoleRow>();
+  for (const r of reports) {
+    const key = `${r.seriesId}#${r.fixtureId}`;
+    let row = rows.get(key);
+    if (!row) {
+      row = {
+        seriesId: r.seriesId,
+        fixtureId: r.fixtureId,
+        matchDate: r.matchDate,
+        competition: r.competition,
+        homeTeamName: r.side === 'home' ? r.clubName : r.opponentName,
+        awayTeamName: r.side === 'home' ? r.opponentName : r.clubName,
+      };
+      rows.set(key, row);
+    }
+    row[r.side] = scorecardConsoleCell(r, cards.get(key)?.available === true);
+  }
+  return [...rows.values()].sort(
+    (a, b) =>
+      b.matchDate.localeCompare(a.matchDate) ||
+      `${a.seriesId}#${a.fixtureId}`.localeCompare(`${b.seriesId}#${b.fixtureId}`),
+  );
+}
+
+/** A row matches a status filter when EITHER side has that status. */
+export function consoleRowMatches(row: ScorecardConsoleRow, status: ConsoleStatusFilter) {
+  if (status === 'all') return true;
+  return row.home?.scorecardStatus === status || row.away?.scorecardStatus === status;
+}
+
+/**
+ * Cross-tenant scorecard status of captains reports, for the operator console. Tenants are
+ * read one at a time (one CAPREPORT Query each — the partition is not date-keyed, so the
+ * window is applied here); scorecards via a projected BatchGet over the window's fixtures.
+ * `tenant` scopes the read to that one tenant (the caller has checked it exists). Per-status
+ * counts are taken before the status filter; rows are capped at `rowCap` across tenants,
+ * newest match first.
+ */
+export async function loadScorecardConsole(
+  repo: Pick<RepoModule, 'listTenants' | 'listCaptainsReports' | 'getFixtureScorecardAvailability'>,
+  opts: {
+    days: number;
+    status: ConsoleStatusFilter;
+    now: Date;
+    tenant?: string;
+    rowCap?: number;
+  },
+): Promise<ScorecardConsolePayload> {
+  const since = consoleSince(opts.days, opts.now);
+  const rowCap = opts.rowCap ?? CONSOLE_ROW_CAP;
+  const counts = Object.fromEntries(CONSOLE_STATUSES.map((s) => [s, 0])) as Record<
+    ConsoleStatusFilter,
+    number
+  >;
+  const configs = await repo.listTenants();
+  const tenantOptions = configs
+    .map((cfg) => ({ tenant: cfg.tenant, tenantName: orgCopy(cfg).name }))
+    .sort((a, b) => a.tenantName.localeCompare(b.tenantName));
+  const all: Array<{ tenant: string; tenantName: string; row: ScorecardConsoleRow }> = [];
+  for (const cfg of configs) {
+    if (opts.tenant && cfg.tenant !== opts.tenant) continue;
+    const reports = (await repo.listCaptainsReports(cfg.tenant)).filter(
+      (r) =>
+        r.matchDate >= since && r.seriesId !== UNLISTED_SERIES_ID && r.source !== 'manual-unlisted',
+    );
+    if (!reports.length) continue;
+    const cards = await repo.getFixtureScorecardAvailability(
+      cfg.tenant,
+      reports.map((r) => ({ seriesId: r.seriesId, fixtureId: r.fixtureId })),
+    );
+    const tenantName = orgCopy(cfg).name;
+    for (const row of pairScorecardConsoleRows(reports, cards)) {
+      for (const s of CONSOLE_STATUSES) if (consoleRowMatches(row, s)) counts[s]++;
+      if (consoleRowMatches(row, opts.status)) all.push({ tenant: cfg.tenant, tenantName, row });
+    }
+  }
+  all.sort(
+    (a, b) =>
+      b.row.matchDate.localeCompare(a.row.matchDate) || a.tenantName.localeCompare(b.tenantName),
+  );
+  const kept = all.slice(0, rowCap);
+  const byTenant = new Map<string, ScorecardConsoleTenant>();
+  for (const { tenant, tenantName, row } of kept) {
+    let t = byTenant.get(tenant);
+    if (!t) byTenant.set(tenant, (t = { tenant, tenantName, rows: [] }));
+    t.rows.push(row);
+  }
+  return {
+    days: opts.days,
+    status: opts.status,
+    ...(opts.tenant ? { tenant: opts.tenant } : {}),
+    since,
+    total: all.length,
+    truncated: all.length > kept.length,
+    counts,
+    tenantOptions,
+    tenants: [...byTenant.values()].sort((a, b) => a.tenantName.localeCompare(b.tenantName)),
+  };
 }

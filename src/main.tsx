@@ -110,7 +110,6 @@ import { UmpireAppointmentsUpload } from './UmpireAppointmentsUpload';
 import { ResyncDialog, isResyncRequired } from './ResyncDialog';
 
 import { CaptainsReportView, CaptainsReportLinkPage } from './CaptainsReport';
-import { ScorecardConfirmLinkPage } from './ScorecardConfirm';
 import { AdminCaptainsReportsView } from './AdminCaptainsReports';
 import { AdminMedicoachSyncView } from './AdminMedicoachSync';
 import { erasureSummary } from './PlayerDetailModal';
@@ -365,14 +364,10 @@ function AppRoutes() {
   // (which may resolve to no tenant, or the wrong one) and themes itself from the
   // certificate's own tenant. So neither the host's /tenant theme nor its 404 screen applies.
   const { pathname } = useLocation();
-  // The captain's-report link page (/r/<token>) and the chair's scorecard digest (/sc/<token>)
-  // are tenant-independent the same way: the token names its tenant, and the page themes
-  // itself from that tenant.
+  // The captain's-report link page (/r/<token>) is tenant-independent the same way: the token
+  // names its tenant, and the page themes itself from that tenant.
   const onVerify =
-    pathname === '/verify' ||
-    pathname.startsWith('/verify/') ||
-    pathname.startsWith('/r/') ||
-    pathname.startsWith('/sc/');
+    pathname === '/verify' || pathname.startsWith('/verify/') || pathname.startsWith('/r/');
 
   // Tenant branding/config (public). Apply theme as soon as it loads.
   // retry the tenant config: it carries the league/district catalogue the authed app
@@ -401,8 +396,6 @@ function AppRoutes() {
       <Route path="/verify/:serial" element={<VerifyCertificatePage />} />
       {/* Public submit-once captain's report link (the token is the capability). */}
       <Route path="/r/:token" element={<CaptainsReportLinkPage />} />
-      {/* Public chair scorecard-confirmation digest (the token is the capability). */}
-      <Route path="/sc/:token" element={<ScorecardConfirmLinkPage />} />
       <Route
         path="/*"
         element={

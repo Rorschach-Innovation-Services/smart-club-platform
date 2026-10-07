@@ -88,6 +88,52 @@ describe('submissionProblems', () => {
   });
 });
 
+describe('submissionProblems — the scorecard answer', () => {
+  const base = {
+    captainName: 'S. Mthembu',
+    declaration: true,
+    umpires: [emptyUmpireEntry({ ...NGUBANE, ratings: allFives })],
+  };
+  const ANSWER = 'Confirm the scorecard or request a correction.';
+  const FEEDBACK = 'Tell us what needs correcting.';
+
+  it.each([
+    ['required, unanswered', { scorecardRequired: true }, [ANSWER]],
+    ['required, confirmed', { scorecardRequired: true, scorecard: { action: 'confirmed' } }, []],
+    [
+      'required, correction with text',
+      { scorecardRequired: true, scorecard: { action: 'correction', feedback: 'Total is 156' } },
+      [],
+    ],
+    [
+      'required, correction without text',
+      { scorecardRequired: true, scorecard: { action: 'correction' } },
+      [FEEDBACK],
+    ],
+    [
+      'required, correction with blank text',
+      { scorecardRequired: true, scorecard: { action: 'correction', feedback: '   ' } },
+      [FEEDBACK],
+    ],
+    ['not required, unanswered', { scorecardRequired: false }, []],
+    ['not required (omitted), unanswered', {}, []],
+    ['not required, confirmed anyway', { scorecard: { action: 'confirmed' } }, []],
+    [
+      'not required, correction still needs its text',
+      { scorecardRequired: false, scorecard: { action: 'correction', feedback: '' } },
+      [FEEDBACK],
+    ],
+    ['required, null answer', { scorecardRequired: true, scorecard: null }, [ANSWER]],
+  ] as const)('%s', (_label, extra, expected) => {
+    expect(submissionProblems({ ...base, ...extra })).toEqual(expected);
+  });
+
+  it('lists the scorecard problem with the others, before the declaration', () => {
+    const problems = submissionProblems({ ...base, declaration: false, scorecardRequired: true });
+    expect(problems).toEqual([ANSWER, 'Confirm the declaration.']);
+  });
+});
+
 describe('umpireRatingAverages', () => {
   it('averages submitted reports per umpireId and counts low ratings', () => {
     const lows = { decisions: 2, pressure: 3, behaviour: 3, communication: 3, regulations: 4 };
