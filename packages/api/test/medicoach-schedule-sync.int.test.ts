@@ -381,6 +381,127 @@ describe('Slice 3 — inbound schedule changes', () => {
     assert.equal(row.counts.scheduleStale, 1);
   });
 
+  test('the clash gate ignores an undated (dateTbc) postponement but not a rescheduled one', async () => {
+    const move = changesPage([
+      {
+        ref: REF(S1, 'f2'),
+        schedule: { scheduledTime: '2026-10-11T13:30:00+02:00', venue: 'Toti Oval 1' },
+      },
+    ]);
+    const s2 = (await repo.getSeries(T, S2))!;
+    // S2/f1 (Toti Oval 1, 11 Oct 13:30) postponed with a new date: it still books its slot.
+    await repo.putSeries(T, {
+      ...s2,
+      fixtures: [
+        { ...(s2.fixtures[0] as object), status: 'postponed', originalDate: '2026-10-04' },
+      ],
+    });
+    pages = [move];
+    assert.equal((await pull()).counts.scheduleConflicts, 1);
+    await repo.deleteSyncConflict(T, REF(S1, 'f2'));
+
+    // Legacy shape (postponed, no originalDate, no dateTbc): still books its slot.
+    const legacy = (await repo.getSeries(T, S2))!;
+    await repo.putSeries(T, {
+      ...legacy,
+      fixtures: [{ ...(s2.fixtures[0] as object), status: 'postponed' }],
+    });
+    pages = [move];
+    assert.equal((await pull()).counts.scheduleConflicts, 1);
+    await repo.deleteSyncConflict(T, REF(S1, 'f2'));
+
+    // Postponed WITHOUT a new date (dateTbc): the ground is free for the move.
+    const held = (await repo.getSeries(T, S2))!;
+    await repo.putSeries(T, {
+      ...held,
+      fixtures: [{ ...(s2.fixtures[0] as object), status: 'postponed', dateTbc: true }],
+    });
+    pages = [move];
+    const summary = await pull();
+    assert.equal(summary.counts.scheduleApplied, 1);
+    const f2 = await fixtureOf(S1, 'f2');
+    assert.equal(f2.date, '2026-10-11');
+    assert.equal(f2.venueName, 'Toti Oval 1');
+  });
+
+  test('an inbound postponement WITH a new date stamps originalDate and books its new slot', async () => {
+    // Postponed onto Toti Oval 1, 11 Oct 13:30 — the slot S2/f1 holds. Without originalDate the
+    // moved fixture would read as an undated postponement and slip past the gate.
+    pages = [
+      changesPage([
+        {
+          ref: REF(S1, 'f1'),
+          schedule: {
+            scheduledTime: '2026-10-11T13:30:00+02:00',
+            venue: 'Toti Oval 1',
+            postponed: true,
+          },
+        },
+      ]),
+    ];
+    assert.equal((await pull()).counts.scheduleConflicts, 1);
+    const held = await fixtureOf(S1, 'f1');
+    assert.equal(held.date, '2026-10-04');
+    assert.equal(held.status, undefined);
+    await repo.deleteSyncConflict(T, REF(S1, 'f1'));
+
+    // The same postponement onto a free ground applies, carrying the date it left.
+    pages = [
+      changesPage([
+        {
+          ref: REF(S1, 'f1'),
+          schedule: {
+            scheduledTime: '2026-10-11T13:30:00+02:00',
+            venue: 'Lahee Park',
+            postponed: true,
+            changedAt: MC_LATER,
+          },
+        },
+      ]),
+    ];
+    assert.equal((await pull()).counts.scheduleApplied, 1);
+    const moved = await fixtureOf(S1, 'f1');
+    assert.equal(moved.date, '2026-10-11');
+    assert.equal(moved.status, 'postponed');
+    assert.equal(moved.originalDate, '2026-10-04');
+  });
+
+  test('inbound reinstatement clears originalDate; a dated change clears an undated dateTbc', async () => {
+    const s = (await repo.getSeries(T, S1))!;
+    type InFixture = Parameters<typeof schedule.buildInboundFixture>[1];
+    const base = { ...(s.fixtures[0] as InFixture) };
+    const wire = (scheduledTime: string, postponed: boolean) => ({
+      scheduledTime,
+      timeTbc: false,
+      dateTbc: false,
+      venue: null,
+      postponed,
+      cancelled: false,
+    });
+    const back = schedule.buildInboundFixture(
+      s,
+      { ...base, date: '2026-10-11', status: 'postponed', originalDate: '2026-10-04' },
+      wire('2026-10-11T13:30:00+02:00', false),
+      [],
+      {},
+    );
+    assert.ok(back.ok);
+    assert.equal(back.fixture.status, 'scheduled');
+    assert.equal(back.fixture.originalDate, undefined);
+
+    const dated = schedule.buildInboundFixture(
+      s,
+      { ...base, date: '2026-10-04', status: 'postponed', dateTbc: true },
+      wire('2026-10-18T13:30:00+02:00', true),
+      [],
+      {},
+    );
+    assert.ok(dated.ok);
+    assert.equal(dated.fixture.dateTbc, undefined);
+    assert.equal(dated.fixture.date, '2026-10-18');
+    assert.equal(dated.fixture.originalDate, '2026-10-04');
+  });
+
   test('a change that would clash is held as a conflict, not applied, and emails the admins once', async () => {
     // f2 (c v d) → Toti Oval 1 on 11 Oct 13:30, which S2/f1 already holds.
     const clash = changesPage([

@@ -4764,6 +4764,12 @@ async function applySeriesPatch(
   if (patch.version !== undefined && patch.version !== current.version)
     throw new HttpError(409, 'series changed; refetch');
 
+  // Postponement bookkeeping before either clash gate runs: a postponed fixture moved to a new
+  // date gets `originalDate` (and loses an undated postponement's `dateTbc`, so the gates see
+  // its new slot); a reinstated one loses both.
+  if (Array.isArray(patch.fixtures))
+    patch.fixtures = stampRescheduledPostponements(current, patch.fixtures as PostponableFixture[]);
+
   // The tenant-wide series/clubs/venues lists both clash gates read, loaded at most once and
   // only when a gate actually runs — a draft fixture edit with no release transition pays no
   // list reads, and a release never loads them twice.
@@ -5417,12 +5423,53 @@ interface PostponableFixture {
   away?: string;
   status?: string;
   originalDate?: string;
+  /** With `status: 'postponed'`: an undated postponement (clash-exempt via dateTbc). */
+  dateTbc?: boolean;
   postponementId?: string;
   [key: string]: unknown;
 }
 
 const fixturesOf = (series: Series): PostponableFixture[] =>
   (series.fixtures as PostponableFixture[]) ?? [];
+
+/**
+ * `next` with the postponement bookkeeping kept consistent with what `current` stores for each
+ * fixture (matched by id):
+ *  - a fixture that ends up `status: 'postponed'` on a NEW date (the admin editor's one-save
+ *    "postpone to <date>", or a date change on an already-postponed fixture) gets
+ *    `originalDate` stamped — the only-if-absent rule of `postponedFixture` (ADR 0015): an
+ *    existing one (incoming, else stored) is kept, so a fixture moved twice keeps pointing at
+ *    its first schedule — and an undated postponement's `dateTbc` is dropped, so it books its
+ *    new slot;
+ *  - a fixture that LEAVES `postponed` loses `originalDate`, and an undated postponement's
+ *    `dateTbc`, so stale bookkeeping never resurfaces on a later postponement.
+ * An undated postponement is `status: 'postponed'` + `dateTbc: true` (the reminder upload,
+ * the patch engine). Only THAT `dateTbc` is cleared here — never the placeholder flag of a
+ * fixture that was not postponed (a draft knockout awaiting its date).
+ */
+function stampRescheduledPostponements(
+  current: Series,
+  next: PostponableFixture[],
+): PostponableFixture[] {
+  const before = new Map(fixturesOf(current).map((f) => [f?.id, f]));
+  return next.map((f) => {
+    const prev = f?.id ? before.get(f.id) : undefined;
+    if (!prev) return f;
+    const tbcPostponement = prev.status === 'postponed' && prev.dateTbc === true;
+    if (f.status !== 'postponed') {
+      if (prev.status !== 'postponed') return f;
+      // Reinstated (or cancelled): drop the postponement's bookkeeping.
+      const out = { ...f };
+      delete out.originalDate;
+      if (tbcPostponement) delete out.dateTbc;
+      return out;
+    }
+    if (!f.date || !prev.date || f.date === prev.date) return f;
+    const out = { ...f, originalDate: f.originalDate ?? prev.originalDate ?? prev.date };
+    if (tbcPostponement) delete out.dateTbc;
+    return out;
+  });
+}
 
 /** The club behind a fixture side: the participants snapshot, else (legacy) the id IS a clubId.
  * A knockout slot reference (`win:f3`) has no club yet. */
@@ -5697,6 +5744,8 @@ function postponedFixture(
     originalDate: fixture.originalDate ?? fixture.date,
     postponementId: requestId,
   };
+  // An undated postponement (`dateTbc`) that gets its new date books its slot again.
+  if (fixture.status === 'postponed' && fixture.dateTbc === true) delete next.dateTbc;
   if (move.venue) {
     next.venueId = move.venue.id;
     next.venueName = move.venue.name;
@@ -11216,6 +11265,187 @@ app.delete('/platform/tenants/:slug/setup-complete', async (c) => {
   delete next.setupCompletedBy;
   await repo.putTenantConfig(next);
   return c.json(next);
+});
+
+/* ─── Fixture amendments (operator) ───
+   The union's weekly "Summary Reminder Fixtures" workbook, uploaded on the operator console:
+   the CLI's own parser, matcher and planner (reminder-fixtures.ts). `preview` writes nothing;
+   `confirm` re-plans from the same file and refuses with 409 `plan_changed` (plus the fresh
+   preview) when the COMPUTED plan moved since the preview, and 409 `clash_gate` when the plan
+   would introduce a venue clash — that gate has no bypass. Rows that cannot apply (unmatched,
+   ambiguous, unknown ground, played, unknown competition) skip with warnings, never block.
+   Writes go through writeSeriesFromSnapshot (version-checked, medicoach outbox). Clubs are
+   NOT notified (v1). Same base64 transport as the umpire appointments upload: xlsx, 2 MB. */
+
+const AMENDMENTS_MAX_BYTES = 2 * 1024 * 1024; // 2 MB
+const AMENDMENTS_MAX_BASE64_LENGTH = Math.ceil((AMENDMENTS_MAX_BYTES * 4) / 3) + 4;
+/**
+ * Pre-write backups of the series an upload touches, in the private Uploads bucket. The
+ * leading underscore keeps the prefix out of reach of every presign/read route: those only
+ * serve keys recorded under `<tenant>/<clubId>/` (assertOwnObjectKey) or `local/`, and a
+ * tenant slug always starts with a letter (TENANT_SLUG_RE) — a plain `backups/` prefix
+ * would be reachable by a tenant slugged "backups".
+ */
+const AMENDMENTS_BACKUP_PREFIX = '_backups/fixture-amendments';
+
+async function planFixtureAmendmentsUpload(c: Context<HonoEnv>, slug: string) {
+  const config = await repo.getTenantConfig(slug);
+  if (!config) throw new HttpError(404, 'tenant not found');
+  const body = (await c.req.json().catch(() => null)) as {
+    filename?: unknown;
+    dataBase64?: unknown;
+    planHash?: unknown;
+    skipRowIds?: unknown;
+    relocateDraftClashes?: unknown;
+  } | null;
+  const filename = typeof body?.filename === 'string' ? body.filename : '';
+  const dataBase64 = typeof body?.dataBase64 === 'string' ? body.dataBase64 : '';
+  if (!dataBase64) throw new HttpError(400, 'dataBase64 is required');
+  if (dataBase64.length > AMENDMENTS_MAX_BASE64_LENGTH)
+    throw new HttpError(413, 'the workbook is larger than 2 MB');
+  if (filename && !/\.xlsx$/i.test(filename))
+    throw new HttpError(400, 'upload the reminder fixtures sheet as an Excel .xlsx file');
+  const skipRaw = body?.skipRowIds ?? [];
+  if (
+    !Array.isArray(skipRaw) ||
+    skipRaw.length > 1000 ||
+    skipRaw.some((x) => typeof x !== 'string' || x.length > 200)
+  )
+    throw new HttpError(400, 'skipRowIds must be a list of row ids');
+  const relocate = body?.relocateDraftClashes ?? false;
+  if (typeof relocate !== 'boolean')
+    throw new HttpError(400, 'relocateDraftClashes must be true or false');
+  const buffer = Buffer.from(dataBase64, 'base64');
+  // Every .xlsx is a zip: anything else (an old .xls, a CSV renamed) is refused unread.
+  if (buffer.length < 4 || buffer.readUInt32LE(0) !== 0x04034b50)
+    throw new HttpError(400, 'that file is not an Excel .xlsx workbook');
+  const rf = await import('./reminder-fixtures.js');
+  const wb = new ExcelJS.Workbook();
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await wb.xlsx.load(buffer as any);
+  } catch {
+    throw new HttpError(400, 'unable to read the workbook — check the file is a valid .xlsx');
+  }
+  const parsed = await rf.parseReminderWorkbook(wb);
+  if (!parsed.rows.length)
+    throw new HttpError(400, 'no fixture rows were recognised in the workbook', {
+      code: 'no_rows',
+      sheets: parsed.sheets,
+    });
+  const [series, clubs, venues, results, officials] = await Promise.all([
+    repo.listSeries(slug),
+    repo.listClubs(slug),
+    repo.listVenues(slug),
+    repo.listFixtureResults(slug),
+    repo.listFixtureOfficials(slug),
+  ]);
+  const aliases = venueAliasesFor(config);
+  const rp = rf.planReminderAmendments({
+    parsed,
+    series,
+    clubs,
+    venues,
+    aliases,
+    playedRefs: new Set(
+      results.filter((r) => !r.cleared).map((r) => `${r.seriesId}#${r.fixtureId}`),
+    ),
+    skipRowIds: skipRaw as string[],
+    relocateDraftClashes: relocate,
+    venueReason: 'Union reminder fixtures upload',
+    gateMode: 'introduced',
+  });
+  const preview = rf.reminderPreview(rp, series, clubs);
+  // Umpire appointments on every fixture the plan touches, so they get re-checked.
+  const touched = new Set(rp.plan.diffs.map((d) => `${d.seriesId}#${d.fixtureId}`));
+  preview.officials = officials
+    .filter((o) => touched.has(`${o.seriesId}#${o.fixtureId}`))
+    .map((o) => ({
+      seriesId: o.seriesId,
+      fixtureId: o.fixtureId,
+      umpires: (o.umpires ?? []).map((u) => u.name),
+      ...(o.referee ? { referee: o.referee.name } : {}),
+    }));
+  return { rf, config, filename, series, clubs, aliases, rp, preview, planHash: body?.planHash };
+}
+
+app.post('/platform/tenants/:slug/fixture-amendments/preview', async (c) => {
+  const { preview } = await planFixtureAmendmentsUpload(c, c.req.param('slug'));
+  return c.json(preview);
+});
+
+app.post('/platform/tenants/:slug/fixture-amendments/confirm', async (c) => {
+  const slug = c.req.param('slug');
+  const auth = c.get('auth');
+  const { rf, config, filename, series, clubs, aliases, rp, preview, planHash } =
+    await planFixtureAmendmentsUpload(c, slug);
+  if (typeof planHash !== 'string' || planHash !== rp.planHash)
+    throw new HttpError(
+      409,
+      'The fixtures changed since your preview. Check the updated preview, then confirm again.',
+      { code: 'plan_changed', preview },
+    );
+  if (rp.gateVerdict.introduced.length)
+    throw new HttpError(
+      409,
+      `Blocked — the amendments would introduce ${preview.gate.introduced.length} venue clash(es). Untick the rows involved${
+        // Relocation only moves drafts: offer it only when a draft holds a blocking ground.
+        preview.gate.introduced.some((x) => x.holderDraft) ? ' (or turn on draft relocation)' : ''
+      } and preview again.`,
+      { code: 'clash_gate', details: preview.gate },
+    );
+  if (!rp.gateVerdict.ok)
+    throw new HttpError(409, `The plan cannot be applied: ${rp.gateVerdict.errors[0]}`, {
+      code: 'plan_errors',
+      errors: rp.gateVerdict.errors,
+    });
+  if (!rp.plan.diffs.length)
+    throw new HttpError(400, 'nothing to apply — every row is already correct or skipped', {
+      code: 'nothing_to_apply',
+    });
+
+  // Pre-write backup of every touched series as read. A failed backup aborts the write.
+  const at = now();
+  const byId = new Map(series.map((s) => [String(s.id), s]));
+  const backupKey = `${AMENDMENTS_BACKUP_PREFIX}/${slug}/${at.replace(/[:.]/g, '-')}.json`;
+  const backup = JSON.stringify({
+    tenant: slug,
+    at,
+    by: auth?.email ?? 'unknown',
+    filename,
+    planHash: rp.planHash,
+    series: rp.plan.touchedSeriesIds.map((id) => byId.get(id)),
+  });
+  if (isLocalUploadsMode()) {
+    const filePath = path.join(process.env.LOCAL_UPLOADS_DIR!, backupKey);
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, backup);
+  } else {
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: UPLOADS_BUCKET,
+        Key: backupKey,
+        Body: backup,
+        ContentType: 'application/json',
+      }),
+    );
+  }
+
+  const out = await rf.writeReminderPlan(repo, slug, series, rp, clubs, aliases, {
+    origin: 'operator-upload',
+  });
+  const written = new Set(out.results.filter((r) => r.status === 'written').map((r) => r.seriesId));
+  return c.json({
+    backupKey,
+    // Sheet amendments only; draft relocations are reported solely as draftMoves.
+    fixturesAmended: rp.plan.diffs.filter((d) => d.kind === 'patch' && written.has(d.seriesId))
+      .length,
+    draftMoves: rp.plan.moves.filter((m) => written.has(m.seriesId)).length,
+    series: out.results,
+    splitSlotRisks: out.splitSlotRisks,
+    medicoachSync: hasFeature(config, 'medicoachSync'),
+    clubsNotified: false,
+  });
 });
 
 /**

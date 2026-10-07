@@ -1484,10 +1484,17 @@ describe('the venue-reason marker in the fixture table', () => {
   it('shows no pill for a routine allocated/Union-T20 ground', () => {
     const reason = 'Union T20 schedule — exact venue';
     setup(moved({ venueReason: reason }));
-    // The reason still reads in the suburb line, but no compact pill (no titled marker).
+    // The reason still reads as a note under the venue, but no compact pill (no titled marker).
     expect(screen.queryByTitle(reason)).toBeNull();
     expect(screen.queryByText('moved')).toBeNull();
     expect(screen.queryByText('directive')).toBeNull();
+  });
+
+  it('keeps the suburb line and shows the reason as a separate note, never in its place', () => {
+    const reason = 'Union reminder fixtures upload';
+    setup(moved({ venueReason: reason }));
+    expect(document.querySelector('.fix-row-venue-suburb')).toHaveTextContent('Mount Edgecombe');
+    expect(document.querySelector('.fix-row-venue-note')).toHaveTextContent(reason);
   });
 
   it('shows no pill when the fixture is on its home ground', () => {

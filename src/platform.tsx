@@ -36,6 +36,7 @@ import { RequiredDocsCard } from './platform-required-docs';
 import { FixtureRemindersCard } from './platform-fixture-reminders';
 import { TransferWindowCard } from './platform-transfer-windows';
 import { DocIntakeWizard } from './platform-intake';
+import { FixtureAmendmentsPage } from './platform-fixture-amendments';
 import { StructureIntakeWizard } from './platform-structure-intake';
 import { RosterIntakeWizard } from './platform-roster-intake';
 import { RepsPage } from './platform-reps';
@@ -501,6 +502,10 @@ export function PlatformPortal({
                 element={<DocIntakeWizard toast={toastShow} />}
               />
               <Route
+                path="/platform/tenants/:slug/fixture-amendments"
+                element={<FixtureAmendmentsPage toast={toastShow} />}
+              />
+              <Route
                 path="/platform/tenants/:slug/structure-intake"
                 element={<StructureIntakeWizard toast={toastShow} />}
               />
@@ -874,6 +879,20 @@ function TenantEditPage({ toast }: { toast: Toast }) {
           <RequiredDocsCard key={`rd-${config.tenant}`} config={config} save={save} toast={toast} />
         </div>
         <OnboardingCard slug={slug} config={config} navigate={navigate} />
+        <Card
+          title="Fixture amendments"
+          sub="Upload the union's weekly reminder fixtures sheet: preview every venue, time, date and postponement change, then apply it."
+          action={
+            <Btn
+              tone="outline"
+              size="sm"
+              icon={Icon.Upload}
+              onClick={() => navigate(`/platform/tenants/${slug}/fixture-amendments`)}
+            >
+              Upload sheet
+            </Btn>
+          }
+        />
         <ClubDirectoryCard
           key={`kc-${config.tenant}`}
           slug={slug}

@@ -33,6 +33,7 @@ import { isoDate, isoTime } from './import-planb-fixtures.js';
 import { letteredTeamId, stripLetterSuffix } from './club-name-resolve.js';
 import { groundKey, normaliseName } from './venue-clash.js';
 import type { Club, Venue } from './types.js';
+import { cellText } from './xlsx-cells.js';
 
 export const EMCU_TENANT = 'dolphins';
 /** Every series this importer writes carries this id prefix (`--revert` scope). */
@@ -453,18 +454,8 @@ export interface ParsedEmcuWorkbook {
   warnings: string[];
 }
 
-export function cellText(v: unknown): string {
-  if (v == null || v instanceof Date) return '';
-  if (typeof v === 'object' && 'richText' in (v as object))
-    return (v as { richText: Array<{ text: string }> }).richText
-      .map((r) => r.text)
-      .join('')
-      .replace(/\s+/g, ' ')
-      .trim();
-  if (typeof v === 'object' && 'result' in (v as object))
-    return cellText((v as { result: unknown }).result);
-  return String(v).replace(/\s+/g, ' ').trim();
-}
+// Cell text lives in xlsx-cells.ts (shared with the reminder and umpire importers).
+export { cellText };
 
 /** A banner/section header's text → the section it opens, or null. */
 export function classifySectionHeader(text: string): SectionKind | null {

@@ -91,6 +91,8 @@ export interface ScheduleFixture {
   away?: string;
   status?: string;
   dateTbc?: boolean;
+  /** The date a rescheduled postponement left (ADR 0015); absent on an undated one. */
+  originalDate?: string;
   venueId?: string;
   venueName?: string;
   venueOverride?: string;
@@ -653,6 +655,21 @@ export function buildInboundFixture(
     next.status = 'scheduled';
     changed.push('status');
   }
+  // A postponement that lands on a new date is a RESCHEDULED one: stamp the date being left
+  // (only if absent — ADR 0015 `postponedFixture` semantics). An undated postponement's
+  // `dateTbc` needs no handling here: it mirrors `schedule.dateTbc` above, so a dated change
+  // already clears it. A fixture that LEAVES postponed drops `originalDate`, so a stale one
+  // never resurfaces on a later postponement.
+  if (statusFlag(ours) === 'postponed' && next.status !== 'postponed' && next.originalDate)
+    delete next.originalDate;
+  if (
+    next.status === 'postponed' &&
+    !next.originalDate &&
+    fixture.date &&
+    next.date &&
+    next.date !== fixture.date
+  )
+    next.originalDate = fixture.date;
   // Truncated to the contract's 200-character cap before it is resolved, on both sides of
   // the comparison (a ground named longer than that is what medicoach holds of it).
   const wanted = capVenue(schedule.venue)?.trim();

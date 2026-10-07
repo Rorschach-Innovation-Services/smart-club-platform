@@ -86,6 +86,21 @@ export interface PatchSet {
   /** Mark the date a placeholder (the fixture leaves every clash ledger; date is kept).
    * Only `true`, and only on a DRAFT series (released !== true). */
   dateTbc?: true;
+  /** Move the fixture to this date (YYYY-MM-DD). Alone it is a plain re-date; with
+   * `postponed` it is a rescheduled postponement (see below). The gate re-checks the new day. */
+  date?: string;
+  /**
+   * Postpone the fixture (`status: 'postponed'`), in one of two shapes:
+   *  - with `date`: the ADR 0015 `postponedFixture` shape — new date, `status: 'postponed'`,
+   *    `originalDate` kept from a first postponement or set to the date it leaves. It keeps
+   *    booking its NEW slot, so the gate sees it there.
+   *  - without `date`: an UNDATED postponement — `status: 'postponed'` + `dateTbc: true`,
+   *    date untouched (it stays the date the match left). The existing `dateTbc` exemption
+   *    (`isClashExempt`) takes it out of every ground ledger until it gets a new date. This
+   *    combination is allowed on a released series (a bare `set.dateTbc` is not).
+   * Only `true`.
+   */
+  postponed?: true;
 }
 
 export interface PatchEntry {
@@ -118,6 +133,7 @@ interface StoredFixture {
   away?: string;
   status?: string;
   dateTbc?: boolean;
+  originalDate?: string;
   venueId?: string;
   venueName?: string;
   venueOverride?: string;
@@ -160,14 +176,32 @@ export interface DraftMove {
   registryMiss: boolean;
 }
 
+/** A gate clash plus the series of its subject fixture (`Clash` names only the other side's). */
+export type GateClash = Clash & { subjectSeriesId: string };
+
 export interface PatchGate {
   /** Unique clashes in the would-be tenant, by clashKey. */
   totalAfter: number;
-  introduced: Clash[];
+  introduced: GateClash[];
   /** Clashes on the manifest dates where either side is a released fixture. */
-  weekendReleased: Clash[];
+  weekendReleased: GateClash[];
   /** Clashes on the manifest dates between two drafts — reported, not fatal. */
-  weekendDraftOnly: Clash[];
+  weekendDraftOnly: GateClash[];
+}
+
+/**
+ * How the gate decides. `strict` (the CLI default): refuse any introduced clash AND any clash
+ * on the manifest dates involving a released fixture (and any residual draft-vs-released
+ * slot after relocation). `introduced` (the operator upload): refuse only clashes the plan
+ * INTRODUCES (the in-season subset rule); pre-existing ones are reported, not fatal. Neither
+ * mode has a bypass for an introduced clash.
+ */
+export type PatchGateMode = 'strict' | 'introduced';
+
+export interface PlanFixturePatchesOptions {
+  gateMode?: PatchGateMode;
+  /** Extra dates the gate reports pre-existing clashes for (e.g. every date on a sheet). */
+  reportDates?: string[];
 }
 
 export interface PatchPlan {
@@ -184,6 +218,13 @@ export interface PatchPlan {
 // ─────────────────────────────── helpers ───────────────────────────────
 
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/** A real calendar date in YYYY-MM-DD. */
+const isIsoDate = (v: unknown): v is string => {
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const d = new Date(`${v}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
+};
 
 const effectiveVenueText = (f: StoredFixture): string =>
   (f.venueOverride ?? '').trim() || (f.venueName ?? '').trim();
@@ -357,7 +398,9 @@ export function planFixturePatches(
   venues: Venue[],
   manifest: PatchManifest,
   aliases: Record<string, string> = DEFAULT_VENUE_ALIASES,
+  opts: PlanFixturePatchesOptions = {},
 ): PatchPlan {
+  const gateMode: PatchGateMode = opts.gateMode ?? 'strict';
   const errors: string[] = [];
   const clubsById = new Map(clubs.map((c) => [c.id, c]));
   const venuesById = new Map(venues.map((v) => [v.id, v]));
@@ -412,7 +455,7 @@ export function planFixturePatches(
     }
     const set = e.set ?? {};
     const unknownKeys = Object.keys(set).filter(
-      (k) => !['home', 'time', 'venueId', 'dateTbc'].includes(k),
+      (k) => !['home', 'time', 'venueId', 'dateTbc', 'date', 'postponed'].includes(k),
     );
     if (unknownKeys.length) {
       errors.push(`${ref}: unsupported set field(s) ${unknownKeys.join(', ')}`);
@@ -422,7 +465,9 @@ export function planFixturePatches(
       set.home === undefined &&
       set.time === undefined &&
       set.venueId === undefined &&
-      set.dateTbc === undefined
+      set.dateTbc === undefined &&
+      set.date === undefined &&
+      set.postponed === undefined
     ) {
       errors.push(`${ref}: entry sets nothing`);
       continue;
@@ -436,6 +481,24 @@ export function planFixturePatches(
         errors.push(
           `${ref}: set.dateTbc is only allowed on a draft series — ${e.seriesId} is released`,
         );
+        continue;
+      }
+    }
+    if (set.postponed !== undefined && set.postponed !== true) {
+      errors.push(`${ref}: set.postponed must be true`);
+      continue;
+    }
+    if (set.date !== undefined) {
+      if (!isIsoDate(set.date)) {
+        errors.push(`${ref}: set.date "${set.date}" is not a YYYY-MM-DD date`);
+        continue;
+      }
+      if (set.date === of.date) {
+        errors.push(`${ref}: set.date "${set.date}" is the fixture's current date`);
+        continue;
+      }
+      if (set.dateTbc !== undefined) {
+        errors.push(`${ref}: set.date and set.dateTbc cannot be combined`);
         continue;
       }
     }
@@ -465,6 +528,19 @@ export function planFixturePatches(
     const f = findFixture(s, e.fixtureId)!;
     if (set.home !== undefined) f.home = set.home;
     if (set.time !== undefined) f.time = set.time;
+    if (set.postponed === true) f.status = 'postponed';
+    if (set.date !== undefined) {
+      f.date = set.date;
+      if (f.status === 'postponed') {
+        // A rescheduled postponement keeps pointing at its FIRST schedule (postponedFixture),
+        // and a TBC postponement that gains a date books its new slot again.
+        f.originalDate = of.originalDate ?? of.date;
+        if (of.status === 'postponed') delete f.dateTbc;
+      }
+    } else if (set.postponed === true) {
+      // Undated postponement: the date stays, the dateTbc exemption drops it from every ledger.
+      f.dateTbc = true;
+    }
     // A TBC date is clash-exempt (isClashExempt), so mover detection and the gate below
     // no longer see this fixture. Its date value is left as it was.
     if (set.dateTbc === true) f.dateTbc = true;
@@ -610,23 +686,29 @@ export function planFixturePatches(
   );
   const after = uniqueClashes(next, clubs, venues, aliases);
   const releasedIds = new Set(next.filter((s) => s.released === true).map((s) => String(s.id)));
-  const introduced = after
-    .filter((u) => !before.has(clashKey(u.clash, aliases)))
-    .map((u) => u.clash);
-  const gateDates = dates.size ? dates : new Set(entries.map((e) => e.expect?.date));
+  const gateClash = (u: { clash: Clash; subjectSeriesId: string }): GateClash => ({
+    ...u.clash,
+    subjectSeriesId: u.subjectSeriesId,
+  });
+  const introduced = after.filter((u) => !before.has(clashKey(u.clash, aliases))).map(gateClash);
+  const gateDates = new Set<string | undefined>(
+    dates.size ? dates : entries.map((e) => e.expect?.date),
+  );
+  for (const e of entries) if (e.set?.date) gateDates.add(e.set.date);
+  for (const d of opts.reportDates ?? []) gateDates.add(d);
   const onDates = after.filter((u) => gateDates.has(u.clash.date));
   const involvesReleased = (u: { clash: Clash; subjectSeriesId: string }) =>
     releasedIds.has(u.subjectSeriesId) || releasedIds.has(u.clash.with.seriesId);
-  const weekendReleased = onDates.filter(involvesReleased).map((u) => u.clash);
-  const weekendDraftOnly = onDates.filter((u) => !involvesReleased(u)).map((u) => u.clash);
+  const weekendReleased = onDates.filter(involvesReleased).map(gateClash);
+  const weekendDraftOnly = onDates.filter((u) => !involvesReleased(u)).map(gateClash);
   if (introduced.length)
     errors.push(`gate: the change would introduce ${introduced.length} new venue clash(es)`);
-  if (weekendReleased.length)
+  if (gateMode === 'strict' && weekendReleased.length)
     errors.push(
       `gate: ${weekendReleased.length} clash(es) on the manifest dates involve a released fixture`,
     );
   // Belt and braces: findClashes names only the first booking of a slot, so re-check directly.
-  if (dates.size) {
+  if (gateMode === 'strict' && dates.size) {
     const residual = draftReleasedConflicts(buildBookings(next, clubsById), dates, resolve);
     for (const r of residual)
       errors.push(
