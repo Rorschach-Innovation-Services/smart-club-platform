@@ -141,7 +141,19 @@ async function seedFixture(request: APIRequestContext) {
         { teamId: HOME, clubId: HOME, name: 'Clares' },
         { teamId: AWAY, clubId: AWAY, name: 'Chatsworth' },
       ],
-      fixtures: [{ id: 'f1', round: 1, date: MATCH_DATE, time: '09:00', home: HOME, away: AWAY }],
+      // A RUN-unique custom ground (fixtures-helpers.ts convention): a re-run against a
+      // reused stack would otherwise clash with the previous run's fixture at Clares' ground.
+      fixtures: [
+        {
+          id: 'f1',
+          round: 1,
+          date: MATCH_DATE,
+          time: '09:00',
+          home: HOME,
+          away: AWAY,
+          venueOverride: `E2E Scorecard ground ${RUN}`,
+        },
+      ],
     },
   });
   expect(create.ok(), `POST /series → ${create.status()} ${await create.text()}`).toBeTruthy();
