@@ -8151,6 +8151,24 @@ export class PlayerErasureBlockedError extends Error {
 /** What a scrubbed name (captain's report, scorecard, digest feedback) reads after erasure. */
 export const ERASED_NAME = '[removed]';
 
+/**
+ * Player erasure could not scrub a cached scorecard (FIXSCORECARD#) or a digest's feedback
+ * (SCORECONF#) because the row kept changing underneath it (3 contested conditional writes in a
+ * row). Thrown BEFORE anything destructive has run, so the erasure is aborted with every row and
+ * artifact intact and can simply be retried.
+ */
+export class ScorecardScrubContentionError extends Error {
+  readonly code = 'SCORECARD_SCRUB_CONTENTION';
+  constructor(readonly target: 'scorecard' | 'feedback') {
+    super(
+      target === 'scorecard'
+        ? 'a match scorecard changed during erasure — try again'
+        : 'a scorecard confirmation changed during erasure — try again',
+    );
+    this.name = 'ScorecardScrubContentionError';
+  }
+}
+
 const normName = (s: string | undefined | null) =>
   (s ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
 const normEmail = (s: string | undefined | null) => (s ?? '').trim().toLowerCase();
@@ -8213,10 +8231,16 @@ function scrubScorecardNames(
  * {@link PlayerErasureBlockedError} BEFORE anything is touched. Returns null when nothing in any
  * category exists (a clean 404 — and the re-run of a completed erasure).
  *
- * Ordering is the re-runnable invariant: S3 first (object keys are only derivable while the
- * rows naming them exist), then the clearance/review/request rows, then the report scrub, and
- * the PLAYER# rows LAST — while any of them survives, a re-run finds the person again and
- * finishes the job. The PII-free audit row (actor + counts) is written once everything landed.
+ * Ordering is the re-runnable invariant: the scorecard + digest-feedback scrubs run FIRST, while
+ * every row naming the person (and so every spelling of their name) is still intact; then S3
+ * (object keys are only derivable while the rows naming them exist), then the clearance/review/
+ * request rows, then the captain's-report scrub, and the PLAYER# rows LAST — while any of them
+ * survives, a re-run finds the person again and finishes the job. A scorecard or digest that
+ * keeps changing underneath its scrub (3 contested writes) throws
+ * {@link ScorecardScrubContentionError} — never a silent skip that the audit counts would hide —
+ * and because nothing destructive has run yet, the erasure aborts intact and a retry has full
+ * name fidelity (including a person with no PLAYER# rows). The PII-free audit row (actor +
+ * counts) is written once everything landed.
  */
 export async function erasePlayerData(
   tenant: string,
@@ -8296,6 +8320,125 @@ export async function erasePlayerData(
   emails.delete('');
   cells.delete('');
 
+  // ── Scorecard scrubs FIRST, before anything destructive ──
+  // Every row naming the person is still intact here, so the name set is complete; a contention
+  // throw below aborts the erasure with nothing deleted (safe to retry).
+  const nameHit = (s: string | undefined) => !!s && names.has(normName(s));
+
+  // ── Cached medicoach scorecards: scrub batter / bowler / fall-of-wicket names ──
+  // A modified card is also marked `terminal` so the sweep never re-fetches it (and with it the
+  // name) from medicoach. Conditional on the card not having been replaced meanwhile; a
+  // replaced card is re-read and scrubbed afresh.
+  let scorecardsScrubbed = 0;
+  for (const listed of await listFixtureScorecards(tenant)) {
+    let card: StoredFixtureScorecard | null = listed;
+    let settled = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const scrubbed = card && scrubScorecardNames(card, nameHit);
+      if (!card || !scrubbed) {
+        settled = true; // deleted meanwhile, or nothing (left) to scrub
+        break;
+      }
+      try {
+        await ddb.send(
+          new PutCommand({
+            TableName: TABLE,
+            Item: {
+              ...scrubbed,
+              terminal: true,
+              ...fixtureScorecardKey(tenant, card.seriesId, card.fixtureId),
+            },
+            ConditionExpression: 'fetchedAt = :f',
+            ExpressionAttributeValues: { ':f': card.fetchedAt },
+          }),
+        );
+        scorecardsScrubbed++;
+        settled = true;
+        break;
+      } catch (err: unknown) {
+        if (!isCcf(err)) throw err;
+        card = await getFixtureScorecard(tenant, card.seriesId, card.fixtureId);
+      }
+    }
+    // Out of retries: only a card that STILL names the person is a failure.
+    if (!settled && card && scrubScorecardNames(card, nameHit)) {
+      throw new ScorecardScrubContentionError('scorecard');
+    }
+  }
+
+  // ── Scorecard digest feedback: the chair's free text may name the person ──
+  const namePatterns = [...names].map(
+    (n) =>
+      new RegExp(
+        `(?<![\\p{L}\\p{N}])${n
+          .split(' ')
+          .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+          .join('\\s+')}(?![\\p{L}\\p{N}])`,
+        'giu',
+      ),
+  );
+  const scrubText = (s: string) => namePatterns.reduce((t, re) => t.replace(re, ERASED_NAME), s);
+  let feedbackScrubbed = 0;
+  for (const listed of await listScorecardConfirmations(tenant)) {
+    // Conditional on each scrubbed feedback being unchanged; a digest changed meanwhile (an
+    // entry re-answered after a clear) is re-read and scrubbed afresh.
+    let d: ScorecardConfirmation | null = listed;
+    let settled = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (!d) {
+        settled = true; // deleted meanwhile
+        break;
+      }
+      const sets: string[] = [];
+      const conds: string[] = [];
+      const attrNames: Record<string, string> = {};
+      const values: Record<string, unknown> = {};
+      for (const [k, e] of Object.entries(d.entries ?? {})) {
+        if (!e.feedback) continue;
+        const next = scrubText(e.feedback);
+        if (next === e.feedback) continue;
+        const i = sets.length;
+        attrNames[`#k${i}`] = k;
+        values[`:fb${i}`] = next;
+        values[`:old${i}`] = e.feedback;
+        sets.push(`entries.#k${i}.feedback = :fb${i}`);
+        conds.push(`entries.#k${i}.feedback = :old${i}`);
+      }
+      if (!sets.length) {
+        settled = true; // nothing (left) to scrub
+        break;
+      }
+      try {
+        await ddb.send(
+          new UpdateCommand({
+            TableName: TABLE,
+            Key: scorecardConfirmKey(tenant, d.weekKey, d.clubId),
+            UpdateExpression: `SET ${sets.join(', ')}, updatedAt = :now`,
+            ConditionExpression: conds.join(' AND '),
+            ExpressionAttributeNames: attrNames,
+            ExpressionAttributeValues: { ...values, ':now': at },
+          }),
+        );
+        feedbackScrubbed += sets.length;
+        settled = true;
+        break;
+      } catch (err: unknown) {
+        if (!isCcf(err)) throw err;
+        d = await getScorecardConfirmation(tenant, d.weekKey, d.clubId);
+      }
+    }
+    // Out of retries: only a digest whose feedback STILL names the person is a failure.
+    if (
+      !settled &&
+      d &&
+      Object.values(d.entries ?? {}).some(
+        (e) => !!e.feedback && scrubText(e.feedback) !== e.feedback,
+      )
+    ) {
+      throw new ScorecardScrubContentionError('feedback');
+    }
+  }
+
   // Row docs are purged by deletePlayer itself; counted here so the total is truthful.
   const rowDocs = rows.flatMap((p) =>
     [p.idDocMeta?.objectKey, p.previousIdDocMeta?.objectKey].filter((k): k is string => !!k),
@@ -8311,7 +8454,6 @@ export async function erasePlayerData(
   if (unique.length) await batchDelete(unique);
 
   // ── Captain's reports: scrub mentions in place ──
-  const nameHit = (s: string | undefined) => !!s && names.has(normName(s));
   let captainsReportsScrubbed = 0;
   for (const r of await listCaptainsReports(tenant)) {
     const contact = r.recipientContact;
@@ -8352,92 +8494,6 @@ export async function erasePlayerData(
       captainsReportsScrubbed++;
     } catch (err: unknown) {
       if (!isCcf(err)) throw err; // deleted concurrently — nothing left to scrub
-    }
-  }
-
-  // ── Cached medicoach scorecards: scrub batter / bowler / fall-of-wicket names ──
-  // A modified card is also marked `terminal` so the sweep never re-fetches it (and with it the
-  // name) from medicoach. Conditional on the card not having been replaced meanwhile; a
-  // replaced card is re-read and scrubbed afresh.
-  let scorecardsScrubbed = 0;
-  for (const listed of await listFixtureScorecards(tenant)) {
-    let card: StoredFixtureScorecard | null = listed;
-    for (let attempt = 0; card && attempt < 3; attempt++) {
-      const scrubbed = scrubScorecardNames(card, nameHit);
-      if (!scrubbed) break;
-      try {
-        await ddb.send(
-          new PutCommand({
-            TableName: TABLE,
-            Item: {
-              ...scrubbed,
-              terminal: true,
-              ...fixtureScorecardKey(tenant, card.seriesId, card.fixtureId),
-            },
-            ConditionExpression: 'fetchedAt = :f',
-            ExpressionAttributeValues: { ':f': card.fetchedAt },
-          }),
-        );
-        scorecardsScrubbed++;
-        break;
-      } catch (err: unknown) {
-        if (!isCcf(err)) throw err;
-        card = await getFixtureScorecard(tenant, card.seriesId, card.fixtureId);
-      }
-    }
-  }
-
-  // ── Scorecard digest feedback: the chair's free text may name the person ──
-  const namePatterns = [...names].map(
-    (n) =>
-      new RegExp(
-        `(?<![\\p{L}\\p{N}])${n
-          .split(' ')
-          .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-          .join('\\s+')}(?![\\p{L}\\p{N}])`,
-        'giu',
-      ),
-  );
-  const scrubText = (s: string) => namePatterns.reduce((t, re) => t.replace(re, ERASED_NAME), s);
-  let feedbackScrubbed = 0;
-  for (const listed of await listScorecardConfirmations(tenant)) {
-    // Conditional on each scrubbed feedback being unchanged; a digest changed meanwhile (an
-    // entry re-answered after a clear) is re-read and scrubbed afresh.
-    let d: ScorecardConfirmation | null = listed;
-    for (let attempt = 0; d && attempt < 3; attempt++) {
-      const sets: string[] = [];
-      const conds: string[] = [];
-      const attrNames: Record<string, string> = {};
-      const values: Record<string, unknown> = {};
-      for (const [k, e] of Object.entries(d.entries ?? {})) {
-        if (!e.feedback) continue;
-        const next = scrubText(e.feedback);
-        if (next === e.feedback) continue;
-        const i = sets.length;
-        attrNames[`#k${i}`] = k;
-        values[`:fb${i}`] = next;
-        values[`:old${i}`] = e.feedback;
-        sets.push(`entries.#k${i}.feedback = :fb${i}`);
-        conds.push(`entries.#k${i}.feedback = :old${i}`);
-      }
-      if (!sets.length) break;
-      try {
-        await ddb.send(
-          new UpdateCommand({
-            TableName: TABLE,
-            Key: scorecardConfirmKey(tenant, d.weekKey, d.clubId),
-            UpdateExpression: `SET ${sets.join(', ')}, updatedAt = :now`,
-            ConditionExpression: conds.join(' AND '),
-            ExpressionAttributeNames: attrNames,
-            ExpressionAttributeValues: { ...values, ':now': at },
-          }),
-        );
-        feedbackScrubbed += sets.length;
-        break;
-      } catch (err: unknown) {
-        if (!isCcf(err)) throw err;
-        d = await getScorecardConfirmation(tenant, d.weekKey, d.clubId);
-      }
     }
   }
 

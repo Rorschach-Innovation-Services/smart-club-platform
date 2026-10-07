@@ -348,10 +348,32 @@ describe('scorecard contract', () => {
     assert.equal(ChangesResponseSchema.safeParse(empty).success, true);
   });
 
-  test('scorecard path: match id encoded, tournamentId always in the query', () => {
+  test('scorecard path: match id encoded, tournamentId then tenant always in the query', () => {
     assert.equal(
-      scorecardPathAndQuery('pma 1/2', 'tour-9'),
-      '/integrations/smartclub/matches/pma%201%2F2/scorecard?tournamentId=tour-9',
+      scorecardPathAndQuery('pma 1/2', 'tour-9', 'dolphins'),
+      '/integrations/smartclub/matches/pma%201%2F2/scorecard?tournamentId=tour-9&tenant=dolphins',
     );
+    // Values are URL-encoded; the order never changes (it is part of the signed string).
+    assert.equal(
+      scorecardPathAndQuery('pma-1', 'tour 9&x', 'a b'),
+      '/integrations/smartclub/matches/pma-1/scorecard?tournamentId=tour+9%26x&tenant=a+b',
+    );
+  });
+
+  test('scorecard path signs and verifies with the tenant in the signed query', () => {
+    const pathAndQuery = scorecardPathAndQuery('pma-1', 'tour-9', 'dolphins');
+    const headers = signRequest({ secret: 's3cret', method: 'GET', pathAndQuery });
+    const verify = (pq: string) =>
+      verifySignature({
+        secret: 's3cret',
+        method: 'GET',
+        pathAndQuery: pq,
+        body: '',
+        timestampHeader: headers['X-Sync-Timestamp'],
+        signatureHeader: headers['X-Sync-Signature'],
+      }).ok;
+    assert.equal(verify(pathAndQuery), true);
+    // Swapping the tenant breaks the signature.
+    assert.equal(verify(pathAndQuery.replace('tenant=dolphins', 'tenant=titans')), false);
   });
 });

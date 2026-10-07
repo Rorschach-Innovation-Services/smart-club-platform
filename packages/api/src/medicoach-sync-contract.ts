@@ -27,7 +27,7 @@ export const SYNC_SIGNATURE_HEADER = 'X-Sync-Signature';
 
 export const CHANGES_PATH = '/integrations/smartclub/changes';
 export const SCHEDULE_PATH = '/integrations/smartclub/schedule';
-/** `GET ${MATCHES_PATH}/:matchId/scorecard?tournamentId=` — see `scorecardPathAndQuery`. */
+/** `GET ${MATCHES_PATH}/:matchId/scorecard?tournamentId=&tenant=` — see `scorecardPathAndQuery`. */
 export const MATCHES_PATH = '/integrations/smartclub/matches';
 
 /** Page size bounds for the changes endpoint. */
@@ -257,10 +257,19 @@ export function changesPathAndQuery(tenant: string, since?: string, limit?: numb
 
 /**
  * The exact path + query the scorecard fetch sends (and signs) for one medicoach match.
- * `tournamentId` is required (medicoach resolves a match within its tournament).
+ * `tournamentId` and `tenant` are both required (medicoach resolves a match within its
+ * tournament, among that tenant's synced fixtures only). Param order is fixed — tournamentId
+ * then tenant — so the signed string is deterministic.
  */
-export function scorecardPathAndQuery(matchId: string, tournamentId: string): string {
-  const q = new URLSearchParams({ tournamentId });
+export function scorecardPathAndQuery(
+  matchId: string,
+  tournamentId: string,
+  tenant: string,
+): string {
+  const q = new URLSearchParams([
+    ['tournamentId', tournamentId],
+    ['tenant', tenant],
+  ]);
   return `${MATCHES_PATH}/${encodeURIComponent(matchId)}/scorecard?${q.toString()}`;
 }
 

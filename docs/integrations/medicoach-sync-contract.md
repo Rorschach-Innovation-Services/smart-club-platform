@@ -119,17 +119,31 @@ Response 200:
 Medicoach rules: apply only if `changedAt` > the fixture's `scheduleChangedAt`; applying sets `scheduleChangedAt = changedAt`
 (so the next pull does NOT bounce it back as newer) and stamps `syncStamp`. Never soft-delete — `cancelled` is a flag.
 A `changedAt` more than 5 minutes ahead of medicoach's clock is refused with `error` (fix the sender's clock).
+Gap fill (the one exception to most-recent-wins): when a change is stale BUT medicoach's stored venue is
+null/empty AND the incoming venue is non-empty, medicoach writes ONLY the venue (same compare-and-set as an
+applied change), sets `scheduleChangedAt` strictly after the stored value, stamps `syncStamp`, and answers
+`applied` with message `venue filled`. Every other field medicoach holds stands, and a non-empty medicoach
+venue is never overwritten this way. Typical case: smart club withheld the venue, medicoach edited the time,
+then smart club revealed the venue — the reveal is stale, but the venue still lands. The next pull returns
+medicoach's whole schedule (its time plus the filled venue) with a `changedAt` newer than smart club's.
 Every applied change is audited in medicoach under the `smartclub-sync` principal.
 `stale`/`unchanged`/`unmapped` are success outcomes for the caller (drop from outbox); `error` = retry later.
 
-## 3. GET /integrations/smartclub/matches/:matchId/scorecard?tournamentId=<id>
+## 3. GET /integrations/smartclub/matches/:matchId/scorecard?tournamentId=<id>&tenant=<t>
 - Same HMAC signing as §1 and §2; `pathAndQuery` is exactly
-  `/integrations/smartclub/matches/<matchId>/scorecard?tournamentId=<tournamentId>`.
+  `/integrations/smartclub/matches/<matchId>/scorecard?tournamentId=<tournamentId>&tenant=<tenant>`
+  (params in that order; the whole query string is signed, so `tenant` is covered by the signature).
 - `matchId` = a result's `medicoachMatchId`; `tournamentId` = its `medicoachTournamentId`. Both are
   `[A-Za-z0-9_-]{1,128}`. `tournamentId` is REQUIRED: medicoach finds the match through that
   competition's synced fixtures (a match has no index by id alone).
-- 400 when `tournamentId` is missing or malformed (or `matchId` is malformed). 404 when no SYNCED fixture
-  of that tournament (one with a smart club `ref`) is linked to that match, or the match was deleted.
+- `tenant` is REQUIRED, with the same meaning and format as §1's `tenant` (the smart club tenant slug,
+  `[a-z0-9][a-z0-9-]{0,62}`). Only fixtures whose `ref` belongs to that tenant are considered.
+- 400 `"<param> is required"` when `tournamentId` or `tenant` is missing or empty; 400
+  `"<param> is invalid"` when either is present but malformed; 400 `"matchId is invalid"` when `matchId`
+  is malformed.
+- 404 when no SYNCED fixture of that tournament (one with a smart club `ref`) OWNED BY THAT TENANT is
+  linked to that match, or the match was deleted. Another tenant's match is the same constant 404 as a
+  match that does not exist: nothing about it is revealed.
 - Scorecards are computed from the ball-by-ball record on every call (never stored); Time Cricket reads
   its paged ball log. Cricket only.
 

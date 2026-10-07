@@ -66,7 +66,7 @@ export async function fetchAndStoreScorecard(
   if (!deps.url || !deps.secret || !medicoachMatchId || !medicoachTournamentId) return 'skipped';
   const where = `${tenant}: scorecard for ${seriesId}/${fixtureId}`;
   try {
-    const pq = scorecardPathAndQuery(medicoachMatchId, medicoachTournamentId);
+    const pq = scorecardPathAndQuery(medicoachMatchId, medicoachTournamentId, tenant);
     const res = await (deps.fetch ?? fetch)(`${deps.url}${pq}`, {
       method: 'GET',
       headers: {

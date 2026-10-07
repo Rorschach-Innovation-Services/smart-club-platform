@@ -4,7 +4,8 @@
  * `/changes` pages and per-match scorecards. The puller, the scorecard fetch and the sweep run
  * for real against an in-process dynalite table (real repo).
  *
- * Covers: a pulled result fetches + stores its scorecard (signed, tournamentId in the query);
+ * Covers: a pulled result fetches + stores its scorecard (signed, tournamentId + tenant in the query —
+ * the stub rejects a missing or foreign tenant like medicoach does);
  * the ids persist on the result; 404 → terminal stub; available:false stored (terminal);
  * a network/5xx failure is swallowed and the sweep retries it; the sweep skips terminal
  * rows, import results, cleared results, results missing an id, and old results; it
@@ -38,7 +39,7 @@ let contract: typeof import('../src/medicoach-sync-contract.js');
 // ── Stub medicoach ──
 let stub: Server;
 let stubUrl = '';
-const requests: Array<{ pathAndQuery: string; verified: boolean }> = [];
+const requests: Array<{ pathAndQuery: string; verified: boolean; tenant?: string | null }> = [];
 let pages: unknown[] = [];
 /** matchId → [status, body]; a missing match answers 404. */
 let cards: Record<string, [number, unknown]> = {};
@@ -63,6 +64,17 @@ function startStub(): Promise<void> {
     }
     const m = pathAndQuery.match(/^\/integrations\/smartclub\/matches\/([^/]+)\/scorecard\?/);
     if (m) {
+      // Mirror medicoach's tenant binding: required, and only this tenant's fixtures resolve.
+      const tenant = new URL(pathAndQuery, 'http://stub').searchParams.get('tenant');
+      requests[requests.length - 1].tenant = tenant;
+      if (!tenant) {
+        res.writeHead(400).end('{"error":"tenant is required"}');
+        return;
+      }
+      if (tenant !== T) {
+        res.writeHead(404).end('{"error":"Match not found"}');
+        return;
+      }
       if (dropScorecards) {
         req.socket.destroy();
         return;
@@ -281,9 +293,10 @@ describe('medicoach scorecard fetch', () => {
     const sc = scorecardRequests();
     assert.equal(sc.length, 1);
     assert.equal(sc[0].verified, true);
+    assert.equal(sc[0].tenant, T, 'the tenant param arrives');
     assert.equal(
       sc[0].pathAndQuery,
-      '/integrations/smartclub/matches/pma-1/scorecard?tournamentId=tour-9',
+      '/integrations/smartclub/matches/pma-1/scorecard?tournamentId=tour-9&tenant=dolphins',
     );
 
     const card = await repo.getFixtureScorecard(T, SERIES, 'f1');
@@ -472,7 +485,7 @@ describe('medicoach scorecard fetch', () => {
     assert.deepEqual(await sweep(), { candidates: 1, fetched: 1, failed: 0 });
     assert.deepEqual(
       scorecardRequests().map((r) => r.pathAndQuery),
-      ['/integrations/smartclub/matches/pma-f1/scorecard?tournamentId=tour-9'],
+      ['/integrations/smartclub/matches/pma-f1/scorecard?tournamentId=tour-9&tenant=dolphins'],
     );
   });
 

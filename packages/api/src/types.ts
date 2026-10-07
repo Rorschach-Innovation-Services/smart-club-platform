@@ -1318,8 +1318,8 @@ export interface StoredFixtureResult {
 /**
  * A medicoach scorecard for one fixture (FIXSCORECARD#), fetched by the sync after a result
  * is stored and re-fetched by the sweep while it may still change. Written by the sync
- * (medicoach-sync/scorecard-fetch.ts) and, to scrub names, by player erasure. Holds player names — personal data, erased with the
- * tenant / cohort / series like FIXRESULT#.
+ * (medicoach-sync/scorecard-fetch.ts) and, to scrub names, by player erasure. Holds player
+ * names — personal data, erased with the tenant / cohort / series like FIXRESULT#.
  *
  * `terminal: true` = this fixture can never have a scorecard (medicoach answered 404 or
  * `available: false`): the sweep stops retrying. A newly stored result still re-fetches.
