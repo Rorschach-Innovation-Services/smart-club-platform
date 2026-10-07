@@ -607,3 +607,24 @@ describe('the real union workbook (skipped when absent)', { skip: !existsSync(WO
     );
   });
 });
+
+describe('bad workbook inputs (E33)', () => {
+  test('a missing manifest sheet and an extra sheet are each fatal, by name', () => {
+    const wb = new ExcelJS.Workbook();
+    wb.addWorksheet('NOT A TITANS SHEET');
+    const { errors } = parseTitansWorkbook(wb, [TITANS_FIXTURE_SHEETS[1]]);
+    assert.ok(errors.includes('sheet "NOT A TITANS SHEET" is not in the manifest'));
+    assert.ok(errors.includes(`sheet "${TITANS_FIXTURE_SHEETS[1].sheet}" not found`));
+  });
+
+  test('an unknown team is unresolved (fatal in the gate); an unknown venue is a registry miss', () => {
+    const ws = sheetWith([
+      HEADER,
+      [dateCell(2026, 10, 24), 'NOBODY XI', 'TUKS 2', 'THE MOON OVAL'],
+    ]);
+    const p = parseTitansSheet(ws, specFor('SECOND', [1]));
+    const out = buildTitansSeries([p], [], []);
+    assert.ok(out.unresolvedNames.some((n) => n.includes('"NOBODY XI"')));
+    assert.equal(out.registryMisses.get('THE MOON OVAL'), 1);
+  });
+});

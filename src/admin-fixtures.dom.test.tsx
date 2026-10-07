@@ -658,6 +658,105 @@ describe('knockout Set team / revert (ADR 0018)', () => {
     await user.click(screen.getByRole('button', { name: /set home team/i }));
     expect(await screen.findByText(/change blocked — not saved/i)).toBeInTheDocument();
   });
+
+  // A club with two named sides, for the participant-series picker.
+  const rosterClub = {
+    id: 'ilembe',
+    name: 'Ilembe CC',
+    leagues: ['premier'],
+    leagueTeams: { premier: 2 },
+    teamRosters: {
+      premier: [
+        { id: 'tm_il_a', name: 'Ilembe A' },
+        { id: 'tm_il_b', name: 'Ilembe B' },
+      ],
+    },
+    ground: { venue: 'KwaDukuza Stadium' },
+  } as unknown as Club;
+
+  it('(13) a legacy series (no participants) offers one option per club — club ids only', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <FixtureTable
+        series={ko({ home: 'win:f1', away: 'tbd:Best%203rd%20place' })}
+        clubs={[...clubs.filter((c) => c.id !== 'ilembe'), rosterClub]}
+        onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
+        onDeleteSeries={vi.fn()}
+        onDuplicateSeries={vi.fn()}
+        onAskRelease={vi.fn()}
+        onAskRecall={vi.fn()}
+        onAskReveal={vi.fn()}
+        onApprove={vi.fn()}
+        onUnapprove={vi.fn()}
+        onAllocateVenues={vi.fn()}
+        onCheckClashes={vi.fn().mockResolvedValue({ results: [] })}
+        onSetSide={vi.fn().mockResolvedValue(undefined)}
+        toast={vi.fn()}
+      />,
+    );
+    await openKo(user, /best 3rd place/i);
+    const picker = screen.getByRole('combobox', { name: /team to set as away/i });
+    const values = Array.from(picker.querySelectorAll('option')).map((o) => o.value);
+    expect(values).toEqual(['', 'spartan', 'tongaat', 'ilembe']);
+  });
+
+  it('(13) a participant series offers each named side of an outside club', async () => {
+    const user = userEvent.setup();
+    const s = {
+      ...ko({ home: 'win:f1', away: 'tbd:Best%203rd%20place' }),
+      participants: [
+        { teamId: 'spartan', clubId: 'spartan', name: 'Spartan Sporting CC' },
+        { teamId: 'tongaat', clubId: 'tongaat', name: 'Tongaat CC' },
+      ],
+    } as unknown as Series;
+    renderWithProviders(
+      <FixtureTable
+        series={s}
+        clubs={[...clubs.filter((c) => c.id !== 'ilembe'), rosterClub]}
+        onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
+        onDeleteSeries={vi.fn()}
+        onDuplicateSeries={vi.fn()}
+        onAskRelease={vi.fn()}
+        onAskRecall={vi.fn()}
+        onAskReveal={vi.fn()}
+        onApprove={vi.fn()}
+        onUnapprove={vi.fn()}
+        onAllocateVenues={vi.fn()}
+        onCheckClashes={vi.fn().mockResolvedValue({ results: [] })}
+        onSetSide={vi.fn().mockResolvedValue(undefined)}
+        toast={vi.fn()}
+      />,
+    );
+    await openKo(user, /best 3rd place/i);
+    const picker = screen.getByRole('combobox', { name: /team to set as away/i });
+    const values = Array.from(picker.querySelectorAll('option')).map((o) => o.value);
+    expect(values).toEqual(['', 'spartan', 'tongaat', 'tm_il_a', 'tm_il_b']);
+  });
+
+  it('(14) on a medicoach-synced fixture a win: side has no Set team; a tbd: side keeps it', async () => {
+    const onSetSide = vi.fn().mockResolvedValue(undefined);
+    const user = renderKo(
+      ko({ home: 'win:f1', away: 'tbd:Best%203rd%20place', syncMapped: true }),
+      onSetSide,
+    );
+    await openKo(user, /best 3rd place/i);
+    expect(screen.queryByRole('combobox', { name: /team to set as home/i })).toBeNull();
+    expect(screen.getByText(/filled by the medicoach sync/i)).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: /team to set as away/i })).toBeInTheDocument();
+  });
+
+  it('(6) a stale-version refusal shows the refresh message inline', async () => {
+    const { SERIES_CONFLICT_MESSAGE, SERIES_CONFLICT_FRIENDLY } = await import('./api');
+    const onSetSide = vi.fn().mockRejectedValue(new ApiError(409, SERIES_CONFLICT_MESSAGE));
+    const user = renderKo(ko({ home: 'win:f1', away: 'tbd:Best%203rd%20place' }), onSetSide);
+    await openKo(user, /best 3rd place/i);
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: /team to set as away/i }),
+      'ilembe',
+    );
+    await user.click(screen.getByRole('button', { name: /set away team/i }));
+    expect(await screen.findByText(SERIES_CONFLICT_FRIENDLY)).toBeInTheDocument();
+  });
 });
 
 describe('a tenant with no series still gets the season machinery', () => {

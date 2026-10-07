@@ -30,7 +30,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { WrittenFixture } from './import-planb-fixtures.js';
-import { reconcileFixtureIds } from './fixture-identity.js';
+import { carrySyncOwnedFields, reconcileFixtureIds } from './fixture-identity.js';
 import {
   findClashes,
   groundKey,
@@ -44,7 +44,7 @@ import { hasFeature } from './features.js';
 import { writeSeriesFromSnapshot } from './medicoach-sync/cli-write.js';
 import { storedDraftDrift } from './import-lions-fixtures.js';
 import { venueIdFor } from './lions-fixture-map.js';
-import { isSlotRef, slotSource } from '../../engine/src/formats.js';
+import { isSlotRef, loserOf, slotSource, winnerOf } from '../../engine/src/formats.js';
 import {
   AMBIGUOUS_VENUES,
   EXPECTED_TOTAL_FIXTURES,
@@ -593,7 +593,11 @@ export function stabiliseIds(
   // placeholder too, so the same row keeps its id whichever side got its team first.
   const keyed = (incoming as Slotted[]).map(byPlaceholder);
   const r = reconcileFixtureIds(existing, keyed);
-  keyed.forEach((k, i) => (incoming[i].id = k.id));
+  keyed.forEach((k, i) => {
+    incoming[i].id = k.id;
+    // reconcileFixtureIds carried the stored sync-owned fields onto the keyed copy.
+    carrySyncOwnedFields(k, incoming[i]);
+  });
   return {
     matched: r.matched,
     added: r.added,
@@ -601,7 +605,99 @@ export function stabiliseIds(
   };
 }
 
+/**
+ * Stable ids for a KNOCKOUT series, whose fixtures point at each other (`win:f3`). Plain
+ * `stabiliseIds` would renumber an unmatched fixture (`f9` for sheet row f1) without touching
+ * the `win:`/`lose:` refs that name it, leaving a dangling or WRONG link. So, round by round
+ * (a link always points at an earlier round):
+ *
+ * - the round's refs are rewritten to the ids already settled (sheet id → final id),
+ * - its fixtures are matched to the stored ones by `slots[side] ?? side` (risk R8),
+ * - a matched fixture keeps the stored id (and its sync-owned fields); an unmatched one keeps
+ *   its SHEET id when no stored fixture holds it, else gets max + 1 over every stored and
+ *   sheet id (never a reused id),
+ *
+ * and finally every `win:`/`lose:` ref (sides and `slots`) is rewritten from the ORIGINAL
+ * sheet ids, so nothing is mapped twice. Mutates `incoming`; returns the stored fixtures no
+ * incoming row matched ("f3 2026-10-10 a v b") and the ids that changed.
+ */
+export function stabiliseKoIds(
+  incoming: KoFixture[],
+  stored: Series | undefined,
+): { removed: string[]; renamed: Array<[string, string]> } {
+  type Slotted = KoFixture & { slots?: { home?: string; away?: string } };
+  const byPlaceholder = (f: Slotted) => ({
+    ...f,
+    home: f.slots?.home ?? f.home,
+    away: f.slots?.away ?? f.away,
+  });
+  const idNum = (id?: string) => Number(/^f(\d+)$/.exec(id ?? '')?.[1] ?? 0);
+  let pool = ((stored?.fixtures as Slotted[] | undefined) ?? []).map(byPlaceholder);
+  const storedIds = new Set(pool.map((f) => f.id));
+  const orig = new Map(
+    (incoming as Slotted[]).map((f) => [
+      f,
+      { id: f.id, home: f.home, away: f.away, slots: f.slots ? { ...f.slots } : undefined },
+    ]),
+  );
+  const map = new Map<string, string>();
+  const used = new Set<string>();
+  let next = Math.max(0, ...[...storedIds, ...incoming.map((f) => f.id)].map(idNum));
+  const rewrite = (ref: string | undefined): string | undefined => {
+    const src = ref ? slotSource(ref) : null;
+    const to = src ? map.get(src.fixtureId) : undefined;
+    if (!src || !to) return ref;
+    return src.kind === 'winner' ? winnerOf(to) : loserOf(to);
+  };
+  const applyRefs = (f: Slotted) => {
+    const o = orig.get(f)!;
+    f.home = rewrite(o.home)!;
+    f.away = rewrite(o.away)!;
+    if (o.slots) {
+      const slots: { home?: string; away?: string } = {};
+      if (o.slots.home) slots.home = rewrite(o.slots.home);
+      if (o.slots.away) slots.away = rewrite(o.slots.away);
+      f.slots = slots;
+    }
+  };
+  const rounds = [...new Set(incoming.map((f) => Number(f.round) || 0))].sort((a, b) => a - b);
+  for (const round of rounds) {
+    const group = (incoming as Slotted[]).filter((f) => (Number(f.round) || 0) === round);
+    group.forEach(applyRefs);
+    const keyed = group.map(byPlaceholder);
+    reconcileFixtureIds(pool, keyed);
+    group.forEach((f, i) => {
+      const sheetId = orig.get(f)!.id;
+      const k = keyed[i];
+      let id: string;
+      if (storedIds.has(k.id) && pool.some((x) => x.id === k.id)) {
+        id = k.id;
+        carrySyncOwnedFields(k, f);
+        pool = pool.filter((x) => x.id !== k.id);
+      } else if (!storedIds.has(sheetId) && !used.has(sheetId)) id = sheetId;
+      else {
+        do id = `f${++next}`;
+        while (used.has(id) || storedIds.has(id));
+      }
+      used.add(id);
+      map.set(sheetId, id);
+      f.id = id;
+    });
+  }
+  (incoming as Slotted[]).forEach(applyRefs);
+  return {
+    removed: pool.map((f) => `${f.id} ${f.date} ${f.home} v ${f.away}`),
+    renamed: [...map].filter(([a, b]) => a !== b),
+  };
+}
+
 // ───────────────────────── T20 knockouts (PR B) ─────────────────────────
+
+/** A problem with one knockout series — `seriesId` scopes it to `--only`. */
+export interface KoError {
+  seriesId: string;
+  message: string;
+}
 
 /** A knockout fixture left out of the write, and why (union report, risk R10). */
 export interface KoSkip {
@@ -657,7 +753,7 @@ export function buildT20Knockouts(
 ): {
   series: Series[];
   skipped: KoSkip[];
-  errors: string[];
+  errors: KoError[];
   resolvedSides: string[];
   /** Console Set-team sides kept on a re-import (carryConsoleSides). */
   carried: string[];
@@ -665,7 +761,7 @@ export function buildT20Knockouts(
   const resolved = opts.resolved ?? KO_RESOLVED;
   const out: Series[] = [];
   const skipped: KoSkip[] = [];
-  const errors: string[] = [];
+  const errors: KoError[] = [];
   const resolvedSides: string[] = [];
   const carried: string[] = [];
   for (const sheet of sheets) {
@@ -674,6 +770,7 @@ export function buildT20Knockouts(
     const groups = sheet.spec.series.map((x) => built.find((b) => b.series.id === x.seriesId));
     if (groups.some((g) => !g)) continue; // out of --only scope
     const leagueKey = sheet.spec.leagueKey;
+    const fail = (message: string) => errors.push({ seriesId: koId, message });
     const participants: SeriesParticipant[] = [];
     for (const g of groups)
       for (const p of g!.series.participants ?? [])
@@ -682,12 +779,12 @@ export function buildT20Knockouts(
       const canonical = canonicalTeamName(name);
       const club = resolveTeamClub(canonical);
       if (!club) {
-        errors.push(`${where}: "${name}" is not a Titans club`);
+        fail(`${where}: "${name}" is not a Titans club`);
         return null;
       }
       const live = opts.sideOf ? opts.sideOf(leagueKey, canonical) : undefined;
       if (opts.sideOf && !live) {
-        errors.push(`${where}: "${name}" (${leagueKey}) has no side on the live club`);
+        fail(`${where}: "${name}" (${leagueKey}) has no side on the live club`);
         return null;
       }
       const teamId = live?.teamId ?? provisionalSideId(leagueKey, canonical);
@@ -762,8 +859,8 @@ export function buildT20Knockouts(
     // Stable ids, then the console's Set-team sides, BEFORE the cutoff: a team set in the
     // console makes a past fixture known, and a stored fixture is never dropped.
     const stored = opts.stored?.get(koId);
-    const st = stabiliseIds(fixtures, stored);
-    for (const x of st.removed) errors.push(`${koId}: stored fixture ${x} is not in the workbook`);
+    const st = stabiliseKoIds(fixtures, stored);
+    for (const x of st.removed) fail(`${koId}: stored fixture ${x} is not in the workbook`);
     series.teams = participants.map((p) => p.teamId);
     carried.push(...carryConsoleSides(series, stored));
     const storedIds = new Set(((stored?.fixtures as KoFixture[]) ?? []).map((f) => f.id));
@@ -787,7 +884,7 @@ export function buildT20Knockouts(
       for (const side of ['home', 'away'] as const) {
         const src = slotSource(f[side]);
         if (src && !kept.has(src.fixtureId))
-          errors.push(
+          fail(
             `${koId} ${f.id} (${f.date}): its ${side} side is the ${src.kind} of ${src.fixtureId}, which is skipped — name the team in KO_RESOLVED or move --ko-cutoff`,
           );
       }
@@ -2078,7 +2175,7 @@ export async function runImport(args: Args) {
     console.log(`    ${tag} ${koLine(k)}`);
   }
   for (const e of vets.errors) console.log(`    ✗ ${e}`);
-  for (const e of t20?.errors ?? []) console.log(`    ✗ ${e}`);
+  for (const e of t20?.errors ?? []) console.log(`    ✗ ${e.message}`);
   for (const r of t20?.resolvedSides ?? []) console.log(`    union-confirmed: ${r}`);
   console.log(
     `  knockout series built: ${koSeries.map((s) => s.id).join(', ') || 'none'}` +
@@ -2299,7 +2396,7 @@ export async function runImport(args: Args) {
     if (inScope(sid)) for (const n of names) fatal.push(`unresolved side ${n}`);
   fatal.push(...outcome.heldProblems);
   fatal.push(...vets.errors);
-  fatal.push(...(t20?.errors ?? []).filter((e) => writes(e.split(' ')[0])));
+  fatal.push(...koBlockers(t20?.errors ?? [], writes));
   fatal.push(...idProblems);
   if (after.length)
     fatal.push(
@@ -2407,28 +2504,7 @@ export async function runImport(args: Args) {
     args.backupDir,
     clubs,
   );
-  const written: string[] = [];
-  const drifted: string[] = [];
-  try {
-    for (const s of writeSet) {
-      const st = storedById.get(String(s.id)) ?? null;
-      const outcome2 = await writeSeriesFromSnapshot(repo, TITANS_TENANT, st, s, {
-        error: (l) => console.error(l),
-      });
-      if (outcome2 === 'drifted') drifted.push(String(s.id));
-      else {
-        written.push(String(s.id));
-        console.log(
-          `wrote ${s.id} v${s.version} (${(s.fixtures as unknown[]).length} fixtures)${st ? ' (replaced draft)' : ''}`,
-        );
-      }
-    }
-  } catch (err) {
-    console.error(
-      `\n✗ ABORTED after ${written.length} of ${writeSet.length} series — RE-RUN REQUIRED: a re-run replaces the written drafts in place (stable ids) and writes the rest; the club sync has NOT run. Backup: ${backupPath}`,
-    );
-    throw err;
-  }
+  const { written, drifted } = await writeSeriesSet(repo, writeSet, storedById, backupPath);
   if (args.noClubSync)
     console.log('\n── --no-club-sync: club league sync AND T20 cup league keys skipped');
   else if (written.length) {
@@ -2470,6 +2546,49 @@ export async function runImport(args: Args) {
   console.log(
     `\nDone. ${written.length} draft series written. Backup: ${backupPath}. Nothing is released — approve and release from the console (tick "Withhold start times").`,
   );
+}
+
+/**
+ * Write the series one by one, each version-pinned to the copy this run read
+ * (`writeSeriesFromSnapshot`): a series that moved since the read is NOT written ('drifted',
+ * re-run); any other failure aborts with "ABORTED after N of M — RE-RUN REQUIRED" and rethrows
+ * (a re-run replaces the written drafts in place and writes the rest).
+ */
+export async function writeSeriesSet(
+  repo: Parameters<typeof writeSeriesFromSnapshot>[0],
+  writeSet: Series[],
+  storedById: Map<string, Series>,
+  backupPath: string,
+  log: { log: (l: string) => void; error: (l: string) => void } = console,
+): Promise<{ written: string[]; drifted: string[] }> {
+  const written: string[] = [];
+  const drifted: string[] = [];
+  try {
+    for (const s of writeSet) {
+      const st = storedById.get(String(s.id)) ?? null;
+      const outcome = await writeSeriesFromSnapshot(repo, TITANS_TENANT, st, s, {
+        error: (l) => log.error(l),
+      });
+      if (outcome === 'drifted') drifted.push(String(s.id));
+      else {
+        written.push(String(s.id));
+        log.log(
+          `wrote ${s.id} v${s.version} (${(s.fixtures as unknown[]).length} fixtures)${st ? ' (replaced draft)' : ''}`,
+        );
+      }
+    }
+  } catch (err) {
+    log.error(
+      `\n✗ ABORTED after ${written.length} of ${writeSet.length} series — RE-RUN REQUIRED: a re-run replaces the written drafts in place (stable ids) and writes the rest; the club sync has NOT run. Backup: ${backupPath}`,
+    );
+    throw err;
+  }
+  return { written, drifted };
+}
+
+/** The T20 knockout errors that block this run: only those of series it writes (--only). */
+export function koBlockers(errors: KoError[], writes: (id: string) => boolean): string[] {
+  return errors.filter((e) => writes(e.seriesId)).map((e) => e.message);
 }
 
 async function main() {

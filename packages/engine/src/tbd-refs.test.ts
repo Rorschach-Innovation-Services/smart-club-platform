@@ -4,7 +4,15 @@
  * can compute. It must label like a slot and never count as a team.
  */
 import { describe, it, expect } from 'vitest';
-import { isSlotRef, slotRefLabel, slotSource, tbdLabel, tbdOf, TBD_PREFIX } from './formats';
+import {
+  groupPositionLabel,
+  isSlotRef,
+  slotRefLabel,
+  slotSource,
+  tbdLabel,
+  tbdOf,
+  TBD_PREFIX,
+} from './formats';
 import { buildLedger, homeAwayBalance, travelPerTeam } from './venues';
 
 describe('tbd: slot refs', () => {
@@ -45,6 +53,62 @@ describe('tbd: slot refs', () => {
     expect(slotRefLabel('tbd:%E0%A4%A')).toBe('%E0%A4%A'); // broken escape
     expect(slotRefLabel('tbd:')).toBe('To be decided');
     expect(tbdLabel('pos:s-x-g-a:1')).toBeNull();
+  });
+});
+
+describe('tbd: encoding edge cases (22)', () => {
+  const labels = [
+    'Winner: Pool A',
+    '100% fit',
+    'A/B play-off',
+    'Équipe de réserve – Müller',
+    'Cup 🏆 winner',
+    'tbd:nested',
+    'pos:s-x-g-a:1',
+    'win:f3',
+  ];
+  it.each(labels)('round-trips %j through tbdOf / tbdLabel / slotRefLabel', (label) => {
+    const id = tbdOf(label);
+    expect(id.startsWith(TBD_PREFIX)).toBe(true);
+    expect(id.slice(TBD_PREFIX.length)).not.toMatch(/[\s:/%]{2}|[\s:/]/); // one opaque token
+    expect(tbdLabel(id)).toBe(label);
+    expect(slotRefLabel(id)).toBe(label);
+    expect(tbdOf(tbdLabel(id)!)).toBe(id); // stable
+  });
+
+  it('a label that looks like another prefix stays a tbd: label (no slot source, no group)', () => {
+    for (const id of [tbdOf('pos:s-x-g-a:1'), tbdOf('win:f3')]) {
+      expect(isSlotRef(id)).toBe(true);
+      expect(slotSource(id)).toBeNull();
+      expect(groupPositionLabel(id)).toBeNull();
+    }
+  });
+
+  it('leading, trailing and repeated spaces normalise to one id', () => {
+    expect(tbdOf('  Runner-up \t 2  ')).toBe('tbd:Runner-up%202');
+  });
+
+  it('an empty or blank label is a valid id that reads "To be decided"', () => {
+    for (const blank of ['', '   ']) {
+      const id = tbdOf(blank);
+      expect(id).toBe('tbd:');
+      expect(tbdLabel(id)).toBeNull();
+      expect(slotRefLabel(id)).toBe('To be decided');
+    }
+  });
+
+  it('malformed escapes never throw: the raw text is shown', () => {
+    for (const raw of ['tbd:%', 'tbd:%E0%A4%A', 'tbd:%ZZ', 'tbd:50%']) {
+      expect(() => slotRefLabel(raw)).not.toThrow();
+      expect(slotRefLabel(raw)).toBe(raw.slice(4));
+    }
+  });
+
+  it('a tbd: id can never equal a club id or a tm_ team id', () => {
+    // club ids are [a-z0-9-]+ and team ids tm_…: neither contains ':'.
+    for (const id of ['irene-villagers-cricket-club', 'tm_irene_premier_0', 'tbd', 'tbd-club'])
+      expect(isSlotRef(id)).toBe(false);
+    expect(tbdOf('irene-villagers-cricket-club')).not.toBe('irene-villagers-cricket-club');
   });
 });
 

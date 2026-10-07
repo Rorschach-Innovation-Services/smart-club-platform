@@ -384,8 +384,9 @@ A fixture already stored is never dropped by the cutoff.
 "Set … team". The picker lists the series' teams, then every other club side by club (for the
 "Community Cup winner"). "Revert … to placeholder" puts the placeholder back. A Set team that puts
 the home side's ground into a slot another fixture already holds is refused with the clash panel
-(drafts too). A re-import keeps teams set in the console as long as the sheet still has the same
-placeholder.
+(drafts too), and so is a team already playing at that date and time. A re-import keeps teams set
+in the console as long as the sheet still has the same placeholder. A fixture dated **on** the
+cutoff counts as future (kept with its placeholders); only earlier dates are past.
 
 ## Union follow-ups
 

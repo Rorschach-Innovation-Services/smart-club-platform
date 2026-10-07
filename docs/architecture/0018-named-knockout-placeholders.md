@@ -32,17 +32,32 @@ fill one.
    (snapshot of name, club and venue) and `teams[]`. On a legacy series (no participants) only a
    club can go in. The result goes through the in-season clash gate's subset rule on drafts
    **and** released series: a knockout usually has no venue, so setting the home team moves the
-   fixture onto that team's ground.
+   fixture onto that team's ground. A team already playing at that date and time in a released
+   series (the postponement check's rule) is refused with `team_busy`; setting the team a side
+   already holds is a `no_change` 409, with nothing written.
+   - **Leaving the series again.** Set team records the teams it brought in
+     (`series.setTeamAdded`). When a revert or a replacement leaves no fixture side or `slots`
+     value naming such a team, it leaves `teams[]` and `participants` again. Teams the series
+     had of its own (an importer's group union) are never removed.
+   - **Medicoach-synced series.** The sync fills `win:`/`lose:` sides from results (ADR 0016),
+     so on a synced series Set team and revert refuse those sides (409 `sync_owned_side`,
+     "medicoach decides this side") and the editor hides the controls. `pos:`/`tbd:` sides stay
+     settable. Medicoach never had such a fixture (the export skips it), so once Set team leaves
+     it with no `pos:`/`tbd:` side it is reported as needing a bundle top-up (log + SYNCLOG
+     `new-fixtures`) instead of being pushed, which medicoach would answer `unmapped`.
 3. **PATCH refuses new orphan sides.** A fixtures/participants/teams write may not introduce a
    side that is not a series team or participant, not a placeholder, and not filled from a
    stored placeholder. Only new orphans are refused, so older data stays editable.
 4. **Importers keep identity.** A re-import matches fixtures by `slots[side] ?? side` and keeps
-   the console's Set-team sides when the sheet still has the same placeholder.
+   the console's Set-team sides when the sheet still has the same placeholder. A knockout keeps
+   its sheet ids where no stored fixture holds them, and any id that has to change is rewritten
+   in every `win:`/`lose:` link (sides and `slots`), so a link never dangles or points at the
+   wrong match.
 
 ## Consequences
 
 - `tbd:` data must not reach a stage before this code does: older code reads `tbd:` as an
   unknown team id. The Titans importer writes T20 knockouts only with `--include-t20-ko`, and
   the runbook makes "PR B deployed to that stage" a hard precondition.
-- Revert keeps a participant that was added by Set team. Removing it could orphan another
-  fixture that uses it, and an unused participant is harmless.
+- A team Set team added stays while any fixture still names it; only then does a revert or
+  replacement take it out.

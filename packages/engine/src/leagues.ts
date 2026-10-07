@@ -117,7 +117,9 @@ export function clubTeamsForLeague(club: ClubSidesSource, leagueKey: string): Te
  * Every side a club fields across ALL its leagues, deduped by teamId (first league wins), or
  * the club itself when it has no league at all. The candidate pool a knockout "Set team"
  * picks from when the winner comes from outside the series ("Community Cup winner", ADR
- * 0018) — the admin picker and the server check share it so they can never disagree.
+ * 0018) on a series with a participant snapshot; the admin picker and the server check both
+ * use it there. A legacy series (no snapshot) takes club ids only, in the picker and on the
+ * server, so this pool does not apply to it.
  */
 export function clubSides(club: ClubSidesSource & { leagues?: string[] }): TeamParticipant[] {
   const keys = Array.isArray(club.leagues) ? club.leagues : [];

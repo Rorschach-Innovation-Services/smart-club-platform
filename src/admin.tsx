@@ -83,7 +83,12 @@ import {
   isLocked,
   VENUE_REASON_PREFIX,
 } from '../packages/engine/src/venues';
-import { isSlotRef, slotRefLabel, type SlotFixture } from '../packages/engine/src/formats';
+import {
+  isSlotRef,
+  slotRefLabel,
+  slotSource,
+  type SlotFixture,
+} from '../packages/engine/src/formats';
 import { resolveCompetitionDefaults } from '../packages/engine/src/defaults';
 import { TRANSFER_WINDOW_REJECTOR } from './types';
 import type {
@@ -1495,6 +1500,9 @@ export function FixtureTable({
                     onCheckClashes={onCheckClashes}
                     onSetSide={onSetSide}
                     clubs={clubs}
+                    // No participant snapshot: the series' sides are club ids (Set team
+                    // offers clubs only).
+                    legacy={!series.participants?.length}
                     teams={series.teams.map((id) => {
                       const r = teamBy(id);
                       return { id, name: r.name, ground: r.ground, club: r.club };
@@ -1816,7 +1824,10 @@ export function FixtureTable({
  * One knockout side in the fixture editor (ADR 0018): what the side is now (the placeholder's
  * label, or the team set into it), plus "Set team" — series teams first, then every other
  * side in the tenant grouped by club, for a winner from outside the series ("Community Cup
- * winner") — and "Revert to placeholder" once a team has been set.
+ * winner") — and "Revert to placeholder" once a team has been set. A legacy series (no
+ * participant snapshot) takes clubs only, so it lists one option per club (its club id).
+ * Without `onSet` (no write path, or a side the medicoach sync fills) it is read-only, with
+ * `note` saying why.
  */
 function KnockoutSide({
   id,
@@ -1827,8 +1838,10 @@ function KnockoutSide({
   fixtures,
   teams,
   clubs,
+  legacy = false,
   busy,
   onSet,
+  note,
 }: {
   id: string;
   sideLabel: 'home' | 'away';
@@ -1838,8 +1851,10 @@ function KnockoutSide({
   fixtures: unknown[];
   teams: Array<{ id: string; name: string }>;
   clubs: Club[];
+  legacy?: boolean;
   busy: boolean;
   onSet?: (teamId: string | null) => void;
+  note?: string;
 }) {
   const [pick, setPick] = useStateA('');
   const shown = isSlotRef(value)
@@ -1847,7 +1862,12 @@ function KnockoutSide({
     : (teams.find((t) => t.id === value)?.name ?? value);
   const inSeries = new Set(teams.map((t) => t.id));
   const others = clubs
-    .map((c) => ({ club: c.name, sides: clubSides(c).filter((p) => !inSeries.has(p.teamId)) }))
+    .map((c) => ({
+      club: c.name,
+      sides: (legacy ? [{ teamId: c.id, name: c.name }] : clubSides(c)).filter(
+        (p) => !inSeries.has(p.teamId),
+      ),
+    }))
     .filter((g) => g.sides.length)
     .sort((a, b) => a.club.localeCompare(b.club));
   const usable = (teamId: string) => teamId !== value && teamId !== otherSide;
@@ -1859,6 +1879,7 @@ function KnockoutSide({
           Placeholder: {slotRefLabel(placeholder, fixtures as SlotFixture[]) ?? placeholder}
         </div>
       )}
+      {note && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>{note}</div>}
       {onSet && (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
           <select
@@ -1921,6 +1942,7 @@ function EditFixtureRow({
   onCheckClashes,
   onSetSide = undefined as SetSide | undefined,
   clubs = [] as Club[],
+  legacy = false,
 }) {
   const vt = useVertical().terms;
   // Each label is bound to its control. These sit BESIDE their inputs, so without an id
@@ -2183,6 +2205,14 @@ function EditFixtureRow({
   // placeholder kept in `slots`). Those change through Set team / revert, never the select.
   const isKnockoutSide = (side: 'home' | 'away') =>
     isSlotRef(draft[side]) || isSlotRef(fixture.slots?.[side] ?? '');
+  // On a medicoach-synced series a `win:`/`lose:` side is filled by the sync from the result
+  // (ADR 0016/0018): no Set team / revert there; `pos:`/`tbd:` sides stay settable.
+  const syncOwned = (side: 'home' | 'away') =>
+    fixture.syncMapped === true && !!slotSource(fixture.slots?.[side] ?? draft[side] ?? '');
+  const setterFor = (side: 'home' | 'away') =>
+    onSetSide && seriesId && !syncOwned(side)
+      ? (teamId: string | null) => setSide(side, teamId)
+      : undefined;
 
   return (
     <tr className="fix-edit-tr">
@@ -2233,8 +2263,12 @@ function EditFixtureRow({
                 fixtures={fixtures}
                 teams={teams}
                 clubs={clubs}
+                legacy={legacy}
                 busy={saving}
-                onSet={onSetSide && seriesId ? (teamId) => setSide('home', teamId) : undefined}
+                onSet={setterFor('home')}
+                note={
+                  syncOwned('home') ? 'Filled by the medicoach sync from the result' : undefined
+                }
               />
             ) : (
               <select
@@ -2262,8 +2296,12 @@ function EditFixtureRow({
                 fixtures={fixtures}
                 teams={teams}
                 clubs={clubs}
+                legacy={legacy}
                 busy={saving}
-                onSet={onSetSide && seriesId ? (teamId) => setSide('away', teamId) : undefined}
+                onSet={setterFor('away')}
+                note={
+                  syncOwned('away') ? 'Filled by the medicoach sync from the result' : undefined
+                }
               />
             ) : (
               <select

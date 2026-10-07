@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { tbdOf } from '../../engine/src/formats.js';
 import type { Series } from '../src/types.js';
 
-const { buildT20Knockouts, koSideNeeds, koStage, parseArgs, runScope } =
+const { buildT20Knockouts, koBlockers, koSideNeeds, koStage, parseArgs, runScope, stabiliseIds } =
   await import('../src/import-titans-fixtures.js');
 const { TITANS_FIXTURE_SHEETS } = await import('../src/titans-fixture-map.js');
 type Sheet = Parameters<typeof buildT20Knockouts>[0][number];
@@ -160,7 +160,7 @@ describe('T20 knockout build', () => {
   test('a kept fixture fed by a skipped one is an error, never an empty bracket', () => {
     const r = buildT20Knockouts([sheet], groups, { cutoff: '2026-10-11', resolved: {}, sideOf });
     assert.match(
-      r.errors.join('\n'),
+      r.errors.map((e) => e.message).join('\n'),
       /f4 \(2026-10-17\): its home side is the winner of f3, which is skipped/,
     );
   });
@@ -195,7 +195,10 @@ describe('T20 knockout build', () => {
       resolved: { [KO]: { f2: { away: 'PRETORIA 3' } } },
       sideOf: () => undefined,
     });
-    assert.match(r.errors.join('\n'), /PRETORIA 3.*has no side on the live club/);
+    assert.match(
+      r.errors.map((e) => e.message).join('\n'),
+      /PRETORIA 3.*has no side on the live club/,
+    );
   });
 });
 
@@ -287,5 +290,152 @@ describe('T20 knockout flags and scope', () => {
       ['IRENE VILLAGERS 1', 'TUKS 1'],
     );
     assert.deepEqual(koSideNeeds([sheet], new Set(['s-other']), {}), []);
+  });
+});
+
+describe('review fixes: KO ids, links and --only blockers', () => {
+  const ids = (s: Series) => fxOf(s).map((f) => [f.id, f.home, f.away, f.slots ?? null]);
+
+  test('(24) a stored KO fixture missing from the workbook blocks a run that writes that KO', () => {
+    const stored = {
+      id: KO,
+      fixtures: [
+        { id: 'f1', date: '2026-10-10', time: '09:00', home: GA, away: IRENE },
+        { id: 'f9', date: '2026-12-01', time: '09:00', home: 'x', away: 'y' },
+      ],
+    } as unknown as Series;
+    const r = buildT20Knockouts([sheet], groups, {
+      cutoff: '2026-10-01',
+      resolved: {},
+      sideOf,
+      stored: new Map([[KO, stored]]),
+    });
+    assert.deepEqual(r.errors, [
+      { seriesId: KO, message: `${KO}: stored fixture f9 2026-12-01 x v y is not in the workbook` },
+    ]);
+    // `--only s-titans-mens-t20-ko` (the run writes it) → fatal; a run writing other series → not.
+    assert.equal(koBlockers(r.errors, (id) => id === KO).length, 1);
+    assert.equal(koBlockers(r.errors, (id) => id === 's-titans-womens-t20-ko').length, 0);
+  });
+
+  test('(25) skip, then a re-import with the dates future: sheet ids kept, win: links intact', () => {
+    const run1 = buildT20Knockouts([sheet], groups, { cutoff: '2026-10-18', resolved: {}, sideOf });
+    assert.deepEqual(
+      fxOf(run1.series[0]).map((f) => f.id),
+      ['f5'],
+    );
+    const run2 = buildT20Knockouts([sheet], groups, {
+      cutoff: '2026-10-01',
+      resolved: {},
+      sideOf,
+      stored: new Map([[KO, run1.series[0]]]),
+    });
+    assert.deepEqual(run2.errors, []);
+    assert.deepEqual(ids(run2.series[0]), [
+      ['f1', GA, IRENE, null],
+      ['f2', GB, 'tbd:Runner-up%201', null],
+      ['f3', 'win:f1', 'win:f2', null],
+      ['f4', 'win:f3', GB, null],
+      ['f5', 'tbd:Community%20Cup%20winner', GE, null],
+    ]);
+  });
+
+  test('(25) skip, then union-confirmed teams: placeholders in slots point at the right ids', () => {
+    const run1 = buildT20Knockouts([sheet], groups, { cutoff: '2026-10-18', resolved: {}, sideOf });
+    const run2 = buildT20Knockouts([sheet], groups, {
+      cutoff: '2026-10-18',
+      sideOf,
+      resolved: {
+        [KO]: {
+          f1: { home: 'TUKS 1' },
+          f2: { home: 'PRETORIA 1', away: 'IRENE VILLAGERS 1' },
+          f3: { home: 'TUKS 1', away: 'PRETORIA 1' },
+          f4: { home: 'TUKS 1', away: 'PRETORIA 1' },
+        },
+      },
+      stored: new Map([[KO, run1.series[0]]]),
+    });
+    assert.deepEqual(run2.errors, []);
+    assert.deepEqual(run2.skipped, []);
+    assert.deepEqual(
+      fxOf(run2.series[0]).map((f) => f.id),
+      ['f1', 'f2', 'f3', 'f4', 'f5'],
+    );
+    const f3 = fxOf(run2.series[0]).find((f) => f.id === 'f3')!;
+    assert.deepEqual(f3.slots, { home: 'win:f1', away: 'win:f2' });
+  });
+
+  test('(25) collision: a stored f2 that is the sheet f1 match renumbers and relinks', () => {
+    const stored = {
+      id: KO,
+      fixtures: [{ id: 'f2', date: '2026-10-10', time: '09:00', home: GA, away: IRENE }],
+    } as unknown as Series;
+    const r = buildT20Knockouts([sheet], groups, {
+      cutoff: '2026-10-01',
+      resolved: {},
+      sideOf,
+      stored: new Map([[KO, stored]]),
+    });
+    assert.deepEqual(r.errors, []);
+    const byPair = new Map(fxOf(r.series[0]).map((f) => [`${f.home}|${f.away}`, f.id]));
+    assert.equal(byPair.get(`${GA}|${IRENE}`), 'f2', 'the stored match keeps its id');
+    const ru1 = byPair.get(`${GB}|tbd:Runner-up%201`)!;
+    assert.equal(ru1, 'f6', 'sheet f2 is taken, so it gets max + 1 over stored and sheet ids');
+    // The semi links to the two QFs by their FINAL ids — not the sheet's f1/f2.
+    assert.equal(byPair.get(`win:f2|win:${ru1}`), 'f3');
+    const all = fxOf(r.series[0]).map((f) => f.id);
+    assert.equal(new Set(all).size, all.length, 'ids unique');
+  });
+
+  test('(34) a fixture dated ON the cutoff is not past (kept with its placeholders)', () => {
+    const r = buildT20Knockouts([sheet], groups, { cutoff: '2026-10-10', resolved: {}, sideOf });
+    assert.deepEqual(r.skipped, []);
+    assert.equal(fxOf(r.series[0]).length, 5);
+    const r2 = buildT20Knockouts([sheet], groups, { cutoff: '2026-10-11', resolved: {}, sideOf });
+    assert.ok(r2.skipped.some((x) => x.date === '2026-10-10'));
+  });
+
+  test('(35) a re-run with no workbook change is a no-op: same ids, links and teams', () => {
+    const run1 = buildT20Knockouts([sheet], groups, { cutoff: '2026-10-01', resolved: {}, sideOf });
+    const run2 = buildT20Knockouts([sheet], groups, {
+      cutoff: '2026-10-01',
+      resolved: {},
+      sideOf,
+      stored: new Map([[KO, structuredClone(run1.series[0])]]),
+    });
+    assert.deepEqual(run2.errors, []);
+    assert.deepEqual(run2.carried, []);
+    assert.deepEqual(run2.series[0].fixtures, run1.series[0].fixtures);
+    assert.deepEqual(run2.series[0].teams, run1.series[0].teams);
+  });
+
+  test('stabiliseIds keeps the stored sync-owned fields (syncRef, schedule) on a matched row', () => {
+    const stored = {
+      fixtures: [
+        {
+          id: 'f7',
+          date: '2026-11-22',
+          home: 'a',
+          away: 'b',
+          syncRef: 'smartclub:titans:fixture:x:f7',
+          schedule: { changedAt: '2026-10-01T00:00:00Z' },
+        },
+      ],
+    } as unknown as Series;
+    const inc = [
+      {
+        id: 'f1',
+        date: '2026-11-22',
+        home: 'a',
+        away: 'b',
+        round: 1,
+        timeSource: 'sheet' as const,
+      },
+    ];
+    stabiliseIds(inc, stored);
+    const got = inc[0] as Record<string, unknown>;
+    assert.equal(got.id, 'f7');
+    assert.equal(got.syncRef, 'smartclub:titans:fixture:x:f7');
+    assert.deepEqual(got.schedule, { changedAt: '2026-10-01T00:00:00Z' });
   });
 });
