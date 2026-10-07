@@ -12,6 +12,22 @@ This note covers the professional team, the match library and the rebuilt Perfor
 
 ## What the staff see
 
+The tab bar is the same six tabs, in the same order, as Player scouting and Schools: **Overview ·
+Matches · Leaderboards · Performance map · Teams · Shortlist**. The eight views below sit in them
+like this (a small switch under the bar picks between the two that share a tab):
+
+| Tab             | Holds            | `?ptab=` / `?psub=`               |
+| --------------- | ---------------- | --------------------------------- |
+| Overview        | Selection        | `overview`                        |
+| Matches         | Matches          | `matches`                         |
+| Leaderboards    | Squad            | `leaders`                         |
+| Performance map | Form · Seasons   | `map` + `form` / `seasons`        |
+| Teams           | Team             | `teams`                           |
+| Shortlist       | Call-ups · Exits | `shortlist` + `callups` / `exits` |
+
+Links made with the earlier names (`ptab=selection`, `squad`, `form`, `seasons`, `team`, `callups`,
+`exits`) still open the right view.
+
 | Tab       | What it answers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Selection | Who to promote, who is at risk, who is moving. A ranked "season → last 5" line per player (coloured by signal, every player named), plus three lanes (Promote · Watch · At risk) with the reasons for each.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |

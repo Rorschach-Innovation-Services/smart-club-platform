@@ -36,6 +36,33 @@ const renderPage = (q = '') =>
 beforeEach(() => localStorage.clear());
 
 describe('Professional team', () => {
+  it('has the same six tabs, in the same order, as Player scouting and Schools', () => {
+    renderPage();
+    const bar = screen.getByRole('tablist', { name: 'Professional team views' });
+    expect(
+      within(bar)
+        .getAllByRole('tab')
+        .map((t) => t.textContent),
+    ).toEqual(['Overview', 'Matches', 'Leaderboards', 'Performance map', 'Teams', 'Shortlist']);
+  });
+
+  it('keeps Form and Seasons, Call-ups and Exits one switch away, and old links working', async () => {
+    const user = userEvent.setup();
+    renderPage('&ptab=map');
+    expect(screen.getByRole('tab', { name: 'Form', selected: true })).toBeTruthy();
+    await user.click(screen.getByRole('tab', { name: 'Seasons' }));
+    expect(screen.getByRole('table', { name: 'Season record' })).toBeTruthy();
+    await user.click(screen.getByRole('tab', { name: 'Shortlist' }));
+    expect(screen.getByRole('tab', { name: 'Call-ups', selected: true })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: 'Exits' })).toBeTruthy();
+  });
+
+  it('opens the right view from a link made with the earlier tab names', () => {
+    renderPage('&ptab=seasons&format=all');
+    expect(screen.getByRole('tab', { name: 'Performance map', selected: true })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: 'Seasons', selected: true })).toBeTruthy();
+  });
+
   it('opens on selection for the men’s squad in T20, with the sample flagged', () => {
     renderPage();
     expect(screen.getByRole('tab', { name: /Hawks.*Men/, selected: true })).toBeTruthy();
@@ -58,7 +85,7 @@ describe('Professional team', () => {
     renderPage();
     await user.click(screen.getByRole('tab', { name: /Hawks.*Women/ }));
     expect(screen.getByRole('tab', { name: /Hawks.*Women/, selected: true })).toBeTruthy();
-    await user.click(screen.getByRole('tab', { name: 'Squad' }));
+    await user.click(screen.getByRole('tab', { name: 'Leaderboards' }));
     expect(screen.getByRole('table', { name: 'Squad' })).toBeTruthy();
     expect(screen.getByText('How each batter used the balls they faced')).toBeTruthy();
   });
@@ -75,7 +102,7 @@ describe('Professional team', () => {
     const saved = JSON.parse(localStorage.getItem('smartclub.pro.tracking.v1')!);
     expect(Object.values(saved)).toEqual([expect.objectContaining({ status: 'called-up' })]);
     expect(Object.keys(saved)[0]).toMatch(new RegExp(`^${name}\\|`));
-    await user.click(screen.getByRole('tab', { name: /Selection/ }));
+    await user.click(screen.getByRole('tab', { name: 'Overview' }));
     const shortlist = screen.getByText('Call-up shortlist').closest('.card') as HTMLElement;
     expect(within(shortlist).getByText(name)).toBeTruthy();
     expect(within(shortlist).getByText('Called up')).toBeTruthy();
