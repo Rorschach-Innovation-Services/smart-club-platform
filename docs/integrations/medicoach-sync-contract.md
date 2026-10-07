@@ -198,7 +198,7 @@ Medicoach rules:
   (single `name` vs "firstName lastName"; case/space/middle-name tolerant).
 - `remove`: soft-remove all smart-club-mapped memberships; the player row is untouched.
 - `erase`: soft-remove mapped memberships; anonymise the player (name → "Erased player"; clear
-  dob/contact/guardian/idNumber/email); release identity claims; delete BOTH ref rows. Stats stay
+  dob/gender/contact/guardian/idNumber/email); release identity claims; delete BOTH ref rows. Stats stay
   on the anonymised id. An erase whose ref is already gone is `erased` (idempotent no-op), never
   a matcher run.
 - `stale`, `unchanged`, `removed`, `erased` are success outcomes for the caller (drop from outbox);
