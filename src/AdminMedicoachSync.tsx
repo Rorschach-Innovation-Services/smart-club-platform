@@ -12,14 +12,20 @@
  *     failed 5+ times is "stuck" (still retried) and offers Retry now / Drop;
  *   - changes held until a draft or withheld series is released/revealed, each linked to it;
  *   - recent activity, and "Sync now": flush the outbox, then pull, right away.
+ * The match monitor (MatchMonitor.tsx) follows every game of a day live from medicoach's
+ * scoring, as two tabs on the same day: "Action board" (the flags to act on) and "Every game"
+ * (start times, score now, last input, innings change, finish, delays).
  */
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState, type ReactNode } from 'react';
 import * as api from './api';
 import { ApiError } from './api';
 import { Btn, Modal, Pill } from './atoms';
+import { MatchMonitor, type MonitorCounts } from './MatchMonitor';
 import { qk } from './query';
 import type { Series } from './types';
+
+type MonitorTab = 'board' | 'games' | 'sync';
 
 const fmtWhen = (iso?: string | null) =>
   iso
@@ -319,6 +325,25 @@ export function AdminMedicoachSyncView({
   const status = useQuery({ queryKey: qk.medicoachSync(), queryFn: api.getMedicoachSyncStatus });
   const [busy, setBusy] = useState<string | null>(null);
   const [dropping, setDropping] = useState<Failure | null>(null);
+  // Three tabs: the flags to act on, every game of the day, and the sync's health. The two
+  // monitor tabs share one MatchMonitor (same day, same data), so switching keeps the day.
+  const [tab, setTab] = useState<MonitorTab>(() => {
+    try {
+      const saved = localStorage.getItem('smartclub.medicoachSync.tab');
+      return saved === 'sync' || saved === 'games' ? saved : 'board';
+    } catch {
+      return 'board';
+    }
+  });
+  const pickTab = (next: MonitorTab) => {
+    setTab(next);
+    try {
+      localStorage.setItem('smartclub.medicoachSync.tab', next);
+    } catch {
+      /* per-browser convenience only */
+    }
+  };
+  const [counts, setCounts] = useState<MonitorCounts | null>(null);
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: qk.medicoachSync() });
     queryClient.invalidateQueries({ queryKey: qk.series() });
@@ -363,34 +388,95 @@ export function AdminMedicoachSyncView({
             Medicoach <em>sync</em>
           </h1>
           <p className="ph-desc">
-            Results and reschedules come in from medicoach every 15 minutes, and fixture changes
-            made here go out to medicoach on the same run. Changes that would double-book a ground,
-            or name a ground we don&apos;t know, wait here for you.
+            {tab === 'board' ? (
+              <>
+                What needs you now across the day&apos;s games: unregistered players, scorers gone
+                quiet, late starts, delays between balls and heavy use of undo.
+              </>
+            ) : tab === 'games' ? (
+              <>
+                Every game of the day as medicoach&apos;s live scoring sees it: start time, score
+                now, the scorer&apos;s last input, innings change and finish.
+              </>
+            ) : (
+              <>
+                Results and reschedules come in from medicoach every 15 minutes, and fixture changes
+                made here go out to medicoach on the same run. Changes that would double-book a
+                ground, or name a ground we don&apos;t know, wait here for you.
+              </>
+            )}
           </p>
         </div>
-        <div className="ph-actions">
-          <Btn
-            tone="ink"
-            size="sm"
-            disabled={busy !== null || !data?.enabled}
-            onClick={() =>
-              run(
-                'sync',
-                api.medicoachSyncNow,
-                (r) =>
-                  (r as { status?: string })?.status === 'dry-run'
-                    ? ['Dry run — the sync connection isn’t configured, so nothing was sent.']
-                    : ['Sync finished'],
-                'The sync did not finish',
-              )
-            }
-          >
-            {busy === 'sync' ? 'Syncing…' : 'Sync now'}
-          </Btn>
-        </div>
+        {tab === 'sync' && (
+          <div className="ph-actions">
+            <Btn
+              tone="ink"
+              size="sm"
+              disabled={busy !== null || !data?.enabled}
+              onClick={() =>
+                run(
+                  'sync',
+                  api.medicoachSyncNow,
+                  (r) =>
+                    (r as { status?: string })?.status === 'dry-run'
+                      ? ['Dry run — the sync connection isn’t configured, so nothing was sent.']
+                      : ['Sync finished'],
+                  'The sync did not finish',
+                )
+              }
+            >
+              {busy === 'sync' ? 'Syncing…' : 'Sync now'}
+            </Btn>
+          </div>
+        )}
       </div>
 
-      {status.isLoading ? (
+      <div className="mm-tabs" role="tablist" aria-label="Medicoach sync">
+        {(
+          [
+            ['board', 'Action board'],
+            ['games', 'Every game'],
+            ['sync', 'Sync health'],
+          ] as const
+        ).map(([k, label]) => (
+          <button
+            key={k}
+            role="tab"
+            aria-selected={tab === k}
+            className={`mm-tab${tab === k ? ' on' : ''}`}
+            onClick={() => pickTab(k)}
+          >
+            {label}
+            {k === 'board' && counts && counts.flags > 0 && (
+              <span
+                className={`mm-chip-n${counts.alerts ? ' alert' : ''}`}
+                title={`${counts.alerts} need you now · ${counts.flags - counts.alerts} to keep an eye on`}
+              >
+                {counts.flags}
+              </span>
+            )}
+            {k === 'games' && counts && counts.games > 0 && (
+              <span className="mm-chip-n" title={`${counts.live} live`}>
+                {counts.games}
+              </span>
+            )}
+            {k === 'sync' && (status.data?.conflicts?.length ?? 0) > 0 && (
+              <span className="mm-chip-n">{status.data!.conflicts!.length}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {tab !== 'sync' ? (
+        status.data && !status.data.enabled ? (
+          <div className="mcs-empty">
+            The medicoach sync isn&apos;t switched on for this union. Your platform operator turns
+            it on.
+          </div>
+        ) : (
+          <MatchMonitor view={tab} onCounts={setCounts} onShowGames={() => pickTab('games')} />
+        )
+      ) : status.isLoading ? (
         <div className="mcs-empty" role="status">
           Loading the sync status…
         </div>

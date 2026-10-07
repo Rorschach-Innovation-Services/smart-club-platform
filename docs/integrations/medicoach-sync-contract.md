@@ -5,7 +5,8 @@ This is the source of truth for both repos. Copy the `examples/*.json` files ver
 example with its own zod schema (drift fails CI).
 
 ## Direction & auth
-- Smart club is always the CALLER; medicoach never calls smart club.
+- Smart club is always the CALLER for fixtures, results and live state (§1–3); medicoach never
+  calls smart club except to forward WhatsApp statuses (below).
 - One shared secret: smart club SST secret `MedicoachSyncSecret` == medicoach SST secret `SmartClubSyncSecret`.
   Base URL on smart club: SST secret `MedicoachSyncUrl` (e.g. https://api.medicoach.co.za). Empty secret/url ⇒ the caller
   runs in dry-run mode (logs only); the medicoach endpoints refuse every request (503) when their secret is empty.
@@ -115,6 +116,95 @@ Medicoach rules: apply only if `changedAt` > the fixture's `scheduleChangedAt`; 
 A `changedAt` more than 5 minutes ahead of medicoach's clock is refused with `error` (fix the sender's clock).
 Every applied change is audited in medicoach under the `smartclub-sync` principal.
 `stale`/`unchanged`/`unmapped` are success outcomes for the caller (drop from outbox); `error` = retry later.
+
+## 3. GET /integrations/smartclub/live?tenant=<t>&date=YYYY-MM-DD
+
+Read-only, for smart club's admin **Match monitor**: the live-scoring state of every match on one
+day that is linked to one of this tenant's fixture refs. Smart club calls it on demand (the admin
+page polls every 30 s while it is open), so it is NOT part of the cursor feed and stores nothing.
+The `/changes` feed is unchanged: an in-progress match still never produces a `result` there.
+
+- `date` is the SAST calendar day (UTC+2) of the fixture's scheduled date.
+- Every match linked to a fixture with an `externalRef` for this tenant on that day; a fixture
+  with no linked match is simply absent. Mirror copies are skipped (one row per ref).
+- Same signing as the other endpoints. 400 for a malformed `tenant`/`date`.
+
+Response 200 (example: `live-day.json`):
+```ts
+{
+  version: 1,
+  tenant: string,
+  date: string,                 // as asked
+  generatedAt: string,          // ISO-8601 UTC
+  matches: Array<{
+    ref: string,                // fixture ref
+    status: "not_started" | "in_progress" | "innings_break" | "completed" | "abandoned",
+    startedAt: string | null,   // first ball of the match (ISO UTC)
+    endedAt: string | null,     // completed / abandoned at
+    lastInputAt: string | null, // latest scoring save of any kind
+    oversPerSide: number | null,
+    innings: Array<{            // at most 4, in order
+      number: number,           // 1..4
+      battingSide: "home" | "away" | null,
+      runs: number, wickets: number,
+      overs: string,            // cricket overs, e.g. "12.3"
+      startedAt: string | null, // first ball of the innings
+      endedAt: string | null    // set once the innings is closed
+    }>,
+    deliveries: number,         // balls scored so far, legal and extras
+    medianGapSec: number | null,// median gap between consecutive balls of one innings
+    longGaps: Array<{           // gaps >= 120 s between consecutive balls of ONE innings,
+                                // longest first, at most 50
+      innings: number,
+      over: string,             // the ball that ended the gap, e.g. "14.2"
+      at: string,               // when that ball was scored (ISO UTC)
+      gapSec: number,
+      reason: "drinks" | "interruption" | null  // a break the scorer recorded inside the gap
+    }>,
+    undoCount: number | null,   // times the scorer pressed Undo; null = not tracked for this match
+    players: Array<{            // at most 60: both team sheets, then anyone added during play
+      side: "home" | "away",
+      name: string,             // as the scorer has it (max 120 chars)
+      ref: string | null,       // smart club player ref when the player came from smart club
+      addedDuringMatch: boolean,// added with "add player" after scoring began
+      addedAt: string | null    // when it was first seen in a save (ISO UTC)
+    }>,
+    medicoachMatchUrl: string | null
+  }>
+}
+```
+`players` is PERSONAL DATA (names, and refs that are hashed ID numbers): never logged on either
+side. Smart club checks each player against the side's club roster (active registration at this
+club / inactive or clearance pending / registered at another club / not registered; a player
+with no ref is matched by name) and sends its admin page the status and the name — never the ref.
+
+What medicoach needs to add (neither is recorded today — Undo deletes events and "add player"
+writes only a name-map entry):
+- `undoCount`: count in `handleSaveLiveScoring`, where the previous blob is already loaded
+  (`previousLiveScoringData`): delivery ids present before and missing now, minus ids removed by
+  an Edit-Overs delete. Exact counting needs the clients to send an `undoCount` (or an undo log)
+  that the save schema keeps — today `SaveLiveScoringSchema` strips unknown fields. Until then
+  send `null` rather than a guess.
+- `addedDuringMatch` / `addedAt`: on the same save, a player id that appears in
+  `batsmenNames`/`bowlersNames` for the first time after the first ball (not in
+  `selectedPlayerIds` or the creation-time `guestPlayers`) is "added"; stamp `addedAt` with the
+  save time and keep it on the match so it survives later saves.
+- `ref`: the player's smart club ref via the ExternalRef reverse rows (`refForInstitution`),
+  filtered to the side's institution; `guest-`/`opponent-` ids have none.
+Deriving the fields in medicoach (cricket limited-overs, from the linked `PostMatchAnalysis`):
+- Ball times are each delivery's `timestamp` (scorer device clock, epoch ms). The innings `start`
+  marker can be re-timestamped when the setup is edited, so `startedAt` is the first BALL's time.
+- `lastInputAt` = `liveScoringData.lastSaved`; innings `endedAt` = the `inningsComplete` marker
+  (or the last ball of a closed innings); `endedAt` = the `gameComplete` marker / completion save.
+- `innings_break` = innings 1 closed and innings 2 has no ball yet.
+- A gap's `reason` comes from a `drinksBreakStart`/`End` or `matchInterruptionStart`/`End` marker
+  between the two balls. A gap across innings is never listed (the break is innings times).
+- Runs, wickets and overs as the scorecard shows them (`computeInnings`).
+
+Consumer rules (smart club): nothing is stored; a failure answers the admin page with the day's
+fixtures and the reason. Smart club applies its own thresholds (late start, delay, scorer
+silence, long break, undo count) on top of these facts and flags every player the roster can't
+vouch for.
 
 ## WhatsApp status forwarding (medicoach → smart club)
 

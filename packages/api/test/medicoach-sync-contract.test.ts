@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ChangesResponseSchema,
+  LiveResponseSchema,
   MEDICOACH_SYNC_VERSION,
   SchedulePushRequestSchema,
   SchedulePushResponseSchema,
@@ -37,16 +38,19 @@ const schemaFor = (file: string) =>
       ? SchedulePushRequestSchema
       : file === 'schedule-push-response.json'
         ? SchedulePushResponseSchema
-        : null;
+        : file.startsWith('live-')
+          ? LiveResponseSchema
+          : null;
 
 describe('contract examples', () => {
   const files = readdirSync(EXAMPLES).filter((f) => f.endsWith('.json'));
 
-  test('all five shared examples are present', () => {
+  test('all six shared examples are present', () => {
     assert.deepEqual(files.sort(), [
       'changes-knockout-reschedule.json',
       'changes-live-result.json',
       'changes-manual-and-cleared.json',
+      'live-day.json',
       'schedule-push-request.json',
       'schedule-push-response.json',
     ]);

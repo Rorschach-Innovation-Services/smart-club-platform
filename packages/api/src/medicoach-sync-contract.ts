@@ -27,6 +27,8 @@ export const SYNC_SIGNATURE_HEADER = 'X-Sync-Signature';
 
 export const CHANGES_PATH = '/integrations/smartclub/changes';
 export const SCHEDULE_PATH = '/integrations/smartclub/schedule';
+/** Live-scoring state of one day's synced fixtures (the admin match monitor). */
+export const LIVE_PATH = '/integrations/smartclub/live';
 
 /** Page size bounds for the changes endpoint. */
 export const CHANGES_LIMIT_DEFAULT = 200;
@@ -150,6 +152,91 @@ export const SchedulePushResponseSchema = z.object({
   ),
 });
 
+/* ── 3. GET /integrations/smartclub/live?tenant=<t>&date=YYYY-MM-DD (read-only) ── */
+
+/** Cricket overs as scorers write them: completed overs, then balls of the current one. */
+const oversText = z.string().regex(/^\d{1,3}(\.[0-5])?$/);
+
+export const LiveInningsSchema = z.object({
+  number: z.number().int().min(1).max(4),
+  battingSide: z.enum(['home', 'away']).nullable(),
+  runs: z.number().int().min(0),
+  wickets: z.number().int().min(0).max(10),
+  overs: oversText,
+  /** First ball of the innings. */
+  startedAt: isoUtc.nullable(),
+  /** Set once the innings is closed (all out, overs done, declared, target reached). */
+  endedAt: isoUtc.nullable(),
+});
+
+/** A gap between two consecutive balls of ONE innings (a break between innings is never one). */
+export const LiveGapSchema = z.object({
+  innings: z.number().int().min(1).max(4),
+  /** The ball that ended the gap, e.g. "14.2". */
+  over: oversText,
+  /** When that ball was scored. */
+  at: isoUtc,
+  gapSec: z.number().int().min(0),
+  /** A break the scorer recorded inside the gap (drinks / interruption marker); null = none. */
+  reason: z.enum(['drinks', 'interruption']).nullable(),
+});
+
+/**
+ * A player in a live match: everyone on either side's team sheet, plus anyone the scorer added
+ * with "add player" during the match. PERSONAL DATA (name, and a ref that is a hashed ID
+ * number) — never log, never store; smart club resolves it to a registration status and sends
+ * the admin page the status, never the ref.
+ */
+export const LivePlayerSchema = z.object({
+  side: z.enum(['home', 'away']),
+  name: z.string().min(1).max(120),
+  /** `smartclub:<t>:player:<naturalKey>` when the player came from smart club; else null. */
+  ref: ref.nullable(),
+  /** Added by the scorer with "add player" after scoring began (not on the team sheet). */
+  addedDuringMatch: z.boolean(),
+  addedAt: isoUtc.nullable(),
+});
+export const LIVE_PLAYERS_MAX = 60;
+
+/** Gaps of at least this long are listed in `longGaps`; shorter ones only feed the median. */
+export const LIVE_GAP_FLOOR_SEC = 120;
+/** At most this many `longGaps` per match (the longest are kept). */
+export const LIVE_GAPS_MAX = 50;
+
+export const LiveMatchSchema = z.object({
+  /** The fixture ref the live match is linked to. */
+  ref,
+  status: z.enum(['not_started', 'in_progress', 'innings_break', 'completed', 'abandoned']),
+  /** First ball of the match. */
+  startedAt: isoUtc.nullable(),
+  /** When the match was completed or abandoned. */
+  endedAt: isoUtc.nullable(),
+  /** The latest scoring write of any kind (ball, undo, correction). */
+  lastInputAt: isoUtc.nullable(),
+  oversPerSide: z.number().int().positive().nullable(),
+  innings: z.array(LiveInningsSchema).max(4),
+  /** Balls scored so far (legal and extras). */
+  deliveries: z.number().int().min(0),
+  /** Median gap between consecutive balls of an innings, seconds. */
+  medianGapSec: z.number().min(0).nullable(),
+  longGaps: z.array(LiveGapSchema).max(LIVE_GAPS_MAX),
+  /** Times the scorer undid a ball (null: this scoring app doesn't report it). */
+  undoCount: z.number().int().min(0).nullable(),
+  /** Each side's players, team sheet first, then any added during the match. */
+  players: z.array(LivePlayerSchema).max(LIVE_PLAYERS_MAX),
+  medicoachMatchUrl: z.string().url().nullable().transform(httpUrlOrNull),
+});
+
+export const LiveResponseSchema = z.object({
+  version: z.literal(MEDICOACH_SYNC_VERSION),
+  tenant: z.string().min(1),
+  /** The SAST day asked for. */
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  generatedAt: isoUtc,
+  /** Every live match on that day linked to one of this tenant's fixture refs. */
+  matches: z.array(LiveMatchSchema),
+});
+
 export type SyncSchedule = z.infer<typeof SyncScheduleSchema>;
 export type SyncTeams = z.infer<typeof SyncTeamsSchema>;
 export type SyncResult = z.infer<typeof SyncResultSchema>;
@@ -157,6 +244,9 @@ export type FixtureChange = z.infer<typeof FixtureChangeSchema>;
 export type ChangesResponse = z.infer<typeof ChangesResponseSchema>;
 export type SchedulePushRequest = z.infer<typeof SchedulePushRequestSchema>;
 export type SchedulePushResponse = z.infer<typeof SchedulePushResponseSchema>;
+export type LiveMatch = z.infer<typeof LiveMatchSchema>;
+export type LivePlayer = z.infer<typeof LivePlayerSchema>;
+export type LiveResponse = z.infer<typeof LiveResponseSchema>;
 
 /* ─────────────────────────── Request paths ─────────────────────────── */
 
@@ -169,6 +259,11 @@ export function changesPathAndQuery(tenant: string, since?: string, limit?: numb
   if (since && since !== '0') q.set('since', since);
   if (limit !== undefined) q.set('limit', String(limit));
   return `${CHANGES_PATH}?${q.toString()}`;
+}
+
+/** The exact path + query of a live request (signed as sent). */
+export function livePathAndQuery(tenant: string, date: string): string {
+  return `${LIVE_PATH}?${new URLSearchParams({ tenant, date }).toString()}`;
 }
 
 /* ─────────────────────────── Signing ─────────────────────────── */
