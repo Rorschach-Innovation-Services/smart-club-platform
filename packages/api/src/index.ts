@@ -2454,13 +2454,17 @@ app.post('/clubs/:id/players', async (c) => {
     // Veterans second-club affiliation — name derived server-side (above), never from the client.
     veteransClub: veteransClub?.name,
     veteransClubId: veteransClub?.id,
-    // Cricket fields deliberately NOT vertical-gated here (authed caller, unlike public /register); follow-up pending.
-    battingHand: body.battingHand,
-    bowlingHand: body.bowlingHand,
-    battingType: body.battingType,
-    bowlerType: body.bowlerType,
-    isAllRounder: body.isAllRounder ?? false,
-    isWk: body.isWk ?? false,
+    // Same gate as public /register: a 'positions' tenant silently drops the cricket fields.
+    ...(resolveVertical(cfg).playerProfile !== 'positions'
+      ? {
+          battingHand: body.battingHand,
+          bowlingHand: body.bowlingHand,
+          battingType: body.battingType,
+          bowlerType: body.bowlerType,
+          isAllRounder: body.isAllRounder ?? false,
+          isWk: body.isWk ?? false,
+        }
+      : {}),
     ...(position ? { position } : {}),
   };
   const lastClubId = await resolveDeclaredPreviousClubId(ra.tenant, body.lastClubId, body.lastClub);

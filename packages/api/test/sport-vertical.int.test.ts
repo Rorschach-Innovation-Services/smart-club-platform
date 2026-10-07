@@ -166,6 +166,42 @@ async function register(clubId: string, extra: Record<string, unknown>) {
   });
 }
 
+/** A chair/admin portal registration (POST /clubs/:id/players) with the same base identity. */
+async function portalRegister(
+  tenant: string,
+  auth: string,
+  clubId: string,
+  extra: Record<string, unknown>,
+) {
+  const tenantCfg = await repo.getTenantConfig(tenant);
+  return app.request(`/clubs/${clubId}/players`, {
+    method: 'POST',
+    headers: headers(auth, tenant),
+    body: JSON.stringify({
+      firstName: 'Cam',
+      lastName: 'Portal',
+      idType: 'passport',
+      dob: '2000-01-01',
+      nationality: 'South African',
+      race: 'African',
+      gender: 'Male',
+      cell: '0820000003',
+      team: tenantCfg?.leagues?.[0]?.key ?? 'u15',
+      district: 'North',
+      ...extra,
+    }),
+  });
+}
+
+const CRICKET_PROFILE = {
+  battingHand: 'Left',
+  bowlingHand: 'Right',
+  battingType: 'Top order',
+  bowlerType: 'Fast',
+  isAllRounder: true,
+  isWk: true,
+};
+
 const findPlayer = async (tenant: string, clubId: string, idNumber: string) =>
   (await repo.listPlayers(tenant, clubId)).find((p) => p.idNumber === idNumber);
 
@@ -492,6 +528,20 @@ describe('registration with the clearances module off (football)', () => {
     assert.equal(p?.isAllRounder, undefined);
     assert.equal(p?.isWk, undefined);
   });
+
+  test('the chair route also drops posted cricket playing-profile fields on a positions tenant', async () => {
+    const res = await portalRegister('fc', FC_ADMIN, 'fc-a', {
+      idNumber: 'FC010',
+      position: 'Striker',
+      ...CRICKET_PROFILE,
+    });
+    assert.equal(res.status, 201);
+    const p = await findPlayer('fc', 'fc-a', 'FC010');
+    assert.equal(p?.position, 'Striker');
+    for (const k of Object.keys(CRICKET_PROFILE)) {
+      assert.equal(p?.[k as keyof typeof p], undefined, k);
+    }
+  });
 });
 
 describe('registration with the clearances module on (cricket) is unchanged', () => {
@@ -550,6 +600,18 @@ describe('registration with the clearances module on (cricket) is unchanged', ()
     assert.equal(p?.bowlerType, 'Fast');
     assert.equal(p?.isWk, true);
     assert.equal(p?.isAllRounder, false);
+  });
+
+  test('the chair route still stores cricket playing-profile fields on a cricket tenant', async () => {
+    const res = await portalRegister('dolphins', DOL_ADMIN, 'dv-a', {
+      idNumber: 'DV005',
+      ...CRICKET_PROFILE,
+    });
+    assert.equal(res.status, 201);
+    const p = await findPlayer('dolphins', 'dv-a', 'DV005');
+    for (const [k, v] of Object.entries(CRICKET_PROFILE)) {
+      assert.equal(p?.[k as keyof typeof p], v, k);
+    }
   });
 });
 
