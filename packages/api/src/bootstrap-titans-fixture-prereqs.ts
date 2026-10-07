@@ -17,7 +17,7 @@
  *      elsewhere is reported, never overwritten.
  *   3. VENUE REGISTRY — one row per canonical ground in the workbook (plus each club's own
  *      ground), `surfaces` 1 until the union answers the capacity question, `homeClubIds` = the
- *      clubs fielding the HOME side there plus the club whose ground it is. An existing row
+ *      clubs hosting 2+ home fixtures there (veterans central-venue days excluded) plus the club whose ground it is. An existing row
  *      (matched by titans ground key) keeps its name/pin/surfaces; missing homeClubIds are
  *      unioned in.
  *

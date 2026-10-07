@@ -304,8 +304,9 @@ export function buildTitansSeries(
 // ───────────────────────── Would-be registry ─────────────────────────
 
 /** One registry row per canonical ground name (fixture venues + club grounds), one pitch each
- * (capacity unknown until the union answers); homeClubIds = the clubs fielding the home side
- * there in the workbook, plus the club whose own ground it is. */
+ * (capacity unknown until the union answers); homeClubIds = the clubs hosting 2+ home
+ * fixtures there in the workbook (veterans central-venue days excluded), plus the club whose
+ * own ground it is. */
 export function wouldBeRegistry(sheets: ParsedTitansSheet[], clubs: Club[]): Venue[] {
   const byKey = new Map<string, Venue>();
   const add = (rawName: string, clubId?: string) => {
@@ -318,9 +319,23 @@ export function wouldBeRegistry(sheets: ParsedTitansSheet[], clubs: Club[]): Ven
     }
     if (clubId && !v.homeClubIds!.includes(clubId)) v.homeClubIds!.push(clubId);
   };
-  // A club whose side is the HOME side at a ground calls it home (plus its own club ground).
+  // A club hosting at least 2 home fixtures at a ground calls it home (plus its own club
+  // ground). Veterans fixtures are left out: that league plays central venue days where the
+  // "home" side is only the first-named team, not the ground's club.
+  const hosted = new Map<string, number>();
   for (const s of sheets)
-    for (const f of s.fixtures) if (f.venue) add(f.venue, resolveTeamClub(f.home)?.id);
+    for (const f of s.fixtures) {
+      if (!f.venue) continue;
+      add(f.venue);
+      const clubId = resolveTeamClub(f.home)?.id;
+      if (!clubId || s.spec.leagueKey === 'veterans-league') continue;
+      const k = `${f.venue}\u0000${clubId}`;
+      hosted.set(k, (hosted.get(k) ?? 0) + 1);
+    }
+  for (const [k, n] of hosted) {
+    const [venue, clubId] = k.split('\u0000');
+    if (n >= 2) add(venue, clubId);
+  }
   for (const c of clubs)
     if (c.ground?.venue && !isTbcVenue(c.ground.venue)) add(c.ground.venue, c.id);
   return [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name));
