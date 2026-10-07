@@ -146,6 +146,18 @@ describe('Players panel', () => {
     });
   });
 
+  it('a review with no candidates shows medicoach’s message and only Dismiss', async () => {
+    renderPage(status(on({ reviews: 1 })), [
+      { ...MEDICOACH_REVIEW, message: 'out-of-tenant-identity-conflict', candidates: [] },
+    ]);
+    const list = await screen.findByTestId('mcs-player-reviews');
+    expect(within(list).getByRole('note')).toHaveTextContent('out-of-tenant-identity-conflict');
+    expect(within(list).queryByRole('button', { name: /create new/ })).toBeNull();
+    expect(within(list).queryByRole('button', { name: 'Link to this player' })).toBeNull();
+    await userEvent.click(within(list).getByRole('button', { name: 'Dismiss' }));
+    expect(api.resolveMedicoachPlayerReview).toHaveBeenCalledWith('nk-a', { action: 'dismiss' });
+  });
+
   it('summarises a player push in recent activity', async () => {
     renderPage({
       ...status(on()),

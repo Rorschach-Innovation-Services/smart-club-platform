@@ -172,7 +172,9 @@ Response 200:
 Medicoach rules:
 - Resolve `ref` → player id via the external-ref table. On a miss, match in this order:
   1. SA-ID-hash equality (ref's natural key vs hashed `idNumber`) across ALL of the tenant's
-     smart-club-mapped institutions → link.
+     smart-club-mapped institutions, CORROBORATED by matching surname or dob → link. An
+     uncorroborated or dob-conflicting hash match → `needs-review` (a mistyped ID must never
+     merge two people). An uncorroborated hash candidate does not block a `resolution.create`.
   2. Exact normalised name + dob WITHIN the target institution only → link. The same match at a
      DIFFERENT institution → `needs-review`.
   3. Anything weaker, or MORE THAN ONE candidate at any tier → `needs-review` with `candidates`.

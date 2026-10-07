@@ -91,6 +91,15 @@ CLI writing raw DynamoDB items does not.
 - **Waiting for a team** — ask the operator for a bundle top-up, then "Retry waiting players".
 - Reviews expire after 60 days; the player is re-evaluated on their next change.
 
+### Reviews with `out-of-tenant-identity-conflict` and no candidates
+
+medicoach could not create the player because an identity claim **outside this tenant** (same
+name/email claim held by a player smart club may not see) blocks it, and it never links across
+tenants. The review shows medicoach's message and only **Dismiss** — link and create are not
+offered. Dismiss it on smart club, then ask the medicoach team to resolve the claim by hand on
+their side (merge, or release the claim). Once fixed, the player's next change (or
+`enqueue-players --confirm`) sends them again.
+
 ## 6. Erasure
 
 `DELETE /admin/players/:nk` (POPIA) queues an `erase`: medicoach anonymises the player and drops

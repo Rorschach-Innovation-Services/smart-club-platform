@@ -129,6 +129,14 @@ medicoach export and warns (never blocks) when players would park.
   pairs. Medicoach then soft-removes memberships, anonymises the player (name → "Erased player";
   dob, contact, guardian, ID and email cleared), releases identity claims and deletes both ref
   rows.
+- **Medicoach-side erase tombstone.** Erasing deletes the ref rows, so medicoach keeps a
+  short-lived marker on the forward ref recording `erasedAt`. A replayed or delayed `upsert`
+  with `changedAt <= erasedAt` answers `stale` (it can never resurrect the erased player); a
+  genuinely newer `upsert` is a re-registration — it clears the marker and creates a fresh
+  player (smart club's `eraseFirst` makes sure the erase is sent before it).
+- **Erasing one of several refs.** When the athlete also carries another smart-club ref (two
+  refs, one player), an `erase` removes only the teams that ONLY the erased ref wanted and
+  drops that ref; full anonymisation and claim release happen only when the last ref goes.
 - **Match statistics are retained** on the anonymised medicoach player. Lawful basis: legitimate
   interest in historical competition records (results, scorecards and standings other players
   and clubs rely on), with every identifier removed so the record no longer relates to an

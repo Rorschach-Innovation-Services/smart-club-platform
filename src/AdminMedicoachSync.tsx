@@ -341,6 +341,9 @@ function PlayerReviewCard({
   const headingId = `mcs-p-${r.naturalKey.slice(0, 16).replace(/[^a-z0-9]/gi, '-')}`;
   const medicoach = r.reason === 'medicoach-needs-review';
   const ids = r.candidates.map((c) => c.playerId).filter((x): x is string => !!x);
+  // No candidates at all (e.g. `out-of-tenant-identity-conflict`): medicoach can neither link
+  // nor create — the fix is manual on the medicoach side, so only Dismiss is offered.
+  const blocked = medicoach && r.candidates.length === 0;
   const isBusy = busy?.startsWith(`player:${r.naturalKey}`) ?? false;
   return (
     <article className="mcs-card" aria-labelledby={headingId}>
@@ -353,7 +356,13 @@ function PlayerReviewCard({
         </div>
         <Pill tone="gold">{REVIEW_REASON[r.reason]}</Pill>
       </div>
-      <p className="mcs-note">
+      {blocked && (
+        <p className="mcs-error-text" role="note">
+          {r.message || 'medicoach cannot add this player'} — medicoach can&apos;t link or create
+          this player from here. Ask the medicoach team to fix it on their side, then dismiss.
+        </p>
+      )}
+      <p className="mcs-note" hidden={blocked}>
         {medicoach
           ? 'Not sent until you choose: link this registration to one of these medicoach players, or create a new one.'
           : 'Not sent until you decide: if these are different people, confirm it; if it is the same person, fix the ID on smart club first, then dismiss.'}
@@ -391,7 +400,7 @@ function PlayerReviewCard({
         </Details>
       )}
       <div className="mcs-card-actions">
-        {medicoach ? (
+        {blocked ? null : medicoach ? (
           <Btn
             tone="ink"
             size="sm"
