@@ -165,6 +165,7 @@ async function register(
 interface PlayersStatus {
   enabled: boolean;
   pending: number;
+  queued?: number;
   parked: number;
   stuck: number;
   reviews: number;
@@ -275,7 +276,7 @@ test('registrations queue, sync, and land in the Players panel as counts and rev
   );
 });
 
-test('link needs a candidate, create must acknowledge every candidate; both ride the next push', async ({
+test('link needs a candidate, create must acknowledge every candidate; each is sent at once', async ({
   page,
   request,
 }) => {
@@ -294,19 +295,21 @@ test('link needs a candidate, create must acknowledge every candidate; both ride
 
   await signInAsAdmin(page);
   await page.locator('aside.nav .nav-item', { hasText: 'Medicoach sync' }).click();
+  pushes.length = 0;
   const link = card(page, NAME.link);
   await expect(link.getByRole('button', { name: 'Link to this player' })).toHaveCount(2);
   await link.getByRole('button', { name: 'Link to this player' }).first().click();
-  await expect(page.getByText('Linked — it goes to medicoach on the next sync')).toBeVisible();
+  // The decision goes to medicoach right away (only this player), not on the next cron.
+  await expect(page.getByText('Linked — sent to medicoach')).toBeVisible();
   await expect(link).toHaveCount(0);
 
   const create = card(page, NAME.create);
   await create.getByRole('button', { name: 'None of these — create new' }).click();
+  await expect(page.getByText('New player — sent to medicoach')).toBeVisible();
   await expect(create).toHaveCount(0);
 
-  pushes.length = 0;
-  await syncNow(request);
   const sent = pushedEntries();
+  expect(pushes.every((p) => p.players.length === 1)).toBe(true);
   expect(sent.find((e) => e.lastName === NAME.link)?.resolution).toEqual({
     action: 'link',
     playerId: 'pl_link_a',
@@ -323,12 +326,14 @@ test('different people, dismiss, and a no-candidate identity conflict offers Dis
 }) => {
   await signInAsAdmin(page);
   await page.locator('aside.nav .nav-item', { hasText: 'Medicoach sync' }).click();
+  pushes.length = 0;
 
   // Smart club's possible duplicate: confirming them distinct settles BOTH reviews.
   await card(page, NAME.twin)
     .first()
     .getByRole('button', { name: 'They are different people' })
     .click();
+  await expect(page.getByText('Marked as different people — sent to medicoach')).toBeVisible();
   await expect(card(page, NAME.twin)).toHaveCount(0);
 
   // The out-of-tenant conflict: medicoach's message, no Link/Create.
@@ -341,7 +346,7 @@ test('different people, dismiss, and a no-candidate identity conflict offers Dis
   await card(page, NAME.dismiss).getByRole('button', { name: 'Dismiss' }).click();
   await expect(card(page, NAME.dismiss)).toHaveCount(0);
 
-  pushes.length = 0;
+  // Both twins went out with the decision; dismissed reviews send nothing, now or later.
   await syncNow(request);
   const names = pushedNames();
   expect(names.filter((n) => n === NAME.twin)).toHaveLength(2);
@@ -349,7 +354,7 @@ test('different people, dismiss, and a no-candidate identity conflict offers Dis
   expect(names).not.toContain(NAME.conflict);
 });
 
-test('retry re-queues the parked player; the next sync sends it and the panel clears', async ({
+test('retry re-queues the parked player: queued, then sent and gone on the next sync', async ({
   page,
   request,
 }) => {
@@ -366,12 +371,19 @@ test('retry re-queues the parked player; the next sync sends it and the panel cl
   await page.getByRole('button', { name: 'Retry waiting players' }).click();
   await expect(page.getByText(`${parked} player(s) will be sent on the next sync`)).toBeVisible();
 
+  // Retry moves it from "waiting for a team" to a visible QUEUED state — never into nothing.
+  await expect(stat(page, 'Waiting for a team')).toHaveText('0');
+  const queued = page.getByTestId('mcs-players-queued');
+  await expect(queued).toContainText('Queued');
+  await expect(queued).toContainText(`${parked} player(s) you retried or decided on are queued`);
+  expect((await playersStatus(request)).queued).toBe(parked);
+
   parkedTeamExists = true; // the bundle top-up landed in medicoach
   pushes.length = 0;
-  // Retry un-parks at once (the row is waiting again); the sync then sends it.
-  await expect(stat(page, 'Waiting for a team')).toHaveText('0');
   await page.getByRole('button', { name: 'Sync now' }).click();
   await expect(page.getByText('Sync finished')).toBeVisible();
   await expect.poll(() => pushedNames()).toContain(NAME.parked);
+  // Accepted: the queued state clears and nothing is waiting for a team.
+  await expect(queued).toHaveCount(0);
   await expect(stat(page, 'Waiting for a team')).toHaveText('0');
 });
