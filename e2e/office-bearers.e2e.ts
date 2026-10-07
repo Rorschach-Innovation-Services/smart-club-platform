@@ -165,8 +165,14 @@ test('the School Leadership roster needs a Director of Academics to submit — i
   await submit.click();
   await expect(modal).toHaveCount(0);
 
+  // The modal can close before the roster write lands: poll the stored school until the
+  // Director of Academics is on record instead of reading it once.
+  await expect
+    .poll(async () => (await getSchool(request)).exco?.vc, {
+      message: 'the Director of Academics is stored',
+    })
+    .toMatchObject({ name: 'Academics Person', email: 'academics@bearers.example' });
   const { exco } = await getSchool(request);
-  expect(exco?.vc).toMatchObject({ name: 'Academics Person', email: 'academics@bearers.example' });
   // The per-role merge kept the bearers already on record.
   expect(exco?.chair).toMatchObject(bearer('Principal'));
   expect(exco?.tre).toMatchObject(bearer('Football'));
