@@ -1,0 +1,25 @@
+{
+  "B1.responses": [
+    "200:linked",
+    "200:error (another push is creating this player; retry later)",
+    "200:linked",
+    "200:linked",
+    "200:created",
+    "200:linked",
+    "200:linked",
+    "200:linked",
+    "200:linked",
+    "200:error (another push is creating this player; retry later)"
+  ],
+  "B1.tally": {
+    "linked": 7,
+    "error": 2,
+    "created": 1
+  },
+  "B1.rosterCount": 1,
+  "B1.followup": {
+    "ref": "smartclub:synclab2:player:650dbb5fb95677f0b9ff4d66c46cf8008e499148e59f5da0e7e06a7086a60cbc",
+    "status": "unchanged"
+  },
+  "B1.rosterCountAfter": 1
+}

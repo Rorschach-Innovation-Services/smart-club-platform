@@ -1,0 +1,32 @@
+{
+  "B1.responses": [
+    "200:needs-review (possible match (contact+surname-first-name-differs))",
+    "200:needs-review (possible match (contact+surname-first-name-differs))",
+    "200:needs-review (possible match (contact+surname-first-name-differs))",
+    "200:needs-review (possible match (contact+surname-first-name-differs))",
+    "200:needs-review (possible match (contact+surname-first-name-differs))",
+    "200:needs-review (possible match (contact+surname-first-name-differs))",
+    "200:needs-review (possible match (contact+surname-first-name-differs))",
+    "200:needs-review (possible match (contact+surname-first-name-differs))",
+    "200:needs-review (possible match (contact+surname-first-name-differs))",
+    "200:needs-review (possible match (contact+surname-first-name-differs))"
+  ],
+  "B1.tally": {
+    "needs-review": 10
+  },
+  "B1.rosterCount": 0,
+  "B1.followup": {
+    "ref": "smartclub:synclab2:player:1f8ecb518fe7a7e0e6ba396238a0516dde994ad899b26a01b38f51f41f043c87",
+    "status": "needs-review",
+    "message": "possible match (contact+surname-first-name-differs)",
+    "candidates": [
+      {
+        "playerId": "b34eaad2-09b1-46dc-9b07-b14ecc8fd7ea",
+        "name": "Race1 Concurrent",
+        "dob": "1985-05-05",
+        "institutionName": "SyncLab2 Club 01 (e2e)"
+      }
+    ]
+  },
+  "B1.rosterCountAfter": 0
+}

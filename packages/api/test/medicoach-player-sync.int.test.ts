@@ -683,13 +683,13 @@ describe('admin + operator surface', () => {
     await clearPlayerSync();
   });
 
-  test('Sync now sends a first slice of 100 and reports the rest; the cron keeps the 500 cap', async () => {
+  test('Sync now sends one batch of 50 and reports the rest; the cron keeps the 500 cap', async () => {
     const { playerFlushCap, PLAYER_FLUSH_MAX_PER_RUN } = players;
-    assert.equal(playerFlushCap('manual'), 100);
+    assert.equal(playerFlushCap('manual'), 50);
     assert.equal(playerFlushCap('cron'), PLAYER_FLUSH_MAX_PER_RUN);
     assert.equal(PLAYER_FLUSH_MAX_PER_RUN, 500);
     const at = new Date().toISOString();
-    for (let i = 0; i < 101; i++)
+    for (let i = 0; i < 51; i++)
       await repo.putPendingPlayerSync(T, `nk-slice-${String(i).padStart(3, '0')}`, at);
     answer = () => ({ status: 'removed' });
     const res = await call('POST', '/integrations/medicoach/sync-now');
@@ -697,11 +697,11 @@ describe('admin + operator surface', () => {
     const body = (await res.json()) as {
       playerPush: { deferred: number; counts: { sent: number } };
     };
-    assert.equal(body.playerPush.counts.sent, 100);
+    assert.equal(body.playerPush.counts.sent, 50);
     assert.equal(body.playerPush.deferred, 1);
     assert.equal(
       pushes.reduce((n, p) => n + p.players.length, 0),
-      100,
+      50,
     );
 
     // The cron run (same code path, trigger 'cron') takes the rest under the 500 cap.

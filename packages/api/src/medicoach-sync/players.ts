@@ -62,18 +62,23 @@ type RepoModule = typeof import('../repo.js');
 export const PLAYER_FLUSH_MAX_PER_RUN = 500;
 
 /**
- * The cap for an admin's "Sync now" (2 batches): it runs inside the API Lambda behind the 30 s
- * API Gateway limit, and 500 rows = 10 sequential batches × a 10 s timeout could exceed it.
- * The rest stay queued (`deferred`) and the cron continues with the full cap.
+ * The cap for an admin's "Sync now" (ONE batch): it runs inside the API Lambda behind the 30 s
+ * API Gateway limit, and a single batch may take up to HTTP_TIMEOUT_MS (25 s). The rest stay
+ * queued (`deferred`) and the cron continues with the full cap (10 batches × worst 25 s fits
+ * its 300 s budget; steady-state batches take 1–2 s).
  */
-export const PLAYER_FLUSH_MAX_MANUAL = 100;
+export const PLAYER_FLUSH_MAX_MANUAL = 50;
 
 /** The per-run row cap for a trigger: manual runs send a first slice, the cron drains. */
 export function playerFlushCap(trigger: 'cron' | 'manual' | 'cli'): number {
   return trigger === 'manual' ? PLAYER_FLUSH_MAX_MANUAL : PLAYER_FLUSH_MAX_PER_RUN;
 }
 
-const HTTP_TIMEOUT_MS = 10_000;
+/**
+ * Per player-push request. A worst-case batch of 50 NEW players (matcher + creates) measured
+ * ~3–5 s with 3× spikes, so the fixture push's 10 s would cut real work short.
+ */
+const HTTP_TIMEOUT_MS = 25_000;
 const ROSTER_CONCURRENCY = 8;
 
 /* ─────────────────────────── Snapshot (one read of the tenant) ─────────────────────────── */

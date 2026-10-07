@@ -75,7 +75,7 @@ npm --prefix packages/api run enqueue-players -- --tenant <t> --confirm
 ```
 
 The 15-minute cron drains the backlog, about 500 people per run; watch the Players panel. "Sync
-now" only sends a first slice of 100 (it runs behind the API's 30-second limit) and says how many
+now" only sends a first slice of about 50 (one batch; it runs behind the API's 30-second limit) and says how many
 remain — the cron continues with the rest automatically.
 
 **Re-run `enqueue-players --confirm` after any import CLI that writes players** (roster or

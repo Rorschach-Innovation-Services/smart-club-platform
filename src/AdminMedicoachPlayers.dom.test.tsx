@@ -247,10 +247,10 @@ describe('Players panel', () => {
     expect(
       syncNowToast({
         status: 'ok',
-        playerPush: { status: 'ok', deferred: 400, counts: { sent: 100 } },
+        playerPush: { status: 'ok', deferred: 450, counts: { sent: 50 } },
       }),
     ).toEqual([
-      'Sync finished — sent 100 player(s), 400 remaining; the next sync continues automatically',
+      'Sync finished — sent 50 player(s), 450 remaining; the next sync continues automatically',
     ]);
     expect(syncNowToast({ status: 'ok', playerPush: { status: 'ok', deferred: 0 } })).toEqual([
       'Sync finished',

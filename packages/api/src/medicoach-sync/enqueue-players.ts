@@ -158,9 +158,7 @@ async function main(): Promise<void> {
     );
   const queued = await repo.recordPlayerSyncChange(tenant, plan.eligible, { config });
   line('queued', queued);
-  console.log(
-    '  The 15-minute cron pushes them, about 500 per run ("Sync now" sends a first 100).',
-  );
+  console.log('  The 15-minute cron pushes them, about 500 per run ("Sync now" sends a first 50).');
 }
 
 // Only run as a CLI; tests import parseArgs/planBackfill.
