@@ -241,6 +241,57 @@ describe('in-season clash gate — PATCH /series/:id', () => {
     assert.equal(((await refused.json()) as { code: string }).code, 'venue_clash');
   });
 
+  test('a one-save "postpone to a new date" stamps originalDate and books the new slot', async () => {
+    await putReleased('rp-a', [fixture({ id: 'f1', date: '2026-10-04', venueName: 'Busy Oval' })]);
+    await putReleased('rp-b', [
+      fixture({ id: 'f1', home: 'away-club', away: 'home-club', venueName: 'Quiet Oval' }),
+    ]);
+    // Postponed AND moved onto rp-a's slot in one write: refused, not exempt.
+    const b = await repo.getSeries('dolphins', 'rp-b');
+    const refused = await patch('rp-b', {
+      version: b!.version,
+      fixtures: [
+        fixture({
+          id: 'f1',
+          home: 'away-club',
+          away: 'home-club',
+          venueName: 'Busy Oval',
+          date: '2026-10-04',
+          status: 'postponed',
+        }),
+      ],
+    });
+    assert.equal(refused.status, 409);
+    assert.equal(((await refused.json()) as { code: string }).code, 'venue_clash');
+
+    // Postponed to a free date: saves, recording the date it left.
+    const ok = await patch('rp-b', {
+      version: b!.version,
+      fixtures: [
+        fixture({
+          id: 'f1',
+          home: 'away-club',
+          away: 'home-club',
+          venueName: 'Quiet Oval',
+          date: '2026-10-11',
+          status: 'postponed',
+        }),
+      ],
+    });
+    assert.equal(ok.status, 200);
+    const stored = (await repo.getSeries('dolphins', 'rp-b'))!.fixtures[0] as Fixture;
+    assert.equal(stored.originalDate, '2026-09-27');
+
+    // Moved again: originalDate keeps pointing at the first schedule.
+    const again = await patch('rp-b', {
+      version: (await repo.getSeries('dolphins', 'rp-b'))!.version,
+      fixtures: [{ ...stored, originalDate: undefined, date: '2026-10-18' }],
+    });
+    assert.equal(again.status, 200);
+    const twice = (await repo.getSeries('dolphins', 'rp-b'))!.fixtures[0] as Fixture;
+    assert.equal(twice.originalDate, '2026-09-27');
+  });
+
   test('the same clashing edit on a DRAFT series saves (no gate on drafts)', async () => {
     await putReleased('dr-a', [fixture({ id: 'f1', venueName: 'Chatsworth Oval' })]);
     await repo.putSeries(

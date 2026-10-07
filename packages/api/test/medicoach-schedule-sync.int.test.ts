@@ -414,6 +414,48 @@ describe('Slice 3 — inbound schedule changes', () => {
     assert.equal(f2.venueName, 'Toti Oval 1');
   });
 
+  test('an inbound postponement WITH a new date stamps originalDate and books its new slot', async () => {
+    // Postponed onto Toti Oval 1, 11 Oct 13:30 — the slot S2/f1 holds. Without originalDate the
+    // moved fixture would read as an undated postponement and slip past the gate.
+    pages = [
+      changesPage([
+        {
+          ref: REF(S1, 'f1'),
+          schedule: {
+            scheduledTime: '2026-10-11T13:30:00+02:00',
+            venue: 'Toti Oval 1',
+            postponed: true,
+          },
+        },
+      ]),
+    ];
+    assert.equal((await pull()).counts.scheduleConflicts, 1);
+    const held = await fixtureOf(S1, 'f1');
+    assert.equal(held.date, '2026-10-04');
+    assert.equal(held.status, undefined);
+    await repo.deleteSyncConflict(T, REF(S1, 'f1'));
+
+    // The same postponement onto a free ground applies, carrying the date it left.
+    pages = [
+      changesPage([
+        {
+          ref: REF(S1, 'f1'),
+          schedule: {
+            scheduledTime: '2026-10-11T13:30:00+02:00',
+            venue: 'Lahee Park',
+            postponed: true,
+            changedAt: MC_LATER,
+          },
+        },
+      ]),
+    ];
+    assert.equal((await pull()).counts.scheduleApplied, 1);
+    const moved = await fixtureOf(S1, 'f1');
+    assert.equal(moved.date, '2026-10-11');
+    assert.equal(moved.status, 'postponed');
+    assert.equal(moved.originalDate, '2026-10-04');
+  });
+
   test('a change that would clash is held as a conflict, not applied, and emails the admins once', async () => {
     // f2 (c v d) → Toti Oval 1 on 11 Oct 13:30, which S2/f1 already holds.
     const clash = changesPage([

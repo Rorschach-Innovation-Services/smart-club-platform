@@ -4727,6 +4727,12 @@ async function applySeriesPatch(
   if (patch.version !== undefined && patch.version !== current.version)
     throw new HttpError(409, 'series changed; refetch');
 
+  // A postponed fixture this write moves to a new date is a RESCHEDULED postponement: stamp
+  // `originalDate` before either clash gate runs, or `isClashExempt` would read it as undated
+  // and let it double-book its new slot unseen.
+  if (Array.isArray(patch.fixtures))
+    patch.fixtures = stampRescheduledPostponements(current, patch.fixtures as PostponableFixture[]);
+
   // The tenant-wide series/clubs/venues lists both clash gates read, loaded at most once and
   // only when a gate actually runs — a draft fixture edit with no release transition pays no
   // list reads, and a release never loads them twice.
@@ -5291,6 +5297,28 @@ interface PostponableFixture {
 
 const fixturesOf = (series: Series): PostponableFixture[] =>
   (series.fixtures as PostponableFixture[]) ?? [];
+
+/**
+ * `next` with `originalDate` stamped on every fixture that ends up `status: 'postponed'` on a
+ * date different from the one `current` stores for it (matched by id) — the admin editor's
+ * one-save "postpone to <date>", or a date change on an already-postponed fixture. Same
+ * only-if-absent rule as `postponedFixture` (ADR 0015): an existing `originalDate` (on the
+ * incoming fixture, else the stored one) is kept, so a fixture moved twice keeps pointing at
+ * its first schedule. Without it `isClashExempt` would treat the moved fixture as an undated
+ * postponement and leave its new slot out of every ground ledger.
+ */
+function stampRescheduledPostponements(
+  current: Series,
+  next: PostponableFixture[],
+): PostponableFixture[] {
+  const before = new Map(fixturesOf(current).map((f) => [f?.id, f]));
+  return next.map((f) => {
+    const prev = f?.id ? before.get(f.id) : undefined;
+    if (!prev || f.status !== 'postponed' || f.originalDate) return f;
+    if (!f.date || !prev.date || f.date === prev.date) return f;
+    return { ...f, originalDate: prev.originalDate ?? prev.date };
+  });
+}
 
 /** The club behind a fixture side: the participants snapshot, else (legacy) the id IS a clubId.
  * A knockout slot reference (`win:f3`) has no club yet. */
