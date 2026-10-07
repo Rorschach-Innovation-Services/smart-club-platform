@@ -254,10 +254,12 @@ export interface ClearanceWhatsAppInput {
   fromClubName: string;
   playerName: string;
   toClubName: string;
+  /** Deep link to the clearance in the chair's club portal ({{5}} of the template). Required. */
+  portalLink: string;
 }
 
 /**
- * Build the four positional body params for `club_clearance_pending`, in order:
+ * Build the first four positional body params of `club_clearance_pending_v2`, in order:
  * {{1}} chair name (fallback 'there'), {{2}} from-club, {{3}} player, {{4}} to-club.
  * Every param rides through cleanParam — the player name arrives from the PUBLIC register
  * form as free text (Meta rejects newlines/tabs/4+ spaces). Exported so the param
@@ -275,22 +277,60 @@ export function clearanceParams(
 }
 
 /**
- * Clearance-pending heads-up to the FROM-club chairman: a player wants to leave and
- * the club must approve or reject. No link in the body — the chair may hold no portal
- * login (chair invites were removed with admin onboarding), so the copy points at the
- * club portal / union office rather than telling the recipient to sign in. Uses the
- * `clearancePending` registry entry.
+ * Build the five positional body params for `club_clearance_pending_v2`: the name params
+ * ({@link clearanceParams}) plus {{5}} the clearance deep link. The link skips cleanParam (as
+ * `fixtureReminderParams`' portal link does) — it is server-built from the tenant origin, never
+ * free text, and truncating it would break it.
+ */
+export function clearanceV2Params(
+  input: Pick<
+    ClearanceWhatsAppInput,
+    'chairName' | 'fromClubName' | 'playerName' | 'toClubName' | 'portalLink'
+  >,
+): TemplateParam[] {
+  return [...clearanceParams(input), { type: 'text', text: input.portalLink }];
+}
+
+/**
+ * Which clearance-pending template a send uses, and its params: `clearancePendingV2` — the only
+ * clearance template since v1 (`club_clearance_pending`) was retired in code on 7 Oct 2026 — when
+ * the notice carries a link; null when it does not. {{5}} is the link and Meta rejects an empty
+ * param, so a null pick means the caller skips the WhatsApp channel (sendClearanceWhatsAppChannel
+ * in notify/index.ts records it `skipped`). Exported so tests can assert both sides.
+ */
+export function clearanceTemplateFor(
+  input: Pick<
+    ClearanceWhatsAppInput,
+    'chairName' | 'fromClubName' | 'playerName' | 'toClubName'
+  > & {
+    portalLink?: string;
+  },
+): { key: 'clearancePendingV2'; params: TemplateParam[] } | null {
+  if (!input.portalLink) return null;
+  return {
+    key: 'clearancePendingV2',
+    params: clearanceV2Params({ ...input, portalLink: input.portalLink }),
+  };
+}
+
+/**
+ * Clearance-pending heads-up to the FROM-club chairman: a player wants to leave and the club must
+ * approve or reject. Sends `club_clearance_pending_v2` with the portal deep link, which is
+ * required: a link-less notice never reaches here — the caller skips the channel and records why
+ * (sendClearanceWhatsAppChannel in notify/index.ts). The copy keeps the "contact your union
+ * office" fallback, since the chair may hold no portal login. The ClearanceReminders cron's
+ * WhatsApp channel gate reads this template's registry status (crons/clearance-reminders.ts).
  */
 export async function sendClearanceWhatsApp(
   input: ClearanceWhatsAppInput,
 ): Promise<{ messageId: string }> {
   const { to, fromClubName } = input;
-  const { name, lang } = WHATSAPP_TEMPLATES.clearancePending;
+  const { name, lang } = WHATSAPP_TEMPLATES.clearancePendingV2;
   return sendTemplate(
     to,
     name,
     lang,
-    clearanceParams(input),
+    clearanceV2Params(input),
     `clearance notice for ${fromClubName}`,
   );
 }

@@ -3244,6 +3244,33 @@
         background: var(--green-pale);
         border-color: rgba(15, 77, 46, 0.2);
       }
+      /* The card a ?clearance=<id> notification link points at: a brand ring that holds, then
+         fades out before ClubClearancesView drops the class (CLEARANCE_LINK_HIGHLIGHT_MS).
+         fadeUp is kept in the list so adding/removing the class doesn't replay the entrance. */
+      .clr-card.linked {
+        animation:
+          fadeUp 0.35s cubic-bezier(0.16, 1, 0.3, 1) both,
+          clrLinked 4s ease-out both;
+      }
+      @keyframes clrLinked {
+        0%,
+        65% {
+          border-color: var(--green-bright);
+          box-shadow: 0 0 0 3px var(--green-bright);
+        }
+        100% {
+          box-shadow: 0 0 0 3px transparent;
+        }
+      }
+      /* Reduced motion collapses animations to their end frame (the faded-out ring), so show
+         a static ring for as long as the class is on instead. */
+      @media (prefers-reduced-motion: reduce) {
+        .clr-card.linked {
+          animation: none;
+          border-color: var(--green-bright);
+          box-shadow: 0 0 0 3px var(--green-bright);
+        }
+      }
       .clr-card-head {
         display: flex;
         align-items: flex-start;

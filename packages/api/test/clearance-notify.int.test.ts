@@ -14,6 +14,18 @@
  * — logged as kind `clearance-reminder`, which never consumes the creation cap. 409 on a resolved
  * clearance, 422 on an off-system source.
  *
+ * Deep links: this env has no canonical web origin for this tenant (like a dev stage), so creation
+ * notices — including the ANONYMOUS register route's — carry no link even when the request sends an
+ * Origin header (it must never be reflected into a link), while the authenticated admin actions
+ * (remind, reject, reopen) fall back to a localhost request Origin and link each chair to their OWN
+ * club page. A CORS-trusted Origin that is not this tenant's (a `*.cloudfront.net` clone, another
+ * tenant's vanity host) never becomes a link. Links are observed via the dry-run log's `(link: …)`
+ * suffix.
+ *
+ * WhatsApp: the only clearance template (club_clearance_pending_v2) carries the link, so a
+ * link-less notice records its WhatsApp channel `skipped` ('no portal link for this tenant') —
+ * the expected dev-stage behavior — and a linked one sends.
+ *
  * Senders run in dry-run (no FROM_EMAIL); admin emails are observed from the dry-run log line.
  * Run with the API package's test runner (tsx --test).
  */
@@ -35,6 +47,11 @@ process.env.AWS_ACCESS_KEY_ID ??= 'test';
 process.env.AWS_SECRET_ACCESS_KEY ??= 'test';
 process.env.AWS_MAX_ATTEMPTS = '1';
 process.env.NOTIFY_DRY_RUN = '1';
+// ANOTHER tenant's vanity host, CORS-trusted via ALLOWED_ORIGINS — must never become a link for
+// this tenant. Read once by origins.ts at import time, so set before the app is imported.
+const OTHER_TENANT_ORIGIN = 'https://titans.example.org';
+process.env.ALLOWED_ORIGINS = OTHER_TENANT_ORIGIN;
+process.env.WEB_ORIGIN_MAP = JSON.stringify({ titans: OTHER_TENANT_ORIGIN });
 
 type Repo = typeof import('../src/repo.js');
 type Club = import('../src/types.js').Club;
@@ -236,8 +253,13 @@ describe('clearance creation fan-out', () => {
     const srcLog = await commLog(src);
     assert.deepEqual(srcLog.map((e) => `${e.kind}/${e.channel}/${e.status}`).sort(), [
       'clearance/email/sent',
-      'clearance/whatsapp/sent',
+      'clearance/whatsapp/skipped',
     ]);
+    // No canonical origin ⇒ no link ⇒ the link-carrying WhatsApp template is skipped, with why.
+    assert.equal(
+      srcLog.find((e) => e.channel === 'whatsapp')?.error,
+      'no portal link for this tenant',
+    );
 
     const dstLog = await commLog(dst);
     assert.equal(dstLog.length, 1);
@@ -357,11 +379,16 @@ describe('directory-source creation fan-out (public registration naming an off-s
     });
     return { dst, dirId, teamKey: (cfg.leagues ?? [])[0]?.key ?? '' };
   }
-  const registerNaming = (dst: string, dirId: string, teamKey: string) => {
+  const registerNaming = (
+    dst: string,
+    dirId: string,
+    teamKey: string,
+    extraHeaders: Record<string, string> = {},
+  ) => {
     dirSeq++;
     return app.request(`/register/${dst}?t=tok-${dst}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...extraHeaders },
       body: JSON.stringify({
         firstName: 'Sipho',
         lastName: `Offline${dirSeq}`,
@@ -416,6 +443,23 @@ describe('directory-source creation fan-out (public registration naming an off-s
     assert.equal(await repo.getClub(TENANT, dirId), null);
     assert.ok(!logged.some((l) => l.includes('clearance notice') && l.includes('Offline CC')));
     assert.deepEqual(adminEmailsSent(), ['admin1@union.test', 'admin2@union.test']);
+  });
+
+  test('the anonymous register route never reflects a request Origin into a notice link', async () => {
+    const { dst, dirId, teamKey } = await seedDirectoryPair('dirorigin');
+    // A trusted-for-CORS but attacker-controllable host: `originAllowed` accepts any *.cloudfront.net.
+    const res = await registerNaming(dst, dirId, teamKey, {
+      origin: 'https://evil-clone.cloudfront.net',
+    });
+    assert.equal(res.status, 201, await res.clone().text());
+    // The notices did go out (so there was something to inspect)…
+    assert.ok(
+      logged.some((l) => l.includes(`clearance-opened (destination) notice for dirorigin`)),
+    );
+    assert.deepEqual(adminEmailsSent(), ['admin1@union.test', 'admin2@union.test']);
+    // …and none carries a link: no canonical origin here, and the request Origin is never used.
+    assert.ok(!logged.some((l) => l.includes('evil-clone')));
+    assert.ok(!logged.some((l) => l.includes('(link:')));
   });
 
   test('the directory cap counts directory-source inbound rows on the destination only', async () => {
@@ -540,9 +584,10 @@ describe('POST /admin/clearances/:cid/remind', () => {
     const { results } = (await first.json()) as {
       results: Array<{ channel: string; status: string }>;
     };
+    // No Origin and no canonical origin ⇒ no link ⇒ WhatsApp skipped; the email still counts.
     assert.deepEqual(results.map((r) => `${r.channel}/${r.status}`).sort(), [
       'email/sent',
-      'whatsapp/sent',
+      'whatsapp/skipped',
     ]);
 
     const reminders = (await commLog(src)).filter((e) => e.kind === 'clearance-reminder');
@@ -658,6 +703,119 @@ describe('POST /admin/clearances/:cid/remind', () => {
     assert.match(
       ((await res.json()) as { error: string }).error,
       /source club is not on the system/,
+    );
+  });
+});
+
+describe('clearance deep links', () => {
+  const DEV_ORIGIN = 'http://localhost:5173';
+  const post = (path: string, body: unknown, extra: Record<string, string> = {}) =>
+    app.request(path, {
+      method: 'POST',
+      headers: { ...headers(ADMIN), ...extra },
+      body: JSON.stringify(body),
+    });
+  /** The dry-run email line sent to `to` whose label includes `kind`. */
+  const lineFor = (kind: string, to: string) =>
+    logged.find((l) => l.includes(`${kind} to ${to}`)) ?? '';
+
+  test('a chair-portal creation never takes its link from the request Origin', async () => {
+    const { src, dst, player } = await seedPair('lnkcreate');
+    const res = await app.request(`/clubs/${dst}/clearances`, {
+      method: 'POST',
+      headers: { ...headers(repOf(dst)), origin: DEV_ORIGIN },
+      body: JSON.stringify({ fromClubId: src, playerNaturalKey: player.naturalKey }),
+    });
+    assert.equal(res.status, 201);
+    assert.ok(lineFor('clearance notice', `chair@${src}.test`), 'source chair notified');
+    assert.ok(!logged.some((l) => l.includes('(link:')));
+  });
+
+  test('manual remind links the source chair to the clearance in their club portal', async () => {
+    const { src, dst, player } = await seedPair('lnkremind');
+    const clearance = (await (await openClearance(src, dst, player)).json()) as PlayerClearance;
+    logged = [];
+    const res = await post(
+      `/admin/clearances/${clearance.id}/remind`,
+      { fromClubId: src },
+      { origin: DEV_ORIGIN },
+    );
+    assert.equal(res.status, 200, await res.clone().text());
+    assert.ok(
+      lineFor('clearance notice', `chair@${src}.test`).endsWith(
+        `(link: ${DEV_ORIGIN}/club/${src}/clearances?clearance=${clearance.id})`,
+      ),
+    );
+    // With a link, the v2 WhatsApp template goes out too.
+    const { results } = (await res.json()) as {
+      results: Array<{ channel: string; status: string }>;
+    };
+    assert.deepEqual(results.map((r) => `${r.channel}/${r.status}`).sort(), [
+      'email/sent',
+      'whatsapp/sent',
+    ]);
+  });
+
+  // Untrusted, a CORS-trusted CloudFront clone (originAllowed accepts any *.cloudfront.net), and
+  // ANOTHER tenant's CORS-trusted vanity host: none belongs to this tenant, so none is a link.
+  for (const [i, origin] of [
+    'https://evil.example.com',
+    'https://evil-clone.cloudfront.net',
+    OTHER_TENANT_ORIGIN,
+  ].entries()) {
+    test(`manual remind with Origin ${origin} carries no link and skips WhatsApp`, async () => {
+      const { src, dst, player } = await seedPair(`lnkremind-none-${i}`);
+      const clearance = (await (await openClearance(src, dst, player)).json()) as PlayerClearance;
+      logged = [];
+      const res = await post(
+        `/admin/clearances/${clearance.id}/remind`,
+        { fromClubId: src },
+        { origin },
+      );
+      assert.equal(res.status, 200, await res.clone().text());
+      const line = lineFor('clearance notice', `chair@${src}.test`);
+      assert.ok(line, 'source chair reminded');
+      assert.ok(!line.includes('(link:'));
+      assert.ok(!logged.some((l) => l.includes(new URL(origin).hostname)));
+      const { results } = (await res.json()) as {
+        results: Array<{ channel: string; status: string; error?: string }>;
+      };
+      const wa = results.find((r) => r.channel === 'whatsapp');
+      assert.equal(wa?.status, 'skipped');
+      assert.equal(wa?.error, 'no portal link for this tenant');
+    });
+  }
+
+  test('reject then reopen link EACH chair to the clearance on their own club page', async () => {
+    const { src, dst, player } = await seedPair('lnkresolve');
+    const clearance = (await (await openClearance(src, dst, player)).json()) as PlayerClearance;
+    const linkFor = (club: string) =>
+      `(link: ${DEV_ORIGIN}/club/${club}/clearances?clearance=${clearance.id})`;
+
+    logged = [];
+    const rejected = await post(
+      `/admin/clearances/${clearance.id}/reject`,
+      { fromClubId: src, reason: 'unpaid fees' },
+      { origin: DEV_ORIGIN },
+    );
+    assert.equal(rejected.status, 200, await rejected.clone().text());
+    assert.ok(lineFor('clearance-rejected notice', `chair@${src}.test`).endsWith(linkFor(src)));
+    assert.ok(lineFor('clearance-rejected notice', `chair@${dst}.test`).endsWith(linkFor(dst)));
+
+    logged = [];
+    const reopened = await post(
+      `/admin/clearances/${clearance.id}/reopen`,
+      { fromClubId: src },
+      { origin: DEV_ORIGIN },
+    );
+    assert.equal(reopened.status, 200, await reopened.clone().text());
+    assert.ok(
+      lineFor('clearance-reopened (source) notice', `chair@${src}.test`).endsWith(linkFor(src)),
+    );
+    assert.ok(
+      lineFor('clearance-reopened (destination) notice', `chair@${dst}.test`).endsWith(
+        linkFor(dst),
+      ),
     );
   });
 });

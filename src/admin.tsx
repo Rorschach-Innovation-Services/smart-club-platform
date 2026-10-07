@@ -21,7 +21,7 @@ import {
   hasActiveFilters,
   emptyPlayerFilters,
 } from './playerFilters';
-import { filterClearances } from './clearanceFilters';
+import { filterClearances, readClearanceLinkId, clearanceLinkMissing } from './clearanceFilters';
 import { GUIDE_URL } from './help/HelpDrawer';
 import {
   DISTRICTS,
@@ -171,6 +171,7 @@ import {
   InfoDot,
   ScrollX,
   FieldGuide,
+  ClearanceLinkMissingNotice,
 } from './atoms';
 
 /* ─── Local view-state shapes — explicit type params for `useState(null)` state that is
@@ -7383,6 +7384,9 @@ export function AdminClearances({
   transferWindowStatus = undefined,
   busyId,
   busyAction,
+  // False while the list is still loading — `clearances` is `[]` then, so the dead-link
+  // notice below would flash before the real list lands.
+  clearancesLoaded = true,
 }) {
   const [confirm, setConfirm] = useStateA<ClearanceConfirmState | null>(null);
   // Optional note the admin attaches to a rejection (shown to both clubs).
@@ -7394,8 +7398,14 @@ export function AdminClearances({
   // Target club for a reallocation (the reassign confirm's picker).
   const [reassignTarget, setReassignTarget] = useStateA('');
   const [filter, setFilter] = useStateA('all');
+  // `?clearance=<id>` (from a clearance notification email) seeds the search with that id —
+  // the filter matches on `r.id` and the default pill is All, so it surfaces at any status.
+  const [linkId] = useStateA(() =>
+    typeof window !== 'undefined' ? readClearanceLinkId(window.location.search) : null,
+  );
+  const [linkNoticeDismissed, setLinkNoticeDismissed] = useStateA(false);
   // Free-text search across every status; combines with the status pills below.
-  const [q, setQ] = useStateA('');
+  const [q, setQ] = useStateA(linkId ?? '');
   const teamLabel = labelByKey(leagues ?? []);
   // requestedAt is an INSTANT — the local calendar day, not the UTC one, or a request
   // logged at 01:00 SAST reads as the previous day.
@@ -7451,6 +7461,16 @@ export function AdminClearances({
       </div>
 
       <TransferWindowBanner status={transferWindowStatus} />
+
+      {clearancesLoaded && !linkNoticeDismissed && clearanceLinkMissing(linkId, all) && (
+        <ClearanceLinkMissingNotice
+          onDismiss={() => {
+            setLinkNoticeDismissed(true);
+            // Drop the dead seeded search too, so dismissing lands on the full list.
+            if (q === linkId) setQ('');
+          }}
+        />
+      )}
 
       <div className="players-stats">
         <div className="players-stat">

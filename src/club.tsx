@@ -97,7 +97,9 @@ import {
   cqiBand,
   scoreCQI,
   Modal,
+  ClearanceLinkMissingNotice,
 } from './atoms';
+import { readClearanceLinkId, clearanceLinkMissing } from './clearanceFilters';
 import { useQuery } from '@tanstack/react-query';
 import {
   RegisterPlayerForm,
@@ -6127,6 +6129,11 @@ export function RequestPlayerForm({ club, directory, onSubmit, onCancel, busy })
 }
 
 /* ─── Phase 04 · Clearances (club side) ─── */
+// How long the deep-linked card keeps its `linked` ring — matches the `clrLinked` keyframes
+// in index.html, which hold the ring then fade it out before the class comes off.
+const CLEARANCE_LINK_HIGHLIGHT_MS = 4000;
+const clearanceCardDomId = (id: string) => `clearance-${id}`;
+
 export function ClubClearancesView({
   club,
   clearances,
@@ -6137,12 +6144,46 @@ export function ClubClearancesView({
   onOpenRequest,
   busyId,
   onCertificateViewed = undefined,
+  // False while the list is still loading — `clearances` is empty then, so the dead-link
+  // notice would flash (and the scroll-to would have nothing to find) before data lands.
+  clearancesLoaded = true,
 }) {
   const teamLabel = labelByKey(leagues);
   const incoming = clearances?.incoming ?? [];
   const outgoing = clearances?.outbound ?? [];
   const incomingPending = incoming.filter((r) => r.status === 'pending');
   const incomingResolved = incoming.filter((r) => r.status !== 'pending');
+  // `?clearance=<id>` (from a clearance notification email): there is no search box here, and
+  // filtering a nudged chair down to one card would hide the rest of their queue — so the
+  // linked card is scrolled into view and briefly highlighted instead.
+  const [linkId] = useStateC(() =>
+    typeof window !== 'undefined' ? readClearanceLinkId(window.location.search) : null,
+  );
+  const [highlightId, setHighlightId] = useStateC<string | null>(null);
+  const [linkNoticeDismissed, setLinkNoticeDismissed] = useStateC(false);
+  const linkHandledRef = useRefC(false);
+  const linkMissing = clearanceLinkMissing(linkId, [...incoming, ...outgoing]);
+  useEffectC(() => {
+    // Once per mount: a later refetch must not yank the chair back to the card.
+    if (!linkId || !clearancesLoaded || linkMissing || linkHandledRef.current) return;
+    linkHandledRef.current = true;
+    setHighlightId(linkId);
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    document
+      .getElementById(clearanceCardDomId(linkId))
+      ?.scrollIntoView?.({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
+  }, [linkId, clearancesLoaded, linkMissing]);
+  useEffectC(() => {
+    if (!highlightId) return;
+    const t = setTimeout(() => setHighlightId(null), CLEARANCE_LINK_HIGHLIGHT_MS);
+    return () => clearTimeout(t);
+  }, [highlightId]);
+  // Card chrome shared by the three card lists: the DOM id the scroll-to targets, plus the
+  // transient `linked` ring (index.html `.clr-card.linked`) on the deep-linked card.
+  const linkProps = (req: PlayerClearance, cls: string) => ({
+    id: clearanceCardDomId(req.id),
+    className: highlightId === req.id ? `${cls} linked` : cls,
+  });
   // The clearance whose transfer certificate is open in the inline viewer. Both sides of the
   // move may view it — the API presigns off this club's own row (source or destination).
   const [certFor, setCertFor] = useStateC<PlayerClearance | null>(null);
@@ -6195,6 +6236,12 @@ export function ClubClearancesView({
         </div>
       </div>
 
+      {clearancesLoaded && linkMissing && !linkNoticeDismissed && (
+        <div style={{ marginBottom: 14 }}>
+          <ClearanceLinkMissingNotice onDismiss={() => setLinkNoticeDismissed(true)} />
+        </div>
+      )}
+
       <Card title="Incoming requests" sub={`Players asking to leave ${club.name}.`}>
         {incomingPending.length === 0 && incomingResolved.length === 0 && (
           <div
@@ -6212,7 +6259,7 @@ export function ClubClearancesView({
           {incomingPending.map((req) => {
             const busy = busyId === req.id;
             return (
-              <div key={req.id} className="clr-card">
+              <div key={req.id} {...linkProps(req, 'clr-card')}>
                 <div className="clr-card-head">
                   <div>
                     <div className="clr-eyebrow">
@@ -6290,7 +6337,7 @@ export function ClubClearancesView({
           })}
           {incomingResolved.map((req) =>
             req.status === 'rejected' ? (
-              <div key={req.id} className="clr-card resolved">
+              <div key={req.id} {...linkProps(req, 'clr-card resolved')}>
                 <div className="clr-card-head">
                   <div>
                     <div className="clr-eyebrow" style={{ color: 'var(--coral)' }}>
@@ -6314,7 +6361,7 @@ export function ClubClearancesView({
                 </div>
               </div>
             ) : (
-              <div key={req.id} className="clr-card resolved">
+              <div key={req.id} {...linkProps(req, 'clr-card resolved')}>
                 <div className="clr-card-head">
                   <div>
                     <div className="clr-eyebrow" style={{ color: 'var(--green)' }}>
@@ -6349,7 +6396,7 @@ export function ClubClearancesView({
         <Card title="Players moving to your club" sub="Awaiting clearance from their current club">
           <div className="clr-list">
             {outgoing.map((req) => (
-              <div key={req.id} className="clr-card incoming">
+              <div key={req.id} {...linkProps(req, 'clr-card incoming')}>
                 <div className="clr-card-head">
                   <div>
                     <div className="clr-eyebrow">

@@ -6955,7 +6955,10 @@ describe('Clearance chairman notice (comm log + channels)', () => {
     assert.equal(email?.to, 'chair@ntc.test');
     assert.equal(email?.by, 'admin@test', 'attributed to the requesting rep');
     assert.equal(email?.idempotencyKey, `clearance-${clearance.id}-email`);
-    assert.equal(wa?.status, 'sent');
+    // The only clearance template (club_clearance_pending_v2) carries the link, and this env has
+    // no canonical origin (like a dev stage), so WhatsApp is skipped — recorded, with why.
+    assert.equal(wa?.status, 'skipped');
+    assert.equal(wa?.error, 'no portal link for this tenant');
     assert.equal(wa?.to, '27835556666', 'cell normalized to E.164');
   });
 
@@ -7723,10 +7726,11 @@ describe('Clearance resolved notice (union reject / override → both clubs)', (
       ).status,
       200,
     );
-    // Reopen → version 2.
+    // Reopen → version 2. A localhost Origin gives the notices a link (no canonical origin here),
+    // which the source's WhatsApp template needs.
     const reopened = await app.request('/admin/clearances/crv-r-clr/reopen', {
       method: 'POST',
-      headers: headers(ADMIN),
+      headers: { ...headers(ADMIN), origin: 'http://localhost:5173' },
       body: JSON.stringify({ fromClubId: 'crv-r-src' }),
     });
     assert.equal(reopened.status, 200);

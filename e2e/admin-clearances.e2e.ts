@@ -8,6 +8,8 @@ import {
   overrideViaApi,
   fetchClearance,
   openClearancesFilteredTo,
+  signInAsRep,
+  dismissOnboarding,
   RUN,
   API_BASE,
   adminAuthHeader,
@@ -36,6 +38,8 @@ const CLUBS = {
   regC: { linkClub: 'verulam', prevClub: 'phoenix', prevName: 'Phoenix' },
   // "Send reminder": the test gives Chatsworth a chair contact (the demo seed has none).
   remind: { from: 'chatsworth', fromName: 'Chatsworth Sporting CC', to: 'clares' },
+  // ?clearance= notification deep links (admin search seed + chair scroll/highlight).
+  deepLink: { from: 'rhythm', to: 'berea' },
 };
 
 // A status pill button reads "<Label> <count>"; assert on the count that follows the label.
@@ -365,4 +369,66 @@ test('"Send reminder" nudges the source chair once per day', async ({ page, requ
   await expect(page.locator('.toast', { hasText: 'already reminded today' })).toBeVisible();
   // Still pending: a reminder never resolves anything.
   await expect(card.getByRole('button', { name: 'Reject' })).toBeVisible();
+});
+
+// Clearance notification emails deep-link each audience straight to the clearance: the union
+// office to /admin/clearances?clearance=<id>, each chair to /club/<clubId>/clearances?clearance=<id>.
+test('a ?clearance= link seeds the admin search with that clearance, at any status', async ({
+  page,
+  request,
+}) => {
+  const { from, to } = CLUBS.deepLink;
+  const linked = await seedPendingClearance(request, { from, to, name: `DeepLinked-${RUN}` });
+  const other = await seedPendingClearance(request, { from, to, name: `DeepOther-${RUN}` });
+  // Resolved, so the link must surface it without the admin touching the status pills.
+  await rejectViaApi(request, linked, 'Fees outstanding');
+
+  await page.goto(`/admin/clearances?clearance=${encodeURIComponent(linked.id)}`);
+  await expect(page.getByLabel('Search clearances')).toHaveValue(linked.id);
+  await expect(page.locator('.clr-card', { hasText: linked.playerName })).toBeVisible();
+  await expect(page.getByText(other.playerName)).toHaveCount(0);
+  await expect(page.getByText('No clearance matches this link')).toHaveCount(0);
+});
+
+test('a ?clearance= link to a clearance that no longer exists says so on both pages', async ({
+  page,
+}) => {
+  const { from } = CLUBS.deepLink;
+  const gone = `clr-gone-${RUN}`;
+  const notice = page.getByText('No clearance matches this link — it may have been removed.');
+
+  await page.goto(`/admin/clearances?clearance=${gone}`);
+  await expect(notice).toBeVisible();
+  await page.getByRole('button', { name: 'Dismiss' }).click();
+  await expect(notice).toHaveCount(0);
+  // Dismissing drops the dead seeded search so the admin lands on the full list.
+  await expect(page.getByLabel('Search clearances')).toHaveValue('');
+
+  await signInAsRep(page, from);
+  await page.goto(`/club/${from}/clearances?clearance=${gone}`);
+  await dismissOnboarding(page);
+  await expect(notice).toBeVisible();
+});
+
+test('a chair’s ?clearance= link scrolls to and briefly highlights the card, keeping the queue', async ({
+  page,
+  request,
+}) => {
+  const { from, to } = CLUBS.deepLink;
+  const first = await seedPendingClearance(request, { from, to, name: `ChairQueue-${RUN}` });
+  const linked = await seedPendingClearance(request, { from, to, name: `ChairLinked-${RUN}` });
+
+  await signInAsRep(page, from);
+  await page.goto(`/club/${from}/clearances?clearance=${encodeURIComponent(linked.id)}`);
+
+  const card = page.locator('.clr-card', { hasText: linked.playerName });
+  // Before dismissOnboarding: the ring drops on a 4s timer (CLEARANCE_LINK_HIGHLIGHT_MS) from load.
+  await expect(card).toHaveClass(/\blinked\b/);
+  await expect(card).toBeInViewport();
+  await dismissOnboarding(page);
+  // Not filtered: the rest of the chair's queue is still on the page.
+  await expect(page.locator('.clr-card', { hasText: first.playerName })).toHaveCount(1);
+  await expect(page.getByText('No clearance matches this link')).toHaveCount(0);
+  // The highlight is transient.
+  await expect(card).not.toHaveClass(/\blinked\b/, { timeout: 10_000 });
 });

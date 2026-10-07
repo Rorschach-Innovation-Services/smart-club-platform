@@ -221,24 +221,49 @@ export async function sendRegLinkEmail(input: RegLinkEmailInput): Promise<{ mess
   return { messageId: res.MessageId ?? '' };
 }
 
+/**
+ * The clearance deep-link line ("Review it here: <link>"), plain-text form, with its trailing
+ * blank line — '' without a link, so a link-less message renders exactly as it did before links
+ * existed. The "contact your union office" sentence always stays next to it: a chair with no
+ * portal login can't get past sign-in, and that sentence is their way through.
+ */
+function clearanceLinkText(link: string | undefined, lead = 'Review it here'): string {
+  return link ? `${lead}: ${link}\n\n` : '';
+}
+
+/** Dry-run log suffix naming a clearance notice's deep link, so a dry run shows where it points. */
+function dryRunLink(link: string | undefined): string {
+  return link ? ` (link: ${link})` : '';
+}
+
+/** The HTML form of {@link clearanceLinkText}: one paragraph, '' without a link. */
+function clearanceLinkHtml(link: string | undefined, lead = 'Review it here'): string {
+  return link ? `<p>${lead}: <a href="${escapeHtml(link)}">${escapeHtml(link)}</a></p>` : '';
+}
+
 export interface ClearanceEmailInput {
   to: string;
   chairName: string;
   fromClubName: string;
   playerName: string;
   toClubName: string;
+  /** Deep link to the clearance in the chair's club portal; omitted when no origin resolves. */
+  portalLink?: string;
 }
 
 /**
- * Clearance-pending heads-up to the FROM-club chairman, mirroring the WhatsApp
- * template's copy. Deliberately no sign-in link or "log in" instruction — the chair
- * may hold no portal login (chair invites were removed with admin onboarding), so the
- * body asks for the review to happen in the club portal / via the union office.
+ * Build the clearance-pending email bodies (the FROM-club chairman's heads-up, mirroring the
+ * WhatsApp template's copy). Pure (no SES, no env) — exported so tests can assert the rendered
+ * copy. With `portalLink` the body carries a "Review it here" line pointing at the clearance in
+ * the club portal; the "or contact your union office" fallback stays either way, since the chair
+ * may hold no portal login.
  */
-export async function sendClearanceEmail(
-  input: ClearanceEmailInput,
-): Promise<{ messageId: string }> {
-  const { to, chairName, fromClubName, playerName, toClubName } = input;
+export function clearancePendingEmailContent(input: Omit<ClearanceEmailInput, 'to'>): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { chairName, fromClubName, playerName, toClubName, portalLink } = input;
   // Public-route names are collapsed at validation, but portal-entered roster names are
   // not — never let a newline reach an email header.
   const subject = `Clearance pending — ${playerName.replace(/\s+/g, ' ').trim()}`;
@@ -248,6 +273,7 @@ export async function sendClearanceEmail(
     `Hello ${greetName},\n\n` +
     `A player clearance is awaiting ${fromClubName}'s review: ${playerName} has applied to join ` +
     `${toClubName} and needs a clearance from your club.\n\n` +
+    clearanceLinkText(portalLink) +
     `Please have this reviewed and approved or rejected in your club portal, or contact your ` +
     `union office if you have any questions.\n\n` +
     `Thank you,\nThe union office`;
@@ -261,13 +287,30 @@ export async function sendClearanceEmail(
     `<p>Hello ${safeName},</p>` +
     `<p>A player clearance is awaiting <strong>${safeFrom}</strong>'s review: <strong>${safePlayer}</strong> ` +
     `has applied to join <strong>${safeTo}</strong> and needs a clearance from your club.</p>` +
+    clearanceLinkHtml(portalLink) +
     `<p>Please have this reviewed and approved or rejected in your club portal, or contact your ` +
     `union office if you have any questions.</p>` +
     `<p>Thank you,<br/>The union office</p>` +
     `</div>`;
 
+  return { subject, text, html };
+}
+
+/**
+ * Clearance-pending heads-up to the FROM-club chairman (see clearancePendingEmailContent).
+ * Dry-run gated like its siblings.
+ */
+export async function sendClearanceEmail(
+  input: ClearanceEmailInput,
+): Promise<{ messageId: string }> {
+  const { to, fromClubName } = input;
+  const { subject, text, html } = clearancePendingEmailContent(input);
+
   if (EMAIL_DRY_RUN) {
-    console.log(`[notify:email dry-run] would send clearance notice to ${to} for ${fromClubName}`);
+    console.log(
+      `[notify:email dry-run] would send clearance notice to ${to} for ${fromClubName}` +
+        dryRunLink(input.portalLink),
+    );
     return { messageId: `dry-run-${randomUUID()}` };
   }
 
@@ -306,6 +349,8 @@ export interface ClearanceResolvedEmailInput {
    * back to the source-reactivated copy.
    */
   rejectOutcome?: RejectOutcome;
+  /** Deep link to the clearance in THIS recipient's club portal; omitted when no origin resolves. */
+  portalLink?: string;
 }
 
 /**
@@ -318,7 +363,16 @@ export function clearanceResolvedEmailContent(input: ClearanceResolvedEmailInput
   text: string;
   html: string;
 } {
-  const { chairName, fromClubName, playerName, toClubName, outcome, reason, rejectOutcome } = input;
+  const {
+    chairName,
+    fromClubName,
+    playerName,
+    toClubName,
+    outcome,
+    reason,
+    rejectOutcome,
+    portalLink,
+  } = input;
   // Portal-entered roster names aren't whitespace-collapsed on the way in — never let a
   // newline reach an email header.
   const subject = `Clearance ${outcome} — ${playerName.replace(/\s+/g, ' ').trim()}`;
@@ -353,6 +407,7 @@ export function clearanceResolvedEmailContent(input: ClearanceResolvedEmailInput
   const text =
     `Hello ${greetName},\n\n` +
     `${body}${reasonLine}\n\n` +
+    clearanceLinkText(portalLink) +
     `If you have any questions, please contact your union office.\n\n` +
     `Thank you,\nThe union office`;
 
@@ -364,6 +419,7 @@ export function clearanceResolvedEmailContent(input: ClearanceResolvedEmailInput
     `<p>Hello ${safeName},</p>` +
     `<p>${safeBody}</p>` +
     `${reasonHtml}` +
+    clearanceLinkHtml(portalLink) +
     `<p>If you have any questions, please contact your union office.</p>` +
     `<p>Thank you,<br/>The union office</p>` +
     `</div>`;
@@ -376,7 +432,7 @@ export function clearanceResolvedEmailContent(input: ClearanceResolvedEmailInput
  * mirroring the pending notice's shape. Unlike the WhatsApp resolved template, this
  * email CARRIES the admin reason: the recipients are the two clubs' chairs (not Meta's
  * infrastructure), so the free-text note stays inside the union's own channel. Same
- * deliberately link-free body — the chair may hold no portal login — and the same
+ * optional portal deep link (with the union-office fallback beside it) and the same
  * dry-run gate as the other clearance senders.
  */
 export async function sendClearanceResolvedEmail(
@@ -387,7 +443,8 @@ export async function sendClearanceResolvedEmail(
 
   if (EMAIL_DRY_RUN) {
     console.log(
-      `[notify:email dry-run] would send clearance-${outcome} notice to ${to} for ${fromClubName}`,
+      `[notify:email dry-run] would send clearance-${outcome} notice to ${to} for ${fromClubName}` +
+        dryRunLink(input.portalLink),
     );
     return { messageId: `dry-run-${randomUUID()}` };
   }
@@ -414,6 +471,8 @@ export interface ClearanceReopenedEmailInput {
   fromClubName: string;
   playerName: string;
   toClubName: string;
+  /** Deep link to the clearance in THIS recipient's club portal; omitted when no origin resolves. */
+  portalLink?: string;
 }
 
 /**
@@ -427,7 +486,7 @@ export function clearanceReopenedSourceEmailContent(input: ClearanceReopenedEmai
   text: string;
   html: string;
 } {
-  const { chairName, fromClubName, playerName, toClubName } = input;
+  const { chairName, fromClubName, playerName, toClubName, portalLink } = input;
   const subject = `Clearance reopened — ${playerName.replace(/\s+/g, ' ').trim()}`;
   const greetName = chairName || 'there';
   const preamble =
@@ -439,6 +498,7 @@ export function clearanceReopenedSourceEmailContent(input: ClearanceReopenedEmai
     `${preamble}\n\n` +
     `A player clearance is awaiting ${fromClubName}'s review: ${playerName} has applied to join ` +
     `${toClubName} and needs a clearance from your club.\n\n` +
+    clearanceLinkText(portalLink) +
     `Please have this reviewed and approved or rejected in your club portal, or contact your ` +
     `union office if you have any questions.\n\n` +
     `Thank you,\nThe union office`;
@@ -453,6 +513,7 @@ export function clearanceReopenedSourceEmailContent(input: ClearanceReopenedEmai
     `<p>${escapeHtml(preamble)}</p>` +
     `<p>A player clearance is awaiting <strong>${safeFrom}</strong>'s review: <strong>${safePlayer}</strong> ` +
     `has applied to join <strong>${safeTo}</strong> and needs a clearance from your club.</p>` +
+    clearanceLinkHtml(portalLink) +
     `<p>Please have this reviewed and approved or rejected in your club portal, or contact your ` +
     `union office if you have any questions.</p>` +
     `<p>Thank you,<br/>The union office</p>` +
@@ -471,7 +532,7 @@ export function clearanceReopenedDestEmailContent(input: ClearanceReopenedEmailI
   text: string;
   html: string;
 } {
-  const { chairName, fromClubName, playerName } = input;
+  const { chairName, fromClubName, playerName, portalLink } = input;
   const subject = `Clearance reopened — ${playerName.replace(/\s+/g, ' ').trim()}`;
   const greetName = chairName || 'there';
   const body =
@@ -481,6 +542,7 @@ export function clearanceReopenedDestEmailContent(input: ClearanceReopenedEmailI
   const text =
     `Hello ${greetName},\n\n` +
     `${body}\n\n` +
+    clearanceLinkText(portalLink) +
     `If you have any questions, please contact your union office.\n\n` +
     `Thank you,\nThe union office`;
 
@@ -490,6 +552,7 @@ export function clearanceReopenedDestEmailContent(input: ClearanceReopenedEmailI
     `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
     `<p>Hello ${safeName},</p>` +
     `<p>${safeBody}</p>` +
+    clearanceLinkHtml(portalLink) +
     `<p>If you have any questions, please contact your union office.</p>` +
     `<p>Thank you,<br/>The union office</p>` +
     `</div>`;
@@ -505,7 +568,8 @@ export async function sendClearanceReopenedSourceEmail(
   const { subject, text, html } = clearanceReopenedSourceEmailContent(input);
   if (EMAIL_DRY_RUN) {
     console.log(
-      `[notify:email dry-run] would send clearance-reopened (source) notice to ${to} for ${fromClubName}`,
+      `[notify:email dry-run] would send clearance-reopened (source) notice to ${to} for ${fromClubName}` +
+        dryRunLink(input.portalLink),
     );
     return { messageId: `dry-run-${randomUUID()}` };
   }
@@ -530,7 +594,8 @@ export async function sendClearanceReopenedDestEmail(
   const { subject, text, html } = clearanceReopenedDestEmailContent(input);
   if (EMAIL_DRY_RUN) {
     console.log(
-      `[notify:email dry-run] would send clearance-reopened (destination) notice to ${to} for ${fromClubName}`,
+      `[notify:email dry-run] would send clearance-reopened (destination) notice to ${to} for ${fromClubName}` +
+        dryRunLink(input.portalLink),
     );
     return { messageId: `dry-run-${randomUUID()}` };
   }
@@ -580,6 +645,8 @@ export interface ClearanceOpenedDestEmailInput {
   fromClubName: string;
   playerName: string;
   toClubName: string;
+  /** Deep link to the clearance in the destination club's portal; omitted when no origin resolves. */
+  portalLink?: string;
 }
 
 /**
@@ -591,7 +658,7 @@ export function clearanceOpenedDestEmailContent(input: Omit<ClearanceOpenedDestE
   text: string;
   html: string;
 } {
-  const { chairName, fromClubName, playerName, toClubName } = input;
+  const { chairName, fromClubName, playerName, toClubName, portalLink } = input;
   const subject = `Incoming clearance — ${playerName.replace(/\s+/g, ' ').trim()}`;
   const greetName = chairName || 'there';
   const body =
@@ -600,12 +667,14 @@ export function clearanceOpenedDestEmailContent(input: Omit<ClearanceOpenedDestE
   const text =
     `Hello ${greetName},\n\n` +
     `${body}\n\n` +
+    clearanceLinkText(portalLink) +
     `If you have any questions, please contact your union office.\n\n` +
     `Thank you,\nThe union office`;
   const html =
     EMAIL_WRAP_OPEN +
     `<p>Hello ${escapeHtml(greetName)},</p>` +
     `<p>${escapeHtml(body)}</p>` +
+    clearanceLinkHtml(portalLink) +
     `<p>If you have any questions, please contact your union office.</p>` +
     `<p>Thank you,<br/>The union office</p>` +
     `</div>`;
@@ -618,7 +687,7 @@ export async function sendClearanceOpenedDestEmail(
   return sendSesEmail(
     input.to,
     clearanceOpenedDestEmailContent(input),
-    `clearance-opened (destination) notice for ${input.toClubName}`,
+    `clearance-opened (destination) notice for ${input.toClubName}${dryRunLink(input.portalLink)}`,
   );
 }
 
@@ -629,6 +698,8 @@ export interface ClearanceOpenedAdminEmailInput {
   toClubName: string;
   /** The source is a directory entry (not on the system): only the union office can resolve it. */
   fromClubDirectory?: boolean;
+  /** Deep link to the clearance in the admin console; omitted when no origin resolves. */
+  adminLink?: string;
 }
 
 /** Who a newly opened clearance is waiting on — the source club, or the union for a directory source. */
@@ -646,16 +717,17 @@ export function clearanceOpenedAdminEmailContent(
   text: string;
   html: string;
 } {
-  const { fromClubName, playerName, toClubName, fromClubDirectory } = input;
+  const { fromClubName, playerName, toClubName, fromClubDirectory, adminLink } = input;
   const subject = `New clearance — ${playerName.replace(/\s+/g, ' ').trim()}`;
   const body =
     `A clearance has opened for ${playerName}: ${fromClubName} → ${toClubName}. ` +
     `${clearanceWaitingOn(fromClubName, fromClubDirectory)} and is listed under Clearances in the admin console.`;
-  const text = `Hello,\n\n${body}\n\nThe union office platform`;
+  const text = `Hello,\n\n${body}\n\n${clearanceLinkText(adminLink)}The union office platform`;
   const html =
     EMAIL_WRAP_OPEN +
     `<p>Hello,</p>` +
     `<p>${escapeHtml(body)}</p>` +
+    clearanceLinkHtml(adminLink) +
     `<p>The union office platform</p>` +
     `</div>`;
   return { subject, text, html };
@@ -667,7 +739,8 @@ export async function sendClearanceOpenedAdminEmail(
   return sendSesEmail(
     input.to,
     clearanceOpenedAdminEmailContent(input),
-    `clearance-opened (admin) notice for ${input.fromClubName} → ${input.toClubName}`,
+    `clearance-opened (admin) notice for ${input.fromClubName} → ${input.toClubName}` +
+      dryRunLink(input.adminLink),
   );
 }
 
@@ -682,6 +755,8 @@ export interface ClearanceOpenedAdminSummaryEmailInput {
   /** The club whose chair ran the bulk registration (every clearance opens INTO it). */
   toClubName: string;
   clearances: ClearanceOpenedAdminSummaryLine[];
+  /** Link to the admin console's clearances list; omitted when no origin resolves. */
+  adminLink?: string;
 }
 
 /**
@@ -692,7 +767,7 @@ export interface ClearanceOpenedAdminSummaryEmailInput {
 export function clearanceOpenedAdminSummaryEmailContent(
   input: Omit<ClearanceOpenedAdminSummaryEmailInput, 'to'>,
 ): { subject: string; text: string; html: string } {
-  const { toClubName, clearances } = input;
+  const { toClubName, clearances, adminLink } = input;
   const n = clearances.length;
   const subject = `${n} new clearance${n === 1 ? '' : 's'} — ${toClubName}`;
   const intro =
@@ -704,12 +779,13 @@ export function clearanceOpenedAdminSummaryEmailContent(
   const text =
     `Hello,\n\n${intro}\n\n` +
     clearances.map((l) => `- ${line(l)}`).join('\n') +
-    `\n\nThe union office platform`;
+    `\n\n${clearanceLinkText(adminLink, 'Review them here')}The union office platform`;
   const html =
     EMAIL_WRAP_OPEN +
     `<p>Hello,</p>` +
     `<p>${escapeHtml(intro)}</p>` +
     `<ul>${clearances.map((l) => `<li>${escapeHtml(line(l))}</li>`).join('')}</ul>` +
+    clearanceLinkHtml(adminLink, 'Review them here') +
     `<p>The union office platform</p>` +
     `</div>`;
   return { subject, text, html };
@@ -721,7 +797,8 @@ export async function sendClearanceOpenedAdminSummaryEmail(
   return sendSesEmail(
     input.to,
     clearanceOpenedAdminSummaryEmailContent(input),
-    `clearance-opened (admin summary, ${input.clearances.length}) notice for ${input.toClubName}`,
+    `clearance-opened (admin summary, ${input.clearances.length}) notice for ${input.toClubName}` +
+      dryRunLink(input.adminLink),
   );
 }
 
@@ -731,6 +808,8 @@ export interface ClearanceAutoRejectedAdminEmailInput {
   playerName: string;
   toClubName: string;
   reason: string;
+  /** Deep link to the clearance in the admin console; omitted when no origin resolves. */
+  adminLink?: string;
 }
 
 /**
@@ -744,18 +823,21 @@ export function clearanceAutoRejectedAdminEmailContent(
   text: string;
   html: string;
 } {
-  const { fromClubName, playerName, toClubName, reason } = input;
+  const { fromClubName, playerName, toClubName, reason, adminLink } = input;
   const subject = `Clearance auto-rejected — ${playerName.replace(/\s+/g, ' ').trim()}`;
   const body =
     `${playerName} registered with ${toClubName} naming ${fromClubName} as their previous club, ` +
     `but transfers are closed, so the clearance was recorded as rejected and the player was not ` +
     `registered. It is listed under Clearances in the admin console, where it can be reopened.`;
-  const text = `Hello,\n\n${body}\n\nReason: ${reason}\n\nThe union office platform`;
+  const text =
+    `Hello,\n\n${body}\n\nReason: ${reason}\n\n` +
+    `${clearanceLinkText(adminLink)}The union office platform`;
   const html =
     EMAIL_WRAP_OPEN +
     `<p>Hello,</p>` +
     `<p>${escapeHtml(body)}</p>` +
     `<p><strong>Reason:</strong> ${escapeHtml(reason)}</p>` +
+    clearanceLinkHtml(adminLink) +
     `<p>The union office platform</p>` +
     `</div>`;
   return { subject, text, html };
@@ -767,16 +849,21 @@ export async function sendClearanceAutoRejectedAdminEmail(
   return sendSesEmail(
     input.to,
     clearanceAutoRejectedAdminEmailContent(input),
-    `clearance-auto-rejected (admin) notice for ${input.fromClubName} → ${input.toClubName}`,
+    `clearance-auto-rejected (admin) notice for ${input.fromClubName} → ${input.toClubName}` +
+      dryRunLink(input.adminLink),
   );
 }
 
 export interface ClearanceReminderDigestLine {
+  /** The clearance id (the admin deep link's `?clearance=` value). */
+  id: string;
   playerName: string;
   fromClubName: string;
   toClubName: string;
   /** Whole days the clearance has been pending (tenant wall-clock). */
   daysPending: number;
+  /** Deep link to this clearance in the admin console; omitted when no origin resolves. */
+  adminLink?: string;
 }
 
 export interface ClearanceReminderDigestEmailInput {
@@ -813,7 +900,11 @@ export function clearanceReminderDigestEmailContent(
   const text =
     `Hello,\n\n` +
     sections
-      .map((s) => `${s.title}:\n${s.lines.map((l) => `- ${line(l)}`).join('\n')}`)
+      .map(
+        (s) =>
+          `${s.title}:\n` +
+          s.lines.map((l) => `- ${line(l)}${l.adminLink ? ` — ${l.adminLink}` : ''}`).join('\n'),
+      )
       .join('\n\n') +
     `\n\nThese are listed under Clearances in the admin console.\n\nThe union office platform`;
   const html =
@@ -823,7 +914,14 @@ export function clearanceReminderDigestEmailContent(
       .map(
         (s) =>
           `<p><strong>${escapeHtml(s.title)}</strong></p><ul>` +
-          s.lines.map((l) => `<li>${escapeHtml(line(l))}</li>`).join('') +
+          s.lines
+            .map(
+              (l) =>
+                `<li>${escapeHtml(line(l))}` +
+                (l.adminLink ? ` — <a href="${escapeHtml(l.adminLink)}">Review</a>` : '') +
+                `</li>`,
+            )
+            .join('') +
           `</ul>`,
       )
       .join('') +
@@ -919,7 +1017,7 @@ export interface VeteransRequestEmailInput {
  * one of their players for veterans cricket, and the club confirms in its portal. Pure (no SES,
  * no env) — exported so tests can assert the rendered copy, mirroring
  * clearanceResolvedEmailContent. Deliberately link-free (the chair may hold no portal login) and
- * email-only, like the clearance resolved notice.
+ * email-only.
  */
 export function veteransRequestEmailContent(input: VeteransRequestEmailInput): {
   subject: string;

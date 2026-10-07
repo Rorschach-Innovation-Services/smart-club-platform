@@ -14,7 +14,8 @@ const {
   staffInviteParams,
   regLinkParams,
   fixturesParams,
-  clearanceParams,
+  clearanceV2Params,
+  clearanceTemplateFor,
   fixtureReminderParams,
   captainsReportDueParams,
   captainsReportOpsDigestParams,
@@ -69,12 +70,13 @@ const BUILDERS = [
     }),
   },
   {
-    key: 'clearancePending' as const,
-    params: clearanceParams({
+    key: 'clearancePendingV2' as const,
+    params: clearanceV2Params({
       chairName: 'Thandi Nkosi',
       fromClubName: 'Adelaar CC',
       playerName: 'A Player',
       toClubName: 'Centurion Kavaliers',
+      portalLink: 'https://club.example.com/club/c1/clearances?clearance=clr-1',
     }),
   },
   {
@@ -228,5 +230,49 @@ describe("captain's report ops digest template", () => {
       summary: 'x',
     });
     assert.match(messageId, /^dry-run-/);
+  });
+});
+
+describe('clearance-pending template (v2 only; v1 retired in code 7 Oct 2026)', () => {
+  const v2 = WHATSAPP_TEMPLATES.clearancePendingV2;
+  const copy = {
+    chairName: 'Thandi  Nkosi',
+    fromClubName: 'Adelaar CC',
+    playerName: 'A\nPlayer',
+    toClubName: 'Centurion Kavaliers',
+  };
+  const LONG_LINK = `https://club.example.com/club/c1/clearances?clearance=${'x'.repeat(120)}`;
+
+  test('v2 is the only clearance template: the retired v1 name has no registry entry', () => {
+    assert.equal(v2.name, 'club_clearance_pending_v2');
+    assert.equal(v2.status, 'registered');
+    assert.equal(v2.paramCount, 5);
+    const names = Object.values(WHATSAPP_TEMPLATES)
+      .map((d) => d.name)
+      .filter((n) => n.startsWith('club_clearance'));
+    assert.deepEqual(names, ['club_clearance_pending_v2']);
+  });
+
+  test('a linked notice picks v2 with the link passed through whole (never truncated)', () => {
+    const pick = clearanceTemplateFor({ ...copy, portalLink: LONG_LINK });
+    assert.ok(pick);
+    assert.equal(pick.key, 'clearancePendingV2');
+    assert.equal(pick.params.length, v2.paramCount);
+    // Text params are cleaned; the link is not.
+    assert.deepEqual(
+      pick.params.map((p) => p.text),
+      ['Thandi Nkosi', 'Adelaar CC', 'A Player', 'Centurion Kavaliers', LONG_LINK],
+    );
+  });
+
+  test('a notice with no link picks no template — the caller skips WhatsApp', () => {
+    assert.equal(clearanceTemplateFor(copy), null);
+    assert.equal(clearanceTemplateFor({ ...copy, portalLink: '' }), null);
+  });
+
+  test('the v2 body keeps the union-office fallback and does not end on the link variable', () => {
+    assert.match(v2.bodyText, /Review it here: \{\{5\}\}/);
+    assert.match(v2.bodyText, /contact your union office/);
+    assert.doesNotMatch(v2.bodyText, /\{\{\d+\}\}\s*$/);
   });
 });
