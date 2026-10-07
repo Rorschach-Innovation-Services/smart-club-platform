@@ -12,7 +12,7 @@ import {
 } from './helpers';
 
 /**
- * The admin "Medicoach sync" page's Players panel (ADR 0018) end to end: a STUB medicoach on
+ * The admin "Medicoach sync" page's Players panel (ADR 0019) end to end: a STUB medicoach on
  * :4799 (the port playwright.config.ts points the stack's MEDICOACH_SYNC_URL at) answers the
  * player push per player (scripted by the run-unique last name). Players are registered through
  * the real chair route, so the repo hooks queue them; "Sync now" pushes them (signed):

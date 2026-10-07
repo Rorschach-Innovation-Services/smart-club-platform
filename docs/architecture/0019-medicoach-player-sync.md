@@ -1,4 +1,4 @@
-# ADR 0018 — Medicoach player sync: smart club pushes desired roster state per person
+# ADR 0019 — Medicoach player sync: smart club pushes desired roster state per person
 
 **Status:** Accepted (October 2026). Smart club side built on `worktree-medicoach-player-sync`;
 medicoach's `POST /integrations/smartclub/players` ships separately (deploy it first).
@@ -25,7 +25,7 @@ Decisions taken with the union before building:
 
 Smart club pushes; medicoach applies — the mirror of `POST /schedule`. Same HMAC
 (`signRequest`), same secret, same 15-minute cron and "Sync now". The contract gains one
-additive endpoint (§3 of `docs/integrations/medicoach-sync-contract.md`, byte-identical in both
+additive endpoint (§4 of `docs/integrations/medicoach-sync-contract.md`, byte-identical in both
 repos and pinned by sha256 in both contract tests).
 
 The person's ref stays `smartclub:<t>:player:<naturalKey>`. Medicoach's external-ref tables

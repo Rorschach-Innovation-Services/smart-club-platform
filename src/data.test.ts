@@ -214,6 +214,19 @@ describe('teamIdsForClub / resolveTeam', () => {
     expect(r.name).toBe('Unknown team');
     expect(r.clubId).toBeUndefined();
   });
+
+  it('a tbd: placeholder (ADR 0018) renders its words, pending, with no club or ground', () => {
+    const s = {
+      teams: ['pirates'],
+      participants: [{ teamId: 'pirates', clubId: 'pirates', name: 'Pirates' }],
+    };
+    const r = resolveTeam(s, 'tbd:Community%20Cup%20winner', clubBy);
+    expect(r.name).toBe('Community Cup winner');
+    expect(r.pending).toBe(true);
+    expect(r.clubId).toBeUndefined();
+    expect(r.ground).toEqual({});
+    expect(teamIdsForClub(s, 'pirates')).toEqual(['pirates']);
+  });
 });
 
 describe('relTimeAgo', () => {

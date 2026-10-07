@@ -7,7 +7,7 @@
  * each repo's test parses every one with its own schema, so drift fails CI on either side.
  *
  * Direction: smart club is always the CALLER (it pulls `GET /integrations/smartclub/changes`
- * and, from Slice 4, pushes `POST /integrations/smartclub/schedule`, and from ADR 0018
+ * and, from Slice 4, pushes `POST /integrations/smartclub/schedule`, and from ADR 0019
  * `POST /integrations/smartclub/players`); medicoach never calls
  * smart club. Requests are HMAC-SHA256 signed with one shared secret (smart club SST secret
  * `MedicoachSyncSecret` == medicoach `SmartClubSyncSecret`).
@@ -29,13 +29,15 @@ export const SYNC_SIGNATURE_HEADER = 'X-Sync-Signature';
 export const CHANGES_PATH = '/integrations/smartclub/changes';
 export const SCHEDULE_PATH = '/integrations/smartclub/schedule';
 export const PLAYERS_PATH = '/integrations/smartclub/players';
+/** `GET ${MATCHES_PATH}/:matchId/scorecard?tournamentId=&tenant=` — see `scorecardPathAndQuery`. */
+export const MATCHES_PATH = '/integrations/smartclub/matches';
 
 /** Page size bounds for the changes endpoint. */
 export const CHANGES_LIMIT_DEFAULT = 200;
 export const CHANGES_LIMIT_MAX = 500;
 /** Max schedule changes per push request. */
 export const SCHEDULE_PUSH_MAX = 100;
-/** Max players per player push request (contract §3). */
+/** Max players per player push request (contract §4). */
 export const PLAYER_PUSH_MAX = 50;
 
 /* ─────────────────────────── Schemas ─────────────────────────── */
@@ -118,6 +120,21 @@ export const SyncResultSchema = z.object({
   captainRef: ref.nullable(),
   /** A non-http(s) link is dropped to null rather than failing the page. */
   medicoachMatchUrl: z.string().url().nullable().transform(httpUrlOrNull),
+  /**
+   * The medicoach match (PostMatchAnalysis) id behind this result and its tournament id —
+   * together the key for `GET /integrations/smartclub/matches/:matchId/scorecard?tournamentId=`.
+   * Optional: older senders omit them; a scorecard is fetched only when both are present.
+   * Both match the documented `[A-Za-z0-9_-]{1,128}` id shape — a malformed id fails here.
+   * An empty string is tolerated as another spelling of "absent" (the puller drops it).
+   */
+  medicoachMatchId: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{0,128}$/)
+    .optional(),
+  medicoachTournamentId: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{0,128}$/)
+    .optional(),
 });
 
 export const FixtureChangeSchema = z.object({
@@ -137,6 +154,71 @@ export const ChangesResponseSchema = z.object({
   fixtures: z.array(FixtureChangeSchema),
 });
 
+/* ── Scorecard (GET /integrations/smartclub/matches/:matchId/scorecard) ── */
+
+export const ScorecardExtrasWireSchema = z.object({
+  byes: z.number(),
+  legByes: z.number(),
+  wides: z.number(),
+  noBalls: z.number(),
+  penalties: z.number(),
+  total: z.number(),
+});
+
+export const ScorecardBatterWireSchema = z.object({
+  order: z.number(),
+  name: z.string(),
+  runs: z.number(),
+  ballsFaced: z.number(),
+  fours: z.number(),
+  sixes: z.number(),
+  strikeRate: z.number(),
+  howOut: z.string(),
+  dismissal: z.string().optional(),
+});
+
+export const ScorecardBowlerWireSchema = z.object({
+  order: z.number(),
+  name: z.string(),
+  overs: z.string(),
+  maidens: z.number(),
+  runsConceded: z.number(),
+  wickets: z.number(),
+  economy: z.number(),
+  wides: z.number(),
+  noBalls: z.number(),
+});
+
+export const ScorecardFallOfWicketWireSchema = z.object({
+  wicket: z.number(),
+  runs: z.number(),
+  overs: z.string(),
+  batterName: z.string(),
+});
+
+/** One innings of a medicoach scorecard, as sent on the wire. */
+export const InningsScorecardWireSchema = z.object({
+  battingTeamName: z.string(),
+  totalRuns: z.number(),
+  wickets: z.number(),
+  overs: z.string(),
+  extras: ScorecardExtrasWireSchema,
+  batters: z.array(ScorecardBatterWireSchema),
+  bowlers: z.array(ScorecardBowlerWireSchema),
+  fallOfWickets: z.array(ScorecardFallOfWicketWireSchema),
+});
+
+/**
+ * `available: false` = medicoach has no ball-by-ball scorecard for the match (e.g. a
+ * manually entered result); `innings` is present when it is available.
+ */
+export const ScorecardResponseSchema = z.object({
+  available: z.boolean(),
+  matchId: z.string().min(1),
+  matchState: z.string().optional(),
+  innings: z.array(InningsScorecardWireSchema).optional(),
+});
+
 export const SchedulePushRequestSchema = z.object({
   version: z.literal(MEDICOACH_SYNC_VERSION),
   tenant: z.string().min(1),
@@ -154,7 +236,7 @@ export const SchedulePushResponseSchema = z.object({
   ),
 });
 
-/* ─────────────── Player push (contract §3, POST /integrations/smartclub/players) ─────────────── */
+/* ─────────────── Player push (contract §4, POST /integrations/smartclub/players) ─────────────── */
 
 /** `YYYY-MM-DD` — the same shape the migration bundle's PlayerSchema uses for `dob`. */
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'expected YYYY-MM-DD');
@@ -274,6 +356,8 @@ export type SyncTeams = z.infer<typeof SyncTeamsSchema>;
 export type SyncResult = z.infer<typeof SyncResultSchema>;
 export type FixtureChange = z.infer<typeof FixtureChangeSchema>;
 export type ChangesResponse = z.infer<typeof ChangesResponseSchema>;
+export type InningsScorecardWire = z.infer<typeof InningsScorecardWireSchema>;
+export type ScorecardResponse = z.infer<typeof ScorecardResponseSchema>;
 export type SchedulePushRequest = z.infer<typeof SchedulePushRequestSchema>;
 export type SchedulePushResponse = z.infer<typeof SchedulePushResponseSchema>;
 export type PlayerResolution = z.infer<typeof PlayerResolutionSchema>;
@@ -294,6 +378,24 @@ export function changesPathAndQuery(tenant: string, since?: string, limit?: numb
   if (since && since !== '0') q.set('since', since);
   if (limit !== undefined) q.set('limit', String(limit));
   return `${CHANGES_PATH}?${q.toString()}`;
+}
+
+/**
+ * The exact path + query the scorecard fetch sends (and signs) for one medicoach match.
+ * `tournamentId` and `tenant` are both required (medicoach resolves a match within its
+ * tournament, among that tenant's synced fixtures only). Param order is fixed — tournamentId
+ * then tenant — so the signed string is deterministic.
+ */
+export function scorecardPathAndQuery(
+  matchId: string,
+  tournamentId: string,
+  tenant: string,
+): string {
+  const q = new URLSearchParams([
+    ['tournamentId', tournamentId],
+    ['tenant', tenant],
+  ]);
+  return `${MATCHES_PATH}/${encodeURIComponent(matchId)}/scorecard?${q.toString()}`;
 }
 
 /* ─────────────────────────── Signing ─────────────────────────── */

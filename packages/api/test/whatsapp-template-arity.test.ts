@@ -14,11 +14,14 @@ const {
   staffInviteParams,
   regLinkParams,
   fixturesParams,
-  clearanceParams,
+  clearanceV2Params,
+  clearanceTemplateFor,
   fixtureReminderParams,
   captainsReportDueParams,
   captainsReportOpsDigestParams,
+  scorecardConfirmDueParams,
   sendCaptainsReportOpsDigestWhatsApp,
+  sendScorecardConfirmDueWhatsApp,
   urlButtonComponent,
 } = await import('../src/notify/whatsapp.js');
 const { WHATSAPP_TEMPLATES } = await import('../src/notify/whatsapp-templates.js');
@@ -69,12 +72,21 @@ const BUILDERS = [
     }),
   },
   {
-    key: 'clearancePending' as const,
-    params: clearanceParams({
+    key: 'scorecardConfirmDue' as const,
+    params: scorecardConfirmDueParams({
+      chairName: 'Thandi Nkosi',
+      clubName: 'Adelaar CC',
+      weekLabel: '5–11 Oct 2026',
+    }),
+  },
+  {
+    key: 'clearancePendingV2' as const,
+    params: clearanceV2Params({
       chairName: 'Thandi Nkosi',
       fromClubName: 'Adelaar CC',
       playerName: 'A Player',
       toClubName: 'Centurion Kavaliers',
+      portalLink: 'https://club.example.com/club/c1/clearances?clearance=clr-1',
     }),
   },
   {
@@ -179,7 +191,7 @@ describe("captain's report template (v2 copy, edited in place in Meta 4 Oct 2026
     const names = Object.values(WHATSAPP_TEMPLATES)
       .map((d) => d.name)
       .filter((n) => n.startsWith('captains_report'));
-    assert.deepEqual(names, ['captains_report_due', 'captains_report_ops_digest']);
+    assert.deepEqual(names, ['captains_report_due', 'captains_report_ops_digest_v2']);
     const linked = Object.values(WHATSAPP_TEMPLATES).filter(
       (d) => d.name.startsWith('captains_report') && 'urlButton' in d,
     );
@@ -193,8 +205,10 @@ describe("captain's report template (v2 copy, edited in place in Meta 4 Oct 2026
 describe("captain's report ops digest template", () => {
   const digest = WHATSAPP_TEMPLATES.captainsReportOpsDigest;
 
-  test('two body params, no URL button, registered in Meta (6 Oct 2026)', () => {
-    assert.equal(digest.name, 'captains_report_ops_digest');
+  test('two body params, no URL button, registered in Meta as UTILITY (v2, 7 Oct 2026)', () => {
+    // v1 (captains_report_ops_digest) was approved as MARKETING; category is immutable
+    // once approved, so v2 was created fresh as Utility with transaction-anchored copy.
+    assert.equal(digest.name, 'captains_report_ops_digest_v2');
     assert.equal(digest.lang, 'en');
     assert.equal(digest.status, 'registered');
     assert.equal(digest.paramCount, 2);
@@ -203,8 +217,9 @@ describe("captain's report ops digest template", () => {
     assert.equal(
       digest.bodyText,
       'Hello {{1}},\n\n' +
-        "Captain's report run update: {{2}}.\n\n" +
-        'Automated status message for union administrators.',
+        'Account status notification for your union administrator account.\n\n' +
+        "Latest captain's report processing run: {{2}}.\n\n" +
+        'This is an automated service message. No action is required.',
     );
   });
 
@@ -223,6 +238,85 @@ describe("captain's report ops digest template", () => {
       to: '+27000000000',
       recipientName: 'Union admin',
       summary: 'x',
+    });
+    assert.match(messageId, /^dry-run-/);
+  });
+});
+
+describe('clearance-pending template (v2 only; v1 retired in code 7 Oct 2026)', () => {
+  const v2 = WHATSAPP_TEMPLATES.clearancePendingV2;
+  const copy = {
+    chairName: 'Thandi  Nkosi',
+    fromClubName: 'Adelaar CC',
+    playerName: 'A\nPlayer',
+    toClubName: 'Centurion Kavaliers',
+  };
+  const LONG_LINK = `https://club.example.com/club/c1/clearances?clearance=${'x'.repeat(120)}`;
+
+  test('v2 is the only clearance template: the retired v1 name has no registry entry', () => {
+    assert.equal(v2.name, 'club_clearance_pending_v2');
+    assert.equal(v2.status, 'registered');
+    assert.equal(v2.paramCount, 5);
+    const names = Object.values(WHATSAPP_TEMPLATES)
+      .map((d) => d.name)
+      .filter((n) => n.startsWith('club_clearance'));
+    assert.deepEqual(names, ['club_clearance_pending_v2']);
+  });
+
+  test('a linked notice picks v2 with the link passed through whole (never truncated)', () => {
+    const pick = clearanceTemplateFor({ ...copy, portalLink: LONG_LINK });
+    assert.ok(pick);
+    assert.equal(pick.key, 'clearancePendingV2');
+    assert.equal(pick.params.length, v2.paramCount);
+    // Text params are cleaned; the link is not.
+    assert.deepEqual(
+      pick.params.map((p) => p.text),
+      ['Thandi Nkosi', 'Adelaar CC', 'A Player', 'Centurion Kavaliers', LONG_LINK],
+    );
+  });
+
+  test('a notice with no link picks no template — the caller skips WhatsApp', () => {
+    assert.equal(clearanceTemplateFor(copy), null);
+    assert.equal(clearanceTemplateFor({ ...copy, portalLink: '' }), null);
+  });
+
+  test('the v2 body keeps the union-office fallback and does not end on the link variable', () => {
+    assert.match(v2.bodyText, /Review it here: \{\{5\}\}/);
+    assert.match(v2.bodyText, /contact your union office/);
+    assert.doesNotMatch(v2.bodyText, /\{\{\d+\}\}\s*$/);
+  });
+});
+
+describe('scorecard confirmation digest template', () => {
+  const due = WHATSAPP_TEMPLATES.scorecardConfirmDue;
+
+  test('three body params (chair first name, club, week) and the /sc/ URL button', () => {
+    assert.equal(due.name, 'scorecard_confirm_due');
+    assert.equal(due.lang, 'en');
+    assert.equal(due.paramCount, 3);
+    assert.equal(due.urlButton.urlTemplate, 'https://platform.club.medicoach.co.za/sc/{{1}}');
+    assert.deepEqual(
+      scorecardConfirmDueParams({
+        chairName: '  Thandi  Nkosi ',
+        clubName: 'Adelaar CC',
+        weekLabel: '5–11 Oct 2026',
+      }).map((p) => p.text),
+      ['Thandi', 'Adelaar CC', '5–11 Oct 2026'],
+    );
+    assert.equal(
+      scorecardConfirmDueParams({ chairName: '', clubName: 'A', weekLabel: 'w' })[0].text,
+      'there',
+    );
+  });
+
+  test('the sender sends once registered (dry-run without credentials)', async () => {
+    assert.equal(due.status, 'registered');
+    const { messageId } = await sendScorecardConfirmDueWhatsApp({
+      to: '+27000000000',
+      chairName: 'A',
+      clubName: 'B',
+      weekLabel: 'C',
+      token: 'tok.sig',
     });
     assert.match(messageId, /^dry-run-/);
   });

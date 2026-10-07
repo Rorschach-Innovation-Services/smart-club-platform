@@ -1,5 +1,5 @@
 /**
- * The player-sync CLIs (ADR 0018), pure: `enqueue-players` plans the backfill (eligible
+ * The player-sync CLIs (ADR 0019), pure: `enqueue-players` plans the backfill (eligible
  * upserts queued, inactive people skipped, possible duplicates counted — the flush holds
  * them), and `audit-player-duplicates` groups same name + dob under different IDs, masking
  * names and leaving out natural keys. The snapshot is loaded through an in-memory repo.

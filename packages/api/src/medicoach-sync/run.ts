@@ -5,12 +5,15 @@
  *   1. flush the PENDINGSYNC# outbox to medicoach (Slice 4) — first, so a smart-club edit
  *      reaches medicoach before the pull compares schedules; a push failure never stops the
  *      pull (the rows stay queued with their attempt count);
- *   1b. flush the PENDINGPLAYERSYNC# player outbox (ADR 0018) when the tenant has the player
+ *   1b. flush the PENDINGPLAYERSYNC# player outbox (ADR 0019) when the tenant has the player
  *      sync on — same rules: a failure never stops the pull;
  *   2. pull and apply changes (`runMedicoachSync`) — throws on an HTTP/contract failure;
  *   3. retry captain's reports whose opening failed earlier (REPORTOPEN# markers) — always,
  *      even when the pull failed, since it needs nothing from medicoach;
  *   4. send the one reminder for pending reports whose link expires within 2 days.
+ *
+ * Last, after a pull that did not throw, `sweepScorecards` fetches the medicoach scorecards
+ * recent results still lack (best-effort: a failure is a log line + Sentry, never the run's).
  *
  * After step 3, a run with captain's-report activity (reports opened, notices sent or failed)
  * sends ONE ops-digest WhatsApp to the union-admin cell (`OpsDigestCell`); a quiet run sends
@@ -41,12 +44,14 @@ import {
 import { flushPlayerOutbox, playerFlushCap, type PlayerFlushSummary } from './players.js';
 import { playerSyncEnabled } from './player-placement.js';
 import { flushScheduleOutbox, type FlushSummary } from './schedule.js';
+import { sweepScorecards, type ScorecardSweepSummary } from './scorecard-fetch.js';
 
 export interface TenantSyncSummary extends SyncRunSummary {
   push?: FlushSummary;
   playerPush?: PlayerFlushSummary;
   reports?: ReportRetrySummary;
   reminders?: ReminderSummary;
+  scorecards?: ScorecardSweepSummary;
 }
 
 export interface TenantSyncDeps extends PullerDeps {
@@ -60,7 +65,7 @@ interface DigestCounts {
   opened: number;
   notified: number;
   failed: number;
-  /** Player-sync items waiting on an admin (ADR 0018) — ride along, never trigger a digest. */
+  /** Player-sync items waiting on an admin (ADR 0019) — ride along, never trigger a digest. */
   playerReviews?: number;
   playersParked?: number;
 }
@@ -251,11 +256,36 @@ export async function runTenantSync(
       `[medicoach-sync] ${tenant}: report reminders failed — ${err instanceof Error ? err.message : 'error'}`,
     );
   }
+  let scorecards: ScorecardSweepSummary | undefined;
+  try {
+    scorecards = await sweepScorecards(
+      {
+        repo,
+        url: deps.url,
+        secret: deps.secret,
+        ...(deps.fetch ? { fetch: deps.fetch } : {}),
+        ...(deps.now ? { now: deps.now } : {}),
+        ...(deps.log ? { log: deps.log } : {}),
+      },
+      tenant,
+    );
+  } catch (err) {
+    // A scorecard sweep failure never fails the sync run; the next run sweeps again.
+    console.warn(
+      `[medicoach-sync] ${tenant}: scorecard sweep failed — ${err instanceof Error ? err.message : 'error'}`,
+    );
+    await import('../instrument.js')
+      .then(({ Sentry }) =>
+        Sentry.captureException(err, { tags: { job: 'scorecard-sweep', tenant } }),
+      )
+      .catch(() => {});
+  }
   return {
     ...summary,
     ...(push ? { push } : {}),
     ...(playerPush ? { playerPush } : {}),
     reports,
     ...(reminders ? { reminders } : {}),
+    ...(scorecards ? { scorecards } : {}),
   };
 }

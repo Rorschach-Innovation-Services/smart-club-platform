@@ -12,7 +12,7 @@
  *     failed 5+ times is "stuck" (still retried) and offers Retry now / Drop;
  *   - changes held until a draft or withheld series is released/revealed, each linked to it;
  *   - recent activity, and "Sync now": flush the outbox, then pull, right away;
- *   - Players (ADR 0018, when the player sync is on): registrations waiting to reach medicoach
+ *   - Players (ADR 0019, when the player sync is on): registrations waiting to reach medicoach
  *     rosters, parked ones (medicoach lacks a team — retry after a bundle top-up), stuck ones,
  *     and the players held for a decision: link to a medicoach candidate, create a new one,
  *     confirm two smart-club registrations are different people, or dismiss.
@@ -497,7 +497,7 @@ function PlayerReviewCard({
   );
 }
 
-/** The Players panel (ADR 0018): counts, retry for parked/stuck, and the review list. */
+/** The Players panel (ADR 0019): counts, retry for parked/stuck, and the review list. */
 function PlayersPanel({
   players,
   busy,

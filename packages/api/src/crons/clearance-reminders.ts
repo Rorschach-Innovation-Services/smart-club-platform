@@ -28,7 +28,13 @@
  * the chair's details gets the chair reminded on the next run.
  *
  * WhatsApp goes to the source chair only when the `whatsappInvites` feature is on AND the
- * `club_clearance_pending` registry entry is "registered". Admins get email only.
+ * `club_clearance_pending_v2` registry entry (the only clearance template) is "registered"; a
+ * reminder with no link (no canonical origin) records the WhatsApp channel `skipped`, since the
+ * template's {{5}} is the link — see sendClearanceWhatsApp. Admins get email only.
+ *
+ * Links: each chair reminder links to the clearance in the source club's portal, and each digest
+ * line to the clearance in the admin console, built from canonicalWebOrigin ONLY (`portalLinkFor`)
+ * — a cron has no request, and must never reflect one. No canonical origin ⇒ no links.
  *
  * Failures are isolated per tenant and per clearance (captured to Sentry, counted, the run moves
  * on). NOTIFY_DRY_RUN is honoured by the senders themselves; markers and comm-log rows are still
@@ -58,6 +64,8 @@ import {
   lastClearanceReminderAt,
 } from '../clearance-reminder.js';
 import { hasFeature, hasModule } from '../features.js';
+import { canonicalWebOrigin } from '../origins.js';
+import { clearanceAdminLink, clearanceChairLink } from '../clearance-links.js';
 import { orgCopy } from '../branding.js';
 import { tenantDate } from '../tenant-time.js';
 import type { Channel, Club, PlayerClearance, TenantConfig } from '../types.js';
@@ -88,8 +96,10 @@ export interface ClearanceRemindersDeps {
   repo: ReminderRepo;
   send: typeof sendClearanceNotice;
   sendDigest: typeof sendClearanceReminderDigest;
-  /** The `club_clearance_pending` template's registry status (the WhatsApp runtime gate). */
+  /** The `club_clearance_pending_v2` template's registry status (the WhatsApp runtime gate). */
   whatsappTemplateStatus: WhatsAppTemplateDefinition['status'];
+  /** The tenant's web origin for the clearance links (canonicalWebOrigin); null ⇒ no links. */
+  portalLinkFor: (tenant: string) => string | null;
   captureException: (err: unknown, tags: Record<string, string>) => void;
   log: (message: string, data?: Record<string, unknown>) => void;
 }
@@ -119,8 +129,9 @@ const defaultDeps = (): ClearanceRemindersDeps => ({
   send: sendClearanceNotice,
   sendDigest: sendClearanceReminderDigest,
   // Widened from the `as const` literal so the comparison below is a real runtime check.
-  whatsappTemplateStatus: WHATSAPP_TEMPLATES.clearancePending
+  whatsappTemplateStatus: WHATSAPP_TEMPLATES.clearancePendingV2
     .status as WhatsAppTemplateDefinition['status'],
+  portalLinkFor: canonicalWebOrigin,
   captureException: (err, tags) => Sentry.captureException(err, { tags }),
   log: (message, data) => console.log(JSON.stringify({ msg: message, ...data })),
 });
@@ -161,12 +172,21 @@ export function reminderChannels(
     : ['email'];
 }
 
-const digestLine = (c: PlayerClearance, today: string): ClearanceReminderDigestLine => ({
-  playerName: c.playerName,
-  fromClubName: c.fromClubName,
-  toClubName: c.toClubName,
-  daysPending: daysPending(c, today),
-});
+const digestLine = (
+  c: PlayerClearance,
+  today: string,
+  origin: string | null,
+): ClearanceReminderDigestLine => {
+  const adminLink = clearanceAdminLink(origin, c.id);
+  return {
+    id: c.id,
+    playerName: c.playerName,
+    fromClubName: c.fromClubName,
+    toClubName: c.toClubName,
+    daysPending: daysPending(c, today),
+    ...(adminLink ? { adminLink } : {}),
+  };
+};
 
 /** Run one reminder pass. Exported for tests (inject `now` and the seams in `overrides`). */
 export async function runClearanceReminders(
@@ -198,6 +218,7 @@ export async function runClearanceReminders(
       );
       if (pending.length === 0) continue;
       const channels = reminderChannels(cfg, deps.whatsappTemplateStatus);
+      const origin = deps.portalLinkFor(tenant);
       const clubs = new Map<string, Club | null>();
       const clubOf = async (id: string): Promise<Club | null> => {
         if (!clubs.has(id)) clubs.set(id, await repo.getClub(tenant, id));
@@ -223,7 +244,7 @@ export async function runClearanceReminders(
             const lastMention = lastClearanceReminderAt(toClub?.commLog, clearance.id);
             if (!isReminderDue(clearance, today, lastMention)) continue;
             summary.chairless++;
-            chairless.push(digestLine(clearance, today));
+            chairless.push(digestLine(clearance, today, origin));
             if (toClub) digestMentions.push({ clearance, clubId: toClub.id });
             continue;
           }
@@ -235,7 +256,7 @@ export async function runClearanceReminders(
             const lastMention = lastClearanceReminderAt(fromClub.commLog, clearance.id, 'digest');
             if (!isReminderDue(clearance, today, lastMention)) continue;
             summary.noContact++;
-            noContact.push(digestLine(clearance, today));
+            noContact.push(digestLine(clearance, today, origin));
             digestMentions.push({ clearance, clubId: fromClub.id });
             continue;
           }
@@ -260,17 +281,19 @@ export async function runClearanceReminders(
             continue;
           }
           claimed = true;
+          const portalLink = clearanceChairLink(origin, fromClub.id, clearance.id);
           const { results } = await deps.send({
             chair,
             fromClubName: fromClub.name,
             playerName: clearance.playerName,
             toClubName: clearance.toClubName,
+            ...(portalLink ? { portalLink } : {}),
             channels,
           });
           sent = true;
           if (results.some((r) => r.status === 'sent')) {
             summary.reminded++;
-            nudged.push(digestLine(clearance, today));
+            nudged.push(digestLine(clearance, today, origin));
             await repo.completeInviteSend(tenant, fromClub.id, key, results);
           } else {
             // Nothing delivered: free the day's key so a manual retry (or tomorrow) can send.

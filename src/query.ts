@@ -41,6 +41,7 @@ export const qk = {
   clubCaptainsReports: (clubId: string) => ['club-captains-reports', t(), clubId],
   // Global: the token names its own tenant.
   linkedCaptainsReport: (token: string) => ['captains-report-link', token],
+  linkedScorecardConfirm: (token: string) => ['scorecard-confirm-link', token],
   tenantConfig: () => ['tenant-config', t()],
   users: () => ['users', t()],
   players: (clubId: string) => ['players', t(), clubId],
@@ -80,4 +81,6 @@ export const qk = {
   platformTenant: (slug: string) => ['platform-tenant', slug],
   platformTenantOverview: (slug: string) => ['platform-tenant-overview', slug],
   platformTenantReps: (slug: string) => ['platform-tenant-reps', slug],
+  // Cross-tenant; '' = the latest completed week (the server's default).
+  platformScorecardConfirmations: (week: string) => ['platform-scorecard-confirmations', week],
 };

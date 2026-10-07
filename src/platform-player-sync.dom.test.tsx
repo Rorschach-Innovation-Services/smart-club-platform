@@ -1,5 +1,5 @@
 /**
- * PlayerSyncCard: the operator's switch for the medicoach player sync (ADR 0018). It writes
+ * PlayerSyncCard: the operator's switch for the medicoach player sync (ADR 0019). It writes
  * `integrations.medicoach.playerSync` (keeping the rest of the medicoach block), needs the
  * fixture sync on, and shows the team-coverage warnings the API answers when it is switched on.
  */

@@ -1,6 +1,6 @@
 /**
  * Operator console: the medicoach PLAYER sync switch (`integrations.medicoach.playerSync`,
- * ADR 0018). Registrations go to medicoach team rosters on the 15-minute sync. It needs the
+ * ADR 0019). Registrations go to medicoach team rosters on the 15-minute sync. It needs the
  * medicoach fixture sync (`features.medicoachSync`) on, and the client's teams must already be in
  * medicoach (bundle import) — the API probes team coverage when it is switched on and answers
  * with warnings, shown here (they are also toasted by the shared save).

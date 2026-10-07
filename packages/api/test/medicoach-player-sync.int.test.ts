@@ -1,5 +1,5 @@
 /**
- * Medicoach PLAYER sync (ADR 0018) end to end: a STUB medicoach on a free localhost port
+ * Medicoach PLAYER sync (ADR 0019) end to end: a STUB medicoach on a free localhost port
  * answers `POST /integrations/smartclub/players` (verifying every signature with the contract
  * helper) while the REAL repo hooks, outbox, flush and Hono app run against an in-process
  * dynalite table.

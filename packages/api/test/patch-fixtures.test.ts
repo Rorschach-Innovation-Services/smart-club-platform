@@ -496,3 +496,253 @@ describe('planFixturePatches — set.dateTbc', () => {
     assert.equal(plan.gate!.weekendReleased.length, 0);
   });
 });
+
+describe('planFixturePatches — set.date, postponements and gate mode', () => {
+  /** s-rel plus a second released series holding Gamma Field at 13:30 on the 18th. */
+  const nextWeek = () =>
+    series('s-next', true, [
+      {
+        id: 'n1',
+        date: '2026-10-18',
+        time: '13:30',
+        home: 'alpha',
+        away: 'gamma',
+        venueName: 'Gamma Field',
+      },
+    ]);
+
+  test('set.date alone re-dates the fixture; the gate checks the NEW day', () => {
+    const clean = planFixturePatches(
+      [released(), nextWeek()],
+      clubs,
+      venues,
+      manifest([entry({ set: { date: '2026-10-17' } })], false),
+    );
+    assert.deepEqual(clean.errors, []);
+    const f2 = fx(clean.next, 's-rel', 'f2');
+    assert.equal(f2.date, '2026-10-17');
+    assert.equal(f2.status, undefined, 'a plain re-date is not a postponement');
+    assert.equal(f2.originalDate, undefined);
+
+    // Onto Gamma Field 13:30 on the 18th, which s-next/n1 holds ⇒ introduced clash.
+    const clash = planFixturePatches(
+      [released(), nextWeek()],
+      clubs,
+      venues,
+      manifest([entry({ set: { date: '2026-10-18' } })], false),
+      undefined,
+      { gateMode: 'introduced' },
+    );
+    assert.ok(clash.errors.some((e) => /introduce 2 new venue clash/.test(e)));
+    assert.ok(clash.gate!.introduced.every((c) => c.date === '2026-10-18'));
+  });
+
+  test('set.date + postponed: the ADR 0015 shape — originalDate kept, new slot booked', () => {
+    const plan = planFixturePatches(
+      [released(), nextWeek()],
+      clubs,
+      venues,
+      manifest([entry({ set: { date: '2026-10-18', postponed: true } })], false),
+      undefined,
+      { gateMode: 'introduced' },
+    );
+    const f2 = fx(plan.next, 's-rel', 'f2');
+    assert.equal(f2.status, 'postponed');
+    assert.equal(f2.originalDate, DATE);
+    assert.equal(f2.date, '2026-10-18');
+    // A rescheduled postponement is NOT clash-exempt: the double-booking is still refused.
+    assert.ok(plan.errors.some((e) => /introduce/.test(e)));
+
+    // A second postponement keeps pointing at the FIRST schedule.
+    const rel = released();
+    Object.assign((rel.fixtures as Fx[])[1], { status: 'postponed', originalDate: '2026-10-04' });
+    const again = planFixturePatches(
+      [rel],
+      clubs,
+      venues,
+      manifest([entry({ set: { date: '2026-10-25', postponed: true } })], false),
+    );
+    assert.deepEqual(again.errors, []);
+    assert.equal(fx(again.next, 's-rel', 'f2').originalDate, '2026-10-04');
+  });
+
+  test('postponed without a date: postponed + dateTbc (allowed on released), slot freed for another entry', () => {
+    // f1 (alpha v beta, Beta Park 09:00) postponed undated; f2 moves onto Beta Park 09:00.
+    const plan = planFixturePatches(
+      [released()],
+      clubs,
+      venues,
+      manifest(
+        [
+          entry({
+            fixtureId: 'f1',
+            expect: { home: 'alpha', away: 'beta', date: DATE, time: '09:00', venue: 'Beta Park' },
+            set: { postponed: true },
+          }),
+          entry({ set: { time: '09:00', venueId: 'v-beta' } }),
+        ],
+        false,
+      ),
+      undefined,
+      { gateMode: 'introduced' },
+    );
+    assert.deepEqual(plan.errors, []);
+    const f1 = fx(plan.next, 's-rel', 'f1');
+    assert.equal(f1.status, 'postponed');
+    assert.equal(f1.date, DATE);
+    assert.equal(f1.originalDate, undefined);
+    assert.equal(f1.dateTbc, true, 'the undated shape rides the existing dateTbc exemption');
+    assert.deepEqual(plan.gate!.introduced, []);
+  });
+
+  test('a bare set.dateTbc stays draft-only even though postponed + dateTbc is allowed', () => {
+    const plan = planFixturePatches(
+      [released()],
+      clubs,
+      venues,
+      manifest([entry({ set: { dateTbc: true } })], false),
+    );
+    assert.match(plan.errors[0], /only allowed on a draft series/);
+  });
+
+  test('re-dating an undated (dateTbc) postponement clears dateTbc, stamps originalDate, books its slot', () => {
+    const rel = released();
+    Object.assign((rel.fixtures as Fx[])[1], { status: 'postponed', dateTbc: true });
+    const plan = planFixturePatches(
+      [rel, nextWeek()],
+      clubs,
+      venues,
+      manifest([entry({ set: { date: '2026-10-18', postponed: true } })], false),
+      undefined,
+      { gateMode: 'introduced' },
+    );
+    const f2 = fx(plan.next, 's-rel', 'f2');
+    assert.equal(f2.status, 'postponed');
+    assert.equal(f2.date, '2026-10-18');
+    assert.equal(f2.dateTbc, undefined);
+    assert.equal(f2.originalDate, DATE);
+    // Back in the ledger: the new slot (s-next/n1's) is an introduced clash.
+    assert.ok(plan.errors.some((e) => /introduce/.test(e)));
+
+    // A plain set.date (no set.postponed) on a postponed fixture is still a reschedule.
+    const rel2 = released();
+    Object.assign((rel2.fixtures as Fx[])[1], { status: 'postponed', dateTbc: true });
+    const plain = planFixturePatches(
+      [rel2],
+      clubs,
+      venues,
+      manifest([entry({ set: { date: '2026-10-25' } })], false),
+    );
+    assert.deepEqual(plain.errors, []);
+    const g = fx(plain.next, 's-rel', 'f2');
+    assert.equal(g.dateTbc, undefined);
+    assert.equal(g.originalDate, DATE);
+  });
+
+  test('set.date / set.postponed validation', () => {
+    const plan = planFixturePatches(
+      [released()],
+      clubs,
+      venues,
+      manifest(
+        [
+          entry({ set: { date: '2026-02-30' } }),
+          entry({
+            fixtureId: 'f1',
+            expect: { home: 'alpha', away: 'beta', date: DATE, time: '09:00', venue: 'Beta Park' },
+            set: { date: DATE },
+          }),
+        ],
+        false,
+      ),
+    );
+    assert.match(plan.errors[0], /set.date "2026-02-30" is not a YYYY-MM-DD date/);
+    assert.match(plan.errors[1], /is the fixture's current date/);
+    const bad = planFixturePatches(
+      [released()],
+      clubs,
+      venues,
+      manifest([entry({ set: { postponed: false as unknown as true } })], false),
+    );
+    assert.match(bad.errors[0], /set.postponed must be true/);
+    const draftMix = planFixturePatches(
+      [draft()],
+      clubs,
+      venues,
+      manifest(
+        [
+          {
+            seriesId: 's-draft',
+            fixtureId: 'f1',
+            expect: { home: 'beta', away: 'alpha', date: DATE, time: '', venue: '' },
+            set: { date: '2026-10-12', dateTbc: true },
+          },
+        ],
+        false,
+      ),
+    );
+    assert.match(draftMix.errors[0], /cannot be combined/);
+  });
+
+  test('gate mode: a pre-existing released clash on the dates is fatal only when strict', () => {
+    const rel = released();
+    // A standing double-booking: f3 shares Gamma Field 13:30 with f2.
+    (rel.fixtures as Fx[]).push({
+      id: 'f3',
+      date: DATE,
+      time: '13:30',
+      home: 'beta',
+      away: 'alpha',
+      venueName: 'Gamma Field',
+    });
+    const m = manifest(
+      [
+        entry({
+          fixtureId: 'f1',
+          expect: { home: 'alpha', away: 'beta', date: DATE, time: '09:00', venue: 'Beta Park' },
+          set: { time: '10:00' },
+        }),
+      ],
+      false,
+    );
+    const strict = planFixturePatches([rel], clubs, venues, m);
+    assert.ok(strict.errors.some((e) => /involve a released fixture/.test(e)));
+    const introduced = planFixturePatches([rel], clubs, venues, m, undefined, {
+      gateMode: 'introduced',
+    });
+    assert.deepEqual(introduced.errors, []);
+    assert.equal(introduced.gate!.weekendReleased.length > 0, true, 'still reported');
+  });
+
+  test('reportDates widen the reported weekend without changing the verdict', () => {
+    const rel = released();
+    (rel.fixtures as Fx[]).push({
+      id: 'f3',
+      date: '2026-10-10',
+      time: '10:00',
+      home: 'beta',
+      away: 'alpha',
+      venueName: 'Alpha Oval',
+    });
+    const other = series('s-o', true, [
+      {
+        id: 'o1',
+        date: '2026-10-10',
+        time: '10:00',
+        home: 'gamma',
+        away: 'beta',
+        venueName: 'Alpha Oval',
+      },
+    ]);
+    const plan = planFixturePatches(
+      [rel, other],
+      clubs,
+      venues,
+      manifest([entry({ set: { time: '14:00' } })], false),
+      undefined,
+      { gateMode: 'introduced', reportDates: ['2026-10-10'] },
+    );
+    assert.deepEqual(plan.errors, []);
+    assert.ok(plan.gate!.weekendReleased.some((c) => c.date === '2026-10-10'));
+  });
+});

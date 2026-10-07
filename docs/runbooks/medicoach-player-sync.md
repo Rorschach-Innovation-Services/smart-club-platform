@@ -1,7 +1,7 @@
-# Medicoach player sync — enabling, backfill, reviews (ADR 0018)
+# Medicoach player sync — enabling, backfill, reviews (ADR 0019)
 
 Registrations on smart club reach medicoach team rosters on the 15-minute sync
-([ADR 0018](../architecture/0018-medicoach-player-sync.md)). This runbook is the addendum to
+([ADR 0019](../architecture/0019-medicoach-player-sync.md)). This runbook is the addendum to
 [medicoach-migration-cutover.md](medicoach-migration-cutover.md): do it per tenant, after that
 tenant's bundle import.
 
@@ -105,5 +105,5 @@ their side (merge, or release the claim). Once fixed, the player's next change (
 ## 6. Erasure
 
 `DELETE /admin/players/:nk` (POPIA) queues an `erase`: medicoach anonymises the player and drops
-the ref; match statistics stay on the anonymised record (ADR 0018, lawful basis). Club deletion
+the ref; match statistics stay on the anonymised record (ADR 0019, lawful basis). Club deletion
 never erases: people are re-sent with fewer teams, or removed from their teams.

@@ -1,5 +1,5 @@
 /**
- * Medicoach player sync placement + intent (ADR 0018), pure:
+ * Medicoach player sync placement + intent (ADR 0019), pure:
  *  - regression: the shared `desiredTeamRefs` (used by BOTH the bundle exporter and the sync)
  *    reproduces the exporter's teamRefs on the existing placement fixture, and the sync's own
  *    placement context (`buildPlacementContext`) agrees with the bundle player by player;

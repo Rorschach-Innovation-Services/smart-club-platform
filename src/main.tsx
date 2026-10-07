@@ -110,6 +110,7 @@ import { UmpireAppointmentsUpload } from './UmpireAppointmentsUpload';
 import { ResyncDialog, isResyncRequired } from './ResyncDialog';
 
 import { CaptainsReportView, CaptainsReportLinkPage } from './CaptainsReport';
+import { ScorecardConfirmLinkPage } from './ScorecardConfirm';
 import { AdminCaptainsReportsView } from './AdminCaptainsReports';
 import { AdminMedicoachSyncView } from './AdminMedicoachSync';
 import { erasureSummary } from './PlayerDetailModal';
@@ -364,10 +365,14 @@ function AppRoutes() {
   // (which may resolve to no tenant, or the wrong one) and themes itself from the
   // certificate's own tenant. So neither the host's /tenant theme nor its 404 screen applies.
   const { pathname } = useLocation();
-  // The captain's-report link page (/r/<token>) is tenant-independent the same way: the token
-  // names its tenant, and the page themes itself from the report's tenant.
+  // The captain's-report link page (/r/<token>) and the chair's scorecard digest (/sc/<token>)
+  // are tenant-independent the same way: the token names its tenant, and the page themes
+  // itself from that tenant.
   const onVerify =
-    pathname === '/verify' || pathname.startsWith('/verify/') || pathname.startsWith('/r/');
+    pathname === '/verify' ||
+    pathname.startsWith('/verify/') ||
+    pathname.startsWith('/r/') ||
+    pathname.startsWith('/sc/');
 
   // Tenant branding/config (public). Apply theme as soon as it loads.
   // retry the tenant config: it carries the league/district catalogue the authed app
@@ -396,6 +401,8 @@ function AppRoutes() {
       <Route path="/verify/:serial" element={<VerifyCertificatePage />} />
       {/* Public submit-once captain's report link (the token is the capability). */}
       <Route path="/r/:token" element={<CaptainsReportLinkPage />} />
+      {/* Public chair scorecard-confirmation digest (the token is the capability). */}
+      <Route path="/sc/:token" element={<ScorecardConfirmLinkPage />} />
       <Route
         path="/*"
         element={
@@ -692,6 +699,22 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
     return withToast(
       () => api.patchSeries(seriesId, { ...rest, version: cur.version }),
       'Could not save fixtures',
+      { rawConflict: true },
+    ).then(() => invalidate(qk.series()));
+  }
+  // Knockout Set team / revert (ADR 0018): one server action on one fixture side, pinned to
+  // the cached version. Resolves once the series list has refetched, so the editor's next
+  // Save already carries the new side and version; rejects (after the toast) on a 409.
+  function setFixtureSide(seriesId, fixtureId, side, teamId) {
+    const cur = allSeries.find((s) => s.id === seriesId);
+    if (!cur) return Promise.reject(new Error('That series is no longer loaded — refresh.'));
+    return withToast(
+      () =>
+        api.patchSeries(seriesId, {
+          setSide: { fixtureId, side, teamId },
+          version: cur.version,
+        }),
+      teamId ? 'Could not set the team' : 'Could not revert to the placeholder',
       { rawConflict: true },
     ).then(() => invalidate(qk.series()));
   }
@@ -1078,6 +1101,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   setSupportContact,
                   saveOrgName,
                   updateSeries,
+                  setFixtureSide,
                   deleteSeries,
                   duplicateSeries,
                   setReleased,
@@ -1237,6 +1261,7 @@ function Shell({
   setSupportContact,
   saveOrgName,
   updateSeries,
+  setFixtureSide = undefined,
   deleteSeries,
   duplicateSeries,
   setReleased,
@@ -2857,6 +2882,7 @@ function Shell({
             // effect, and an inline lambda here would re-fire that request on every App
             // re-render (toast, refetch) with an unchanged draft.
             onCheckClashes={api.checkSeriesClashes}
+            onSetSide={setFixtureSide}
             toast={toastShow}
             allCalendars={allCalendars}
             allSeasonRuns={allSeasonRuns}
@@ -2955,6 +2981,7 @@ function Shell({
             transferWindowStatus={tenantConfig?.transferWindowStatus}
             busyId={busyClearanceId}
             busyAction={busyClearanceAction}
+            clearancesLoaded={allClearancesQuery.isSuccess}
           />
         );
       if (view === 'reg_reviews')
@@ -3111,6 +3138,7 @@ function Shell({
             onOpenRequest={() => setShowRequestPlayer(true)}
             busyId={busyClearanceId}
             onCertificateViewed={() => invalidate(qk.clearances(clubId))}
+            clearancesLoaded={clearancesQuery.isSuccess}
           />
         );
       }

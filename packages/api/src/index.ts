@@ -87,6 +87,7 @@ import {
   type ScheduleFixture,
 } from './medicoach-sync/schedule.js';
 import {
+  captainsReportLinkBase,
   captainsReportLinkSecret,
   medicoachResolveTimeoutMs,
   medicoachSyncSecret,
@@ -211,6 +212,9 @@ import {
 } from './veterans.js';
 import type {
   CaptainsReport,
+  ScorecardConfirmation,
+  StoredFixtureResult,
+  StoredFixtureScorecard,
   Club,
   ClubCommEvent,
   ClubSpec,
@@ -246,6 +250,7 @@ import type {
   PlayerSyncReview,
 } from './types.js';
 import { teamIdsForClub, resolveTeam } from './teams.js';
+import { applySetSide, orphanSides, parseSetSide } from './set-side.js';
 import { orgCopy } from './branding.js';
 import { chairContactOf } from './club-contacts.js';
 import {
@@ -264,6 +269,24 @@ import {
   reportView,
   UNLISTED_SERIES_ID,
 } from './captains-reports.js';
+import {
+  answeredAgainstFetchedAt,
+  isWeekKey,
+  lastCompletedWeekKey,
+  loadLinkedScorecardConfirmation,
+  notifyOperatorsOfCorrection,
+  parseScorecardAnswer,
+  ScorecardInputError,
+  scorecardEntryKey,
+  scorecardFixtureLine,
+  toPlatformScorecardTenant,
+  toScorecardConfirmView,
+  weekLabel,
+} from './scorecard-confirmations.js';
+import {
+  runScorecardConfirmations,
+  scorecardConfirmationsEnabled,
+} from './crons/scorecard-confirmations-run.js';
 import { applyWhatsAppStatuses, parseStatuses } from './notify/whatsapp-status.js';
 import {
   SYNC_SIGNATURE_HEADER,
@@ -287,6 +310,11 @@ import {
 } from './tenant-validation.js';
 import { grantTenantAdmin, addAdminMembership } from './tenant-admin.js';
 import { originAllowed, originAllowedForTenant, canonicalWebOrigin } from './origins.js';
+import {
+  clearanceAdminLink,
+  clearanceChairLink,
+  clearancesAdminListLink,
+} from './clearance-links.js';
 import {
   issueCertificate,
   ensureCertificateRecord,
@@ -1479,6 +1507,11 @@ interface ClearanceOpenedNotifyOpts {
  * Email is attempted on every notice, so counting email rows counts notices — including capped
  * ones, which keeps the gate shut for the rest of the day. Read-then-append with no transaction:
  * parallel creates can briefly overshoot the cap. Fine for an anti-abuse bound; not a quota.
+ *
+ * Each notice carries a deep link to the clearance (source/destination chair: their own club
+ * portal; admins: the console) built from canonicalWebOrigin ONLY — this fires from the anonymous
+ * register route, so a request Origin must never steer the link host (see clearance-links.ts).
+ * No canonical origin (dev stages) ⇒ no link, and the notices render exactly as before.
  */
 async function notifyClearanceOpened(
   tenant: string,
@@ -1488,6 +1521,7 @@ async function notifyClearanceOpened(
   by: string,
   opts: ClearanceOpenedNotifyOpts = {},
 ): Promise<void> {
+  const linkOrigin = canonicalWebOrigin(tenant);
   let capped = false;
   if (fromClub) {
     try {
@@ -1499,6 +1533,7 @@ async function notifyClearanceOpened(
         (e) => e.kind === 'clearance' && e.channel === 'email',
       );
       capped = !opts.bypassCap && noticesToday >= CLEARANCE_NOTICES_PER_DAY;
+      const portalLink = clearanceChairLink(linkOrigin, fromClub.id, clearance.id);
       const results: SendResult[] = capped
         ? channels.map((channel) => ({
             channel,
@@ -1511,6 +1546,7 @@ async function notifyClearanceOpened(
               fromClubName: fromClub.name,
               playerName: clearance.playerName,
               toClubName: clearance.toClubName,
+              ...(portalLink ? { portalLink } : {}),
               channels,
             })
           ).results;
@@ -1550,6 +1586,7 @@ async function notifyClearanceOpened(
         ) >= CLEARANCE_NOTICES_PER_DAY;
     }
     if (toClub) {
+      const portalLink = clearanceChairLink(linkOrigin, toClub.id, clearance.id);
       const { results } = capped
         ? {
             results: [
@@ -1561,6 +1598,7 @@ async function notifyClearanceOpened(
             fromClubName: clearance.fromClubName,
             playerName: clearance.playerName,
             toClubName: clearance.toClubName,
+            ...(portalLink ? { portalLink } : {}),
           });
       await repo.appendClubCommEvents(
         tenant,
@@ -1596,12 +1634,14 @@ async function notifyClearanceOpened(
   try {
     const admins = await (opts.adminEmails ?? adminEmailsProvider(repo, tenant))();
     if (admins.length > 0) {
+      const adminLink = clearanceAdminLink(linkOrigin, clearance.id);
       await sendClearanceAdminNotice({
         to: admins,
         fromClubName: clearance.fromClubName,
         playerName: clearance.playerName,
         toClubName: clearance.toClubName,
         ...(clearance.fromClubDirectory ? { fromClubDirectory: true } : {}),
+        ...(adminLink ? { adminLink } : {}),
       });
     }
   } catch (err) {
@@ -1623,6 +1663,8 @@ async function notifyClearanceAdminSummary(
   try {
     const admins = await adminEmails();
     if (admins.length === 0) return;
+    // Canonical origin only — the chair bulk routes are not admin actions.
+    const adminLink = clearancesAdminListLink(canonicalWebOrigin(tenant));
     await sendClearanceAdminSummaryNotice({
       to: admins,
       toClubName,
@@ -1631,6 +1673,7 @@ async function notifyClearanceAdminSummary(
         fromClubName: x.fromClubName,
         ...(x.fromClubDirectory ? { fromClubDirectory: true } : {}),
       })),
+      ...(adminLink ? { adminLink } : {}),
     });
   } catch (err) {
     console.error(`clearance admin summary failed for ${tenant}`, err);
@@ -1666,12 +1709,18 @@ async function notifyClearanceAdminSummary(
  * fault is logged and swallowed, never failing the request. A partial send (the Lambda dies
  * between the two clubs) is NOT replayed — the resolved clearance 409s on any retry — which is
  * accepted: at worst one club's chair is not messaged, and the resolution itself stands.
+ *
+ * Each chair's email links to the clearance in THEIR OWN club portal, built from `linkOrigin`.
+ * It defaults to canonicalWebOrigin — the only origin the anonymous auto-reject path may use —
+ * and only the authenticated reject/override routes pass adminClearanceLinkOrigin (which may fall
+ * back to the request Origin on dev stages). No origin ⇒ no link.
  */
 async function notifyClearanceResolved(
   tenant: string,
   clearance: PlayerClearance,
   outcome: 'approved' | 'rejected',
   by: string,
+  linkOrigin: string | null = canonicalWebOrigin(tenant),
 ): Promise<void> {
   try {
     const [fromClub, toClub] = await Promise.all([
@@ -1681,6 +1730,7 @@ async function notifyClearanceResolved(
     const notifyClub = async (club: Club | null): Promise<void> => {
       if (!club) return; // directory source (or a club since deleted): nothing to notify
       const reason = outcome === 'rejected' ? clearance.rejectReason : clearance.overrideReason;
+      const portalLink = clearanceChairLink(linkOrigin, club.id, clearance.id);
       const { results } = await sendClearanceResolvedNotice({
         chair: chairContactOf(club),
         fromClubName: clearance.fromClubName,
@@ -1689,6 +1739,7 @@ async function notifyClearanceResolved(
         outcome,
         ...(reason ? { reason } : {}),
         ...(clearance.rejectOutcome ? { rejectOutcome: clearance.rejectOutcome } : {}),
+        ...(portalLink ? { portalLink } : {}),
       });
       await repo.appendClubCommEvents(
         tenant,
@@ -1757,12 +1808,15 @@ async function notifyClearanceAutoRejected(
   try {
     const admins = await adminEmails();
     if (admins.length > 0) {
+      // Anonymous path: canonical origin only, never the request Origin.
+      const adminLink = clearanceAdminLink(canonicalWebOrigin(tenant), clearance.id);
       await sendClearanceAutoRejectedAdminNotice({
         to: admins,
         fromClubName: clearance.fromClubName,
         playerName: clearance.playerName,
         toClubName: clearance.toClubName,
         reason: clearance.rejectReason ?? '',
+        ...(adminLink ? { adminLink } : {}),
       });
     }
   } catch (err) {
@@ -1781,12 +1835,15 @@ async function notifyClearanceAutoRejected(
  * `clearance-${id}-reopened-v${version}-${channel}` (version-suffixed so repeated reject→reopen
  * cycles never collide). The cap is bypassed for the same reason a resolution bypasses it — a
  * reopen is a deliberate authenticated admin action, not the anonymous abuse the cap guards.
+ * Each chair's notice links to the clearance in their own club portal, built from `linkOrigin`
+ * (the reopen route passes adminClearanceLinkOrigin); no origin ⇒ no link.
  */
 async function notifyClearanceReopened(
   tenant: string,
   tenantConfig: TenantConfig | null,
   clearance: PlayerClearance,
   by: string,
+  linkOrigin: string | null = canonicalWebOrigin(tenant),
 ): Promise<void> {
   try {
     const channels: Channel[] = hasFeature(tenantConfig, 'whatsappInvites', true)
@@ -1798,12 +1855,14 @@ async function notifyClearanceReopened(
     ]);
     const notifyClub = async (club: Club | null, side: 'source' | 'destination'): Promise<void> => {
       if (!club) return; // directory source (or a club since deleted): nothing to notify
+      const portalLink = clearanceChairLink(linkOrigin, club.id, clearance.id);
       const { results } = await sendClearanceReopenedNotice({
         side,
         chair: chairContactOf(club),
         fromClubName: clearance.fromClubName,
         playerName: clearance.playerName,
         toClubName: clearance.toClubName,
+        ...(portalLink ? { portalLink } : {}),
         channels,
       });
       await repo.appendClubCommEvents(
@@ -2512,7 +2571,7 @@ app.post('/clubs/:id/players', async (c) => {
     throw new HttpError(409, 'transfers are closed');
   }
   const player = result.player;
-  // Soft duplicate warning (ADR 0018): the same name + dob under another identity elsewhere.
+  // Soft duplicate warning (ADR 0019): the same name + dob under another identity elsewhere.
   const possibleExistingAt = playerSyncEnabled(cfg)
     ? possibleExistingRegistrations(
         await buildNameDobIndex(ra.tenant, await repo.listClubs(ra.tenant)),
@@ -2632,7 +2691,7 @@ async function registerChairRows(
 ): Promise<{ results: ChairBulkResult[]; playerCount: number }> {
   const results: ChairBulkResult[] = [];
   const toRegister = rows.filter((r) => r.fields);
-  // The soft duplicate warning (ADR 0018) rides the same roster reads: other clubs via the
+  // The soft duplicate warning (ADR 0019) rides the same roster reads: other clubs via the
   // cross-club index, this club's own roster read once more.
   const nameDob: NameDobIndex | undefined =
     toRegister.length && playerSyncEnabled(cfg) ? new Map() : undefined;
@@ -4644,8 +4703,8 @@ async function createSeries(
   return series;
 }
 
-/** A series PATCH may also carry the `reveal` ACTION key — not a stored field. */
-type SeriesPatch = Partial<Series> & { reveal?: unknown };
+/** A series PATCH may also carry the `reveal` / `setSide` ACTION keys — not stored fields. */
+type SeriesPatch = Partial<Series> & { reveal?: unknown; setSide?: unknown };
 
 app.patch('/series/:id', requireAdmin, async (c) => {
   const ra = c.get('requestAuth')!;
@@ -4769,6 +4828,12 @@ async function applySeriesPatch(
   if (patch.version !== undefined && patch.version !== current.version)
     throw new HttpError(409, 'series changed; refetch');
 
+  // Postponement bookkeeping before either clash gate runs: a postponed fixture moved to a new
+  // date gets `originalDate` (and loses an undated postponement's `dateTbc`, so the gates see
+  // its new slot); a reinstated one loses both.
+  if (Array.isArray(patch.fixtures))
+    patch.fixtures = stampRescheduledPostponements(current, patch.fixtures as PostponableFixture[]);
+
   // The tenant-wide series/clubs/venues lists both clash gates read, loaded at most once and
   // only when a gate actually runs — a draft fixture edit with no release transition pays no
   // list reads, and a release never loads them twice.
@@ -4781,6 +4846,101 @@ async function applySeriesPatch(
       // The tenant's configured ground-name aliases, merged over the code default.
       repo.getTenantConfig(tenant).then(venueAliasesFor),
     ]));
+
+  // ── Knockout "Set team" (ADR 0018) ──
+  // `setSide` is an ACTION key: put a real team into one fixture's placeholder side (or revert
+  // it), computed entirely from `current`. Sibling keys are ignored, like `reveal`. It is gated
+  // on a NEW ground clash for drafts AND released series alike (subset rule): a knockout side
+  // usually has no venue, so setting the home team moves the fixture onto that team's ground.
+  // A team already playing that day/slot (released series, the postponement check's rule) is
+  // refused with `team_busy`. On a medicoach-synced series a `win:`/`lose:` side is medicoach's
+  // to fill (409 `sync_owned_side`). The narrowed write then runs the rest of this function
+  // unchanged (approval recall on a draft, the in-season gate, the medicoach schedule diff).
+  if (patch.setSide !== undefined) {
+    const op = parseSetSide(patch.setSide);
+    if (typeof patch.version !== 'number')
+      throw new HttpError(400, 'setSide needs the series version');
+    const [allSeries, clubs, venues, aliases] = await loadClashInputs();
+    const syncMapped = await seriesMappedForSync(
+      repo,
+      tenant,
+      current,
+      await repo.getTenantConfig(tenant),
+    );
+    const next = applySetSide(current, op, clubs, { syncMapped });
+    if (op.teamId !== null) {
+      const f = (next.fixtures as Array<{ id?: string; date?: string; time?: string }>).find(
+        (x) => x?.id === op.fixtureId,
+      );
+      const busy = f?.date
+        ? findTeamBusy(
+            allSeries.filter((s) => s.released === true),
+            {
+              seriesId: id,
+              fixtureId: op.fixtureId,
+              [op.side]: op.teamId,
+            },
+            f.date,
+            f.time,
+          )[op.side]
+        : undefined;
+      if (busy) {
+        const clubsById = new Map(clubs.map((cl) => [cl.id, cl]));
+        const other = allSeries.find((s) => s.id === busy.seriesId);
+        const team = resolveTeam({ ...current, ...next } as Series, op.teamId, clubsById).name;
+        throw new HttpError(
+          409,
+          `${team} already plays on ${busy.date}${busy.time ? ' ' + busy.time : ''} (${other?.name ?? busy.seriesId}) — pick another team, or move one of the fixtures`,
+          {
+            code: 'team_busy',
+            teamBusy: [
+              {
+                side: op.side,
+                team,
+                date: busy.date,
+                with: {
+                  seriesId: busy.seriesId,
+                  seriesName: other?.name,
+                  fixtureId: busy.fixtureId,
+                },
+              },
+            ],
+          },
+        );
+      }
+    }
+    const refusal = inSeasonClashRefusal(
+      current,
+      { ...current, ...next, id } as Series,
+      allSeries,
+      clubs,
+      venues,
+      aliases,
+    );
+    if (refusal) throw refusal;
+    patch = { ...next, version: patch.version };
+  }
+
+  // Every fixture side must resolve: a series team / participant, a placeholder, or a side
+  // filled from a stored placeholder (`slots`). Only NEW orphans are refused, so a series that
+  // already carries one (old data) stays editable (risk R7).
+  if (
+    patch.fixtures !== undefined ||
+    patch.participants !== undefined ||
+    patch.teams !== undefined
+  ) {
+    // Both sides judged against the team set the write leaves, so a series that had none
+    // (nothing to judge) isn't blamed for its old sides once a write adds teams.
+    const after = { ...current, ...patch } as Series;
+    const before = new Set(orphanSides(current, after));
+    const introduced = orphanSides(after).filter((o) => !before.has(o));
+    if (introduced.length)
+      throw new HttpError(
+        400,
+        `fixture side(s) not in the series: ${introduced.slice(0, 5).join('; ')}${introduced.length > 5 ? ` … +${introduced.length - 5} more` : ''} — add the team to the series, or use Set team on a knockout placeholder`,
+        { code: 'orphan_side', orphans: introduced },
+      );
+  }
 
   // Withheld fields are chosen ONLY on the false→true release transition, and only when
   // the patch actually carries a `withheld` key. Gating on the flag value alone would
@@ -5062,7 +5222,7 @@ app.get('/integrations/medicoach/status', async (c) => {
     conflicts: conflicts
       .sort((a, b) => b.detectedAt.localeCompare(a.detectedAt))
       .map((x) => conflictView(x)),
-    // The player sync (ADR 0018): counts only — outbox rows hold natural keys, never shown.
+    // The player sync (ADR 0019): counts only — outbox rows hold natural keys, never shown.
     players: playersOn ? playerSyncStatus(playerRows, playerReviews.length) : { enabled: false },
     // What needs an admin, at a glance (the nav badge + the page header read this).
     attention: {
@@ -5258,7 +5418,7 @@ app.post('/integrations/medicoach/outbox/drop', async (c) => {
 });
 
 /**
- * The admin page's Players panel numbers (ADR 0018): rows waiting, parked (medicoach lacks a
+ * The admin page's Players panel numbers (ADR 0019): rows waiting, parked (medicoach lacks a
  * team — the refs it named, which carry no personal data, tell the operator what to top up),
  * stuck (STUCK_ATTEMPTS+ failed pushes, still retried) and reviews waiting on an admin.
  */
@@ -5291,7 +5451,7 @@ async function requirePlayerSync(tenant: string): Promise<TenantConfig> {
 }
 
 /**
- * Retry parked and/or stuck player rows (ADR 0018): their attempt count restarts and parked
+ * Retry parked and/or stuck player rows (ADR 0019): their attempt count restarts and parked
  * rows are un-parked, so the next sync run (or "Sync now") sends them again — after a bundle
  * top-up added the missing teams, say. Body `{ scope?: 'parked' | 'stuck' | 'all' }`.
  */
@@ -5322,7 +5482,7 @@ function playerReviewView(r: PlayerSyncReview) {
 }
 
 /**
- * Player pushes held for an admin (ADR 0018): medicoach's `needs-review` (uncertain match —
+ * Player pushes held for an admin (ADR 0019): medicoach's `needs-review` (uncertain match —
  * pick a candidate or create) and smart club's own possible duplicates (same name + dob under
  * another ID). Personal data — admins only, like the rest of /integrations.
  */
@@ -5335,7 +5495,7 @@ app.get('/integrations/medicoach/player-reviews', async (c) => {
 });
 
 /**
- * Send the people an admin just resolved RIGHT AWAY (ADR 0018) through the normal flush,
+ * Send the people an admin just resolved RIGHT AWAY (ADR 0019) through the normal flush,
  * restricted to their rows — the admin sees the outcome instead of waiting for the cron. A
  * dry run, a medicoach failure or a parked team leaves the row queued for the cron's retry
  * (never an error to the admin). Answers per the whole set:
@@ -5376,7 +5536,7 @@ async function deliverResolvedPlayers(
 }
 
 /**
- * Resolve a held player (ADR 0018). Actions:
+ * Resolve a held player (ADR 0019). Actions:
  *  - `link` `{ medicoachPlayerId }` — one of the review's medicoach candidates: the next push
  *    binds this person to that player;
  *  - `create` `{ acknowledgedCandidates }` — every candidate shown, explicitly: medicoach
@@ -5536,12 +5696,53 @@ interface PostponableFixture {
   away?: string;
   status?: string;
   originalDate?: string;
+  /** With `status: 'postponed'`: an undated postponement (clash-exempt via dateTbc). */
+  dateTbc?: boolean;
   postponementId?: string;
   [key: string]: unknown;
 }
 
 const fixturesOf = (series: Series): PostponableFixture[] =>
   (series.fixtures as PostponableFixture[]) ?? [];
+
+/**
+ * `next` with the postponement bookkeeping kept consistent with what `current` stores for each
+ * fixture (matched by id):
+ *  - a fixture that ends up `status: 'postponed'` on a NEW date (the admin editor's one-save
+ *    "postpone to <date>", or a date change on an already-postponed fixture) gets
+ *    `originalDate` stamped — the only-if-absent rule of `postponedFixture` (ADR 0015): an
+ *    existing one (incoming, else stored) is kept, so a fixture moved twice keeps pointing at
+ *    its first schedule — and an undated postponement's `dateTbc` is dropped, so it books its
+ *    new slot;
+ *  - a fixture that LEAVES `postponed` loses `originalDate`, and an undated postponement's
+ *    `dateTbc`, so stale bookkeeping never resurfaces on a later postponement.
+ * An undated postponement is `status: 'postponed'` + `dateTbc: true` (the reminder upload,
+ * the patch engine). Only THAT `dateTbc` is cleared here — never the placeholder flag of a
+ * fixture that was not postponed (a draft knockout awaiting its date).
+ */
+function stampRescheduledPostponements(
+  current: Series,
+  next: PostponableFixture[],
+): PostponableFixture[] {
+  const before = new Map(fixturesOf(current).map((f) => [f?.id, f]));
+  return next.map((f) => {
+    const prev = f?.id ? before.get(f.id) : undefined;
+    if (!prev) return f;
+    const tbcPostponement = prev.status === 'postponed' && prev.dateTbc === true;
+    if (f.status !== 'postponed') {
+      if (prev.status !== 'postponed') return f;
+      // Reinstated (or cancelled): drop the postponement's bookkeeping.
+      const out = { ...f };
+      delete out.originalDate;
+      if (tbcPostponement) delete out.dateTbc;
+      return out;
+    }
+    if (!f.date || !prev.date || f.date === prev.date) return f;
+    const out = { ...f, originalDate: f.originalDate ?? prev.originalDate ?? prev.date };
+    if (tbcPostponement) delete out.dateTbc;
+    return out;
+  });
+}
 
 /** The club behind a fixture side: the participants snapshot, else (legacy) the id IS a clubId.
  * A knockout slot reference (`win:f3`) has no club yet. */
@@ -5816,6 +6017,8 @@ function postponedFixture(
     originalDate: fixture.originalDate ?? fixture.date,
     postponementId: requestId,
   };
+  // An undated postponement (`dateTbc`) that gets its new date books its slot again.
+  if (fixture.status === 'postponed' && fixture.dateTbc === true) delete next.dateTbc;
   if (move.venue) {
     next.venueId = move.venue.id;
     next.venueName = move.venue.name;
@@ -7264,6 +7467,143 @@ app.put('/captains-report-link/:token', async (c) => {
     memberId,
   });
   return c.json(await linkPayload(tenant, saved, isChairLink));
+});
+
+/**
+ * Public scorecard-confirmation link (`/sc/<token>`): a club chair's weekly digest. The token
+ * is the capability (HMAC over tenant + week + club + the digest's memberId + expiry, its own
+ * context — a captain's-report token never verifies here). Invalid / unknown digest → 404;
+ * expired or revoked (memberId rotated) → 410. Never cached, never leaks the URL onward.
+ */
+async function linkedScorecardOr410(c: Context<HonoEnv>) {
+  c.header('Cache-Control', 'no-store');
+  c.header('Referrer-Policy', 'no-referrer');
+  const found = await loadLinkedScorecardConfirmation(
+    repo,
+    c.req.param('token') ?? '',
+    Date.now(),
+    captainsReportLinkSecret(),
+  );
+  if (!found.ok) throw new HttpError(found.status, found.error);
+  return found;
+}
+
+/**
+ * The pinned GET /scorecard-confirm-link/:token payload (see ScorecardConfirmView). Reads
+ * only the digest's own entries' result + scorecard (two GetItems per entry, in parallel) —
+ * never the tenant's whole result/scorecard partitions.
+ */
+async function scorecardLinkPayload(tenant: string, record: ScorecardConfirmation) {
+  const entries = Object.entries(record.entries ?? {});
+  const [cfg, rows] = await Promise.all([
+    repo.getTenantConfig(tenant),
+    Promise.all(
+      entries.map(async ([k, e]) => {
+        const [result, card] = await Promise.all([
+          repo.getFixtureResult(tenant, e.seriesId, e.fixtureId),
+          repo.getFixtureScorecard(tenant, e.seriesId, e.fixtureId),
+        ]);
+        return { k, result, card };
+      }),
+    ),
+  ]);
+  const results = new Map<string, StoredFixtureResult>();
+  const cards = new Map<string, StoredFixtureScorecard>();
+  for (const { k, result, card } of rows) {
+    if (result) results.set(k, result);
+    if (card) cards.set(k, card);
+  }
+  return toScorecardConfirmView(record, cards, results, {
+    name: cfg ? orgCopy(cfg).name : tenant,
+    logoUrl: cfg?.branding?.logoUrl ?? '',
+    colors: cfg?.branding?.colors ?? {},
+  });
+}
+
+app.get('/scorecard-confirm-link/:token', async (c) => {
+  const { tenant, record } = await linkedScorecardOr410(c);
+  return c.json(await scorecardLinkPayload(tenant, record));
+});
+
+/**
+ * Answer one match of the digest: `{action: 'confirm' | 'correction', feedback?,
+ * scorecardFetchedAt?}` (feedback required for a correction, ≤ 2,000 chars;
+ * `scorecardFetchedAt` echoes the rendered card's version and is stored — clamped to the
+ * stored card's version, see answeredAgainstFetchedAt — as the answer's
+ * `confirmedAgainstFetchedAt`, for a confirm and a correction alike). First submit wins: 404 for a match not in the
+ * digest, 409 `entry_closed` once answered (or void). A correction emails the PLATFORM
+ * OPERATORS (never tenant admins) — best-effort, it never fails the submit.
+ */
+app.put('/scorecard-confirm-link/:token/fixtures/:seriesId/:fixtureId', async (c) => {
+  const { tenant, record, memberId } = await linkedScorecardOr410(c);
+  const seriesId = c.req.param('seriesId');
+  const fixtureId = c.req.param('fixtureId');
+  const entryKey = scorecardEntryKey(seriesId, fixtureId);
+  let answer: ReturnType<typeof parseScorecardAnswer>;
+  try {
+    answer = parseScorecardAnswer(await c.req.json().catch(() => null));
+  } catch (err) {
+    if (err instanceof ScorecardInputError) throw new HttpError(400, err.message);
+    throw err;
+  }
+  const entry = record.entries?.[entryKey];
+  if (!entry) throw new HttpError(404, 'that match is not in this digest');
+  // The card the chair answered against (confirm or correction): the version the page
+  // rendered (echoed back as `scorecardFetchedAt`) when it is a plausible past value no later
+  // than the card stored now, else the stored card's version.
+  const card = await repo.getFixtureScorecard(tenant, seriesId, fixtureId);
+  const confirmedAgainstFetchedAt = answeredAgainstFetchedAt(
+    answer.scorecardFetchedAt,
+    card,
+    new Date(),
+  );
+  let saved: ScorecardConfirmation;
+  try {
+    saved = await repo.submitScorecardConfirmEntry(
+      tenant,
+      record.weekKey,
+      record.clubId,
+      entryKey,
+      {
+        status: answer.action === 'confirm' ? 'confirmed' : 'correction',
+        ...(answer.feedback ? { feedback: answer.feedback } : {}),
+        ...(confirmedAgainstFetchedAt ? { confirmedAgainstFetchedAt } : {}),
+        memberId,
+      },
+    );
+  } catch (err) {
+    if (err instanceof repo.ScorecardConfirmStateError) {
+      if (err.code === 'entry_closed')
+        throw new HttpError(409, err.message, { code: 'entry_closed' });
+      if (err.code === 'link_revoked') throw new HttpError(410, err.message);
+      throw new HttpError(404, err.message);
+    }
+    throw err;
+  }
+  if (answer.action === 'correction') {
+    try {
+      const cfg = await repo.getTenantConfig(tenant);
+      await notifyOperatorsOfCorrection(
+        { repo },
+        {
+          tenantName: cfg ? orgCopy(cfg).name : tenant,
+          clubName: saved.clubName,
+          ref: saved.ref,
+          fixtureLine: scorecardFixtureLine(entry),
+          feedback: answer.feedback ?? '',
+          consoleLink: `${captainsReportLinkBase()}/platform`,
+        },
+      );
+    } catch (err) {
+      // Never fails the submit: the answer is stored and the operator console shows it.
+      console.warn(
+        `[scorecard-confirm] ${tenant} ${saved.ref}: operator notice failed — ${
+          err instanceof Error ? err.name : 'error'
+        }`,
+      );
+    }
+  }
+  return c.json(await scorecardLinkPayload(tenant, saved));
 });
 
 /* ─── Season runs (ADR 0008) ───
@@ -8868,6 +9208,7 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   delete (patch as { clearanceCertTemplate?: unknown }).clearanceCertTemplate;
   delete (patch as { orgContact?: unknown }).orgContact;
   delete (patch as { fixtureReminders?: unknown }).fixtureReminders;
+  delete (patch as { scorecardConfirmations?: unknown }).scorecardConfirmations;
   delete (patch as { transferWindows?: unknown }).transferWindows;
   delete (patch as { sport?: unknown }).sport;
   delete (patch as { seasonLabel?: unknown }).seasonLabel;
@@ -9280,6 +9621,18 @@ function keepStoredCompetitions(incoming: League[], stored: League[]): League[] 
   });
 }
 
+/** 400 unless `v` is `{ enabled: boolean }` (unknown keys rejected). */
+function validateScorecardConfirmationsConfig(v: unknown): { enabled: boolean } {
+  if (v === null || typeof v !== 'object' || Array.isArray(v))
+    throw new HttpError(400, 'scorecardConfirmations must be an object');
+  for (const k of Object.keys(v))
+    if (k !== 'enabled') throw new HttpError(400, `scorecardConfirmations: unknown field "${k}"`);
+  const enabled = (v as { enabled?: unknown }).enabled;
+  if (typeof enabled !== 'boolean')
+    throw new HttpError(400, 'scorecardConfirmations.enabled must be a boolean');
+  return { enabled };
+}
+
 /**
  * PUT /platform/tenants/:slug — merge-patch branding / features / leagues /
  * districts / submissionDeadline (whitelisted: the operator portal edits nothing
@@ -9291,7 +9644,7 @@ function keepStoredCompetitions(incoming: League[], stored: League[]): League[] 
 /**
  * `integrations` on PUT /platform/tenants/:slug (operator-only):
  *  - `medicoach.goLiveDate`: YYYY-MM-DD, or ''/null to clear it;
- *  - `medicoach.playerSync` (ADR 0018): boolean; absent (incl. an absent/null `medicoach`
+ *  - `medicoach.playerSync` (ADR 0019): boolean; absent (incl. an absent/null `medicoach`
  *    block) ⇒ the stored value is kept (the caller merges it), so only an explicit `false`
  *    switches the player sync off.
  */
@@ -9468,7 +9821,13 @@ app.put('/platform/tenants/:slug', async (c) => {
   if (body.fixtureReminders !== undefined) {
     patch.fixtureReminders = validateFixtureReminders(body.fixtureReminders);
   }
-  // Player sync switched on by this save (ADR 0018) — probed for team coverage after the write.
+  // Whole-key write: `{enabled: boolean}` only.
+  if (body.scorecardConfirmations !== undefined) {
+    patch.scorecardConfirmations = validateScorecardConfirmationsConfig(
+      body.scorecardConfirmations,
+    );
+  }
+  // Player sync switched on by this save (ADR 0019) — probed for team coverage after the write.
   let playerSyncSwitchedOn = false;
   if (body.integrations !== undefined) {
     const integrations = validateIntegrations(body.integrations) ?? {};
@@ -11350,6 +11709,47 @@ app.post('/platform/tenants/:slug/clubs', async (c) => {
 });
 
 /**
+ * GET /platform/scorecard-confirmations?week=YYYY-MM-DD — one week of chair scorecard
+ * confirmations across every tenant (default: the most recent completed Mon–Sun week).
+ * Per tenant: each fixture with BOTH clubs' answers side by side, plus each digest's delivery
+ * status. Lists tenants that have digests that week or have the feature switched on.
+ */
+app.get('/platform/scorecard-confirmations', async (c) => {
+  const week = c.req.query('week');
+  if (week !== undefined && !isWeekKey(week))
+    throw new HttpError(400, 'week must be a Sunday (YYYY-MM-DD)');
+  const weekKey = week ?? lastCompletedWeekKey(new Date());
+  const tenants = await repo.listTenants();
+  const out = [];
+  for (const cfg of tenants) {
+    const records = await repo.listScorecardConfirmations(cfg.tenant, weekKey);
+    const enabled = scorecardConfirmationsEnabled(cfg);
+    if (!records.length && !enabled) continue;
+    out.push(toPlatformScorecardTenant(cfg.tenant, orgCopy(cfg).name, weekKey, enabled, records));
+  }
+  out.sort((a, b) => a.tenantName.localeCompare(b.tenantName));
+  return c.json({ weekKey, weekLabel: weekLabel(weekKey), tenants: out });
+});
+
+/**
+ * POST /platform/scorecard-confirmations/run — body `{week?}` (a Sunday; default the most
+ * recent completed week). Runs the Monday cron now for every gated tenant: idempotent
+ * (a digest already sent is never re-sent) and it tops up digests with late results.
+ */
+app.post('/platform/scorecard-confirmations/run', async (c) => {
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as { week?: unknown };
+  if (body.week !== undefined && !isWeekKey(body.week))
+    throw new HttpError(400, 'week must be a Sunday (YYYY-MM-DD)');
+  const week = body.week as string | undefined;
+  // Only a COMPLETED week: running the in-progress one would claim each chair's send for a
+  // half-week digest (Monday's cron then only tops up, and the chair is never re-notified).
+  if (week && week > lastCompletedWeekKey(new Date()))
+    throw new HttpError(400, 'week must be a completed week');
+  const summary = await runScorecardConfirmations({}, week ? { week } : {});
+  return c.json(summary);
+});
+
+/**
  * POST /platform/tenants/:slug/setup-complete — stamp the operator's "setup done"
  * milestone (informational only; the client is already publicly live and every setting
  * stays editable). Records who + when. DELETE reopens. Kept OUT of the PUT merge-patch
@@ -11376,6 +11776,187 @@ app.delete('/platform/tenants/:slug/setup-complete', async (c) => {
   delete next.setupCompletedBy;
   await repo.putTenantConfig(next);
   return c.json(next);
+});
+
+/* ─── Fixture amendments (operator) ───
+   The union's weekly "Summary Reminder Fixtures" workbook, uploaded on the operator console:
+   the CLI's own parser, matcher and planner (reminder-fixtures.ts). `preview` writes nothing;
+   `confirm` re-plans from the same file and refuses with 409 `plan_changed` (plus the fresh
+   preview) when the COMPUTED plan moved since the preview, and 409 `clash_gate` when the plan
+   would introduce a venue clash — that gate has no bypass. Rows that cannot apply (unmatched,
+   ambiguous, unknown ground, played, unknown competition) skip with warnings, never block.
+   Writes go through writeSeriesFromSnapshot (version-checked, medicoach outbox). Clubs are
+   NOT notified (v1). Same base64 transport as the umpire appointments upload: xlsx, 2 MB. */
+
+const AMENDMENTS_MAX_BYTES = 2 * 1024 * 1024; // 2 MB
+const AMENDMENTS_MAX_BASE64_LENGTH = Math.ceil((AMENDMENTS_MAX_BYTES * 4) / 3) + 4;
+/**
+ * Pre-write backups of the series an upload touches, in the private Uploads bucket. The
+ * leading underscore keeps the prefix out of reach of every presign/read route: those only
+ * serve keys recorded under `<tenant>/<clubId>/` (assertOwnObjectKey) or `local/`, and a
+ * tenant slug always starts with a letter (TENANT_SLUG_RE) — a plain `backups/` prefix
+ * would be reachable by a tenant slugged "backups".
+ */
+const AMENDMENTS_BACKUP_PREFIX = '_backups/fixture-amendments';
+
+async function planFixtureAmendmentsUpload(c: Context<HonoEnv>, slug: string) {
+  const config = await repo.getTenantConfig(slug);
+  if (!config) throw new HttpError(404, 'tenant not found');
+  const body = (await c.req.json().catch(() => null)) as {
+    filename?: unknown;
+    dataBase64?: unknown;
+    planHash?: unknown;
+    skipRowIds?: unknown;
+    relocateDraftClashes?: unknown;
+  } | null;
+  const filename = typeof body?.filename === 'string' ? body.filename : '';
+  const dataBase64 = typeof body?.dataBase64 === 'string' ? body.dataBase64 : '';
+  if (!dataBase64) throw new HttpError(400, 'dataBase64 is required');
+  if (dataBase64.length > AMENDMENTS_MAX_BASE64_LENGTH)
+    throw new HttpError(413, 'the workbook is larger than 2 MB');
+  if (filename && !/\.xlsx$/i.test(filename))
+    throw new HttpError(400, 'upload the reminder fixtures sheet as an Excel .xlsx file');
+  const skipRaw = body?.skipRowIds ?? [];
+  if (
+    !Array.isArray(skipRaw) ||
+    skipRaw.length > 1000 ||
+    skipRaw.some((x) => typeof x !== 'string' || x.length > 200)
+  )
+    throw new HttpError(400, 'skipRowIds must be a list of row ids');
+  const relocate = body?.relocateDraftClashes ?? false;
+  if (typeof relocate !== 'boolean')
+    throw new HttpError(400, 'relocateDraftClashes must be true or false');
+  const buffer = Buffer.from(dataBase64, 'base64');
+  // Every .xlsx is a zip: anything else (an old .xls, a CSV renamed) is refused unread.
+  if (buffer.length < 4 || buffer.readUInt32LE(0) !== 0x04034b50)
+    throw new HttpError(400, 'that file is not an Excel .xlsx workbook');
+  const rf = await import('./reminder-fixtures.js');
+  const wb = new ExcelJS.Workbook();
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await wb.xlsx.load(buffer as any);
+  } catch {
+    throw new HttpError(400, 'unable to read the workbook — check the file is a valid .xlsx');
+  }
+  const parsed = await rf.parseReminderWorkbook(wb);
+  if (!parsed.rows.length)
+    throw new HttpError(400, 'no fixture rows were recognised in the workbook', {
+      code: 'no_rows',
+      sheets: parsed.sheets,
+    });
+  const [series, clubs, venues, results, officials] = await Promise.all([
+    repo.listSeries(slug),
+    repo.listClubs(slug),
+    repo.listVenues(slug),
+    repo.listFixtureResults(slug),
+    repo.listFixtureOfficials(slug),
+  ]);
+  const aliases = venueAliasesFor(config);
+  const rp = rf.planReminderAmendments({
+    parsed,
+    series,
+    clubs,
+    venues,
+    aliases,
+    playedRefs: new Set(
+      results.filter((r) => !r.cleared).map((r) => `${r.seriesId}#${r.fixtureId}`),
+    ),
+    skipRowIds: skipRaw as string[],
+    relocateDraftClashes: relocate,
+    venueReason: 'Union reminder fixtures upload',
+    gateMode: 'introduced',
+  });
+  const preview = rf.reminderPreview(rp, series, clubs);
+  // Umpire appointments on every fixture the plan touches, so they get re-checked.
+  const touched = new Set(rp.plan.diffs.map((d) => `${d.seriesId}#${d.fixtureId}`));
+  preview.officials = officials
+    .filter((o) => touched.has(`${o.seriesId}#${o.fixtureId}`))
+    .map((o) => ({
+      seriesId: o.seriesId,
+      fixtureId: o.fixtureId,
+      umpires: (o.umpires ?? []).map((u) => u.name),
+      ...(o.referee ? { referee: o.referee.name } : {}),
+    }));
+  return { rf, config, filename, series, clubs, aliases, rp, preview, planHash: body?.planHash };
+}
+
+app.post('/platform/tenants/:slug/fixture-amendments/preview', async (c) => {
+  const { preview } = await planFixtureAmendmentsUpload(c, c.req.param('slug'));
+  return c.json(preview);
+});
+
+app.post('/platform/tenants/:slug/fixture-amendments/confirm', async (c) => {
+  const slug = c.req.param('slug');
+  const auth = c.get('auth');
+  const { rf, config, filename, series, clubs, aliases, rp, preview, planHash } =
+    await planFixtureAmendmentsUpload(c, slug);
+  if (typeof planHash !== 'string' || planHash !== rp.planHash)
+    throw new HttpError(
+      409,
+      'The fixtures changed since your preview. Check the updated preview, then confirm again.',
+      { code: 'plan_changed', preview },
+    );
+  if (rp.gateVerdict.introduced.length)
+    throw new HttpError(
+      409,
+      `Blocked — the amendments would introduce ${preview.gate.introduced.length} venue clash(es). Untick the rows involved${
+        // Relocation only moves drafts: offer it only when a draft holds a blocking ground.
+        preview.gate.introduced.some((x) => x.holderDraft) ? ' (or turn on draft relocation)' : ''
+      } and preview again.`,
+      { code: 'clash_gate', details: preview.gate },
+    );
+  if (!rp.gateVerdict.ok)
+    throw new HttpError(409, `The plan cannot be applied: ${rp.gateVerdict.errors[0]}`, {
+      code: 'plan_errors',
+      errors: rp.gateVerdict.errors,
+    });
+  if (!rp.plan.diffs.length)
+    throw new HttpError(400, 'nothing to apply — every row is already correct or skipped', {
+      code: 'nothing_to_apply',
+    });
+
+  // Pre-write backup of every touched series as read. A failed backup aborts the write.
+  const at = now();
+  const byId = new Map(series.map((s) => [String(s.id), s]));
+  const backupKey = `${AMENDMENTS_BACKUP_PREFIX}/${slug}/${at.replace(/[:.]/g, '-')}.json`;
+  const backup = JSON.stringify({
+    tenant: slug,
+    at,
+    by: auth?.email ?? 'unknown',
+    filename,
+    planHash: rp.planHash,
+    series: rp.plan.touchedSeriesIds.map((id) => byId.get(id)),
+  });
+  if (isLocalUploadsMode()) {
+    const filePath = path.join(process.env.LOCAL_UPLOADS_DIR!, backupKey);
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, backup);
+  } else {
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: UPLOADS_BUCKET,
+        Key: backupKey,
+        Body: backup,
+        ContentType: 'application/json',
+      }),
+    );
+  }
+
+  const out = await rf.writeReminderPlan(repo, slug, series, rp, clubs, aliases, {
+    origin: 'operator-upload',
+  });
+  const written = new Set(out.results.filter((r) => r.status === 'written').map((r) => r.seriesId));
+  return c.json({
+    backupKey,
+    // Sheet amendments only; draft relocations are reported solely as draftMoves.
+    fixturesAmended: rp.plan.diffs.filter((d) => d.kind === 'patch' && written.has(d.seriesId))
+      .length,
+    draftMoves: rp.plan.moves.filter((m) => written.has(m.seriesId)).length,
+    series: out.results,
+    splitSlotRisks: out.splitSlotRisks,
+    medicoachSync: hasFeature(config, 'medicoachSync'),
+    clubsNotified: false,
+  });
 });
 
 /**
@@ -11749,10 +12330,11 @@ app.post('/admin/export-log', async (c) => {
  * 404 only when NOTHING exists in any category — a person already removed via the per-club
  * delete (or a window-rejected-only registrant) has no player row but still has PII on
  * clearance rows, and that must stay erasable. 409 while a clearance naming them is pending
- * (or a row is clearance-pending), and on a lost race with a concurrent clearance. With the
- * medicoach player sync on (ADR 0018) the erasure queues an `erase` tombstone, so medicoach
- * anonymises the player on the next sync; without it, data already exported to medicoach is not
- * recalled. Returns per-category counts.
+ * (or a row is clearance-pending), on a lost race with a concurrent clearance, and when a cached
+ * scorecard / digest kept changing under its scrub (aborted intact; retry). With the medicoach
+ * player sync on (ADR 0019) the erasure queues an `erase` tombstone, so medicoach anonymises the
+ * player on the next sync; without it, data already exported to Medicoach is not recalled.
+ * Returns per-category counts.
  */
 app.delete('/admin/players/:nk', async (c) => {
   const ra = c.get('requestAuth')!;
@@ -11765,6 +12347,8 @@ app.delete('/admin/players/:nk', async (c) => {
     return c.json({ ok: true, counts });
   } catch (err: unknown) {
     if (err instanceof repo.PlayerErasureBlockedError) throw new HttpError(409, err.message);
+    // Aborted before anything was deleted: a plain retry finishes the job.
+    if (err instanceof repo.ScorecardScrubContentionError) throw new HttpError(409, err.message);
     if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
       throw new HttpError(409, 'player is mid-transfer — refresh and try again');
     }
@@ -11917,7 +12501,13 @@ app.post('/admin/clearances/:cid/override', async (c) => {
     });
     // Best-effort: email BOTH clubs' chairmen that the union issued the transfer (never fails
     // the request). See notifyClearanceResolved re: email-only, no daily cap, destination chair.
-    await notifyClearanceResolved(ra.tenant, resolved, 'approved', ra.email);
+    await notifyClearanceResolved(
+      ra.tenant,
+      resolved,
+      'approved',
+      ra.email,
+      adminClearanceLinkOrigin(c, ra.tenant),
+    );
     const cert = declineCertificate ? {} : await issueOnResolve(ra.tenant, resolved);
     return c.json({ ...repo.publicClearance(resolved), ...cert });
   } catch (err) {
@@ -12091,7 +12681,13 @@ app.post('/admin/clearances/:cid/reject', async (c) => {
     });
     // Best-effort: email BOTH clubs' chairmen that the union declined the transfer (never fails
     // the request). The reject reason rides the email — see notifyClearanceResolved.
-    await notifyClearanceResolved(ra.tenant, rejected, 'rejected', ra.email);
+    await notifyClearanceResolved(
+      ra.tenant,
+      rejected,
+      'rejected',
+      ra.email,
+      adminClearanceLinkOrigin(c, ra.tenant),
+    );
     return c.json(repo.publicClearance(rejected));
   } catch (err) {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'clearance changed; refetch');
@@ -12136,7 +12732,13 @@ app.post('/admin/clearances/:cid/reopen', async (c) => {
     // Best-effort: tell BOTH clubs' chairmen the union reopened the clearance (never fails the
     // request). Source and destination get different copy — see notifyClearanceReopened.
     const tenantConfig = await getTenantConfigCached(c, ra.tenant).catch(() => null);
-    await notifyClearanceReopened(ra.tenant, tenantConfig, reopened, ra.email);
+    await notifyClearanceReopened(
+      ra.tenant,
+      tenantConfig,
+      reopened,
+      ra.email,
+      adminClearanceLinkOrigin(c, ra.tenant),
+    );
     return c.json(repo.publicClearance(reopened));
   } catch (err) {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'clearance changed; refetch');
@@ -12185,6 +12787,7 @@ app.post('/admin/clearances/:cid/remind', async (c) => {
     'clearance-reminder',
   );
   if (replay) throw new HttpError(409, 'already reminded today');
+  const portalLink = clearanceChairLink(adminClearanceLinkOrigin(c, ra.tenant), fromClub.id, cid);
   let results: SendResult[];
   try {
     ({ results } = await sendClearanceNotice({
@@ -12192,6 +12795,7 @@ app.post('/admin/clearances/:cid/remind', async (c) => {
       fromClubName: fromClub.name,
       playerName: clearance.playerName,
       toClubName: clearance.toClubName,
+      ...(portalLink ? { portalLink } : {}),
       channels,
     }));
   } catch (err) {
@@ -12357,6 +12961,31 @@ function resolveLoginUrl(c: Context<HonoEnv>, tenant: string, link?: string): st
   // No usable origin (e.g. a server-to-server call) — return a harmless localhost
   // default so the response always carries a copyable link; the admin can correct it.
   return 'http://localhost:5173';
+}
+
+/**
+ * The origin an AUTHENTICATED admin action's clearance-notice links point at (reject/override,
+ * reopen, manual remind): the tenant's canonical origin, else — only in the dormant pre-wildcard
+ * state (dev stages) — the request Origin when it belongs to THIS tenant (originAllowedForTenant)
+ * or is a plain localhost dev origin; else null (no link). Deliberately stricter than the broad
+ * CORS check (originAllowed): a `*.cloudfront.net` clone or another tenant's host never becomes a
+ * link. A tenant with no canonical origin has no origins of its own, so in practice only
+ * localhost passes the fallback — a deployed dev stage (CloudFront) sends link-less notices.
+ * Never use this on an anonymous path or in a cron: those take canonicalWebOrigin alone, so a
+ * caller can never steer the link host (see clearance-links.ts).
+ */
+function adminClearanceLinkOrigin(c: Context<HonoEnv>, tenant: string): string | null {
+  const canonical = canonicalWebOrigin(tenant);
+  if (canonical) return canonical;
+  const origin = c.req.header('origin') ?? '';
+  if (!origin) return null;
+  if (originAllowedForTenant(origin, tenant)) return origin;
+  try {
+    // Local dev (vite on localhost), which originAllowedForTenant excludes on purpose.
+    return new URL(origin).hostname === 'localhost' ? origin : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

@@ -1,5 +1,5 @@
 /**
- * The "Players" panel on the admin Medicoach sync page (ADR 0018): counts, parked/stuck retry,
+ * The "Players" panel on the admin Medicoach sync page (ADR 0019): counts, parked/stuck retry,
  * and the review list with its four decisions. Rendered for real through the app's providers;
  * only the HTTP client is mocked.
  */

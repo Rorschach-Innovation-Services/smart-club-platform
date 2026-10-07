@@ -254,10 +254,12 @@ export interface ClearanceWhatsAppInput {
   fromClubName: string;
   playerName: string;
   toClubName: string;
+  /** Deep link to the clearance in the chair's club portal ({{5}} of the template). Required. */
+  portalLink: string;
 }
 
 /**
- * Build the four positional body params for `club_clearance_pending`, in order:
+ * Build the first four positional body params of `club_clearance_pending_v2`, in order:
  * {{1}} chair name (fallback 'there'), {{2}} from-club, {{3}} player, {{4}} to-club.
  * Every param rides through cleanParam — the player name arrives from the PUBLIC register
  * form as free text (Meta rejects newlines/tabs/4+ spaces). Exported so the param
@@ -275,22 +277,60 @@ export function clearanceParams(
 }
 
 /**
- * Clearance-pending heads-up to the FROM-club chairman: a player wants to leave and
- * the club must approve or reject. No link in the body — the chair may hold no portal
- * login (chair invites were removed with admin onboarding), so the copy points at the
- * club portal / union office rather than telling the recipient to sign in. Uses the
- * `clearancePending` registry entry.
+ * Build the five positional body params for `club_clearance_pending_v2`: the name params
+ * ({@link clearanceParams}) plus {{5}} the clearance deep link. The link skips cleanParam (as
+ * `fixtureReminderParams`' portal link does) — it is server-built from the tenant origin, never
+ * free text, and truncating it would break it.
+ */
+export function clearanceV2Params(
+  input: Pick<
+    ClearanceWhatsAppInput,
+    'chairName' | 'fromClubName' | 'playerName' | 'toClubName' | 'portalLink'
+  >,
+): TemplateParam[] {
+  return [...clearanceParams(input), { type: 'text', text: input.portalLink }];
+}
+
+/**
+ * Which clearance-pending template a send uses, and its params: `clearancePendingV2` — the only
+ * clearance template since v1 (`club_clearance_pending`) was retired in code on 7 Oct 2026 — when
+ * the notice carries a link; null when it does not. {{5}} is the link and Meta rejects an empty
+ * param, so a null pick means the caller skips the WhatsApp channel (sendClearanceWhatsAppChannel
+ * in notify/index.ts records it `skipped`). Exported so tests can assert both sides.
+ */
+export function clearanceTemplateFor(
+  input: Pick<
+    ClearanceWhatsAppInput,
+    'chairName' | 'fromClubName' | 'playerName' | 'toClubName'
+  > & {
+    portalLink?: string;
+  },
+): { key: 'clearancePendingV2'; params: TemplateParam[] } | null {
+  if (!input.portalLink) return null;
+  return {
+    key: 'clearancePendingV2',
+    params: clearanceV2Params({ ...input, portalLink: input.portalLink }),
+  };
+}
+
+/**
+ * Clearance-pending heads-up to the FROM-club chairman: a player wants to leave and the club must
+ * approve or reject. Sends `club_clearance_pending_v2` with the portal deep link, which is
+ * required: a link-less notice never reaches here — the caller skips the channel and records why
+ * (sendClearanceWhatsAppChannel in notify/index.ts). The copy keeps the "contact your union
+ * office" fallback, since the chair may hold no portal login. The ClearanceReminders cron's
+ * WhatsApp channel gate reads this template's registry status (crons/clearance-reminders.ts).
  */
 export async function sendClearanceWhatsApp(
   input: ClearanceWhatsAppInput,
 ): Promise<{ messageId: string }> {
   const { to, fromClubName } = input;
-  const { name, lang } = WHATSAPP_TEMPLATES.clearancePending;
+  const { name, lang } = WHATSAPP_TEMPLATES.clearancePendingV2;
   return sendTemplate(
     to,
     name,
     lang,
-    clearanceParams(input),
+    clearanceV2Params(input),
     `clearance notice for ${fromClubName}`,
   );
 }
@@ -395,7 +435,7 @@ export interface CaptainsReportOpsDigestWhatsAppInput {
 }
 
 /**
- * Build the two body params for `captains_report_ops_digest`, in order: {{1}} recipient
+ * Build the two body params for `captains_report_ops_digest_v2`, in order: {{1}} recipient
  * name (fallback 'there'), {{2}} the one-line run summary (bounded at 300 chars).
  */
 export function captainsReportOpsDigestParams(
@@ -425,6 +465,56 @@ export async function sendCaptainsReportOpsDigestWhatsApp(
     lang,
     captainsReportOpsDigestParams(input),
     "captain's report ops digest",
+  );
+}
+
+export interface ScorecardConfirmDueWhatsAppInput {
+  to: string; // already E.164 (see toE164)
+  /** The chair's name as stored; {{1}} is its first word. */
+  chairName: string;
+  clubName: string;
+  /** "5–11 Oct 2026" */
+  weekLabel: string;
+  /** The signed digest token — the URL button's dynamic suffix. Never logged. */
+  token: string;
+}
+
+/**
+ * Build the three body params for `scorecard_confirm_due`, in order: {{1}} the chair's FIRST
+ * name (fallback 'there'), {{2}} club name, {{3}} the week label ("5–11 Oct 2026"). The link
+ * is NOT a body param — it rides in the URL button (see `scorecardConfirmDue.urlButton`).
+ */
+export function scorecardConfirmDueParams(
+  input: Pick<ScorecardConfirmDueWhatsAppInput, 'chairName' | 'clubName' | 'weekLabel'>,
+): TemplateParam[] {
+  const first = input.chairName.trim().split(/\s+/)[0] ?? '';
+  return [
+    { type: 'text', text: cleanParam(first || 'there') },
+    { type: 'text', text: cleanParam(input.clubName) },
+    { type: 'text', text: cleanParam(input.weekLabel) },
+  ];
+}
+
+/**
+ * The scorecard-confirmation digest over WhatsApp (URL button with the token as its suffix).
+ * Throws `WhatsAppTemplatePendingError` while the registry entry is not `registered` — the
+ * channel is then skipped as `template-pending`, never failed.
+ */
+export async function sendScorecardConfirmDueWhatsApp(
+  input: ScorecardConfirmDueWhatsAppInput,
+): Promise<{ messageId: string }> {
+  const { name, lang } = WHATSAPP_TEMPLATES.scorecardConfirmDue;
+  // Widened: the `as const` literal would make the gate a type error once it is 'registered'.
+  const status = WHATSAPP_TEMPLATES.scorecardConfirmDue
+    .status as WhatsAppTemplateDefinition['status'];
+  if (status !== 'registered') throw new WhatsAppTemplatePendingError();
+  return sendTemplate(
+    input.to,
+    name,
+    lang,
+    scorecardConfirmDueParams(input),
+    `scorecard confirmation digest for ${input.clubName}`,
+    input.token,
   );
 }
 

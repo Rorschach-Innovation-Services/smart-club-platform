@@ -467,6 +467,22 @@ export const fixtureResultsListKey = (tenant: string) => ({
   skPrefix: 'FIXRESULT#',
 });
 
+/**
+ * A medicoach SCORECARD for one fixture (FIXSCORECARD#), next to its FIXRESULT#. Its own
+ * partition so the sweep lists a tenant's scorecards with one Query. Holds player names
+ * (personal data): erased explicitly with the tenant / cohort / series.
+ */
+export const fixtureScorecardKey = (tenant: string, seriesId: string, fixtureId: string) => ({
+  pk: `${tenantPrefix(tenant)}#FIXSCORECARD`,
+  sk: `FIXSCORECARD#${seriesId}#${fixtureId}`,
+});
+
+/** pk + sk-prefix to query every scorecard in a tenant. */
+export const fixtureScorecardsListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#FIXSCORECARD`,
+  skPrefix: 'FIXSCORECARD#',
+});
+
 /** The medicoach sync puller's cursor (the last `nextCursor` it fully processed). */
 export const syncCursorKey = (tenant: string) => ({
   pk: `${tenantPrefix(tenant)}#SYNC`,
@@ -528,7 +544,7 @@ export const pendingSyncListKey = (tenant: string) => ({
 });
 
 /**
- * The PLAYER outbox (ADR 0018): one row per natural key (one person, tenant-wide) saying "this
+ * The PLAYER outbox (ADR 0019): one row per natural key (one person, tenant-wide) saying "this
  * player changed since `changedAt`". The row holds the key + timing only — the payload is
  * rebuilt from live data at flush — except an `erase` tombstone, whose source rows are gone.
  */
@@ -543,7 +559,7 @@ export const pendingPlayerSyncListKey = (tenant: string) => ({
 });
 
 /**
- * A player push held for admin review (ADR 0018): medicoach answered `needs-review`, or the
+ * A player push held for admin review (ADR 0019): medicoach answered `needs-review`, or the
  * flush found another smart-club person with the same name + dob. Holds medicoach candidates'
  * personal data, so it self-expires (`expiresAt`) and is deleted by resolve and by erasure.
  */
@@ -623,6 +639,36 @@ export const captainsReportCounterKey = (tenant: string, year: string) => ({
 export const captainsReportNotifyKey = (tenant: string, reportId: string, audience: string) => ({
   pk: captainsReportPartitionPk(tenant),
   sk: `NOTIFY#capreport#${reportId}#${audience}`,
+});
+
+/**
+ * Chair scorecard confirmations: one partition per tenant holding every weekly digest
+ * (`SCORECONF#<weekKey>#<clubId>`), the `SC-YYYY-NNNN` counters and the NOTIFY# send ledger.
+ * No gsi1/META listing — tenant erasure and cohort clear enumerate the whole partition.
+ */
+export const scorecardConfirmPartitionPk = (tenant: string) => `${tenantPrefix(tenant)}#SCORECONF`;
+
+export const scorecardConfirmKey = (tenant: string, weekKey: string, clubId: string) => ({
+  pk: scorecardConfirmPartitionPk(tenant),
+  sk: `SCORECONF#${weekKey}#${clubId}`,
+});
+
+/** pk + sk-prefix to query a tenant's digests (all weeks, or one week with `weekKey`). */
+export const scorecardConfirmsListKey = (tenant: string, weekKey?: string) => ({
+  pk: scorecardConfirmPartitionPk(tenant),
+  skPrefix: weekKey ? `SCORECONF#${weekKey}#` : 'SCORECONF#',
+});
+
+/** The atomic per-tenant, per-year `SC-YYYY-NNNN` counter. */
+export const scorecardConfirmCounterKey = (tenant: string, year: string) => ({
+  pk: scorecardConfirmPartitionPk(tenant),
+  sk: `COUNTER#SC#${year}`,
+});
+
+/** The digest's send claim (one per club per week): `NOTIFY#SCORECONF#<weekKey>#<clubId>`. */
+export const scorecardConfirmNotifyKey = (tenant: string, weekKey: string, clubId: string) => ({
+  pk: scorecardConfirmPartitionPk(tenant),
+  sk: `NOTIFY#SCORECONF#${weekKey}#${clubId}`,
 });
 
 /**

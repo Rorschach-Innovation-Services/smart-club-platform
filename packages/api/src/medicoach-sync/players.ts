@@ -1,5 +1,5 @@
 /**
- * Medicoach PLAYER sync — smart club → medicoach team rosters (ADR 0018).
+ * Medicoach PLAYER sync — smart club → medicoach team rosters (ADR 0019).
  *
  * Every repo write that changes a player row notes the PERSON (natural key) on the
  * `PENDINGPLAYERSYNC#` outbox (`repo.recordPlayerSyncChange`); erasure writes an `erase`
@@ -357,7 +357,7 @@ function reviewSubject(snap: PlayerSyncSnapshot, nk: string, intent: SyncIntent 
 }
 
 /**
- * Push the tenant's player outbox (ADR 0018). Never throws for a medicoach failure: failed
+ * Push the tenant's player outbox (ADR 0019). Never throws for a medicoach failure: failed
  * rows keep their attempt count for the next run. Parked rows are skipped. Dry run (URL or
  * secret empty): logs a count, sends nothing, writes nothing.
  */

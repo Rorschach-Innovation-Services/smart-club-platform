@@ -36,7 +36,7 @@
  * migration bundle carries its own `venueWithheld`/`timeWithheld`.
  */
 import { randomUUID } from 'node:crypto';
-import { isSlotRef } from '../../../engine/src/formats.js';
+import { isSlotRef, slotSource, tbdLabel } from '../../../engine/src/formats.js';
 import { fixtureSyncRef } from '../fixture-identity.js';
 import {
   capVenue,
@@ -91,6 +91,8 @@ export interface ScheduleFixture {
   away?: string;
   status?: string;
   dateTbc?: boolean;
+  /** The date a rescheduled postponement left (ADR 0015); absent on an undated one. */
+  originalDate?: string;
   venueId?: string;
   venueName?: string;
   venueOverride?: string;
@@ -155,6 +157,15 @@ export function fixtureSchedule(
     cancelled: f.status === 'cancelled',
     changedAt,
   };
+}
+
+/** True when a side is a placeholder the medicoach export can't carry: a `pos:` group position
+ * or a `tbd:` label (not a `win:`/`lose:` fixture link). Such a fixture is skipped by the
+ * export (`unresolved-side`), so medicoach never had it. */
+export function neverExported(f: Pick<ScheduleFixture, 'home' | 'away'>): boolean {
+  return [f.home, f.away].some(
+    (side) => typeof side === 'string' && isSlotRef(side) && !slotSource(side),
+  );
 }
 
 /** Same match before and after an edit: the same unordered pair, or a knockout slot filled. */
@@ -278,6 +289,16 @@ export async function recordScheduleDiff(
       if (f?.id) newRefs.push(fixtureSyncRef(tenant, String(after.id), f));
       return f;
     }
+    // A fixture with a `pos:`/`tbd:` side was never exported (ADR 0018: no team, no fixture to
+    // wait on), so medicoach has no match to update. Once Set team leaves it with no such side
+    // it needs a bundle top-up — reported like a new fixture, never pushed (a push would come
+    // back `unmapped` and vanish). Still unresolved: nothing to push either.
+    if (neverExported(old)) {
+      if (!neverExported(f) && f.id) newRefs.push(fixtureSyncRef(tenant, String(after.id), f));
+      return f;
+    }
+    // Reverted to a `pos:`/`tbd:` placeholder: the contract can't carry it, so nothing is pushed.
+    if (neverExported(f)) return f;
     if (!before || !sameMatch(old, f)) return f;
     if (scheduleKey(before, old) === scheduleKey(after, f)) return f;
     const next: ScheduleFixture = { ...f, schedule: { ...(f.schedule ?? {}), changedAt: nowIso } };
@@ -636,6 +657,21 @@ export function buildInboundFixture(
     next.status = 'scheduled';
     changed.push('status');
   }
+  // A postponement that lands on a new date is a RESCHEDULED one: stamp the date being left
+  // (only if absent — ADR 0015 `postponedFixture` semantics). An undated postponement's
+  // `dateTbc` needs no handling here: it mirrors `schedule.dateTbc` above, so a dated change
+  // already clears it. A fixture that LEAVES postponed drops `originalDate`, so a stale one
+  // never resurfaces on a later postponement.
+  if (statusFlag(ours) === 'postponed' && next.status !== 'postponed' && next.originalDate)
+    delete next.originalDate;
+  if (
+    next.status === 'postponed' &&
+    !next.originalDate &&
+    fixture.date &&
+    next.date &&
+    next.date !== fixture.date
+  )
+    next.originalDate = fixture.date;
   // Truncated to the contract's 200-character cap before it is resolved, on both sides of
   // the comparison (a ground named longer than that is what medicoach holds of it).
   const wanted = capVenue(schedule.venue)?.trim();
@@ -803,7 +839,10 @@ export async function applyInboundSchedule(
 /** A readable "Home v Away" for a fixture (participant names, else the raw side). */
 function matchLineOf(series: Series, f: ScheduleFixture): string {
   const name = (side: string | undefined) =>
-    series.participants?.find((p) => p.teamId === side)?.name ?? side ?? '?';
+    series.participants?.find((p) => p.teamId === side)?.name ??
+    (side ? tbdLabel(side) : null) ??
+    side ??
+    '?';
   return `${name(f.home)} v ${name(f.away)}`;
 }
 

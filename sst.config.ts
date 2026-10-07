@@ -635,7 +635,8 @@ export default $config({
 
     // ── Clearance reminders cron ── daily 05:00 UTC = 07:00 SAST. Nudges the source chair of every
     // clearance pending ≥ 7 days (again every 7 days) and emails each tenant's admins a digest.
-    // Same least-privilege link/env as FixtureReminders, minus the portal-origin vars it never uses.
+    // Same least-privilege link/env as FixtureReminders, including the portal-origin vars (each
+    // reminder and digest line carries a deep link to its clearance).
     new sst.aws.Cron('ClearanceReminders', {
       schedule: 'cron(0 5 * * ? *)',
       function: {
@@ -648,11 +649,49 @@ export default $config({
           STAGE: $app.stage,
           SENTRY_DSN: sentryDsnApi.value,
           SENTRY_RELEASE: sentryRelease,
+          // canonicalWebOrigin() (the reminder + digest clearance links) reads these three.
+          WEB_ORIGIN_MAP: JSON.stringify(isProd ? webOriginMap(VANITY) : {}),
+          WILDCARD_ENABLED: wildcardEnabled ? '1' : '',
+          WILDCARD_WEB_SUFFIX: isProd ? WILDCARD_WEB_SUFFIX : '',
           SES_REGION: 'eu-west-1',
           FROM_EMAIL: fromEmail.value,
           WHATSAPP_ACCESS_TOKEN: whatsappAccessToken.value,
           WHATSAPP_PHONE_NUMBER_ID: whatsappPhoneNumberId.value,
           NOTIFY_DRY_RUN: process.env.NOTIFY_DRY_RUN ?? '',
+        },
+      },
+    });
+
+    // ── Scorecard confirmations cron ── Mondays 05:00 UTC = 07:00 SAST. Sends each club chair
+    // whose club played in the previous Mon–Sun week ONE digest link (`/sc/<token>`) to confirm
+    // the week's scorecards, for tenants whose operator enabled `scorecardConfirmations`. Same
+    // least-privilege link/env as FixtureReminders, plus the captain's-report link secret (the
+    // digest token is signed with it under its own context) and the link base URL.
+    new sst.aws.Cron('ScorecardConfirmations', {
+      schedule: 'cron(0 5 ? * MON *)',
+      function: {
+        handler: 'packages/api/src/crons/scorecard-confirmations.handler',
+        link: [
+          table,
+          fromEmail,
+          whatsappAccessToken,
+          whatsappPhoneNumberId,
+          captainsReportLinkSecret,
+        ],
+        permissions: [{ actions: ['ses:SendEmail', 'ses:SendRawEmail'], resources: ['*'] }],
+        timeout: '5 minutes',
+        environment: {
+          TABLE_NAME: table.name,
+          STAGE: $app.stage,
+          SENTRY_DSN: sentryDsnApi.value,
+          SENTRY_RELEASE: sentryRelease,
+          SES_REGION: 'eu-west-1',
+          FROM_EMAIL: fromEmail.value,
+          WHATSAPP_ACCESS_TOKEN: whatsappAccessToken.value,
+          WHATSAPP_PHONE_NUMBER_ID: whatsappPhoneNumberId.value,
+          NOTIFY_DRY_RUN: process.env.NOTIFY_DRY_RUN ?? '',
+          CAPTAINS_REPORT_LINK_SECRET: captainsReportLinkSecret.value,
+          CAPTAINS_REPORT_LINK_BASE_URL: captainsReportLinkBaseUrl,
         },
       },
     });

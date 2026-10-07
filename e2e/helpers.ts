@@ -366,12 +366,16 @@ export interface VeteransAffiliate {
 export async function signInAsRep(page: Page, clubId: string): Promise<void> {
   await page.goto('/');
   // A previous dev identity persists in localStorage and renders the portal/console instead
-  // of the picker — sign it out first so a spec can switch between two reps.
+  // of the picker — sign it out first so a spec can switch between two reps. The old immediate
+  // isVisible() check raced hydration: probed before the signed-in UI rendered, it skipped the
+  // sign-out and the picker never appeared. Wait for the page to settle into ONE of the two
+  // states (picker or signed-in shell) before deciding.
   const signOut = page.getByRole('button', { name: 'Sign out' });
-  if (await signOut.isVisible().catch(() => false)) {
+  const role = page.locator('select.field-select').first();
+  await expect(role.or(signOut).first()).toBeVisible();
+  if (await signOut.isVisible()) {
     await signOut.click();
   }
-  const role = page.locator('select.field-select').first();
   await expect(role).toBeVisible();
   await role.selectOption('rep');
   // The rep branch reveals a comma-separated club-ids input (placeholder "ukzn, clares").

@@ -73,6 +73,7 @@ export type {
 } from '../../engine/src/umpires.js';
 export type { ReportUmpireEntry, AppointedUmpire } from '../../engine/src/captainsReport.js';
 import type { ReportUmpireEntry, AppointedUmpire } from '../../engine/src/captainsReport.js';
+import type { InningsScorecardWire } from './medicoach-sync-contract.js';
 
 export type Role = 'admin' | 'rep' | 'operator';
 
@@ -337,7 +338,7 @@ export interface TenantConfig {
    *  - medicoach.goLiveDate (YYYY-MM-DD): results for matches before this date never open
    *    captain's reports (Slice 2.3); stored now, read by the result hook.
    *  - medicoach.playerSync (default false): push registrations to medicoach team rosters
-   *    (ADR 0018). Requires features.medicoachSync.
+   *    (ADR 0019). Requires features.medicoachSync.
    */
   integrations?: {
     medicoach?: { goLiveDate?: string; playerSync?: boolean };
@@ -376,6 +377,12 @@ export interface TenantConfig {
    * validateFixtureReminders), and GET /tenant/config does not project it.
    */
   fixtureReminders?: FixtureRemindersConfig;
+  /**
+   * The Monday chair scorecard-confirmation digest (ScorecardConfirmations cron). Absent or
+   * `enabled` not true ⇒ off. Also needs `features.medicoachSync` + a medicoach goLiveDate.
+   * Operator-only: PUT /tenant/config strips it, only PUT /platform/tenants/:slug writes it.
+   */
+  scorecardConfirmations?: ScorecardConfirmationsConfig;
   /**
    * Transfer windows: inclusive tenant wall-clock date ranges (ADR 0008) in which a clearance may
    * be opened. Absent OR empty ⇒ no restriction (an empty list must never lock a tenant out).
@@ -597,7 +604,10 @@ export interface ClubCommEvent {
     | 'clearance-inbound'
     // Pending-clearance nudge to the source chair (admin "Send reminder" or the ClearanceReminders
     // cron), keyed `clearance-<id>-reminder-<date>-<channel>`. Bypasses the daily cap.
-    | 'clearance-reminder';
+    | 'clearance-reminder'
+    // The Monday scorecard-confirmation digest to the chair (ScorecardConfirmations cron), one
+    // row per channel, keyed `scorecard-confirm-<weekKey>-<channel>`.
+    | 'scorecard-confirm';
   /** Aggregate, PII-free outcome for a broadcast send, e.g. "8 sent · 2 skipped" (sent · skipped · failed; zero parts omitted). */
   summary?: string;
 }
@@ -659,6 +669,10 @@ export interface PlayerErasureCounts {
   certificates: number;
   /** Captain's reports that named the person and were scrubbed in place (not deleted). */
   captainsReportsScrubbed: number;
+  /** Cached medicoach scorecards (FIXSCORECARD#) that named the person: scrubbed and marked terminal. */
+  scorecardsScrubbed: number;
+  /** Scorecard-digest entries whose chair feedback named the person and was scrubbed in place. */
+  feedbackScrubbed: number;
   /**
    * Pending REPORTOPEN# markers whose captain ref was this person: the ref is scrubbed, the
    * marker kept (its retry then addresses the scoring side's chair instead).
@@ -1296,7 +1310,41 @@ export interface StoredFixtureResult {
   recordedAt?: string;
   scoringSide?: 'home' | 'away' | null;
   medicoachMatchUrl?: string | null;
+  /** The medicoach match (PostMatchAnalysis) id, when the sender gave one — scorecard key. */
+  medicoachMatchId?: string;
+  /** The medicoach tournament id of that match — required alongside it for the scorecard. */
+  medicoachTournamentId?: string;
   storedAt: string;
+}
+
+/**
+ * A medicoach scorecard for one fixture (FIXSCORECARD#), fetched by the sync after a result
+ * is stored and re-fetched by the sweep while it may still change. Written by the sync
+ * (medicoach-sync/scorecard-fetch.ts) and, to scrub names, by player erasure. Holds player
+ * names — personal data, erased with the tenant / cohort / series like FIXRESULT#.
+ *
+ * `terminal: true` = this fixture can never have a scorecard (medicoach answered 404 or
+ * `available: false`): the sweep stops retrying. A newly stored result still re-fetches.
+ * Player erasure also sets it on an AVAILABLE card it scrubbed, so the sweep never re-fetches
+ * the card (and with it the erased name) from medicoach.
+ */
+export interface StoredFixtureScorecard {
+  seriesId: string;
+  fixtureId: string;
+  medicoachMatchId: string;
+  medicoachTournamentId: string;
+  schemaVersion: 1;
+  /** ISO instant of the fetch that produced this row. */
+  fetchedAt: string;
+  available: boolean;
+  matchState?: string;
+  innings?: InningsScorecardWire[];
+  terminal?: boolean;
+  /**
+   * ISO instant of the last fetch that found no card while this AVAILABLE one was kept (a
+   * 404 / `available: false` never overwrites an available card).
+   */
+  lastCheckedAt?: string;
 }
 
 /** The read-only result joined onto a fixture in GET /series (no captain/player data). */
@@ -1348,7 +1396,7 @@ export interface SyncLogEntry {
   newFixtureRefs?: string[];
   /** Outbox flush outcome counts (push rows only). */
   push?: SchedulePushCounts;
-  /** Player-outbox flush outcome counts (`player-push` rows only, ADR 0018). */
+  /** Player-outbox flush outcome counts (`player-push` rows only, ADR 0019). */
   playerPush?: PlayerPushCounts;
   /** Technical failure text (field paths and statuses only — never a payload value). */
   error?: string;
@@ -1412,14 +1460,14 @@ export interface PendingScheduleSync {
   heldUntilReveal?: boolean;
 }
 
-/** The admin's answer to a medicoach `needs-review`, sent with the next push (contract §3). */
+/** The admin's answer to a medicoach `needs-review`, sent with the next push (contract §4). */
 export type PlayerSyncResolution =
   | { action: 'link'; playerId: string }
   | { action: 'create'; acknowledgedCandidates: string[] };
 
 /**
  * PENDINGPLAYERSYNC#<naturalKey> — one person changed and medicoach must get their current
- * desired state (ADR 0018). Collapsed per person: a newer change overwrites `changedAt` and
+ * desired state (ADR 0019). Collapsed per person: a newer change overwrites `changedAt` and
  * resets the attempts; the row is deleted only while it still holds the `changedAt` that was
  * sent. No personal data is stored — the payload is rebuilt at flush — except `op: 'erase'`.
  */
@@ -1465,7 +1513,7 @@ export interface PlayerReviewCandidate {
 }
 
 /**
- * PLAYERREVIEW#<naturalKey> — a player not pushed until an admin decides (ADR 0018). Holds
+ * PLAYERREVIEW#<naturalKey> — a player not pushed until an admin decides (ADR 0019). Holds
  * candidates' personal data: TTL'd (`expiresAt`), deleted on resolve and by erasePlayerData.
  */
 export interface PlayerSyncReview {
@@ -1480,7 +1528,7 @@ export interface PlayerSyncReview {
   candidates: PlayerReviewCandidate[];
 }
 
-/** What one player-outbox flush did (ADR 0018). Counts only. */
+/** What one player-outbox flush did (ADR 0019). Counts only. */
 export interface PlayerPushCounts {
   sent: number;
   created: number;
@@ -1499,7 +1547,8 @@ export interface PlayerPushCounts {
 }
 
 /** Who changed a fixture's schedule. `medicoach` = the Slice 3 inbound apply (never echoed). */
-export type ScheduleChangeOrigin = 'admin' | 'generate' | 'cli' | 'medicoach';
+/** `operator-upload` = the operator console's reminder-fixtures upload (writes like a CLI). */
+export type ScheduleChangeOrigin = 'admin' | 'generate' | 'cli' | 'medicoach' | 'operator-upload';
 
 /**
  * SYNCCONFLICT#<ref> — a medicoach schedule change held for admin review instead of applied.
@@ -1664,4 +1713,63 @@ export interface CaptainsReport {
   recipientContact?: { email?: string; cell?: string };
   createdAt: string;
   updatedAt: string;
+}
+
+/** Per-tenant chair scorecard confirmation settings (see TenantConfig.scorecardConfirmations). */
+export interface ScorecardConfirmationsConfig {
+  /** The operator's master switch for the Monday digest. Absent/false ⇒ off. */
+  enabled?: boolean;
+}
+
+/** Where one fixture of a scorecard digest stands. */
+export type ScorecardConfirmEntryStatus = 'pending' | 'confirmed' | 'correction' | 'void';
+
+/** One fixture of a club's weekly scorecard digest (keyed `<seriesId>#<fixtureId>`). */
+export interface ScorecardConfirmEntry {
+  seriesId: string;
+  fixtureId: string;
+  homeTeamName: string;
+  awayTeamName: string;
+  /** YYYY-MM-DD */
+  fixtureDate: string;
+  competition?: string;
+  venue?: string;
+  /** Which side the digest's club played (the operator console lists the home side first). */
+  side?: 'home' | 'away';
+  status: ScorecardConfirmEntryStatus;
+  /** The chair's correction request, verbatim (≤ 2,000 chars). */
+  feedback?: string;
+  submittedAt?: string;
+  submittedVia?: 'link';
+  /**
+   * The FIXSCORECARD# `fetchedAt` the chair ANSWERED against — set for a confirm AND a
+   * correction alike, despite the name (kept for storage compatibility). Absent ⇒ no
+   * scorecard was available (headline only); the stale check then uses `submittedAt`.
+   */
+  confirmedAgainstFetchedAt?: string;
+  /** A newer scorecard arrived after the chair submitted: the answer may be out of date. */
+  staleConfirmation?: boolean;
+}
+
+/**
+ * A club's weekly scorecard confirmation digest (`SCORECONF#<weekKey>#<clubId>`): one per club
+ * per Mon–Sun week (`weekKey` = that Sunday, SAST), one link, one `SC-YYYY-NNNN` ref, the
+ * notice outcomes, and one entry per played fixture. The cron TOPS UP entries for results that
+ * arrive late; each entry is answered once (first submit wins). Rotating `memberId` revokes
+ * the link.
+ */
+export interface ScorecardConfirmation {
+  tenant: string;
+  clubId: string;
+  clubName: string;
+  weekKey: string;
+  ref: string;
+  /** Opaque, random — bound into the link token. Server-only, never served. */
+  memberId: string;
+  linkExpiresAt: string;
+  createdAt: string;
+  updatedAt?: string;
+  deliveries?: CaptainsReportDelivery[];
+  notifiedAt?: string;
+  entries: Record<string, ScorecardConfirmEntry>;
 }

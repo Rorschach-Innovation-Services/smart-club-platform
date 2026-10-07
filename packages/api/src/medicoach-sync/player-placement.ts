@@ -1,5 +1,5 @@
 /**
- * Medicoach player placement + sync intent (ADR 0018). Pure: no DynamoDB, no env, no clock —
+ * Medicoach player placement + sync intent (ADR 0019). Pure: no DynamoDB, no env, no clock —
  * the bundle exporter (medicoach-export-build.ts) and the player sync (players.ts) both call
  * it, so the team a player lands on in the one-off bundle and in the ongoing sync can never
  * diverge.

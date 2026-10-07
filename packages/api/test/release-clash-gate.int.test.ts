@@ -365,6 +365,71 @@ describe('release clash gate', () => {
     assert.equal(res.status, 200);
   });
 
+  test('an undated (dateTbc) postponement does not book the ground; legacy and rescheduled ones still do', async () => {
+    const fixture = (extra: Record<string, unknown>) => ({
+      id: 'f1',
+      round: 1,
+      date: '2026-11-01',
+      time: '09:00',
+      home: 'home-club',
+      away: 'away-club',
+      venueName: 'Postpone Park',
+      ...extra,
+    });
+    await repo.putSeries(
+      'dolphins',
+      series('s-gate-pp-undated', {
+        fixtures: [fixture({ status: 'postponed', dateTbc: true })],
+      }),
+    );
+    await repo.putSeries(
+      'dolphins',
+      series('s-gate-pp-subject', {
+        fixtures: [fixture({ home: 'away-club', away: 'home-club' })],
+      }),
+    );
+    assert.equal((await patchRelease('s-gate-pp-subject', 1)).status, 200);
+
+    // Pre-existing prod data (postponed, no originalDate, no dateTbc) still books its slot.
+    await repo.putSeries(
+      'dolphins',
+      series('s-gate-pp-legacy', {
+        fixtures: [fixture({ date: '2026-11-15', status: 'postponed' })],
+      }),
+    );
+    await repo.putSeries(
+      'dolphins',
+      series('s-gate-pp-subject3', {
+        fixtures: [fixture({ date: '2026-11-15', home: 'away-club', away: 'home-club' })],
+      }),
+    );
+    const legacy = await patchRelease('s-gate-pp-subject3', 1);
+    assert.equal(legacy.status, 409);
+
+    await repo.putSeries(
+      'dolphins',
+      series('s-gate-pp-moved', {
+        fixtures: [
+          fixture({
+            id: 'f1',
+            date: '2026-11-08',
+            status: 'postponed',
+            originalDate: '2026-11-01',
+          }),
+        ],
+      }),
+    );
+    await repo.putSeries(
+      'dolphins',
+      series('s-gate-pp-subject2', {
+        fixtures: [fixture({ date: '2026-11-08', home: 'away-club', away: 'home-club' })],
+      }),
+    );
+    const res = await patchRelease('s-gate-pp-subject2', 1);
+    assert.equal(res.status, 409);
+    assert.match(JSON.stringify(await res.json()), /Postpone Park/);
+  });
+
   test('implicit venue: two clubs sharing the same registered ground clash via the home club, with no venue field on either fixture', async () => {
     // Clubs go in via repo.putClub before the PATCH — same harness pattern as the
     // venue/series setup above, just for the Club side of effectiveGround().

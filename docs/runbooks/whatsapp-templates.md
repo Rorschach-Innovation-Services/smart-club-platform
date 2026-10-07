@@ -2,29 +2,42 @@
 
 **Owner:** runs in the **medicoach AWS account** (the WhatsApp WABA + phone-number id are
 reused from medicoach — recipients see medicoach's WhatsApp display name until a
-Dolphins-owned WABA lands). **Status: LIVE.** `club_clearance_pending` (English, Utility) was
-created in WhatsApp Manager on 4 Aug 2026 under the medicoach WABA and is Active (template ID
-1015867618110855); as of 30 Aug 2026 it shows 20 sent / 20 delivered / 15 read. Nothing needs
-creating — this runbook is the reference for its copy, variables, and how the name reaches the
-Lambda. It is the ONLY WhatsApp message the clearance flow sends (resolutions are email-only).
+Dolphins-owned WABA lands). **Status: LIVE.** `club_clearance_pending_v2` (English, Utility) was
+approved in WhatsApp Manager on 7 Oct 2026 under the medicoach WABA (template ID
+1076095408549057). Nothing needs creating — this runbook is the reference for its copy,
+variables, and how the name reaches the Lambda. It is the ONLY WhatsApp message the clearance
+flow sends (resolutions are email-only).
+
+> **v1 retired in code (7 Oct 2026).** The original 4-param, link-less `club_clearance_pending`
+> (template ID 1015867618110855, live since 4 Aug 2026) has no registry entry any more and
+> nothing sends it. A clearance notice with **no link** now **skips** WhatsApp instead of
+> falling back to v1 — see [Retired — `club_clearance_pending`](#retired--club_clearance_pending-v1)
+> below for when it is safe to delete it in WhatsApp Manager.
 
 This runbook covers the one business-initiated WhatsApp template the clearance flow uses:
 
-| Template purpose      | Registry name (code)     | Sent to         | When                                                                   |
-| --------------------- | ------------------------ | --------------- | ---------------------------------------------------------------------- |
-| Clearance **pending** | `club_clearance_pending` | FROM-club chair | a clearance opens against the club (create / self-register / reassign) |
+| Template purpose      | Registry name (code)        | Sent to         | When                                                                                     |
+| --------------------- | --------------------------- | --------------- | ---------------------------------------------------------------------------------------- |
+| Clearance **pending** | `club_clearance_pending_v2` | FROM-club chair | a clearance opens against the club (create / self-register / reassign), reopen, reminder |
 
 > **Template names live in code, not secrets.** The name + language for every WhatsApp
 > template are held in the code registry `packages/api/src/notify/whatsapp-templates.ts`
-> (entry `clearancePending` for this one). There is no `sst secret set` for a template name.
+> (entry `clearancePendingV2` for this one). There is no `sst secret set` for a template name.
 > The four former name secrets (`WhatsappInviteTemplate`, `WhatsappStaffTemplate`,
 > `WhatsappReglinkTemplate`, `WhatsappClearanceTemplate` — there was never a fixtures secret)
 > have been removed; any values previously set for them on a stage are now inert and can be
 > ignored.
 
-It is a **Utility** template, **body-only** (no header, no buttons, no links) — the chair may
-hold no portal login (chair invites were removed with admin onboarding), so the copy points at
-the club portal / union office rather than telling the recipient to sign in.
+It is a **Utility** template, **body-only** (no header, no buttons). Its `{{5}}` is a deep link
+to the clearance in the chair's club portal, but the chair may hold no portal login (chair
+invites were removed with admin onboarding), so the copy still points at the union office as
+the way through.
+
+> **No link ⇒ no WhatsApp.** The link is built from the tenant's canonical web origin (or, for
+> an authenticated admin action on a dev stage, a localhost request Origin). Meta rejects an
+> empty param, so when there is no link the WhatsApp channel is recorded `skipped` with error
+> `no portal link for this tenant` and only the email goes. Deployed dev stages resolve no
+> canonical origin, so `skipped` WhatsApp rows on dev clearances are expected.
 
 > **Resolved notices are email-only.** When the union office **issues** (override) or
 > **declines** (reject) a clearance, both clubs' chairs are notified **by email only** — there
@@ -59,7 +72,7 @@ the club portal / union office rather than telling the recipient to sign in.
 Both clearance dialogs in the union console promise "Both clubs' chairs will be notified by
 email where an address is on file." The pending-clearance heads-up also goes over WhatsApp:
 email is live the moment the API deploys; WhatsApp is best-effort and only delivers once this
-template exists in Meta under the registry name (`club_clearance_pending`). Each channel
+template exists in Meta under the registry name (`club_clearance_pending_v2`). Each channel
 records its own `sent`/`skipped`/`failed` outcome in the club's comm log,
 so a not-yet-created template shows as a dry-run `sent` locally and (once wired to a real
 token) surfaces Meta's rejection as a `failed` row rather than sinking the email.
@@ -68,50 +81,57 @@ token) surfaces Meta's rejection as a `failed` row rather than sinking the email
 
 ## 1 · Body variables
 
-The template takes **four positional body parameters**, in this order:
+The template takes **five positional body parameters**, in this order:
 
-| Var     | Value                              |
-| ------- | ---------------------------------- |
-| `{{1}}` | chair name (falls back to "there") |
-| `{{2}}` | from-club (previous club) name     |
-| `{{3}}` | player name                        |
-| `{{4}}` | to-club (new club) name            |
+| Var     | Value                                                                   |
+| ------- | ----------------------------------------------------------------------- |
+| `{{1}}` | chair name (falls back to "there")                                      |
+| `{{2}}` | from-club (previous club) name                                          |
+| `{{3}}` | player name                                                             |
+| `{{4}}` | to-club (new club) name                                                 |
+| `{{5}}` | clearance link (`https://<tenant>/club/<id>/clearances?clearance=<id>`) |
 
 > See `sendClearanceWhatsApp` in `packages/api/src/notify/whatsapp.ts`. Copy the body text
 > below verbatim so the placeholders line up with what the code sends.
 
-All parameters are whitespace-collapsed and length-bounded before sending (`cleanParam`) —
+`{{1}}`–`{{4}}` are whitespace-collapsed and length-bounded before sending (`cleanParam`) —
 Meta rejects params with newlines, tabs, or 4+ consecutive spaces, and the player name comes
-from the public register form as free text.
+from the public register form as free text. The link (`{{5}}`) is server-built from the tenant
+origin and passed through whole; truncating it would break it.
 
 ## 2 · Approved body copy (as it stands in WhatsApp Manager)
 
-**`club_clearance_pending`** — vars `{{1}}` chair, `{{2}}` from-club, `{{3}}` player, `{{4}}` to-club:
+**`club_clearance_pending_v2`** — vars `{{1}}` chair, `{{2}}` from-club, `{{3}}` player,
+`{{4}}` to-club, `{{5}}` link:
 
 ```
 Hello {{1}},
 
 A player clearance is awaiting {{2}}'s review: {{3}} has applied to join {{4}} and needs a clearance from your club.
 
+Review it here: {{5}}
+
 Please have this reviewed and approved or rejected in your club portal, or contact your union office if you have any questions.
 ```
 
+The link line sits before the closing sentence rather than at the very end because Meta rejects a
+body that ends on a variable. The "contact your union office" sentence stays: a chair with no
+portal login can't get past sign-in, and that sentence is their way through.
+
 Category **Utility**, language **English (`en`)**. The name and language are held in the code
-registry `packages/api/src/notify/whatsapp-templates.ts` (entry `clearancePending`). If it is
-ever re-created under a different name or language code, edit that entry — there is no env/secret
-override.
+registry `packages/api/src/notify/whatsapp-templates.ts` (entry `clearancePendingV2`), whose
+`bodyText` must match the copy above. If it is ever re-created under a different name or language
+code, edit that entry — there is no env/secret override.
 
 ## 3 · Deploy — the code needs no config
 
-The template name + language are in the code registry, not a secret. So the path is simply:
+The template name + language are in the code registry, not a secret. Deploying is just
+`sst deploy --stage dev` / `sst deploy --stage prod` — the same deploy that ships the sender code.
 
-1. Create the template in Meta under the registry name (`club_clearance_pending`) and wait for
-   approval.
-2. `sst deploy --stage dev` / `sst deploy --stage prod` — the same deploy that ships the sender
-   code.
-
-If Meta only approves it under a **different** name or language, change the `clearancePending`
-entry in `whatsapp-templates.ts` and deploy that change — no `sst secret set` step. The only
+**Runtime gate:** the `clearancePendingV2` entry's `status` is read at runtime by the
+ClearanceReminders cron, which only adds the WhatsApp channel while it is `'registered'` (and the
+tenant's `whatsappInvites` feature is on). If the template is ever re-created under a **different**
+name or language, change that entry in `whatsapp-templates.ts` and deploy — no `sst secret set` step. The only
 WhatsApp secrets that still exist are `WhatsappAccessToken` and `WhatsappPhoneNumberId`; the
 former per-template name secrets have been removed and any values once set for them are inert.
 
@@ -136,6 +156,8 @@ real recipient until the token/phone-id secrets and (for WhatsApp) an approved t
 - A club with no chair email/cell on file gets a `skipped` comm-log row for that channel
   (reason "no valid chair email/cell on file"), not a failure — expected for clubs still
   being onboarded.
+- A notice with no clearance link gets a `skipped` WhatsApp row (reason "no portal link for
+  this tenant") — expected on dev stages, which have no canonical web origin.
 - A directory-sourced clearance (previous club not on the system) has no Club record to
   notify, so only the destination club is messaged on a resolution — that is by design.
 - Watch the comm log for `failed` WhatsApp rows after wiring a real token: they carry Meta's
@@ -218,3 +240,44 @@ To activate:
    anything you miss.
 2. Change the `fixtureReminder` entry's `status` from `'pending'` to `'registered'` and deploy.
    No secret is involved.
+
+---
+
+## Retired — `club_clearance_pending` (v1)
+
+`club_clearance_pending` (4 params, no link; template ID 1015867618110855) was the clearance
+template from 4 Aug 2026. On 7 Oct 2026 `club_clearance_pending_v2` (same copy plus a link line)
+was approved, and the same day v1 was **retired in code**: its registry entry was removed, the
+sender no longer falls back to it, and the ClearanceReminders cron's WhatsApp gate moved to v2's
+status. v2 was created as a **new** template rather than an in-place edit of v1, because changing
+v1's arity (4 → 5) under the same name would have failed every live 4-param send with error
+132000 the moment the edit cleared review.
+
+**Deleting it in WhatsApp Manager:** once this change is deployed to **every** stage (dev and
+prod), nothing sends `club_clearance_pending` and it can be deleted from the medicoach WABA.
+Before then, an older deployment could still send it, so leave it in place until both stages run
+the v2-only code. Meta blocks reusing a deleted template name for **30 days**, so do not delete it
+if you expect to need that exact name again soon.
+
+---
+
+## `scorecard_confirm_due` (chair scorecard confirmation digest) — REGISTERED 7 Oct 2026
+
+The ScorecardConfirmations cron (`packages/api/src/crons/scorecard-confirmations.ts`, Mondays
+07:00 SAST) sends chairs a digest link to confirm their club's weekend scorecards. Registry
+entry `scorecardConfirmDue`; sender `sendScorecardConfirmDueWhatsApp` in `whatsapp.ts`.
+
+Approved in Meta on 7 Oct 2026 — **Utility**, English `en`, template ID `920518190917996`.
+
+Body (3 variables — the registry's `bodyText` must match it exactly):
+
+```
+Hi {{1}}, please review and confirm {{2}}'s match scorecards for the weekend of {{3}}. Tap below to view each scorecard and confirm or request a correction.
+```
+
+- Params: `{{1}}` chair first name, `{{2}}` club name, `{{3}}` weekend label
+  (e.g. `5–11 Oct 2026`).
+- Button: **Visit website**, dynamic URL
+  `https://platform.club.medicoach.co.za/sc/{{1}}` — the signed digest token is the suffix.
+  Button label: **Confirm scorecards**.
+- No header, no footer. No secret involved; the registry `status` is already `'registered'`.

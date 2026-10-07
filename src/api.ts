@@ -68,6 +68,10 @@ import type {
   ClubSignupInfo,
   ClubSignupResult,
   PostponementRequest,
+  ScorecardConfirmView,
+  ScorecardConfirmAnswer,
+  PlatformScorecardWeek,
+  ScorecardConfirmationsRunSummary,
 } from './types';
 
 /**
@@ -979,7 +983,7 @@ export interface MedicoachSyncLog {
   fixtures: number;
   counts: Record<string, number | undefined>;
   push?: Record<string, number>;
-  /** Player push outcome counts (`player-push` rows, ADR 0018). */
+  /** Player push outcome counts (`player-push` rows, ADR 0019). */
   playerPush?: Record<string, number>;
   /** Technical failure text (shown under "Details"). */
   error?: string;
@@ -1035,7 +1039,7 @@ export interface MedicoachSyncStatus {
   pendingReports?: number;
   /** Captain's-report notices that failed on every channel and are waiting on a retry. */
   noticesFailed?: number;
-  /** The player sync (ADR 0018) — counts only. */
+  /** The player sync (ADR 0019) — counts only. */
   players?: MedicoachPlayerSyncStatus;
   /** What needs an admin: held schedule changes, player reviews, players waiting for a team. */
   attention?: { conflicts: number; playerReviews: number; playersParked: number; total: number };
@@ -1216,6 +1220,34 @@ export const forwardLinkedCaptainsReport = (token: string, candidateId: string) 
     method: 'POST',
     body: { candidateId },
     auth: false,
+  });
+
+// ── Chair scorecard confirmation ──
+// The public `/sc/<token>` digest: no auth, the token is the capability. Each match is answered
+// once (first submit wins → 409 `entry_closed`); every answer returns the whole digest again.
+// An answer carries the rendered card's `scorecardFetchedAt` so the server records the version
+// the chair actually saw.
+const scorecardLinkPath = (token: string) => `/scorecard-confirm-link/${encodeURIComponent(token)}`;
+export const getScorecardConfirmLink = (token: string) =>
+  request<ScorecardConfirmView>(scorecardLinkPath(token), { auth: false });
+export const submitScorecardConfirmEntry = (
+  token: string,
+  seriesId: string,
+  fixtureId: string,
+  body: ScorecardConfirmAnswer,
+) =>
+  request<ScorecardConfirmView>(
+    `${scorecardLinkPath(token)}/fixtures/${encodeURIComponent(seriesId)}/${encodeURIComponent(fixtureId)}`,
+    { method: 'PUT', body, auth: false },
+  );
+/** Operator console: one week (a Sunday weekKey; omitted = the latest completed week). */
+export const listPlatformScorecardConfirmations = (week?: string) =>
+  request<PlatformScorecardWeek>('/platform/scorecard-confirmations', { query: { week } });
+/** Run the Monday digest now (idempotent; tops up existing digests with late results). */
+export const runScorecardConfirmations = (week?: string) =>
+  request<ScorecardConfirmationsRunSummary>('/platform/scorecard-confirmations/run', {
+    method: 'POST',
+    body: week ? { week } : {},
   });
 
 // ── Venues (ADR 0008 phase 2) ──
@@ -1506,6 +1538,161 @@ export const platformStructureIntakeCommit = (slug: string, body: StructureIntak
   request<StructureIntakeCommitResponse>(
     `/platform/tenants/${encodeURIComponent(slug)}/structure-intake/commit`,
     { method: 'POST', body },
+  );
+
+// ── Fixture amendments (operator) ── the union's weekly "Reminder Fixtures" workbook, through
+// the reminder-fixtures CLI's parser/matcher/planner behind a preview → confirm pair. Shapes
+// mirror packages/api/src/reminder-fixtures.ts (ReminderPreview, SeriesWriteResult, …).
+export type AmendmentRowOutcome =
+  | 'matched-change'
+  | 'matched-no-change'
+  | 'unmatched'
+  | 'ambiguous'
+  | 'venue-unknown'
+  | 'blocked'
+  | 'competition-unknown';
+export interface AmendmentRowChange {
+  field: 'date' | 'time' | 'venue' | 'status';
+  before: string;
+  after: string;
+}
+export interface AmendmentPreviewRow {
+  /** `<sheet>:<row>` — the key of the per-row skip toggle. */
+  rowId: string;
+  sheetRow: number;
+  competition: string;
+  group?: string;
+  sheet: { home: string; away: string; date: string; time?: string; venue: string };
+  outcome: AmendmentRowOutcome;
+  reason?: string;
+  warnings: string[];
+  skipped: boolean;
+  seriesId?: string;
+  seriesName?: string;
+  fixtureId?: string;
+  fixture?: {
+    home: string;
+    away: string;
+    date: string;
+    time: string;
+    venue: string;
+    status: string;
+    released: boolean;
+  };
+  changes?: AmendmentRowChange[];
+}
+/** One double-booked slot: `fixture` is the side the sheet amends, `with` the ground-holder. */
+export interface AmendmentClash {
+  date: string;
+  time?: string;
+  ground: string;
+  fixture: string;
+  with: string;
+  /** The ground-holder is a DRAFT fixture — draft relocation could clear the clash. */
+  holderDraft: boolean;
+}
+export interface AmendmentGate {
+  ok: boolean;
+  errors: string[];
+  introduced: AmendmentClash[];
+  /** Pre-existing clashes on the sheet dates — reported, never blocking. */
+  preExisting: AmendmentClash[];
+}
+/** How one sheet of the workbook read (also on a 400 `no_rows`, as `details.sheets`). */
+export interface AmendmentSheetReport {
+  sheet: string;
+  status: 'ok' | 'empty' | 'refused';
+  reason?: string;
+  fixtureRows: number;
+  unrecognisedRows: number;
+  vColumn?: number;
+}
+export interface AmendmentPreview {
+  planHash: string;
+  sheets: Array<
+    AmendmentSheetReport & {
+      competitions: Array<{ competition: string; seriesIds: string[] }>;
+      rows: AmendmentPreviewRow[];
+      alreadyCorrect: number;
+      alreadyCorrectRows: Array<{
+        rowId: string;
+        sheetRow: number;
+        home: string;
+        away: string;
+        date: string;
+      }>;
+    }
+  >;
+  skippedRows: Array<{ sheet: string; sheetRow: number; text: string; reason: string }>;
+  counts: Record<AmendmentRowOutcome, number> & { applicable: number; applied: number };
+  moves: Array<{
+    seriesId: string;
+    seriesName: string;
+    fixtureId: string;
+    date: string;
+    home: string;
+    away: string;
+    from: string;
+    to: string;
+    takenBy: string[];
+    registryMiss: boolean;
+  }>;
+  gate: AmendmentGate;
+  touchedSeries: Array<{ id: string; name: string; version: number }>;
+  officials?: Array<{ seriesId: string; fixtureId: string; umpires: string[]; referee?: string }>;
+}
+export interface AmendmentOptions {
+  skipRowIds: string[];
+  relocateDraftClashes: boolean;
+}
+export interface AmendmentConfirmResult {
+  backupKey: string;
+  fixturesAmended: number;
+  draftMoves: number;
+  series: Array<{
+    seriesId: string;
+    seriesName: string;
+    status: 'written' | 'drifted';
+    version?: number;
+    fixtureIds: string[];
+  }>;
+  /** A written fixture sits on a slot a drifted series' fixture still holds: re-upload now. */
+  splitSlotRisks: Array<{
+    written: { seriesId: string; fixtureId: string };
+    stranded: { seriesId: string; fixtureId: string };
+    ground: string;
+    date: string;
+    time?: string;
+  }>;
+  medicoachSync: boolean;
+  clubsNotified: false;
+}
+export const platformFixtureAmendmentsPreview = async (
+  slug: string,
+  file: File,
+  opts: AmendmentOptions,
+) =>
+  request<AmendmentPreview>(
+    `/platform/tenants/${encodeURIComponent(slug)}/fixture-amendments/preview`,
+    {
+      method: 'POST',
+      body: { filename: file.name, dataBase64: await fileToBase64(file), ...opts },
+    },
+  );
+/** 409 `plan_changed` carries the fresh preview on `details.preview`; 409 `clash_gate` the
+ * gate on `details.details`; 409 `plan_errors` the list on `details.errors`. */
+export const platformFixtureAmendmentsConfirm = async (
+  slug: string,
+  file: File,
+  opts: AmendmentOptions,
+  planHash: string,
+) =>
+  request<AmendmentConfirmResult>(
+    `/platform/tenants/${encodeURIComponent(slug)}/fixture-amendments/confirm`,
+    {
+      method: 'POST',
+      body: { filename: file.name, dataBase64: await fileToBase64(file), ...opts, planHash },
+    },
   );
 
 // Rep invites: coverage read + a tightened mirror of /admin/users pinned to role:'rep'.

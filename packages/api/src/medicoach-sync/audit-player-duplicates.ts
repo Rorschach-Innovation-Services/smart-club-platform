@@ -1,5 +1,5 @@
 /**
- * Read-only audit before the medicoach player-sync backfill (ADR 0018): groups of smart-club
+ * Read-only audit before the medicoach player-sync backfill (ADR 0019): groups of smart-club
  * persons with the same normalised name + date of birth under DIFFERENT natural keys (a typo'd
  * ID, a passport later swapped for an SA ID). Each group would be held by the sync's
  * possible-duplicate guard; clean them up on smart club first (fix the ID, or confirm them

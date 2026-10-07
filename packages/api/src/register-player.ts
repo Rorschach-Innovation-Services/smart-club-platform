@@ -201,7 +201,7 @@ export async function buildCrossClubIndex(
 
 /**
  * normalised name + dob → every (natural key, club name) carrying it — the registration-time
- * "possible existing registration" warning (ADR 0018), the same match the medicoach player
+ * "possible existing registration" warning (ADR 0019), the same match the medicoach player
  * sync's possible-duplicate guard makes. Placeholders are left out.
  */
 export type NameDobIndex = Map<string, Array<{ naturalKey: string; clubName: string }>>;

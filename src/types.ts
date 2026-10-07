@@ -306,7 +306,7 @@ export interface TenantConfig {
   seasonLabel?: string;
   /** Per-tenant feature flags (e.g. whatsappInvites). Absent key ⇒ caller default. */
   features?: Record<string, boolean>;
-  /** Third-party integrations (operator-only). `medicoach.playerSync`: ADR 0018. */
+  /** Third-party integrations (operator-only). `medicoach.playerSync`: ADR 0019. */
   integrations?: { medicoach?: { goLiveDate?: string; playerSync?: boolean } };
   submissionDeadline: string;
   /**
@@ -370,6 +370,11 @@ export interface TenantConfig {
    */
   fixtureReminders?: FixtureRemindersConfig;
   /**
+   * The Monday chair scorecard-confirmation digest. Operator-only (PUT /platform/tenants/:slug);
+   * absent ⇒ off. The cron also needs the medicoach sync feature and its go-live date.
+   */
+  scorecardConfirmations?: ScorecardConfirmationsConfig;
+  /**
    * Transfer windows (inclusive YYYY-MM-DD ranges). Absent or empty ⇒ no restriction.
    * Operator-only to write; served on GET /tenant and GET /tenant/config.
    */
@@ -420,6 +425,166 @@ export interface FixtureRemindersConfig {
   enabled: boolean;
   leadDays: number[];
   channels: FixtureReminderChannel[];
+}
+
+/** Mirror of the API's ScorecardConfirmationsConfig. */
+export interface ScorecardConfirmationsConfig {
+  enabled: boolean;
+}
+
+/* ─── Chair scorecard confirmation (`/sc/<token>`, operator console) ─── */
+
+export type ScorecardConfirmEntryStatus = 'pending' | 'confirmed' | 'correction' | 'void';
+
+/** One innings of a medicoach scorecard (MIRRORS InningsScorecardWire in the sync contract). */
+export interface InningsScorecard {
+  battingTeamName: string;
+  totalRuns: number;
+  wickets: number;
+  overs: string;
+  extras: {
+    byes: number;
+    legByes: number;
+    wides: number;
+    noBalls: number;
+    penalties: number;
+    total: number;
+  };
+  batters: Array<{
+    order: number;
+    name: string;
+    runs: number;
+    ballsFaced: number;
+    fours: number;
+    sixes: number;
+    strikeRate: number;
+    howOut: string;
+    dismissal?: string;
+  }>;
+  bowlers: Array<{
+    order: number;
+    name: string;
+    overs: string;
+    maidens: number;
+    runsConceded: number;
+    wickets: number;
+    economy: number;
+    wides: number;
+    noBalls: number;
+  }>;
+  fallOfWickets: Array<{ wicket: number; runs: number; overs: string; batterName: string }>;
+}
+
+/** One match of a chair's digest (MIRRORS the API's ScorecardConfirmEntryView). */
+export interface ScorecardConfirmEntry {
+  entryKey: string;
+  seriesId: string;
+  fixtureId: string;
+  homeTeamName: string;
+  awayTeamName: string;
+  fixtureDate: string;
+  competition?: string;
+  venue?: string;
+  status: ScorecardConfirmEntryStatus;
+  feedback?: string;
+  submittedAt?: string;
+  staleConfirmation?: boolean;
+  result?: {
+    homeScore: string | null;
+    awayScore: string | null;
+    summary?: string;
+    winner?: 'home' | 'away' | 'tie' | 'none';
+  };
+  medicoachMatchUrl?: string;
+  scorecard?: { matchState?: string; innings: InningsScorecard[] };
+  /** The version (fetch instant) of `scorecard` — echoed back when the chair answers. */
+  scorecardFetchedAt?: string;
+}
+
+/** GET /scorecard-confirm-link/:token (and every PUT answer) — the chair's whole digest. */
+export interface ScorecardConfirmView {
+  clubName: string;
+  weekKey: string;
+  weekLabel: string;
+  ref: string;
+  linkExpiresAt: string;
+  branding: { name: string; logoUrl: string; colors: Record<string, string> };
+  entries: ScorecardConfirmEntry[];
+}
+
+/** PUT /scorecard-confirm-link/:token/fixtures/:seriesId/:fixtureId body. */
+export interface ScorecardConfirmAnswer {
+  action: 'confirm' | 'correction';
+  feedback?: string;
+  /** The `scorecardFetchedAt` of the entry as rendered: the card the chair answered against. */
+  scorecardFetchedAt?: string;
+}
+
+/** A digest notice's delivery row (the captain's-report shape; the API drops the message id). */
+export type ScorecardDelivery = CaptainsReportDelivery;
+
+export interface PlatformScorecardSide {
+  clubId: string;
+  clubName: string;
+  ref: string;
+  status: ScorecardConfirmEntryStatus;
+  feedback?: string;
+  submittedAt?: string;
+  staleConfirmation?: boolean;
+  confirmedAgainstFetchedAt?: string;
+  notifiedAt?: string;
+  deliveries: ScorecardDelivery[];
+}
+
+export interface PlatformScorecardFixture {
+  seriesId: string;
+  fixtureId: string;
+  fixtureDate: string;
+  competition?: string;
+  homeTeamName: string;
+  awayTeamName: string;
+  /** Home side first. */
+  sides: PlatformScorecardSide[];
+}
+
+export interface PlatformScorecardRecord {
+  clubId: string;
+  clubName: string;
+  ref: string;
+  createdAt: string;
+  linkExpiresAt: string;
+  notifiedAt?: string;
+  deliveries: ScorecardDelivery[];
+  counts: Record<ScorecardConfirmEntryStatus, number>;
+}
+
+export interface PlatformScorecardTenant {
+  tenant: string;
+  tenantName: string;
+  weekKey: string;
+  enabled: boolean;
+  fixtures: PlatformScorecardFixture[];
+  records: PlatformScorecardRecord[];
+}
+
+/** GET /platform/scorecard-confirmations — one week across every tenant (sorted by name). */
+export interface PlatformScorecardWeek {
+  weekKey: string;
+  weekLabel: string;
+  tenants: PlatformScorecardTenant[];
+}
+
+/** POST /platform/scorecard-confirmations/run — what the on-demand run did. */
+export interface ScorecardConfirmationsRunSummary {
+  weekKey: string;
+  tenants: number;
+  clubsProcessed: number;
+  created: number;
+  toppedUp: number;
+  sent: number;
+  skipped: number;
+  errors: number;
+  dryRun: boolean;
 }
 
 export type ClearanceCertTemplate = 'classic' | 'confirmation';
@@ -723,7 +888,9 @@ export interface ClubCommEvent {
     | 'fixture-reminder'
     // Destination chair's clearance heads-up, and the pending-clearance reminder (manual or cron).
     | 'clearance-inbound'
-    | 'clearance-reminder';
+    | 'clearance-reminder'
+    // The Monday scorecard-confirmation digest to the chair (ScorecardConfirmations cron).
+    | 'scorecard-confirm';
   summary?: string;
 }
 

@@ -12,6 +12,7 @@
  */
 import type { Club, Series, TenantConfig, Venue } from './types.js';
 import { DEFAULT_VENUE_ALIASES } from '../../engine/src/venue-aliases.js';
+import { tbdLabel } from '../../engine/src/formats.js';
 
 /** Lowercase, strip punctuation, drop generic suffix/roster words. Keeps
  * distinguishing words ("sporting", "united") — Chatsworth Sporting must not collide
@@ -195,7 +196,8 @@ function resolveSide(
   if (!ref) return undefined;
   const p = s.participants?.find((x) => x.teamId === ref);
   if (p) return p.name;
-  return clubsById.get(ref)?.name ?? ref;
+  // A `tbd:` placeholder's id is URI-encoded; show its words.
+  return clubsById.get(ref)?.name ?? tbdLabel(ref) ?? ref;
 }
 
 /**

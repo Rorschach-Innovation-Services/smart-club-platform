@@ -283,6 +283,8 @@ interface ClearanceCopy {
   fromClubName: string;
   playerName: string;
   toClubName: string;
+  /** Deep link to the clearance in THIS recipient's club portal; absent when no origin resolves. */
+  portalLink?: string;
 }
 
 async function sendClearanceEmailChannel(
@@ -322,11 +324,23 @@ async function sendClearanceWhatsAppChannel(
       error: 'no valid chair cell on file',
     };
   }
+  const { portalLink, ...names } = copy;
+  if (!portalLink) {
+    // The only clearance template (club_clearance_pending_v2) carries the link as {{5}} and Meta
+    // rejects an empty param, so a link-less notice (no canonical origin — e.g. dev stages) skips.
+    return {
+      channel: 'whatsapp',
+      status: 'skipped',
+      to: e164,
+      error: 'no portal link for this tenant',
+    };
+  }
   try {
     const { messageId } = await sendClearanceWhatsApp({
       to: e164,
       chairName: chair.name,
-      ...copy,
+      ...names,
+      portalLink,
     });
     return { channel: 'whatsapp', status: 'sent', to: e164, messageId };
   } catch (err) {
@@ -358,15 +372,23 @@ export async function sendClearanceNotice(args: {
   fromClubName: string;
   playerName: string;
   toClubName: string;
+  /** Deep link to the clearance in the source club's portal; optional, but WhatsApp is recorded
+   *  `skipped` without it (the template's {{5}} is the link). */
+  portalLink?: string;
   channels: Channel[];
 }): Promise<{ results: SendResult[] }> {
-  const { chair, fromClubName, playerName, toClubName, channels } = args;
+  const { chair, fromClubName, playerName, toClubName, portalLink, channels } = args;
   const contact: ChairContact = {
     name: (chair.name ?? '').trim(),
     email: (chair.email ?? '').trim(),
     cell: (chair.cell ?? '').trim(),
   };
-  const copy: ClearanceCopy = { fromClubName, playerName, toClubName };
+  const copy: ClearanceCopy = {
+    fromClubName,
+    playerName,
+    toClubName,
+    ...(portalLink ? { portalLink } : {}),
+  };
   const results = await Promise.all(
     channels.map((channel) =>
       channel === 'email'
@@ -388,6 +410,8 @@ interface ClearanceResolvedCopy {
   reason?: string;
   /** Reject outcome — steers the rejected email copy (see ClearanceResolvedEmailInput). */
   rejectOutcome?: RejectOutcome;
+  /** Deep link to the clearance in THIS recipient's club portal; absent when no origin resolves. */
+  portalLink?: string;
 }
 
 async function sendClearanceResolvedEmailChannel(
@@ -431,8 +455,19 @@ export async function sendClearanceResolvedNotice(args: {
   outcome: 'approved' | 'rejected';
   reason?: string;
   rejectOutcome?: RejectOutcome;
+  /** Deep link to the clearance in THIS chair's club portal (each club gets its own); optional. */
+  portalLink?: string;
 }): Promise<{ results: SendResult[] }> {
-  const { chair, fromClubName, playerName, toClubName, outcome, reason, rejectOutcome } = args;
+  const {
+    chair,
+    fromClubName,
+    playerName,
+    toClubName,
+    outcome,
+    reason,
+    rejectOutcome,
+    portalLink,
+  } = args;
   const contact: ChairContact = {
     name: (chair.name ?? '').trim(),
     email: (chair.email ?? '').trim(),
@@ -445,6 +480,7 @@ export async function sendClearanceResolvedNotice(args: {
     outcome,
     reason,
     rejectOutcome,
+    ...(portalLink ? { portalLink } : {}),
   };
   const results = [await sendClearanceResolvedEmailChannel(contact, copy)];
   return { results };
@@ -515,15 +551,22 @@ export async function sendClearanceReopenedNotice(args: {
   fromClubName: string;
   playerName: string;
   toClubName: string;
+  /** Deep link to the clearance in THIS chair's club portal (each club gets its own); optional. */
+  portalLink?: string;
   channels: Channel[];
 }): Promise<{ results: SendResult[] }> {
-  const { side, chair, fromClubName, playerName, toClubName, channels } = args;
+  const { side, chair, fromClubName, playerName, toClubName, portalLink, channels } = args;
   const contact: ChairContact = {
     name: (chair.name ?? '').trim(),
     email: (chair.email ?? '').trim(),
     cell: (chair.cell ?? '').trim(),
   };
-  const copy: ClearanceCopy = { fromClubName, playerName, toClubName };
+  const copy: ClearanceCopy = {
+    fromClubName,
+    playerName,
+    toClubName,
+    ...(portalLink ? { portalLink } : {}),
+  };
   const results = await Promise.all(
     channels.map((channel): Promise<SendResult> => {
       if (channel === 'email') {
@@ -531,7 +574,8 @@ export async function sendClearanceReopenedNotice(args: {
           ? sendReopenedSourceEmailChannel(contact, copy)
           : sendReopenedDestEmailChannel(contact, copy);
       }
-      // WhatsApp: the source reuses the pending template; the destination has no template at all,
+      // WhatsApp: the source reuses the pending template (club_clearance_pending_v2; skipped when
+      // there is no link — see sendClearanceWhatsAppChannel); the destination has no template at all,
       // so its channel is recorded skipped rather than sent — the comm log must not imply a send.
       if (side === 'source') return sendClearanceWhatsAppChannel(contact, copy);
       return Promise.resolve<SendResult>({
@@ -557,8 +601,10 @@ export async function sendClearanceDestNotice(args: {
   fromClubName: string;
   playerName: string;
   toClubName: string;
+  /** Deep link to the clearance in the destination club's portal; optional. */
+  portalLink?: string;
 }): Promise<{ results: SendResult[] }> {
-  const { chair, fromClubName, playerName, toClubName } = args;
+  const { chair, fromClubName, playerName, toClubName, portalLink } = args;
   const email = (chair.email ?? '').trim();
   if (!EMAIL_RE.test(email)) {
     return {
@@ -579,6 +625,7 @@ export async function sendClearanceDestNotice(args: {
       fromClubName,
       playerName,
       toClubName,
+      ...(portalLink ? { portalLink } : {}),
     });
     return { results: [{ channel: 'email', status: 'sent', to: email, messageId }] };
   } catch (err) {
@@ -614,6 +661,8 @@ export async function sendClearanceAdminNotice(args: {
   playerName: string;
   toClubName: string;
   fromClubDirectory?: boolean;
+  /** Deep link to the clearance in the admin console; optional. */
+  adminLink?: string;
 }): Promise<{ results: SendResult[] }> {
   const { to, ...copy } = args;
   return sendAdminEmails(to, (address) => sendClearanceOpenedAdminEmail({ to: address, ...copy }));
@@ -628,6 +677,8 @@ export async function sendClearanceAdminSummaryNotice(args: {
   to: string[];
   toClubName: string;
   clearances: Array<{ playerName: string; fromClubName: string; fromClubDirectory?: boolean }>;
+  /** Link to the admin console's clearances list; optional. */
+  adminLink?: string;
 }): Promise<{ results: SendResult[] }> {
   const { to, ...copy } = args;
   return sendAdminEmails(to, (address) =>
@@ -642,6 +693,8 @@ export async function sendClearanceAutoRejectedAdminNotice(args: {
   playerName: string;
   toClubName: string;
   reason: string;
+  /** Deep link to the clearance in the admin console; optional. */
+  adminLink?: string;
 }): Promise<{ results: SendResult[] }> {
   const { to, ...copy } = args;
   return sendAdminEmails(to, (address) =>

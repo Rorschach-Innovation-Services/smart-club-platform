@@ -1,5 +1,5 @@
 /**
- * Backfill the medicoach player sync (ADR 0018): queue every person who belongs on a medicoach
+ * Backfill the medicoach player sync (ADR 0019): queue every person who belongs on a medicoach
  * team, so the cron pushes them (≈500 per 15-minute run).
  *
  *   npx sst shell --stage dev -- npm --prefix packages/api run enqueue-players -- \
