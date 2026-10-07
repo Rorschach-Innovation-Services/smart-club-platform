@@ -10,9 +10,14 @@ import { MemoryRouter } from 'react-router-dom';
 
 vi.mock('./pro-data', async () => {
   const s = await vi.importActual<typeof import('./pro-sample')>('./pro-sample');
-  return { PRO_IS_SAMPLE: true, PRO_MATCHES: s.SAMPLE_PRO_MATCHES, SCOUT_POOLS: [s.SAMPLE_POOL] };
+  return {
+    PRO_IS_SAMPLE: true,
+    POOLS_ARE_SAMPLE: true,
+    PRO_MATCHES: s.SAMPLE_PRO_MATCHES,
+    SCOUT_POOLS: [s.SAMPLE_POOL],
+  };
 });
-vi.mock('./scouting-data', () => ({ SCOUTING_EVENTS: [] }));
+vi.mock('./scouting-data', () => ({ SCOUTING_IS_SAMPLE: true, SCOUTING_EVENTS: [] }));
 
 import { ProTeamPage } from './pro-team-page';
 import { qk } from './query';
@@ -31,9 +36,36 @@ const renderPage = (q = '') =>
 beforeEach(() => localStorage.clear());
 
 describe('Professional team', () => {
+  it('has the same six tabs, in the same order, as Player scouting and Schools', () => {
+    renderPage();
+    const bar = screen.getByRole('tablist', { name: 'Professional team views' });
+    expect(
+      within(bar)
+        .getAllByRole('tab')
+        .map((t) => t.textContent),
+    ).toEqual(['Overview', 'Matches', 'Leaderboards', 'Performance map', 'Teams', 'Shortlist']);
+  });
+
+  it('keeps Form and Seasons, Call-ups and Exits one switch away, and old links working', async () => {
+    const user = userEvent.setup();
+    renderPage('&ptab=map');
+    expect(screen.getByRole('tab', { name: 'Form', selected: true })).toBeTruthy();
+    await user.click(screen.getByRole('tab', { name: 'Seasons' }));
+    expect(screen.getByRole('table', { name: 'Season record' })).toBeTruthy();
+    await user.click(screen.getByRole('tab', { name: 'Shortlist' }));
+    expect(screen.getByRole('tab', { name: 'Call-ups', selected: true })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: 'Exits' })).toBeTruthy();
+  });
+
+  it('opens the right view from a link made with the earlier tab names', () => {
+    renderPage('&ptab=seasons&format=all');
+    expect(screen.getByRole('tab', { name: 'Performance map', selected: true })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: 'Seasons', selected: true })).toBeTruthy();
+  });
+
   it('opens on selection for the men’s squad in T20, with the sample flagged', () => {
     renderPage();
-    expect(screen.getByRole('tab', { name: /Highveld Hawks/, selected: true })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: /Hawks.*Men/, selected: true })).toBeTruthy();
     expect((screen.getByLabelText('Format') as HTMLSelectElement).value).toBe('T20');
     expect(screen.getByText(/Sample data · invented names/)).toBeTruthy();
     expect(screen.getByRole('region', { name: /Promote · in form/ })).toBeTruthy();
@@ -45,15 +77,15 @@ describe('Professional team', () => {
 
   it('says plainly that the files have no ball-by-ball', () => {
     renderPage();
-    expect(screen.getByText(/No ball-by-ball in these files/)).toBeTruthy();
+    expect(screen.getByText(/phases come from when wickets fell/)).toBeTruthy();
   });
 
   it('switches to the women’s squad and keeps the views working', async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.click(screen.getByRole('tab', { name: /Highveld Hawks Women/ }));
-    expect(screen.getByRole('tab', { name: /Highveld Hawks Women/, selected: true })).toBeTruthy();
-    await user.click(screen.getByRole('tab', { name: 'Squad' }));
+    await user.click(screen.getByRole('tab', { name: /Hawks.*Women/ }));
+    expect(screen.getByRole('tab', { name: /Hawks.*Women/, selected: true })).toBeTruthy();
+    await user.click(screen.getByRole('tab', { name: 'Leaderboards' }));
     expect(screen.getByRole('table', { name: 'Squad' })).toBeTruthy();
     expect(screen.getByText('How each batter used the balls they faced')).toBeTruthy();
   });
@@ -70,7 +102,7 @@ describe('Professional team', () => {
     const saved = JSON.parse(localStorage.getItem('smartclub.pro.tracking.v1')!);
     expect(Object.values(saved)).toEqual([expect.objectContaining({ status: 'called-up' })]);
     expect(Object.keys(saved)[0]).toMatch(new RegExp(`^${name}\\|`));
-    await user.click(screen.getByRole('tab', { name: /Selection/ }));
+    await user.click(screen.getByRole('tab', { name: 'Overview' }));
     const shortlist = screen.getByText('Call-up shortlist').closest('.card') as HTMLElement;
     expect(within(shortlist).getByText(name)).toBeTruthy();
     expect(within(shortlist).getByText('Called up')).toBeTruthy();
@@ -180,5 +212,34 @@ describe('Exits', () => {
     expect(screen.getByRole('table', { name: 'Careers in the squad' })).toBeTruthy();
     expect(screen.getByText('Players used')).toBeTruthy();
     expect(await screen.findByText(/register couldn’t be loaded/)).toBeTruthy();
+  });
+});
+
+describe('a union’s own dashboard', () => {
+  it('shows only the Lions squads to the Lions', async () => {
+    const { setActiveTenant } = await import('./api');
+    const s = await vi.importActual<typeof import('./pro-sample')>('./pro-sample');
+    // Invented matches, with the men's franchise renamed to the Lions; the women stay Hawks.
+    const rename = (t: string) => (t === 'Highveld Hawks' ? 'DP World Lions' : t);
+    const library = s.SAMPLE_PRO_MATCHES.map((m) => ({
+      ...m,
+      home: rename(m.home),
+      away: rename(m.away),
+      winner: m.winner ? rename(m.winner) : m.winner,
+      innings: (m.innings ?? []).map((i) => ({ ...i, bat: rename(i.bat), fld: rename(i.fld) })),
+    }));
+    setActiveTenant('lions');
+    try {
+      renderWithProviders(
+        <MemoryRouter initialEntries={['/admin/scouting?view=pro']}>
+          <ProTeamPage />
+        </MemoryRouter>,
+        { seed: [[qk.proMatches(), library]] },
+      );
+      const tabs = within(screen.getByRole('tablist', { name: 'Squad' })).getAllByRole('tab');
+      expect(tabs.map((t) => t.textContent)).toEqual(['LionsMen']);
+    } finally {
+      setActiveTenant(null as unknown as string);
+    }
   });
 });

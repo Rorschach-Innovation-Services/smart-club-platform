@@ -12,6 +12,22 @@ This note covers the professional team, the match library and the rebuilt Perfor
 
 ## What the staff see
 
+The tab bar is the same six tabs, in the same order, as Player scouting and Schools: **Overview ·
+Matches · Leaderboards · Performance map · Teams · Shortlist**. The eight views below sit in them
+like this (a small switch under the bar picks between the two that share a tab):
+
+| Tab             | Holds            | `?ptab=` / `?psub=`               |
+| --------------- | ---------------- | --------------------------------- |
+| Overview        | Selection        | `overview`                        |
+| Matches         | Matches          | `matches`                         |
+| Leaderboards    | Squad            | `leaders`                         |
+| Performance map | Form · Seasons   | `map` + `form` / `seasons`        |
+| Teams           | Team             | `teams`                           |
+| Shortlist       | Call-ups · Exits | `shortlist` + `callups` / `exits` |
+
+Links made with the earlier names (`ptab=selection`, `squad`, `form`, `seasons`, `team`, `callups`,
+`exits`) still open the right view.
+
 | Tab       | What it answers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Selection | Who to promote, who is at risk, who is moving. A ranked "season → last 5" line per player (coloured by signal, every player named), plus three lanes (Promote · Watch · At risk) with the reasons for each.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
@@ -83,9 +99,11 @@ One library of professional matches for the whole platform; every union's scouti
   is left as "not on the scorecard" (rain or DLS) rather than guessed.
 - **Duplicates are dropped**: the same date, teams and totals means the same match.
 
-**Squad detection (`detectSquads`).** For each gender, the squad is the team-name word that
-appears on one side of every match. When words tie, the word nearest the end of the name wins,
-so "Acme Bank Highveld Hawks" resolves to "hawks", not the sponsor.
+**Squad detection (`detectSquads`).** For each gender, every team on one side of at least 40%
+of the matches is a squad (the library can hold several franchises' exports; opponents who
+turn up now and then are not squads). Teams are grouped with sponsor and gender words
+stripped, so "Momentum Multiply Titans" and "Fidelity Titans Ladies" are the Titans men and
+women. The squad switch lists them all; `?squad=lions-men` picks one.
 
 **Phases.** Matches with ball by ball give run rate, dot and boundary balls by phase, the
 worm after every over and the runs in each over. Matches with only a scorecard give phases

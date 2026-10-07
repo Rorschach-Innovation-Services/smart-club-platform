@@ -7,7 +7,8 @@
 import { useMemo, useState, type CSSProperties } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Icon, Pill } from './atoms';
-import { SCOUT_POOLS } from './pro-data';
+import type { ScoutPool } from './scout-pool';
+import { focusEvents, focusPools, isOurFranchise, useFocus } from './scouting-focus';
 import { ProMatchesProvider, useAllProMatches, useProMatches, type ProData } from './pro-library';
 import {
   PRO_FORMATS,
@@ -61,7 +62,7 @@ import {
   type MapPt,
   type Tone,
 } from './pro-charts';
-import { SCOUTING_EVENTS } from './scouting-data';
+import type { ScoutingEvent } from './scouting-data';
 import { ProMatchView } from './pro-match';
 import { ExitsView } from './pro-exits-view';
 import type { ScoutPlayer } from './scouting-data';
@@ -80,17 +81,46 @@ import {
   type Values,
 } from './pro-callups';
 
-type ProTab = 'selection' | 'squad' | 'form' | 'seasons' | 'team' | 'callups' | 'matches' | 'exits';
+/**
+ * The same six tabs, in the same order, as Player scouting and Schools. Views that don't have a
+ * tab of their own sit beside a sibling behind a small switch (`psub`):
+ *   Overview      who to promote, who is at risk
+ *   Matches       every game, and its dashboard
+ *   Leaderboards  the squad's players, rated
+ *   Performance map  Form (last five v season) · Seasons (season on season)
+ *   Teams         the team picture
+ *   Shortlist     Call-ups from the scouting pools · Exits (who stopped playing)
+ */
+type ProTab = 'overview' | 'matches' | 'leaders' | 'map' | 'teams' | 'shortlist';
+type ProSub = 'form' | 'seasons' | 'callups' | 'exits';
 const PRO_TABS: [ProTab, string][] = [
-  ['selection', 'Selection'],
-  ['squad', 'Squad'],
-  ['form', 'Form'],
-  ['seasons', 'Seasons'],
-  ['team', 'Team'],
-  ['callups', 'Call-ups'],
+  ['overview', 'Overview'],
   ['matches', 'Matches'],
-  ['exits', 'Exits'],
+  ['leaders', 'Leaderboards'],
+  ['map', 'Performance map'],
+  ['teams', 'Teams'],
+  ['shortlist', 'Shortlist'],
 ];
+const PRO_SUBS: Partial<Record<ProTab, [ProSub, string][]>> = {
+  map: [
+    ['form', 'Form'],
+    ['seasons', 'Seasons'],
+  ],
+  shortlist: [
+    ['callups', 'Call-ups'],
+    ['exits', 'Exits'],
+  ],
+};
+/** Links made before the tabs were aligned used the first names; they still open the right view. */
+const LEGACY_TABS: Record<string, [ProTab, ProSub | '']> = {
+  selection: ['overview', ''],
+  squad: ['leaders', ''],
+  form: ['map', 'form'],
+  seasons: ['map', 'seasons'],
+  team: ['teams', ''],
+  callups: ['shortlist', 'callups'],
+  exits: ['shortlist', 'exits'],
+};
 
 const r0 = (v: number | null | undefined) =>
   v === null || v === undefined ? '–' : Math.round(v).toString();
@@ -169,44 +199,46 @@ const roleIndex = (c: Pick<Candidate, 'role' | 'batIdx' | 'bowlIdx'>) =>
         : (c.batIdx ?? c.bowlIdx)
       : c.batIdx;
 
-function poolCandidates(gender: Squad['gender']): Candidate[] {
-  return SCOUT_POOLS.filter((p) => p.gender === gender).flatMap((pool) =>
-    pool.players.map((p: PoolPlayer) => ({
-      key: `${p.name}|${p.club}`,
-      name: p.name,
-      club: p.club,
-      union: p.union,
-      role: p.role,
-      source: pool.name,
-      batIdx: p.bat?.batIdx ?? null,
-      bowlIdx: p.bowl?.bowlIdx ?? null,
-      impact: p.impact ?? null,
-      lists: p.lists,
-      note: p.note,
-      vals: {
-        bat: { idx: p.bat?.batIdx, sr: p.bat?.sr, avg: p.bat?.avg ?? null },
-        bowl: {
-          idx: p.bowl?.bowlIdx,
-          econ: p.bowl?.econ,
-          wpo: p.bowl ? p.bowl.wkts / Math.max(1 / 6, oversToBalls(p.bowl.overs) / 6) : null,
-          dot: p.bowl?.dotPct ?? null,
+function poolCandidates(gender: Squad['gender'], pools: ScoutPool[]): Candidate[] {
+  return pools
+    .filter((p) => p.gender === gender)
+    .flatMap((pool) =>
+      pool.players.map((p: PoolPlayer) => ({
+        key: `${p.name}|${p.club}`,
+        name: p.name,
+        club: p.club,
+        union: p.union,
+        role: p.role,
+        source: pool.name,
+        batIdx: p.bat?.batIdx ?? null,
+        bowlIdx: p.bowl?.bowlIdx ?? null,
+        impact: p.impact ?? null,
+        lists: p.lists,
+        note: p.note,
+        vals: {
+          bat: { idx: p.bat?.batIdx, sr: p.bat?.sr, avg: p.bat?.avg ?? null },
+          bowl: {
+            idx: p.bowl?.bowlIdx,
+            econ: p.bowl?.econ,
+            wpo: p.bowl ? p.bowl.wkts / Math.max(1 / 6, oversToBalls(p.bowl.overs) / 6) : null,
+            dot: p.bowl?.dotPct ?? null,
+          },
         },
-      },
-      sample: { balls: p.bat?.balls ?? 0, overs: p.bowl ? oversToBalls(p.bowl.overs) / 6 : 0 },
-      line: [
-        p.bat ? `${p.bat.runs} runs (${p.bat.balls}b) · SR ${Math.round(p.bat.sr)}` : '',
-        p.bowl ? `${p.bowl.wkts}/${p.bowl.runs} in ${p.bowl.overs} ov · econ ${p.bowl.econ}` : '',
-      ]
-        .filter(Boolean)
-        .join(' · '),
-    })),
-  );
+        sample: { balls: p.bat?.balls ?? 0, overs: p.bowl ? oversToBalls(p.bowl.overs) / 6 : 0 },
+        line: [
+          p.bat ? `${p.bat.runs} runs (${p.bat.balls}b) · SR ${Math.round(p.bat.sr)}` : '',
+          p.bowl ? `${p.bowl.wkts}/${p.bowl.runs} in ${p.bowl.overs} ov · econ ${p.bowl.econ}` : '',
+        ]
+          .filter(Boolean)
+          .join(' · '),
+      })),
+    );
 }
 
 /** Senior scouting-event players on the watchlist, rated against their own event. */
-function watchedCandidates(keys: string[]): Candidate[] {
+function watchedCandidates(keys: string[], events: ScoutingEvent[]): Candidate[] {
   const out: Candidate[] = [];
-  for (const ev of SCOUTING_EVENTS) {
+  for (const ev of events) {
     if (/^u\s?\d+/i.test(ev.ageGroup)) continue;
     const ps = ev.players;
     const tot = (f: (p: ScoutPlayer) => number | null) => ps.reduce((n, p) => n + (f(p) ?? 0), 0);
@@ -301,10 +333,30 @@ const SOURCE_NOTE: Record<ProData['source'], string> = {
 function ProTeamView({ data }: { data: ProData }) {
   const all = data.matches;
   const [params, setParams] = useSearchParams();
-  const squads = useMemo(() => detectSquads(all), [all]);
-  const gender = (params.get('squad') as Squad['gender']) || squads[0]?.gender || 'men';
-  const squad = squads.find((s) => s.gender === gender) ?? squads[0];
-  const tab = (params.get('ptab') as ProTab) || 'selection';
+  // A union's own dashboard shows only its franchise's squads (other franchises' games still set
+  // the format averages). Not with the invented sample.
+  const focus = useFocus();
+  const squads = useMemo(
+    () =>
+      detectSquads(all).filter((s) => data.source === 'sample' || isOurFranchise(focus, s.name)),
+    [all, focus, data.source],
+  );
+  const pools = useMemo(() => focusPools(focus), [focus]);
+  const events = useMemo(() => focusEvents(focus), [focus]);
+  // ?squad= is a squad id ("lions-men"); a bare gender ("women") picks that gender's first.
+  const want = params.get('squad') || '';
+  const squad =
+    squads.find((s) => s.id === want) ?? squads.find((s) => s.gender === want) ?? squads[0];
+  const rawTab = params.get('ptab') || 'overview';
+  const legacy = LEGACY_TABS[rawTab];
+  const tab: ProTab = legacy
+    ? legacy[0]
+    : PRO_TABS.some(([k]) => k === rawTab)
+      ? (rawTab as ProTab)
+      : 'overview';
+  const subs = PRO_SUBS[tab];
+  const wantSub = (legacy?.[1] || params.get('psub') || '') as ProSub;
+  const sub: ProSub | '' = subs ? (subs.find(([k]) => k === wantSub)?.[0] ?? subs[0][0]) : '';
   // Default to T20 where the squad plays it: rates only compare within a format.
   const format =
     (params.get('format') as ProFormat | 'all') ||
@@ -332,8 +384,11 @@ function ProTeamView({ data }: { data: ProData }) {
     [squad, format, all],
   );
   const candidates = useMemo(
-    () => (squad ? [...watchedCandidates(watch.keys), ...poolCandidates(squad.gender)] : []),
-    [squad, watch.keys],
+    () =>
+      squad
+        ? [...watchedCandidates(watch.keys, events), ...poolCandidates(squad.gender, pools)]
+        : [],
+    [squad, watch.keys, events, pools],
   );
 
   if (!squad) return <div className="ss-empty">No professional-team scorecards yet.</div>;
@@ -348,13 +403,13 @@ function ProTeamView({ data }: { data: ProData }) {
         <div className="pro-seg" role="tablist" aria-label="Squad">
           {squads.map((s) => (
             <button
-              key={s.gender}
+              key={s.id}
               role="tab"
-              aria-selected={s.gender === squad.gender}
-              className={s.gender === squad.gender ? 'on' : ''}
-              onClick={() => set({ squad: s.gender, fplayer: '', pmatch: '' })}
+              aria-selected={s.id === squad.id}
+              className={s.id === squad.id ? 'on' : ''}
+              onClick={() => set({ squad: s.id, fplayer: '', pmatch: '' })}
             >
-              {s.name}
+              {shortTeam(s.name)}
               <small>{s.gender === 'men' ? 'Men' : 'Women'}</small>
             </button>
           ))}
@@ -394,9 +449,16 @@ function ProTeamView({ data }: { data: ProData }) {
           {data.withBalls ? `, ${data.withBalls} ball by ball` : ''}
         </Pill>
         <span>
-          {ms.length} matches · from scorecards (batting, bowling, fall of wickets). No ball-by-ball
-          in these files, so phases come from when wickets fell; every rating is 100 = the average
-          of everyone in those games, per format.
+          {ms.length} matches ·{' '}
+          {(() => {
+            const bbb = ms.filter((m) => (m.innings ?? []).some((i) => i.balls?.length)).length;
+            if (!bbb)
+              return 'from scorecards (batting, bowling, fall of wickets); phases come from when wickets fell';
+            return bbb === ms.length
+              ? 'all with ball by ball (overs, phases and spells)'
+              : `${bbb} with ball by ball (overs, phases and spells); the rest from scorecards alone`;
+          })()}
+          ; every rating is 100 = the average of everyone in those games, per format.
         </span>
       </div>
 
@@ -408,18 +470,35 @@ function ProTeamView({ data }: { data: ProData }) {
             role="tab"
             aria-selected={tab === k}
             className={tab === k ? 'on' : ''}
-            onClick={() => set({ ptab: k })}
+            onClick={() => set({ ptab: k, psub: '' })}
           >
             {label}
-            {k === 'callups' && Object.keys(tracking.map).length > 0 && (
+            {k === 'shortlist' && Object.keys(tracking.map).length > 0 && (
               <span className="pro-count">{Object.keys(tracking.map).length}</span>
             )}
           </button>
         ))}
       </div>
 
+      {subs && (
+        <div className="pro-seg small" role="tablist" aria-label="View">
+          {subs.map(([k, label]) => (
+            <button
+              key={k}
+              type="button"
+              role="tab"
+              aria-selected={sub === k}
+              className={sub === k ? 'on' : ''}
+              onClick={() => set({ ptab: tab, psub: k })}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
       <div className="sc-body">
-        {tab === 'selection' && (
+        {tab === 'overview' && (
           <SelectionView
             squad={squad}
             ms={ms}
@@ -427,11 +506,11 @@ function ProTeamView({ data }: { data: ProData }) {
             candidates={candidates}
             tracking={tracking}
             openPlayer={setOpen}
-            goCallups={() => set({ ptab: 'callups' })}
+            goCallups={() => set({ ptab: 'shortlist', psub: 'callups' })}
           />
         )}
-        {tab === 'squad' && <SquadView players={players} format={format} openPlayer={setOpen} />}
-        {tab === 'form' && (
+        {tab === 'leaders' && <SquadView players={players} format={format} openPlayer={setOpen} />}
+        {tab === 'map' && sub === 'form' && (
           <FormView
             squad={squad}
             players={players}
@@ -442,17 +521,17 @@ function ProTeamView({ data }: { data: ProData }) {
             slices={slices}
           />
         )}
-        {tab === 'seasons' && (
+        {tab === 'map' && sub === 'seasons' && (
           <SeasonsView
             key={`${squad.gender}-${format}`}
             squad={squad}
             format={format}
             slices={slices}
-            openDive={(name, m) => set({ ptab: 'form', fplayer: name, fmode: m })}
+            openDive={(name, m) => set({ ptab: 'map', psub: 'form', fplayer: name, fmode: m })}
           />
         )}
-        {tab === 'team' && <TeamView squad={squad} ms={ms} format={format} />}
-        {tab === 'callups' && (
+        {tab === 'teams' && <TeamView squad={squad} ms={ms} format={format} />}
+        {tab === 'shortlist' && sub === 'callups' && (
           <CallupsView
             squad={squad}
             players={players}
@@ -460,8 +539,11 @@ function ProTeamView({ data }: { data: ProData }) {
             tracking={tracking}
           />
         )}
-        {tab === 'exits' && (
-          <ExitsView squad={squad} openPlayer={(name) => set({ ptab: 'form', fplayer: name })} />
+        {tab === 'shortlist' && sub === 'exits' && (
+          <ExitsView
+            squad={squad}
+            openPlayer={(name) => set({ ptab: 'map', psub: 'form', fplayer: name })}
+          />
         )}
         {tab === 'matches' &&
           (openMatch ? (

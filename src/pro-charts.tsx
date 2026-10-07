@@ -107,6 +107,7 @@ export function QuadrantMap({
   refY = 100,
   diagonal,
   toneLabels,
+  shortLabels = true,
 }: {
   points: MapPt[];
   xLabel: string;
@@ -122,6 +123,8 @@ export function QuadrantMap({
   diagonal?: boolean;
   /** Legend wording per colour, e.g. { squad: 'Lions', pool: 'Your watchlist' }. */
   toneLabels?: Partial<Record<Tone, string>>;
+  /** Labels are people's names ("P Rademeyer") unless told otherwise (teams, competitions). */
+  shortLabels?: boolean;
 }) {
   const [hover, setHover] = useState<MapPt | null>(null);
   const [box, W] = useWidth(640);
@@ -173,7 +176,7 @@ export function QuadrantMap({
       .filter((p) => p.tone !== 'context' || p.pin)
       .sort((a, b) => Number(!!b.pin) - Number(!!a.pin) || b.size - a.size);
     for (const p of cands) {
-      const text = shortName(p.label);
+      const text = shortLabels ? shortName(p.label) : p.label;
       const w = text.length * 6.1;
       const cx = sx(p.x);
       const cy = sy(p.y);
@@ -276,7 +279,7 @@ export function QuadrantMap({
               />
               {l && (
                 <text className="pv-label" x={l.x} y={l.y} textAnchor={l.anchor}>
-                  {shortName(p.label)}
+                  {shortLabels ? shortName(p.label) : p.label}
                   {clipped ? ' ›' : ''}
                 </text>
               )}
