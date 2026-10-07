@@ -760,7 +760,8 @@ describe('Slice 4 — the outbox', () => {
     assert.equal(row.lastError, 'fixture locked');
 
     pushHttpFail = 503; // medicoach down: the row stays too
-    await flush();
+    const down = await flush();
+    assert.deepEqual([down.counts.errors, down.counts.unreached], [0, 1]);
     [row] = await repo.listPendingSync(T);
     assert.equal(row.attempts, 2);
     assert.equal(row.lastError, 'medicoach answered HTTP 503');

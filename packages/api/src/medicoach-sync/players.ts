@@ -369,8 +369,11 @@ export async function flushPlayerOutbox(
   }
 
   const at = () => now().toISOString();
-  const failRow = async (row: PendingPlayerSync, error: string) => {
-    counts.errors++;
+  // `unreached`: the request never reached medicoach (transport/HTTP/contract failure) — the
+  // row is still queued; distinct from medicoach rejecting this player (`errors`).
+  const failRow = async (row: PendingPlayerSync, error: string, unreached = false) => {
+    if (unreached) counts.unreached = (counts.unreached ?? 0) + 1;
+    else counts.errors++;
     await repo.markPendingPlayerSyncFailed(tenant, row.naturalKey, row.changedAt, error, at());
   };
   const snap = await loadPlayerSyncSnapshot(repo, tenant, { config });
@@ -427,7 +430,7 @@ export async function flushPlayerOutbox(
       const message = err instanceof Error ? err.message : 'push failed';
       log(`[medicoach-sync] ${tenant}: player push failed — ${message}`);
       requestError ??= message;
-      for (const b of batch) await failRow(b.row, message);
+      for (const b of batch) await failRow(b.row, message, true);
       continue;
     }
     for (const { row, entry, intent } of batch) {
@@ -482,13 +485,13 @@ export async function flushPlayerOutbox(
     }
   }
 
-  if (counts.sent || counts.errors || counts.possibleDuplicates)
+  if (counts.sent || counts.errors || counts.unreached || counts.possibleDuplicates)
     await repo.putSyncLog(tenant, {
       id: randomUUID(),
       at: at(),
       trigger: trigger === 'cli' ? 'cli' : trigger,
       kind: 'player-push',
-      outcome: counts.errors ? 'error' : 'ok',
+      outcome: counts.errors || counts.unreached ? 'error' : 'ok',
       pages: 0,
       fixtures: 0,
       counts: {

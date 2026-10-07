@@ -61,6 +61,22 @@ const STATUS_LABEL: Record<string, string> = {
   cancelled: 'Cancelled',
 };
 
+/**
+ * A push whose request never reached medicoach (connection, HTTP or contract failure) is not
+ * a rejection: nothing was decided there and the rows are still queued — say so apart from
+ * per-item "not accepted".
+ */
+function withUnreached(
+  sent: number | undefined,
+  unreached: number | undefined,
+  noun: string,
+  delivered: string,
+): string {
+  if (!unreached) return delivered;
+  const queued = `Couldn't reach medicoach — ${unreached} ${noun} still queued.`;
+  return unreached >= (sent ?? 0) ? queued : `${delivered} ${queued}`;
+}
+
 function logSummary(l: api.MedicoachSyncLog): string {
   if (l.kind === 'player-push' && l.playerPush) {
     const p = l.playerPush;
@@ -77,7 +93,12 @@ function logSummary(l: api.MedicoachSyncLog): string {
       p.parked ? `${p.parked} waiting for a team` : '',
       p.errors ? `${p.errors} not accepted` : '',
     ].filter(Boolean);
-    return `Sent ${p.sent} player(s) to medicoach${bits.length ? `: ${bits.join(', ')}` : ''}.`;
+    return withUnreached(
+      p.sent,
+      p.unreached,
+      'player(s)',
+      `Sent ${(p.sent ?? 0) - (p.unreached ?? 0)} player(s) to medicoach${bits.length ? `: ${bits.join(', ')}` : ''}.`,
+    );
   }
   if (l.kind === 'new-fixtures')
     return `${l.fixtures} new fixture(s) not in medicoach yet — they need a bundle top-up from your operator.`;
@@ -90,7 +111,12 @@ function logSummary(l: api.MedicoachSyncLog): string {
       p.unmapped ? `${p.unmapped} unknown to medicoach` : '',
       p.errors ? `${p.errors} not accepted` : '',
     ].filter(Boolean);
-    return `Sent ${p.sent} change(s) to medicoach${bits.length ? `: ${bits.join(', ')}` : ''}.`;
+    return withUnreached(
+      p.sent,
+      p.unreached,
+      'change(s)',
+      `Sent ${(p.sent ?? 0) - (p.unreached ?? 0)} change(s) to medicoach${bits.length ? `: ${bits.join(', ')}` : ''}.`,
+    );
   }
   const c = l.counts;
   const bits = [

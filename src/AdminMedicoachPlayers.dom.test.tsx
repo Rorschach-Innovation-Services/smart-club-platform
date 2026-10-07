@@ -188,6 +188,44 @@ describe('Players panel', () => {
     expect(stats).toHaveTextContent('2 player(s) · 1 waiting for a team');
   });
 
+  it('a push that never reached medicoach says so — not "not accepted"', async () => {
+    renderPage({
+      ...status(on()),
+      logs: [
+        {
+          id: 'l2',
+          at: '2026-10-07T08:00:00.000Z',
+          trigger: 'cron',
+          kind: 'player-push',
+          outcome: 'error',
+          pages: 0,
+          fixtures: 0,
+          counts: {},
+          playerPush: { sent: 4, unreached: 4, errors: 0 },
+        },
+        {
+          id: 'l3',
+          at: '2026-10-07T07:00:00.000Z',
+          trigger: 'cron',
+          kind: 'player-push',
+          outcome: 'error',
+          pages: 0,
+          fixtures: 0,
+          counts: {},
+          playerPush: { sent: 3, created: 1, errors: 1, unreached: 1 },
+        },
+      ],
+    });
+    expect(
+      await screen.findByText("Couldn't reach medicoach — 4 player(s) still queued."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Sent 2 player(s) to medicoach: 1 added, 1 not accepted. Couldn't reach medicoach — 1 player(s) still queued.",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it('summarises a player push in recent activity', async () => {
     renderPage({
       ...status(on()),

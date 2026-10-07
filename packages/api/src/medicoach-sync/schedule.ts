@@ -468,8 +468,10 @@ export async function flushScheduleOutbox(
     return { status: 'dry-run', pending: all.length - dropped, held, counts };
   }
 
-  const failRow = async (row: PendingScheduleSync, error: string) => {
-    counts.errors++;
+  // `unreached`: the request never reached medicoach — distinct from a per-fixture rejection.
+  const failRow = async (row: PendingScheduleSync, error: string, unreached = false) => {
+    if (unreached) counts.unreached = (counts.unreached ?? 0) + 1;
+    else counts.errors++;
     await repo.markPendingSyncFailed(
       tenant,
       row.ref,
@@ -538,7 +540,7 @@ export async function flushScheduleOutbox(
       const message = err instanceof Error ? err.message : 'push failed';
       log(`[medicoach-sync] ${tenant}: schedule push failed — ${message}`);
       requestError ??= message;
-      for (const row of batch) await failRow(row, message);
+      for (const row of batch) await failRow(row, message, true);
       continue;
     }
     for (const row of batch) {
@@ -558,7 +560,7 @@ export async function flushScheduleOutbox(
       at: now().toISOString(),
       trigger,
       kind: 'push',
-      outcome: counts.errors ? 'error' : 'ok',
+      outcome: counts.errors || counts.unreached ? 'error' : 'ok',
       pages: 0,
       fixtures: counts.sent,
       counts: {

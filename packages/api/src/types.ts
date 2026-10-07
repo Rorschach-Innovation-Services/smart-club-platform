@@ -1374,6 +1374,8 @@ export interface SchedulePushCounts {
   unchanged: number;
   unmapped: number;
   errors: number;
+  /** Changes whose request never reached medicoach (still queued). Absent on older rows. */
+  unreached?: number;
 }
 
 /** A smart-club fixture schedule in the wire shape (`SyncSchedule`, contract v1). */
@@ -1492,6 +1494,8 @@ export interface PlayerPushCounts {
   possibleDuplicates: number;
   parked: number;
   errors: number;
+  /** Players whose request never reached medicoach (still queued). Absent on older rows. */
+  unreached?: number;
 }
 
 /** Who changed a fixture's schedule. `medicoach` = the Slice 3 inbound apply (never echoed). */

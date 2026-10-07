@@ -349,7 +349,9 @@ describe('flush', () => {
     assert.equal((await rowOf(p.naturalKey))?.attempts, 1);
     httpFail = 503;
     const sum = await flush();
-    assert.equal(sum.counts.errors, 1);
+    // A request that never reached medicoach is not a rejection: counted apart, still queued.
+    assert.equal(sum.counts.errors, 0);
+    assert.equal(sum.counts.unreached, 1);
     const row = await rowOf(p.naturalKey);
     assert.equal(row?.attempts, 2);
     assert.equal(row?.lastError, 'medicoach answered HTTP 503');
