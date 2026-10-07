@@ -354,6 +354,23 @@ const REVIEW_REASON: Record<api.MedicoachPlayerReview['reason'], string> = {
   'smartclub-possible-duplicate': 'Same name and date of birth under another ID here',
 };
 
+/**
+ * The toast after "Sync now". A large player backlog (a fresh backfill) goes out in slices —
+ * "Sync now" sends the first; the 15-minute sync continues with the rest automatically.
+ */
+export function syncNowToast(
+  r: Awaited<ReturnType<typeof api.medicoachSyncNow>> | undefined,
+): [string, string?] {
+  if (r?.status === 'dry-run')
+    return ['Dry run — the sync connection isn’t configured, so nothing was sent.'];
+  const deferred = r?.playerPush?.deferred ?? 0;
+  if (!deferred) return ['Sync finished'];
+  const sent = r?.playerPush?.counts?.sent ?? 0;
+  return [
+    `Sync finished — sent ${sent} player(s), ${deferred} remaining; the next sync continues automatically`,
+  ];
+}
+
 /** The toast after a review decision: what was decided, and whether it reached medicoach. */
 export function resolveToast(label: string, res: api.MedicoachResolveResult): [string, string?] {
   if (res.status === 'dismissed') return [`${label} — nothing was sent`];
@@ -700,10 +717,7 @@ export function AdminMedicoachSyncView({
               run(
                 'sync',
                 api.medicoachSyncNow,
-                (r) =>
-                  (r as { status?: string })?.status === 'dry-run'
-                    ? ['Dry run — the sync connection isn’t configured, so nothing was sent.']
-                    : ['Sync finished'],
+                (r) => syncNowToast(r as Awaited<ReturnType<typeof api.medicoachSyncNow>>),
                 'The sync did not finish',
               )
             }

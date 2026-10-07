@@ -38,7 +38,7 @@ import {
   type PullerDeps,
   type SyncRunSummary,
 } from './puller.js';
-import { flushPlayerOutbox, type PlayerFlushSummary } from './players.js';
+import { flushPlayerOutbox, playerFlushCap, type PlayerFlushSummary } from './players.js';
 import { playerSyncEnabled } from './player-placement.js';
 import { flushScheduleOutbox, type FlushSummary } from './schedule.js';
 
@@ -166,6 +166,8 @@ export async function runTenantSync(
         url: deps.url,
         secret: deps.secret,
         config,
+        // "Sync now" runs behind the 30 s gateway limit: a first slice; the cron drains the rest.
+        maxRows: playerFlushCap(trigger),
         ...(deps.fetch ? { fetch: deps.fetch } : {}),
         ...(deps.now ? { now: deps.now } : {}),
         ...(deps.log ? { log: deps.log } : {}),

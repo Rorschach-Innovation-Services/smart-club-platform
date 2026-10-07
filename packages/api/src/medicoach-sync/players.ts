@@ -61,6 +61,18 @@ type RepoModule = typeof import('../repo.js');
 /** At most this many outbox rows per run; the rest stay queued for the next (checkpoint). */
 export const PLAYER_FLUSH_MAX_PER_RUN = 500;
 
+/**
+ * The cap for an admin's "Sync now" (2 batches): it runs inside the API Lambda behind the 30 s
+ * API Gateway limit, and 500 rows = 10 sequential batches × a 10 s timeout could exceed it.
+ * The rest stay queued (`deferred`) and the cron continues with the full cap.
+ */
+export const PLAYER_FLUSH_MAX_MANUAL = 100;
+
+/** The per-run row cap for a trigger: manual runs send a first slice, the cron drains. */
+export function playerFlushCap(trigger: 'cron' | 'manual' | 'cli'): number {
+  return trigger === 'manual' ? PLAYER_FLUSH_MAX_MANUAL : PLAYER_FLUSH_MAX_PER_RUN;
+}
+
 const HTTP_TIMEOUT_MS = 10_000;
 const ROSTER_CONCURRENCY = 8;
 

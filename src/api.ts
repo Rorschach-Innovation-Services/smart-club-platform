@@ -1083,7 +1083,12 @@ export type MedicoachPlayerResolution =
 export const getMedicoachSyncStatus = () =>
   request<MedicoachSyncStatus>('/integrations/medicoach/status');
 export const medicoachSyncNow = () =>
-  request<{ status: string; counts?: Record<string, number> }>('/integrations/medicoach/sync-now', {
+  request<{
+    status: string;
+    counts?: Record<string, number>;
+    /** The player push: "Sync now" sends a first slice; `deferred` wait for the next sync. */
+    playerPush?: { status: string; deferred?: number; counts?: Record<string, number> };
+  }>('/integrations/medicoach/sync-now', {
     method: 'POST',
   });
 export const applyMedicoachConflict = (ref: string) =>

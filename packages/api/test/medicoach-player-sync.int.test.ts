@@ -683,6 +683,35 @@ describe('admin + operator surface', () => {
     await clearPlayerSync();
   });
 
+  test('Sync now sends a first slice of 100 and reports the rest; the cron keeps the 500 cap', async () => {
+    const { playerFlushCap, PLAYER_FLUSH_MAX_PER_RUN } = players;
+    assert.equal(playerFlushCap('manual'), 100);
+    assert.equal(playerFlushCap('cron'), PLAYER_FLUSH_MAX_PER_RUN);
+    assert.equal(PLAYER_FLUSH_MAX_PER_RUN, 500);
+    const at = new Date().toISOString();
+    for (let i = 0; i < 101; i++)
+      await repo.putPendingPlayerSync(T, `nk-slice-${String(i).padStart(3, '0')}`, at);
+    answer = () => ({ status: 'removed' });
+    const res = await call('POST', '/integrations/medicoach/sync-now');
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      playerPush: { deferred: number; counts: { sent: number } };
+    };
+    assert.equal(body.playerPush.counts.sent, 100);
+    assert.equal(body.playerPush.deferred, 1);
+    assert.equal(
+      pushes.reduce((n, p) => n + p.players.length, 0),
+      100,
+    );
+
+    // The cron run (same code path, trigger 'cron') takes the rest under the 500 cap.
+    const { runTenantSync } = await import('../src/medicoach-sync/run.js');
+    const cron = await runTenantSync(T, 'cron', { repo, url: stubUrl, secret: SECRET });
+    assert.equal(cron.playerPush?.counts.sent, 1);
+    assert.equal(cron.playerPush?.deferred, 0);
+    await clearPlayerSync();
+  });
+
   test('status counts pending, stuck and reviews (no natural keys)', async () => {
     const p = mkPlayer();
     await repo.createPlayer(T, p);

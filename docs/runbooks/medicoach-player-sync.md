@@ -74,7 +74,9 @@ diffs (that would overwrite corrections made in medicoach since the migration). 
 npm --prefix packages/api run enqueue-players -- --tenant <t> --confirm
 ```
 
-The cron sends about 500 people per run; watch the Players panel drain.
+The 15-minute cron drains the backlog, about 500 people per run; watch the Players panel. "Sync
+now" only sends a first slice of 100 (it runs behind the API's 30-second limit) and says how many
+remain — the cron continues with the rest automatically.
 
 **Re-run `enqueue-players --confirm` after any import CLI that writes players** (roster or
 compliance imports, the clearance backfills): the repo functions enqueue automatically, but a

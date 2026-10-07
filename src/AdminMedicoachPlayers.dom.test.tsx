@@ -19,7 +19,7 @@ vi.mock('./api', async (importActual) => {
 });
 
 import * as api from './api';
-import { AdminMedicoachSyncView, resolveToast } from './AdminMedicoachSync';
+import { AdminMedicoachSyncView, resolveToast, syncNowToast } from './AdminMedicoachSync';
 import { renderWithProviders } from './test-utils';
 
 const status = (players: api.MedicoachPlayerSyncStatus): api.MedicoachSyncStatus => ({
@@ -241,6 +241,21 @@ describe('Players panel', () => {
     const notes = within(list).getAllByRole('note');
     expect(notes).toHaveLength(1);
     expect(notes[0]).toHaveTextContent(/they will leave Umzinto CC.s synced team/);
+  });
+
+  it('"Sync now" on a large backlog says how many remain for the next sync', () => {
+    expect(
+      syncNowToast({
+        status: 'ok',
+        playerPush: { status: 'ok', deferred: 400, counts: { sent: 100 } },
+      }),
+    ).toEqual([
+      'Sync finished — sent 100 player(s), 400 remaining; the next sync continues automatically',
+    ]);
+    expect(syncNowToast({ status: 'ok', playerPush: { status: 'ok', deferred: 0 } })).toEqual([
+      'Sync finished',
+    ]);
+    expect(syncNowToast({ status: 'dry-run' })[0]).toMatch(/^Dry run/);
   });
 
   it('summarises a player push in recent activity', async () => {
