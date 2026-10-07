@@ -1,6 +1,6 @@
 /**
  * Unit tests for the Titans fixtures write steps (A1–A4): the prereqs bootstrap's pure diffs,
- * the --append-sides side plan (roster matching, the 1→2 seed that keeps the club id, next-free
+ * the --append-sides side plan (roster matching, the guarded 1→2 tm_ seed, next-free
  * tm_ ids, women's sides never appended, counters), the live-side series build, the veterans
  * playoff series, stable fixture ids (held-back reservation, a knockout fixture after "Set
  * team") and the CLI's flag guards. Pure — no dynalite, no repo.js.
@@ -96,7 +96,7 @@ describe('planSides — resolution against live rosters', () => {
     assert.equal(plan.resolve.size, 0);
   });
 
-  test('growing 1 → 2 seeds roster[0] with the club id and appends the next free tm_ id', () => {
+  test('growing 1 → 2 seeds roster[0] with a tm_ id (no references) and appends the next free one', () => {
     const tuks = club('tuks-cricket-club', {
       leagues: ['premier-league', 'u9'],
       leagueTeams: { 'premier-league': 1, u9: 2 },
@@ -120,15 +120,23 @@ describe('planSides — resolution against live rosters', () => {
       { allowAppend: true },
     );
     assert.deepEqual(plan.fatal, []);
-    assert.equal(plan.resolve.get('premier-league::TUKS 1')!.teamId, 'tuks-cricket-club');
+    assert.equal(
+      plan.resolve.get('premier-league::TUKS 1')!.teamId,
+      'tm_tuks-cricket-club_premier-league_0',
+    );
     assert.equal(plan.resolve.get('premier-league::TUKS 1')!.how, 'seed');
+    assert.ok(
+      plan.patches[0].changes.some((c) =>
+        c.includes('single side tuks-cricket-club → tm_tuks-cricket-club_premier-league_0'),
+      ),
+    );
     assert.equal(
       plan.resolve.get('premier-league::TUKS 2')!.teamId,
       'tm_tuks-cricket-club_premier-league_2',
     );
     const p = plan.patches[0];
     assert.deepEqual(p.teamRosters['premier-league'], [
-      { id: 'tuks-cricket-club', name: 'TUKS 1' },
+      { id: 'tm_tuks-cricket-club_premier-league_0', name: 'TUKS 1' },
       { id: 'tm_tuks-cricket-club_premier-league_2', name: 'TUKS 2' },
     ]);
     assert.equal(p.leagueTeams['premier-league'], 2);
@@ -136,6 +144,68 @@ describe('planSides — resolution against live rosters', () => {
     assert.equal(p.teamRosters.u9, tuks.teamRosters!.u9);
     assert.deepEqual([p.teams, p.women, p.juniors], [4, 0, 2]);
     assert.equal(p.version, 3);
+  });
+
+  test('the reference guard refuses a 1 → 2 growth whose club id a stored series or coach uses', () => {
+    const base = {
+      leagues: ['third-league'],
+      leagueTeams: { 'third-league': 1 },
+    };
+    const needs = [
+      { leagueKey: 'third-league', name: 'TUKS 5' },
+      { leagueKey: 'third-league', name: 'TUKS 6' },
+    ];
+    const series = [
+      {
+        id: 's-old-third',
+        leagueKey: 'third-league',
+        participants: [{ teamId: 'tuks-cricket-club', clubId: 'tuks-cricket-club', name: 'TUKS' }],
+        fixtures: [{ id: 'f1', home: 'tuks-cricket-club', away: 'x' }],
+      },
+      // another league naming the club id is not a reference for third-league
+      {
+        id: 's-other',
+        leagueKey: 'premier-league',
+        participants: [{ teamId: 'tuks-cricket-club', clubId: 'tuks-cricket-club', name: 'TUKS' }],
+        fixtures: [],
+      },
+    ] as unknown as Series[];
+    const bySeries = planSides(needs, [club('tuks-cricket-club', base)], {
+      allowAppend: true,
+      storedSeries: series,
+    });
+    assert.equal(bySeries.patches.length, 0);
+    assert.match(bySeries.fatal.join('\n'), /s-old-third \(1 fixture/);
+    assert.ok(!bySeries.fatal.join('\n').includes('s-other'));
+
+    const byCoach = planSides(
+      needs,
+      [
+        club('tuks-cricket-club', {
+          ...base,
+          coaches: [{ name: 'Coach K', teams: ['third-league'], teamIds: ['tuks-cricket-club'] }],
+        }),
+      ],
+      { allowAppend: true, storedSeries: [series[1]] },
+    );
+    assert.equal(byCoach.patches.length, 0);
+    assert.match(byCoach.fatal.join('\n'), /coach "Coach K"/);
+
+    // A coach covering the league by key only (no teamIds) is not a reference.
+    const pass = planSides(
+      needs,
+      [club('tuks-cricket-club', { ...base, coaches: [{ name: 'C', teams: ['third-league'] }] })],
+      { allowAppend: true, storedSeries: [series[1]] },
+    );
+    assert.deepEqual(pass.fatal, []);
+    assert.equal(
+      pass.resolve.get('third-league::TUKS 5')!.teamId,
+      'tm_tuks-cricket-club_third-league_0',
+    );
+    assert.equal(
+      pass.resolve.get('third-league::TUKS 6')!.teamId,
+      'tm_tuks-cricket-club_third-league_1',
+    );
   });
 
   test('an existing roster grows at the end; existing ids keep their places', () => {

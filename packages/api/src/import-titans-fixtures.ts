@@ -1140,7 +1140,9 @@ async function runAppendSides(args: Args) {
   if (!config) throw new Error(`no tenant config for "${TITANS_TENANT}"`);
   const clubs = await repo.listClubs(TITANS_TENANT);
   console.log(`\nTenant "${TITANS_TENANT}": ${clubs.length} club(s)`);
+  const storedSeries = await repo.listSeries(TITANS_TENANT);
   const plan = planSides(sideNeeds(parsed.sheets), clubs, {
+    storedSeries,
     hostLeagues: t20HostLeagues(parsed.sheets),
     allowAppend: true,
     fixturesOnlyKeys: fixturesOnlyKeys(config),
@@ -1375,6 +1377,7 @@ async function runImport(args: Args) {
       );
     }
     sidePlan = planSides(sideNeeds(sheets), clubs, {
+      storedSeries: stored,
       hostLeagues: t20HostLeagues(sheets),
       allowAppend: false,
       fixturesOnlyKeys: fixturesOnlyKeys(cfg),

@@ -13,14 +13,17 @@
  *   - otherwise the side is MISSING and only `--append-sides` may add it: the next free
  *     `tm_<clubId>_<key>_<i>` id (bumped past every id the club already uses), the sheet name
  *     verbatim. Growing a no-roster league from 1 to 2+ sides first SEEDS roster[0] with
- *     `{ id: clubId, name: <first sheet side> }`, so the club's existing single side keeps the
- *     id every earlier series and coach assignment used.
+ *     `{ id: tm_<clubId>_<key>_0, name: <first sheet side> }` — the platform's own convention
+ *     (validateClubPatch and structure intake allow only tm_ roster ids). The club's single
+ *     side therefore CHANGES id from the club id, so a REFERENCE GUARD runs first: any stored
+ *     series of that league naming the club id as a side, or any coach of the club whose
+ *     teamIds hold the club id, makes the growth fatal (listed) instead.
  *
  * Women's competitions are never appended: a women's side the club does not already have is
  * a decision for the union (risk R6), listed as fatal. Any change to an existing roster id is
  * fatal by construction.
  */
-import type { Club, ClubTeam } from './types.js';
+import type { Club, ClubTeam, Series } from './types.js';
 import { CLUB_MAP, type ClubMapEntry } from './titans-import-map.js';
 import { canonicalTeamName, resolveTeamClub } from './titans-fixture-map.js';
 import { deriveTeamPlanCounts } from './team-plan.js';
@@ -92,6 +95,30 @@ function directSide(
         how: 'roster',
       }
     : undefined;
+}
+
+/**
+ * Where a club's single side (its club id) is referenced for one league: stored series of that
+ * league naming the club id as a participant or a fixture side, and coaches of the club whose
+ * `teamIds` hold the club id. Empty ⇒ the id may move to a tm_ id. Pure.
+ */
+export function singleSideReferences(club: Club, leagueKey: string, series: Series[]): string[] {
+  const refs: string[] = [];
+  for (const s of series) {
+    if (s.leagueKey !== leagueKey) continue;
+    const inParticipants = (s.participants ?? []).some((p) => p.teamId === club.id);
+    const fixtures = (
+      (s.fixtures as Array<{ id?: string; home?: string; away?: string }>) ?? []
+    ).filter((f) => f.home === club.id || f.away === club.id);
+    if (inParticipants || fixtures.length)
+      refs.push(
+        `series ${s.id}${fixtures.length ? ` (${fixtures.length} fixture(s))` : ' (participant)'}`,
+      );
+  }
+  for (const c of (club.coaches ?? []) as Array<{ name?: string; teamIds?: unknown }>)
+    if (Array.isArray(c.teamIds) && c.teamIds.includes(club.id))
+      refs.push(`coach "${c.name ?? '?'}" teamIds`);
+  return refs;
 }
 
 /** Order sides "1" < "2" < "10", "A" < "B", "VETERANS 1" < "VETERANS 2". */
@@ -176,6 +203,8 @@ export function planSides(
      * ordinary league. A borrowed side is never appended and adds no roster entry.
      */
     hostLeagues?: (leagueKey: string, name: string) => string[] | null;
+    /** The tenant's stored series — the reference guard for a 1 → 2 growth. */
+    storedSeries?: Series[];
   },
 ): SidePlan {
   const plan: SidePlan = {
@@ -312,20 +341,32 @@ export function planSides(
         plan.needsAppend.push(`${where}: ${missing.join(', ')}`);
         continue;
       }
-      // Grow the roster. A no-roster league seeds roster[0] with the club id first.
+      // Grow the roster. A no-roster league seeds roster[0] with a tm_ id — the single side
+      // changes id from the club id, so the reference guard runs first.
       const next = [...roster];
       if (!roster.length) {
+        const refs = singleSideReferences(club, leagueKey, opts.storedSeries ?? []);
+        if (refs.length) {
+          plan.fatal.push(
+            `${where}: growing 1 → ${names.length} would change the single side ${clubId} → tm_ id, but it is referenced: ${refs.join('; ')} — needs a decision`,
+          );
+          continue;
+        }
         const seedName = missing.shift()!;
-        next.push({ id: clubId, name: seedName });
+        let j = 0;
+        let seedId = `tm_${clubId}_${leagueKey}_${j++}`;
+        while (used.has(seedId)) seedId = `tm_${clubId}_${leagueKey}_${j++}`;
+        used.add(seedId);
+        next.push({ id: seedId, name: seedName });
         resolved(seedName, {
-          teamId: clubId,
+          teamId: seedId,
           clubId,
           name: seedName,
           ...(ground ? { venue: ground } : {}),
           how: 'seed',
         });
         changes.push(
-          `${leagueKey}: SEED roster[0] = { id: ${clubId}, name: "${seedName}" } (existing single side keeps the club id)`,
+          `${leagueKey}: single side ${clubId} → ${seedId} "${seedName}" (no references found)`,
         );
       }
       let i = next.length;
