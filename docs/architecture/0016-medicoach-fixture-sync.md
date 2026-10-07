@@ -294,3 +294,25 @@ number — effectively the ID number. So:
   exported league's results come only from medicoach.
 - Push (smart club → medicoach schedule changes, Slice 4) reuses the same contract, secret
   and cron.
+
+## Addendum (October 2026): scorecards and the match address
+
+- **Two new optional result fields.** A `/changes` result for a fixture with a linked live
+  match now carries `medicoachMatchId` (the match's own id, not the fixture's stored
+  `postMatchId`, which can be out of date) and `medicoachTournamentId` (the medicoach
+  competition). Both are omitted, never null, for manual or imported results. They are
+  medicoach ids, not refs: smart club stores them as given and never needs to understand them.
+- **A third endpoint.** `GET /integrations/smartclub/matches/:matchId/scorecard?tournamentId=`
+  returns the full batting and bowling card (contract §3, example
+  `scorecard-live-match.json`). It is HMAC-signed like the other two, and the signed
+  `pathAndQuery` includes the `?tournamentId=` query. `tournamentId` is required because a
+  medicoach match row cannot be looked up by its id alone. Medicoach finds it through that
+  competition's fixtures, and only through SYNCED fixtures, so smart club can only read
+  scorecards for its own fixtures (anything else is a 404). A match with no ball bowled yet
+  answers `{ available: false, matchId }`.
+- **Computed, never stored on medicoach.** Medicoach folds the card from the ball-by-ball
+  record on every call (Time Cricket reads its paged ball log), so smart club should cache what
+  it pulls rather than fetch on every page view.
+- **Names only.** The card names players and nothing else: no player ids, emails or refs. A
+  player with no usable name reads `"Unknown"`. Nothing in the scorecard is personal data
+  beyond a display name.

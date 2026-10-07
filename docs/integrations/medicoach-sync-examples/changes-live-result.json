@@ -31,7 +31,9 @@
         "recordedAt": "2026-10-04T14:31:58.000Z",
         "scoringSide": "home",
         "captainRef": "smartclub:dolphins:player:0000000000000000000000000000000000000000000000000000000000000000",
-        "medicoachMatchUrl": "https://live.medicoach.co.za/match/example"
+        "medicoachMatchUrl": "https://live.medicoach.co.za/match/example",
+        "medicoachMatchId": "3f9c2a4e-8b1d-4c6a-9e2f-5a7b8c9d0e1f",
+        "medicoachTournamentId": "7d2e1c4b-5a6f-4e3d-8c2b-1a0f9e8d7c6b"
       },
       "resultClearedAt": null
     }

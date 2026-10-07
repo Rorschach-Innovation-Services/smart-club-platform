@@ -46,13 +46,14 @@ const schemaFor = (file: string) =>
 describe('contract examples', () => {
   const files = readdirSync(EXAMPLES).filter((f) => f.endsWith('.json'));
 
-  test('all five shared examples are present', () => {
+  test('all six shared examples are present', () => {
     assert.deepEqual(files.sort(), [
       'changes-knockout-reschedule.json',
       'changes-live-result.json',
       'changes-manual-and-cleared.json',
       'schedule-push-request.json',
       'schedule-push-response.json',
+      'scorecard-live-match.json',
     ]);
   });
 
@@ -63,7 +64,8 @@ describe('contract examples', () => {
       assert.ok(schema, `no schema mapped for ${file}`);
       const parsed = schema.parse(raw);
       assert.deepEqual(parsed, raw);
-      assert.equal(raw.version, MEDICOACH_SYNC_VERSION);
+      // The scorecard response is pinned without a `version` field (contract §3).
+      if (!file.startsWith('scorecard-')) assert.equal(raw.version, MEDICOACH_SYNC_VERSION);
     });
   }
 
