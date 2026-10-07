@@ -10,7 +10,7 @@
  *     on drift that series is skipped with a clear "re-run" message (the others still go);
  *   - the medicoach schedule diff is original-read → written, the change this CLI made.
  */
-import type { Series } from '../types.js';
+import type { ScheduleChangeOrigin, Series } from '../types.js';
 import { recordScheduleDiff } from './schedule.js';
 
 type RepoModule = typeof import('../repo.js');
@@ -30,12 +30,12 @@ export async function writeSeriesFromSnapshot(
   tenant: string,
   original: Series | null | undefined,
   next: Series,
-  opts: { error?: (line: string) => void } = {},
+  opts: { error?: (line: string) => void; origin?: ScheduleChangeOrigin } = {},
 ): Promise<CliWriteOutcome> {
   const expected = original ? original.version : null;
   next.version = original ? (Number(original.version) || 1) + 1 : (next.version ?? 1);
   // Stamp + queue every mapped fixture whose schedule THIS run changed (Slice 4).
-  const scheduleSync = await recordScheduleDiff(repo, tenant, original, next, 'cli');
+  const scheduleSync = await recordScheduleDiff(repo, tenant, original, next, opts.origin ?? 'cli');
   try {
     await repo.putSeriesIfVersion(tenant, next, expected);
   } catch (err) {

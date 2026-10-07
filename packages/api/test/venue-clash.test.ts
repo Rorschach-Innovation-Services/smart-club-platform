@@ -10,6 +10,8 @@ import {
   formatClash,
   clashKey,
   venueAliasesFor,
+  isClashExempt,
+  introducedClashes,
   DEFAULT_VENUE_ALIASES,
 } from '../src/venue-clash.js';
 import type { Series, Club, Venue } from '../src/types.js';
@@ -263,5 +265,53 @@ describe('tenant-configured venue aliases (ADR 0014)', () => {
       clashKey(clashes[0], aliases),
       clashKey({ ...clashes[0], ground: 'Riverside Oval' }, aliases),
     );
+  });
+});
+
+describe('isClashExempt — postponed fixtures', () => {
+  test('undated postponement is exempt; a rescheduled one (originalDate) still books', () => {
+    assert.equal(isClashExempt({ date: '2026-10-11', status: 'postponed' }), true);
+    assert.equal(
+      isClashExempt({ date: '2026-10-18', status: 'postponed', originalDate: '2026-10-11' }),
+      false,
+    );
+    assert.equal(isClashExempt({ date: '2026-10-11', status: 'scheduled' }), false);
+    assert.equal(isClashExempt({ date: '2026-10-11', status: 'cancelled' }), true);
+    assert.equal(isClashExempt({ date: '2026-10-11', dateTbc: true }), true);
+    assert.equal(isClashExempt({ status: 'scheduled' }), true);
+  });
+
+  const at = (id: string, f: Record<string, unknown>) =>
+    mkSeries({
+      id,
+      name: id,
+      fixtures: [{ id: 'f1', date: '2026-10-11', time: '09:00', venueName: 'Beta Park', ...f }],
+    });
+
+  test('findClashes (release gate) ignores an undated postponement, sees a rescheduled one', () => {
+    const subject = at('s-sub', { home: 'a', away: 'b' });
+    const undated = at('s-p', { home: 'c', away: 'd', status: 'postponed' });
+    assert.deepEqual(findClashes(subject, [subject, undated], [], []), []);
+    const moved = at('s-p', {
+      home: 'c',
+      away: 'd',
+      status: 'postponed',
+      originalDate: '2026-10-04',
+    });
+    assert.equal(findClashes(subject, [subject, moved], [], []).length, 1);
+  });
+
+  test('introducedClashes (in-season + medicoach inbound gates) follow the same rule', () => {
+    const current = at('s-sub', { home: 'a', away: 'b', venueName: 'Gamma Field' });
+    const subject = at('s-sub', { home: 'a', away: 'b' }); // moves onto Beta Park 09:00
+    const undated = at('s-p', { home: 'c', away: 'd', status: 'postponed' });
+    assert.deepEqual(introducedClashes(current, subject, [current, undated], [], []), []);
+    const moved = at('s-p', {
+      home: 'c',
+      away: 'd',
+      status: 'postponed',
+      originalDate: '2026-10-04',
+    });
+    assert.equal(introducedClashes(current, subject, [current, moved], [], []).length, 1);
   });
 });

@@ -1407,7 +1407,8 @@ export interface PendingScheduleSync {
 }
 
 /** Who changed a fixture's schedule. `medicoach` = the Slice 3 inbound apply (never echoed). */
-export type ScheduleChangeOrigin = 'admin' | 'generate' | 'cli' | 'medicoach';
+/** `operator-upload` = the operator console's reminder-fixtures upload (writes like a CLI). */
+export type ScheduleChangeOrigin = 'admin' | 'generate' | 'cli' | 'medicoach' | 'operator-upload';
 
 /**
  * SYNCCONFLICT#<ref> — a medicoach schedule change held for admin review instead of applied.

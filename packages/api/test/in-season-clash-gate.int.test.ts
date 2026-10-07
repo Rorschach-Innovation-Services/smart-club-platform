@@ -203,6 +203,44 @@ describe('in-season clash gate — PATCH /series/:id', () => {
     assert.equal(after!.version, before!.version);
   });
 
+  test('a released edit onto a ground an UNDATED postponement held saves; a rescheduled one refuses', async () => {
+    await putReleased('pp-a', [
+      fixture({ id: 'f1', venueName: 'Postponed Oval', status: 'postponed' }),
+    ]);
+    await putReleased('pp-b', [
+      fixture({ id: 'f1', home: 'away-club', away: 'home-club', venueName: 'PP Elsewhere' }),
+    ]);
+    const b = await repo.getSeries('dolphins', 'pp-b');
+    const ok = await patch('pp-b', {
+      version: b!.version,
+      fixtures: [
+        fixture({ id: 'f1', home: 'away-club', away: 'home-club', venueName: 'Postponed Oval' }),
+      ],
+    });
+    assert.equal(ok.status, 200);
+
+    await putReleased('pp-c', [
+      fixture({
+        id: 'f1',
+        venueName: 'Rescheduled Oval',
+        status: 'postponed',
+        originalDate: '2026-09-20',
+      }),
+    ]);
+    await putReleased('pp-d', [
+      fixture({ id: 'f1', home: 'away-club', away: 'home-club', venueName: 'PP Elsewhere 2' }),
+    ]);
+    const d = await repo.getSeries('dolphins', 'pp-d');
+    const refused = await patch('pp-d', {
+      version: d!.version,
+      fixtures: [
+        fixture({ id: 'f1', home: 'away-club', away: 'home-club', venueName: 'Rescheduled Oval' }),
+      ],
+    });
+    assert.equal(refused.status, 409);
+    assert.equal(((await refused.json()) as { code: string }).code, 'venue_clash');
+  });
+
   test('the same clashing edit on a DRAFT series saves (no gate on drafts)', async () => {
     await putReleased('dr-a', [fixture({ id: 'f1', venueName: 'Chatsworth Oval' })]);
     await repo.putSeries(
