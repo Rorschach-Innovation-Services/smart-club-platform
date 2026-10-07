@@ -253,6 +253,42 @@ export const T20_KO_SERIES_IDS = TITANS_FIXTURE_SHEETS.filter(
 export const TITANS_LEAGUE_KEYS = [...new Set(TITANS_FIXTURE_SHEETS.map((s) => s.leagueKey))];
 
 /**
+ * Match length per league, SOURCED, never guessed. The union's own 2026-27 "Club League Entry"
+ * form template (every club's entry form; e.g. TUT's and Pretoria East's in the Oct top-up pack)
+ * labels "2nd/3rd/4th League (45 Overs)", "5th League (35 Overs)" and "Womens' League (35
+ * Overs)"; the T20 sheets are titled T20. Every other league is left unset and listed in the
+ * union report as "overs unknown" (TITANS_OVERS_UNKNOWN).
+ */
+export const TITANS_LEAGUE_OVERS: Record<string, { maxOvers: number; source: string }> = {
+  'second-league': { maxOvers: 45, source: 'entry form "2nd League (45 Overs)"' },
+  'third-league': { maxOvers: 45, source: 'entry form "3rd League (45 Overs)"' },
+  'fourth-league': { maxOvers: 45, source: 'entry form "4th League (45 Overs)"' },
+  'fifth-league': { maxOvers: 35, source: 'entry form "5th League (35 Overs)"' },
+  'womens-premier-league': { maxOvers: 35, source: `entry form "Womens' League (35 Overs)"` },
+  'mens-t20': { maxOvers: 20, source: 'sheet title (T20)' },
+  'womens-t20': { maxOvers: 20, source: 'sheet title (T20)' },
+};
+
+/** Leagues whose overs no source states: left unset, asked in the union report. */
+export const TITANS_OVERS_UNKNOWN: Array<{ leagueKey: string; why: string }> = [
+  { leagueKey: 'premier-league', why: 'the entry form gives no overs for the Premier League' },
+  { leagueKey: 'promotion-league', why: 'the entry form gives no overs for the Promotion League' },
+  {
+    leagueKey: 'sixth-league',
+    why: 'the sheet switches format mid-season ("T20s" rounds, then "30 OVERS"), and one series cannot carry both',
+  },
+  { leagueKey: 'veterans-league', why: `the entry form's "Veterans" row gives no overs` },
+  {
+    leagueKey: 'womens-junior-league',
+    why: `no source (the entry form's "Junior Girls" row gives none)`,
+  },
+  { leagueKey: 'u9', why: `the entry form's junior rows give no overs` },
+  { leagueKey: 'u11', why: `the entry form's junior rows give no overs` },
+  { leagueKey: 'u13', why: `the entry form's junior rows give no overs` },
+  { leagueKey: 'u15', why: `the entry form's junior rows give no overs` },
+];
+
+/**
  * T20 cup sides REUSE the club's existing league side ids (user decision, 7 Oct 2026): the host
  * leagues each cup borrows from, in preference order. Men's T20 → the senior men's league the
  * exact sheet name plays in this workbook; women's T20 → women's premier, else promotion.

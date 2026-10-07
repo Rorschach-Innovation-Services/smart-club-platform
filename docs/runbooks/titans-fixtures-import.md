@@ -37,6 +37,13 @@ So "drafts only" still changes club records. Take the snapshot in step 0 before 
 **08:30** and untimed senior, women's and veterans fixtures get **13:00**. Those are
 provisional (1,199 fixtures, tagged `timeSource: 'provisional'`) until the union confirms.
 
+**Overs.** Set only where a source states them: 2nd/3rd/4th League 45 and 5th League and
+Women's League 35 (the union's own "Club League Entry" form labels), the T20s 20. Premier,
+Promotion, Sixth (it switches from T20 to 30 overs mid-sheet), Veterans, Women's Junior and
+U9–U15 are left **unset** and asked in the union report ("Match length (overs) we could not
+find"). The admin console shows no overs for an unset series once the UI guard is deployed;
+before that deploy it shows "undefined ov" for those series, which is cosmetic.
+
 **Venues.** Only misspellings are merged. Distinct fields of one complex (Irene Oval vs Irene
 Country Club, Gijima Oval vs Gijima Sports Ground) stay separate, because merging them creates
 false clashes. Vets B has 18 TBC-venue fixtures, written venue-less.
@@ -251,6 +258,10 @@ It writes `titans-clubs-backup-<ts>.json` and `titans-fixtures-backup-<ts>.json`
 Done. 44 draft series written. Backup: …. Nothing is released — approve and release from the console (tick "Withhold start times").
 ```
 
+The dry run's "differs from the stored draft" check covers fixtures (dates, times, sides,
+venues) and the series-level fields the importer owns (`maxOvers`, `seriesType`, `leagueKey`,
+start/end dates).
+
 Then re-run the step 4 dry run once. Every series should say `(replaces stored v1 draft)` with
 no drift warnings, and the club sync preview should show `0 club(s) would change` (2 CONFLICTs
 still). That proves the write is stable and idempotent.
@@ -352,6 +363,9 @@ It covers:
 - **Women's League Top 6 / Bottom 6** split rounds (5 dates, 34 rows): dated but no fixtures, not
   imported.
 - **18 Vets B TBC venues**.
+- **Overs for 9 competitions** the entry form and sheets don't state (Premier, Promotion, Sixth,
+  Veterans, Women's Junior, U9–U15). The answer is a later re-import with the overs added to
+  `TITANS_LEAGUE_OVERS` in `titans-fixture-map.ts`.
 
 ## Cleanup
 

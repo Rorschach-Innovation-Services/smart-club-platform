@@ -122,6 +122,9 @@ export interface SlotFixture {
   round: number;
   home?: string;
   away?: string;
+  /** An explicit stage name the fixture was created with ("Semi-final", "Final") — wins over
+   * the round-shape inference when present. */
+  stage?: string;
 }
 
 /**
@@ -194,7 +197,8 @@ function bracketShape(fixtures: SlotFixture[]): {
  * and renders "Unknown team". A whole bracket beyond round one reads as
  * "Unknown team vs Unknown team".
  *
- * Falls back to the fixture's round number when the bracket shape can't be inferred, and
+ * A target fixture's explicit `stage` names the round when it has one; otherwise the name is
+ * inferred from the bracket shape. Falls back to the fixture's round number when the bracket shape can't be inferred, and
  * to a bare "Winner"/"Loser" when the referenced fixture is missing entirely — every
  * branch is more use than "Unknown team".
  */
@@ -210,7 +214,12 @@ export function slotRefLabel(id: string, fixtures: SlotFixture[] = []): string |
   const shape = bracketShape(fixtures);
   const inRound = fixtures.filter((f) => f?.round === target.round);
   let name: string;
-  if (target.round === shape.thirdPlaceRound) {
+  const stage = typeof target.stage === 'string' ? target.stage.trim() : '';
+  if (stage) {
+    // The fixture says what it is (an importer's sheet, a recipe's later fixture). Shape
+    // inference can't: a lone semi before a final reads as a play-in (1 ≠ 2^(2-1)).
+    name = stage;
+  } else if (target.round === shape.thirdPlaceRound) {
     name = 'Third-place playoff';
   } else if (
     // Only the FIRST round can be a play-in — 9 entrants give one preliminary before a

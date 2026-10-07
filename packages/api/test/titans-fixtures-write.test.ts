@@ -931,4 +931,21 @@ describe('review fixes', () => {
     assert.equal(again.held[0].fixtureId, 'f2');
     assert.equal(again.removedBySeries.size, 0);
   });
+
+  test('overs are sourced per league or explicitly unknown — never guessed', async () => {
+    const { TITANS_LEAGUE_OVERS, TITANS_OVERS_UNKNOWN, TITANS_LEAGUE_KEYS } =
+      await import('../src/titans-fixture-map.js');
+    const unknown = new Set(TITANS_OVERS_UNKNOWN.map((o: { leagueKey: string }) => o.leagueKey));
+    for (const k of TITANS_LEAGUE_KEYS)
+      assert.ok(
+        k in TITANS_LEAGUE_OVERS !== unknown.has(k),
+        `${k} must be either sourced or listed unknown (not both, not neither)`,
+      );
+    assert.equal(TITANS_LEAGUE_OVERS['second-league'].maxOvers, 45);
+    assert.equal(TITANS_LEAGUE_OVERS['fifth-league'].maxOvers, 35);
+    // a veterans series (unknown) carries no maxOvers at all
+    const sheet = vetsSheet();
+    const out = buildTitansSeries([sheet], wouldBeRegistry([sheet], clubsFromMap()), []);
+    assert.equal((out.built[0].series as { maxOvers?: number }).maxOvers, undefined);
+  });
 });

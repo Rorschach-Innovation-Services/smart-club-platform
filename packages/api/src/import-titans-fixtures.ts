@@ -64,6 +64,8 @@ import {
   TITANS_TENANT,
   TITANS_VENUE_ALIASES,
   VETERANS_KO_SERIES_IDS,
+  TITANS_LEAGUE_OVERS,
+  TITANS_OVERS_UNKNOWN,
   T20_HOST_LEAGUES,
   canonicalTeamName,
   provisionalSideId,
@@ -321,7 +323,11 @@ export function buildTitansSeries(
         teams: teamIds,
         participants,
         fixtures: kept,
-        ...(sheet.spec.layout === 't20' ? { seriesType: 'T20', maxOvers: 20 } : {}),
+        ...(sheet.spec.layout === 't20' ? { seriesType: 'T20' } : {}),
+        // Sourced overs only (TITANS_LEAGUE_OVERS); unknown ones stay unset and are reported.
+        ...(TITANS_LEAGUE_OVERS[leagueKey]
+          ? { maxOvers: TITANS_LEAGUE_OVERS[leagueKey].maxOvers }
+          : {}),
         kind: 'series',
         // Drafts on purpose: the admin approves + releases from the console.
         approved: false,
@@ -779,6 +785,8 @@ export interface UnionReport {
     gatePreview: TaggedClash[] | null;
   };
   womensLeagueTeams: Array<{ name: string; clubId: string; clubName: string }>;
+  /** Leagues whose match length no source states (left unset on the series). */
+  oversUnknown: Array<{ leagueKey: string; label: string; why: string }>;
   /** Live run only: registry rows no workbook fixture or club ground uses (cleanup items). */
   registryCleanup?: Array<{ id: string; name: string; homeClubIds: string[] }>;
   /** Live run only: the per-club premier/promotion placement table (risk R6). */
@@ -941,6 +949,14 @@ export function renderUnionMarkdown(r: UnionReport): string {
       L.push(`- \`${v.id}\` "${v.name}" (home club: ${v.homeClubIds.join(', ') || 'none'})`);
     L.push('');
   }
+  L.push('## 13. Match length (overs) we could not find');
+  L.push('');
+  L.push(
+    "Your league entry form gives the overs for the 2nd–4th Leagues (45), the 5th League and the Women's League (35), and the T20s are 20 overs. For these competitions we found no number, so the platform shows none until you tell us:",
+  );
+  L.push('');
+  for (const o of r.oversUnknown ?? []) L.push(`- **${o.label}**: ${o.why}. How many overs?`);
+  L.push('');
   L.push('## 10. Dates we corrected');
   L.push('');
   if (!r.dateCorrections.length) L.push('None.');
@@ -1074,6 +1090,17 @@ export function t20HostLeagues(
     const inWorkbook = seen.get(canonicalTeamName(name)) ?? new Set();
     return hosts.filter((k) => inWorkbook.has(k));
   };
+}
+
+/** Series-level fields the importer owns that storedDraftDrift (fixture-level) does not compare. */
+export function seriesFieldDrift(built: Series, stored: Series): string[] {
+  const rec = (x: Series) => x as unknown as Record<string, unknown>;
+  return (['maxOvers', 'seriesType', 'leagueKey', 'startDate', 'endDate'] as const)
+    .filter((k) => (rec(stored)[k] ?? null) !== (rec(built)[k] ?? null))
+    .map(
+      (k) =>
+        `${k} ${JSON.stringify(rec(stored)[k] ?? null)} → ${JSON.stringify(rec(built)[k] ?? null)}`,
+    );
 }
 
 /**
@@ -1831,6 +1858,10 @@ export async function runImport(args: Args) {
       ];
   for (const t of todo) console.log(`  TODO (later step): ${t}`);
 
+  console.log(
+    `\n── Overs: set for ${Object.keys(TITANS_LEAGUE_OVERS).join(', ')} (sourced); UNKNOWN (left unset, union report): ${TITANS_OVERS_UNKNOWN.map((o) => o.leagueKey).join(', ')}`,
+  );
+
   // ── Series list ──
   console.log(`\n── Series (${writeSet.length}) as DRAFTS`);
   for (const s of writeSet) {
@@ -1914,6 +1945,7 @@ export async function runImport(args: Args) {
       dateCorrections,
       clashes: { beforeHeldBack: before, afterHeldBack: after, gatePreview },
       womensLeagueTeams: womens,
+      oversUnknown: TITANS_OVERS_UNKNOWN.map((o) => ({ ...o, label: labelOf(o.leagueKey) })),
       ...(plan ? { womensPlacement: plan.womens, registryCleanup } : {}),
       todo,
     };
@@ -2002,7 +2034,7 @@ export async function runImport(args: Args) {
   for (const s of writeSet) {
     const st = storedById.get(String(s.id));
     if (!st || st.released) continue;
-    const notes = storedDraftDrift(s, st);
+    const notes = [...storedDraftDrift(s, st), ...seriesFieldDrift(s, st)];
     if (notes.length) {
       console.warn(`\n⚠ ${s.id} differs from the stored draft and WILL BE REPLACED by --confirm:`);
       for (const n of notes) console.warn(`    · ${n}`);

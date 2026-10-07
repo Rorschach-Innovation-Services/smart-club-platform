@@ -53,4 +53,40 @@ describe('group-position slot refs', () => {
     expect(slotRefLabel('win:f1', fx)).toBe('Winner of Semi-final 1');
     expect(slotRefLabel('win:f2', fx)).toBe('Winner of Semi-final 2');
   });
+
+  it("prefers the target fixture's explicit stage (a lone semi before a final is no play-in)", () => {
+    // The titans veterans playoff: 2nd v 3rd (round 1), then 1st v that winner (round 2).
+    const vets = [
+      {
+        id: 'f1',
+        round: 1,
+        home: 'pos:s-titans-veterans-league-a:2',
+        away: 'pos:s-titans-veterans-league-a:3',
+        stage: 'Semi-final',
+      },
+      {
+        id: 'f2',
+        round: 2,
+        home: 'pos:s-titans-veterans-league-a:1',
+        away: 'win:f1',
+        stage: 'Final',
+      },
+    ];
+    expect(slotRefLabel('win:f1', vets)).toBe('Winner of Semi-final');
+    // Without a stage the inference still reads it as a play-in (unchanged behaviour).
+    const bare = vets.map(({ stage: _s, ...f }) => f);
+    expect(slotRefLabel('win:f1', bare)).toBe('Winner of Preliminary round');
+  });
+
+  it('recipe stages read exactly as the inferred names did', () => {
+    const recipe = [
+      { id: 'f1', round: 1, home: 'pos:s-a-1:1', away: 'pos:s-a-2:2', stage: 'Semi-final' },
+      { id: 'f2', round: 1, home: 'pos:s-a-2:1', away: 'pos:s-a-1:2', stage: 'Semi-final' },
+      { id: 'f3', round: 2, home: 'win:f1', away: 'win:f2', stage: 'Final' },
+    ];
+    const inferred = recipe.map(({ stage: _s, ...f }) => f);
+    for (const id of ['win:f1', 'win:f2', 'win:f3'])
+      expect(slotRefLabel(id, recipe)).toBe(slotRefLabel(id, inferred));
+    expect(slotRefLabel('win:f2', recipe)).toBe('Winner of Semi-final 2');
+  });
 });
