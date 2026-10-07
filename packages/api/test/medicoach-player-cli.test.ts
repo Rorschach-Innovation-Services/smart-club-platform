@@ -8,7 +8,11 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Club, PlayerClearance, PlayerRegistration, TenantConfig } from '../src/types.js';
 import { loadPlayerSyncSnapshot } from '../src/medicoach-sync/players.js';
-import { parseArgs as parseEnqueue, planBackfill } from '../src/medicoach-sync/enqueue-players.js';
+import {
+  parseArgs as parseEnqueue,
+  planBackfill,
+  predictionEntries,
+} from '../src/medicoach-sync/enqueue-players.js';
 import {
   duplicateGroups,
   parseArgs as parseAudit,
@@ -81,6 +85,31 @@ describe('enqueue-players', () => {
       notEligible: 1,
       possibleDuplicates: 2,
     });
+  });
+});
+
+describe('enqueue-players prediction', () => {
+  test('a registration that cannot fit the contract is left out and counted per club', async () => {
+    const saved = rosters.b;
+    rosters.b = [...saved, row({ naturalKey: 'k5', clubId: 'b', dob: '14/03/2008' })];
+    try {
+      const snap = await loadPlayerSyncSnapshot(fakeRepo(), T);
+      const { entries, unfit } = predictionEntries(
+        T,
+        snap,
+        planBackfill(snap),
+        '2026-10-07T08:00:00.000Z',
+      );
+      // k1 sent; k3/k4 are possible duplicates (held, not predicted); k5 unfit.
+      assert.deepEqual(
+        entries.map((e) => e.ref),
+        [`smartclub:${T}:player:k1`],
+      );
+      assert.equal(unfit.total, 1);
+      assert.deepEqual([...unfit.byClub], [['B CC', 1]]);
+    } finally {
+      rosters.b = saved;
+    }
   });
 });
 

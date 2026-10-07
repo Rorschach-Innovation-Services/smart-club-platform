@@ -20,9 +20,13 @@
  * Output is counts only: no names, natural keys or refs (PERSONAL DATA).
  */
 import { pathToFileURL } from 'node:url';
-import { PLAYER_PUSH_MAX } from '../medicoach-sync-contract.js';
 import { medicoachSyncSecret, medicoachSyncUrl } from '../env.js';
 import { playerSyncEnabled } from './player-placement.js';
+import {
+  PLAYER_PUSH_MAX,
+  PlayerPushEntrySchema,
+  type PlayerPushEntry,
+} from '../medicoach-sync-contract.js';
 import {
   buildPlayerEntry,
   intentOf,
@@ -84,6 +88,39 @@ export function planBackfill(snap: PlayerSyncSnapshot): BackfillPlan {
   return { eligible, counts };
 }
 
+/**
+ * The prediction's wire entries: eligible people minus possible duplicates (the flush holds
+ * those as reviews), pre-validated the way the real flush validates, so one registration
+ * that cannot fit the contract never fails a whole batch. Unfit ones are counted per club —
+ * never named or keyed.
+ */
+export function predictionEntries(
+  tenant: string,
+  snap: PlayerSyncSnapshot,
+  plan: BackfillPlan,
+  changedAt: string,
+): { entries: PlayerPushEntry[]; unfit: { total: number; byClub: Map<string, number> } } {
+  const entries: PlayerPushEntry[] = [];
+  const byClub = new Map<string, number>();
+  let total = 0;
+  for (const nk of plan.eligible) {
+    const intent = intentOf(snap, nk);
+    if (intent.op === 'upsert' && possibleDuplicates(snap, nk, intent.primary).length) continue;
+    const entry = buildPlayerEntry(tenant, { naturalKey: nk, changedAt }, intent);
+    if (PlayerPushEntrySchema.safeParse(entry).success) {
+      entries.push(entry);
+      continue;
+    }
+    total++;
+    const club =
+      intent.op === 'upsert'
+        ? (snap.clubsById.get(intent.primary.clubId)?.name ?? intent.primary.clubId)
+        : 'unknown club';
+    byClub.set(club, (byClub.get(club) ?? 0) + 1);
+  }
+  return { entries, unfit: { total, byClub } };
+}
+
 async function main(): Promise<void> {
   const { tenant, confirm } = parseArgs(process.argv.slice(2));
   const repo: RepoModule = await import('../repo.js');
@@ -107,16 +144,13 @@ async function main(): Promise<void> {
       console.log('\n  MedicoachSyncUrl/Secret unset: no medicoach prediction (dry run only).');
       return;
     }
-    const at = new Date().toISOString();
-    const dups = new Set(
-      plan.eligible.filter((nk) => {
-        const i = intentOf(snap, nk);
-        return i.op === 'upsert' && possibleDuplicates(snap, nk, i.primary).length > 0;
-      }),
-    );
-    const entries = plan.eligible
-      .filter((nk) => !dups.has(nk))
-      .map((nk) => buildPlayerEntry(tenant, { naturalKey: nk, changedAt: at }, intentOf(snap, nk)));
+    const { entries, unfit } = predictionEntries(tenant, snap, plan, new Date().toISOString());
+    if (unfit.total) {
+      // The flush would hold these too ("does not fit the sync contract"); sending them in a
+      // prediction batch would fail the whole batch of 50.
+      line('not sent: registration misses a field the sync needs', unfit.total);
+      for (const [club, n] of [...unfit.byClub].sort()) line(`  … ${club}`, n);
+    }
     const statuses: Record<string, number> = {};
     const fields: Record<string, number> = {};
     let failedBatches = 0;
