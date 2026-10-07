@@ -1037,6 +1037,8 @@ export interface MedicoachSyncStatus {
   noticesFailed?: number;
   /** The player sync (ADR 0018) — counts only. */
   players?: MedicoachPlayerSyncStatus;
+  /** What needs an admin: held schedule changes, player reviews, players waiting for a team. */
+  attention?: { conflicts: number; playerReviews: number; playersParked: number; total: number };
 }
 export type MedicoachPlayerSyncStatus =
   | { enabled: false }
@@ -1044,6 +1046,8 @@ export type MedicoachPlayerSyncStatus =
       enabled: true;
       /** People waiting to be sent (not parked). */
       pending: number;
+      /** Of those, re-queued by an admin (retry / a review decision) and not sent yet. */
+      queued?: number;
       /** Waiting on a team medicoach doesn't have yet (bundle top-up), not resent every run. */
       parked: number;
       /** Failed 5+ pushes; still retried every run. */
@@ -1105,13 +1109,24 @@ export const dropMedicoachOutbox = (ref: string) =>
     body: { ref },
   });
 
+/**
+ * What a review decision did: link/create/distinct are sent to medicoach at once — `sent`,
+ * `queued` (goes out on the next sync) or `review` (medicoach needs another decision);
+ * dismiss answers `dismissed`.
+ */
+export interface MedicoachResolveResult {
+  status: 'sent' | 'queued' | 'review' | 'dismissed';
+  sent?: number;
+  queued?: number;
+  review?: number;
+}
 export const getMedicoachPlayerReviews = () =>
   request<MedicoachPlayerReview[]>('/integrations/medicoach/player-reviews');
 export const resolveMedicoachPlayerReview = (
   naturalKey: string,
   resolution: MedicoachPlayerResolution,
 ) =>
-  request<{ status: string }>(
+  request<MedicoachResolveResult>(
     `/integrations/medicoach/player-reviews/${encodeURIComponent(naturalKey)}/resolve`,
     { method: 'POST', body: resolution },
   );

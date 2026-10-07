@@ -328,6 +328,15 @@ const REVIEW_REASON: Record<api.MedicoachPlayerReview['reason'], string> = {
   'smartclub-possible-duplicate': 'Same name and date of birth under another ID here',
 };
 
+/** The toast after a review decision: what was decided, and whether it reached medicoach. */
+export function resolveToast(label: string, res: api.MedicoachResolveResult): [string, string?] {
+  if (res.status === 'dismissed') return [`${label} — nothing was sent`];
+  if (res.status === 'sent') return [`${label} — sent to medicoach`];
+  if (res.status === 'review')
+    return [`${label} — medicoach needs another decision (see the review below)`, 'warn'];
+  return [`${label} — queued, will send on the next sync`];
+}
+
 /** One held player: who, why, the candidates, and the decisions that apply. */
 function PlayerReviewCard({
   r,
@@ -382,10 +391,7 @@ function PlayerReviewCard({
                 size="sm"
                 disabled={busy !== null}
                 onClick={() =>
-                  onResolve(
-                    { action: 'link', medicoachPlayerId: c.playerId! },
-                    `Linked — it goes to medicoach on the next sync`,
-                  )
+                  onResolve({ action: 'link', medicoachPlayerId: c.playerId! }, 'Linked')
                 }
               >
                 Link to this player
@@ -406,10 +412,7 @@ function PlayerReviewCard({
             size="sm"
             disabled={busy !== null}
             onClick={() =>
-              onResolve(
-                { action: 'create', acknowledgedCandidates: ids },
-                'A new medicoach player will be created on the next sync',
-              )
+              onResolve({ action: 'create', acknowledgedCandidates: ids }, 'New player')
             }
           >
             {isBusy ? 'Saving…' : 'None of these — create new'}
@@ -419,12 +422,7 @@ function PlayerReviewCard({
             tone="ink"
             size="sm"
             disabled={busy !== null}
-            onClick={() =>
-              onResolve(
-                { action: 'distinct' },
-                'Marked as different people — both go to medicoach on the next sync',
-              )
-            }
+            onClick={() => onResolve({ action: 'distinct' }, 'Marked as different people')}
           >
             {isBusy ? 'Saving…' : 'They are different people'}
           </Btn>
@@ -433,7 +431,7 @@ function PlayerReviewCard({
           tone="outline"
           size="sm"
           disabled={busy !== null}
-          onClick={() => onResolve({ action: 'dismiss' }, 'Dismissed — nothing was sent')}
+          onClick={() => onResolve({ action: 'dismiss' }, 'Dismissed')}
         >
           Dismiss
         </Btn>
@@ -482,7 +480,12 @@ function PlayersPanel({
           <div className="mcs-stat-label">Waiting to send</div>
           <div className="mcs-stat-value">{players.pending}</div>
           <div className="ump-sub">
-            {players.stuck ? `${players.stuck} stuck` : 'nothing stuck'}
+            {[
+              players.queued ? `${players.queued} queued by you` : '',
+              players.stuck ? `${players.stuck} stuck` : '',
+            ]
+              .filter(Boolean)
+              .join(' · ') || 'nothing stuck'}
           </div>
         </div>
         <div className="mcs-stat">
@@ -498,6 +501,15 @@ function PlayersPanel({
           <div className="ump-sub">players held</div>
         </div>
       </div>
+      {(players.queued ?? 0) > 0 && (
+        <div className="mcs-note" role="status" data-testid="mcs-players-queued">
+          <Pill tone="navy" dot>
+            Queued
+          </Pill>{' '}
+          {players.queued} player(s) you retried or decided on are queued — they go out on the next
+          sync and leave this list once medicoach accepts them.
+        </div>
+      )}
       {players.parked > 0 && (
         <div className="insights-callout warn" role="note" style={{ marginBottom: 12 }}>
           <div>
@@ -559,7 +571,7 @@ function PlayersPanel({
                 run(
                   `player:${r.naturalKey}:${resolution.action}`,
                   () => api.resolveMedicoachPlayerReview(r.naturalKey, resolution),
-                  label,
+                  (res) => resolveToast(label, res as api.MedicoachResolveResult),
                   "Couldn't save the decision",
                 )
               }
@@ -619,6 +631,8 @@ export function AdminMedicoachSyncView({
   const failures = data?.outbox?.failures ?? [];
   const stuck = failures.filter((f) => f.stuck);
   const held = data?.outbox?.held ?? [];
+  const playerReviews = data?.attention?.playerReviews ?? 0;
+  const playersParked = data?.attention?.playersParked ?? 0;
   const lastFailed =
     !!health?.lastErrorAt &&
     (!health.lastSuccessAt || Date.parse(health.lastErrorAt) > Date.parse(health.lastSuccessAt));
@@ -715,8 +729,18 @@ export function AdminMedicoachSyncView({
           <div className="mcs-stats" data-testid="mcs-stats">
             <div className="mcs-stat">
               <div className="mcs-stat-label">For your review</div>
-              <div className="mcs-stat-value">{conflicts.length}</div>
-              <div className="ump-sub">medicoach changes held</div>
+              <div className="mcs-stat-value">{conflicts.length + playerReviews}</div>
+              <div className="ump-sub">
+                {playerReviews || playersParked
+                  ? [
+                      `${conflicts.length} medicoach change(s)`,
+                      playerReviews ? `${playerReviews} player(s)` : '',
+                      playersParked ? `${playersParked} waiting for a team` : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')
+                  : 'medicoach changes held'}
+              </div>
             </div>
             <div className="mcs-stat">
               <div className="mcs-stat-label">Waiting to send</div>

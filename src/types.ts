@@ -306,6 +306,8 @@ export interface TenantConfig {
   seasonLabel?: string;
   /** Per-tenant feature flags (e.g. whatsappInvites). Absent key ⇒ caller default. */
   features?: Record<string, boolean>;
+  /** Third-party integrations (operator-only). `medicoach.playerSync`: ADR 0018. */
+  integrations?: { medicoach?: { goLiveDate?: string; playerSync?: boolean } };
   submissionDeadline: string;
   /**
    * Operator-managed directory of clubs not yet on the system — feeds the

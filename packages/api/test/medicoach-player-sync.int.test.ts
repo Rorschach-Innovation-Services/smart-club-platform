@@ -319,12 +319,21 @@ describe('flush', () => {
 
     const status = (await (await call('GET', '/integrations/medicoach/status')).json()) as {
       players: { parked: number; missingTeamRefs: string[] };
+      attention: { playersParked: number; total: number };
     };
     assert.equal(status.players.parked, 1);
     assert.deepEqual(status.players.missingTeamRefs, [team('premier', 'solo')]);
+    assert.equal(status.attention.playersParked, 1);
+    assert.ok(status.attention.total >= 1);
 
     const retry = await call('POST', '/integrations/medicoach/players/retry', { scope: 'parked' });
     assert.deepEqual(await retry.json(), { requeued: 1 });
+    const queued = (await (await call('GET', '/integrations/medicoach/status')).json()) as {
+      players: { parked: number; queued: number };
+      attention: { playersParked: number };
+    };
+    assert.deepEqual([queued.players.parked, queued.players.queued], [0, 1]);
+    assert.equal(queued.attention.playersParked, 0);
     answer = () => ({ status: 'linked' });
     const third = await flush();
     assert.equal(third.counts.linked, 1);
@@ -418,14 +427,49 @@ describe('reviews', () => {
       400,
     );
     assert.equal((await call('POST', url, { action: 'distinct' })).status, 400);
+    // The decision is sent at once (only this person), not left for the cron.
+    answer = () => ({ status: 'linked' });
+    pushes.length = 0;
     const ok = await call('POST', url, { action: 'link', medicoachPlayerId: 'pl_1' });
     assert.equal(ok.status, 200);
+    assert.deepEqual(await ok.json(), { status: 'sent', sent: 1, queued: 0, review: 0 });
     assert.equal(await repo.getPlayerReview(T, p.naturalKey), null);
-
-    answer = () => ({ status: 'linked' });
-    await flush();
-    assert.deepEqual(pushes.at(-1)!.players[0].resolution, { action: 'link', playerId: 'pl_1' });
+    assert.equal(pushes.length, 1);
+    assert.deepEqual(
+      pushes[0].players.map((e) => e.ref),
+      [ref(p.naturalKey)],
+    );
+    assert.deepEqual(pushes[0].players[0].resolution, { action: 'link', playerId: 'pl_1' });
     assert.equal(await rowOf(p.naturalKey), null);
+    await clearPlayerSync();
+  });
+
+  test('a decision medicoach cannot take right now stays queued (visible) for the cron', async () => {
+    const p = mkPlayer();
+    await repo.createPlayer(T, p);
+    answer = () => ({
+      status: 'needs-review',
+      candidates: [{ playerId: 'pl_q', name: 'Q', dob: null, institutionName: null }],
+    });
+    await flush();
+    httpFail = 503;
+    const res = await call(
+      'POST',
+      `/integrations/medicoach/player-reviews/${p.naturalKey}/resolve`,
+      { action: 'create', acknowledgedCandidates: ['pl_q'] },
+    );
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { status: 'queued', sent: 0, queued: 1, review: 0 });
+    const row = await rowOf(p.naturalKey);
+    assert.ok(row?.requeuedAt, 'marked queued');
+    const status = (await (await call('GET', '/integrations/medicoach/status')).json()) as {
+      players: { queued: number };
+    };
+    assert.equal(status.players.queued, 1);
+    httpFail = null;
+    answer = () => ({ status: 'created' });
+    await flush();
+    assert.equal(await rowOf(p.naturalKey), null, 'gone once medicoach accepts it');
     await clearPlayerSync();
   });
 
@@ -484,15 +528,15 @@ describe('duplicate prevention (smart club side)', () => {
         action: 'distinct',
       },
     );
-    assert.equal(res.status, 200);
+    assert.equal(res.status, 200, await res.clone().text());
     assert.equal(await repo.getPlayerReview(T, a.naturalKey), null);
     assert.equal(
       await repo.getPlayerReview(T, b.naturalKey),
       null,
       "the other side's review settles too",
     );
-    const pushed = await flush();
-    assert.equal(pushed.counts.created, 2);
+    // Both were sent at once by the resolve itself.
+    assert.deepEqual(await res.json(), { status: 'sent', sent: 2, queued: 0, review: 0 });
     assert.deepEqual(
       pushes[0].players.map((e) => e.ref).sort(),
       [ref(a.naturalKey), ref(b.naturalKey)].sort(),

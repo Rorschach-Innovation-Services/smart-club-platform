@@ -809,6 +809,33 @@ describe('the ops digest after a sync run', () => {
     );
   });
 
+  test('with the player sync on, the digest also counts players waiting on an admin', async () => {
+    const cfg = (await repo.getTenantConfig('dolphins'))!;
+    await repo.putTenantConfig({
+      ...cfg,
+      features: { ...cfg.features, medicoachSync: true },
+      integrations: { medicoach: { ...cfg.integrations?.medicoach, playerSync: true } },
+    });
+    await repo.putPlayerReview('dolphins', {
+      naturalKey: 'nk-digest',
+      reason: 'medicoach-needs-review',
+      detectedAt: new Date().toISOString(),
+      playerName: 'Digest Person',
+      dob: null,
+      clubName: null,
+      candidates: [],
+    });
+    try {
+      page = liveResultPage('live');
+      await syncRun();
+      assert.equal(digests.length, 1);
+      assert.match(digests[0].summary, /0 failed; 1 players to review$/);
+    } finally {
+      await repo.deletePlayerReview('dolphins', 'nk-digest');
+      await repo.putTenantConfig(cfg);
+    }
+  });
+
   test('a quiet run sends nothing', async () => {
     page = liveResultPage('live');
     await syncRun();

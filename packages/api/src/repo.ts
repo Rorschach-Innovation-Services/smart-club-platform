@@ -1462,10 +1462,13 @@ export async function putPendingPlayerSync(
   tenant: string,
   naturalKey: string,
   changedAt: string,
-  opts: { resolution?: PlayerSyncResolution | null } = {},
+  opts: { resolution?: PlayerSyncResolution | null; requeued?: boolean } = {},
 ): Promise<void> {
   const c = isoInstant(changedAt);
-  const resolutionSet = opts.resolution ? ', resolution = :r' : '';
+  // An admin's action (a resolution, or `requeued`) marks the row "queued" for the panel.
+  const resolutionSet =
+    (opts.resolution ? ', resolution = :r' : '') +
+    (opts.resolution || opts.requeued ? ', requeuedAt = :c' : '');
   const resolutionRemove = opts.resolution === null ? ', resolution' : '';
   const values: Record<string, unknown> = { ':nk': naturalKey, ':c': c, ':zero': 0 };
   if (opts.resolution) values[':r'] = opts.resolution;
@@ -1642,7 +1645,7 @@ export async function parkPendingPlayerSync(
     tenant,
     naturalKey,
     changedAt,
-    'SET parked = :t, parkedAt = :at, missingTeamRefs = :m, lastAttemptAt = :at',
+    'SET parked = :t, parkedAt = :at, missingTeamRefs = :m, lastAttemptAt = :at REMOVE requeuedAt',
     { ':t': true, ':at': at, ':m': missingTeamRefs.slice(0, 20) },
   );
 }
@@ -1666,9 +1669,9 @@ export async function retryPendingPlayerSync(tenant: string, naturalKey: string)
       new UpdateCommand({
         TableName: TABLE,
         Key: pendingPlayerSyncKey(tenant, naturalKey),
-        UpdateExpression: `SET attempts = :zero REMOVE ${PLAYER_ROW_RESET}`,
+        UpdateExpression: `SET attempts = :zero, requeuedAt = :at REMOVE ${PLAYER_ROW_RESET}`,
         ConditionExpression: 'attribute_exists(pk)',
-        ExpressionAttributeValues: { ':zero': 0 },
+        ExpressionAttributeValues: { ':zero': 0, ':at': new Date().toISOString() },
       }),
     );
     return true;

@@ -19,7 +19,7 @@ vi.mock('./api', async (importActual) => {
 });
 
 import * as api from './api';
-import { AdminMedicoachSyncView } from './AdminMedicoachSync';
+import { AdminMedicoachSyncView, resolveToast } from './AdminMedicoachSync';
 import { renderWithProviders } from './test-utils';
 
 const status = (players: api.MedicoachPlayerSyncStatus): api.MedicoachSyncStatus => ({
@@ -156,6 +156,36 @@ describe('Players panel', () => {
     expect(within(list).queryByRole('button', { name: 'Link to this player' })).toBeNull();
     await userEvent.click(within(list).getByRole('button', { name: 'Dismiss' }));
     expect(api.resolveMedicoachPlayerReview).toHaveBeenCalledWith('nk-a', { action: 'dismiss' });
+  });
+
+  it('a decision says whether it was sent, queued or needs review', async () => {
+    const { onToast } = renderPage(status(on({ reviews: 1 })), [MEDICOACH_REVIEW]);
+    const list = await screen.findByTestId('mcs-player-reviews');
+    await userEvent.click(within(list).getAllByRole('button', { name: 'Link to this player' })[0]);
+    expect(onToast).toHaveBeenCalledWith('Linked — queued, will send on the next sync');
+    expect(resolveToast('Linked', { status: 'sent' })).toEqual(['Linked — sent to medicoach']);
+    expect(resolveToast('New player', { status: 'review' })[1]).toBe('warn');
+    expect(resolveToast('Dismissed', { status: 'dismissed' })).toEqual([
+      'Dismissed — nothing was sent',
+    ]);
+  });
+
+  it('players an admin re-queued stay visible as queued', async () => {
+    renderPage(status(on({ pending: 2, queued: 2 })));
+    const queued = await screen.findByTestId('mcs-players-queued');
+    expect(queued).toHaveTextContent('Queued');
+    expect(queued).toHaveTextContent('2 player(s) you retried or decided on are queued');
+    expect(within(screen.getByTestId('mcs-players')).getByText(/2 queued by you/)).toBeVisible();
+  });
+
+  it('the page header counts player reviews with the schedule changes', async () => {
+    renderPage({
+      ...status(on({ reviews: 2, parked: 1 })),
+      attention: { conflicts: 0, playerReviews: 2, playersParked: 1, total: 3 },
+    });
+    const stats = await screen.findByTestId('mcs-stats');
+    expect(within(stats).getByText('For your review').nextSibling).toHaveTextContent('2');
+    expect(stats).toHaveTextContent('2 player(s) · 1 waiting for a team');
   });
 
   it('summarises a player push in recent activity', async () => {

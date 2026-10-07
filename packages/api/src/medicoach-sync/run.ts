@@ -60,6 +60,9 @@ interface DigestCounts {
   opened: number;
   notified: number;
   failed: number;
+  /** Player-sync items waiting on an admin (ADR 0018) — ride along, never trigger a digest. */
+  playerReviews?: number;
+  playersParked?: number;
 }
 
 /**
@@ -84,9 +87,14 @@ async function sendOpsDigest(
       return;
     }
     wa = await import('../notify/whatsapp.js');
+    const playerBits = [
+      c.playerReviews ? `${c.playerReviews} players to review` : '',
+      c.playersParked ? `${c.playersParked} players waiting for a team` : '',
+    ].filter(Boolean);
     const summary =
       `${orgCopy(config).name}: ${c.resultsPulled} new results, ${c.opened} reports opened, ` +
-      `${c.notified} notices sent, ${c.failed} failed`;
+      `${c.notified} notices sent, ${c.failed} failed` +
+      (playerBits.length ? `; ${playerBits.join(', ')}` : '');
     await (deps.sendOpsDigest ?? wa.sendCaptainsReportOpsDigestWhatsApp)({
       to,
       recipientName: 'Union admin',
@@ -103,6 +111,24 @@ async function sendOpsDigest(
     await import('../instrument.js')
       .then(({ Sentry }) => Sentry.captureException(err, { tags: { job: 'ops-digest', tenant } }))
       .catch(() => {});
+  }
+}
+
+/** The player sync's admin backlog for the ops digest; empty when off or unreadable. */
+async function playerAttention(
+  tenant: string,
+  config: TenantConfig,
+  repo: TenantSyncDeps['repo'],
+): Promise<Pick<DigestCounts, 'playerReviews' | 'playersParked'>> {
+  if (!playerSyncEnabled(config)) return {};
+  try {
+    const [reviews, rows] = await Promise.all([
+      repo.listPlayerReviews(tenant),
+      repo.listPendingPlayerSync(tenant),
+    ]);
+    return { playerReviews: reviews.length, playersParked: rows.filter((r) => r.parked).length };
+  } catch {
+    return {};
   }
 }
 
@@ -206,6 +232,7 @@ export async function runTenantSync(
       opened: opened.size,
       notified: noticeCount('sent'),
       failed: noticeCount('failed'),
+      ...(await playerAttention(tenant, config, repo)),
     },
     deps,
   );

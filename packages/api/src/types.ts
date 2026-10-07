@@ -1443,6 +1443,11 @@ export interface PendingPlayerSync {
   missingTeamRefs?: string[];
   /** An admin review resolution riding on the next push. */
   resolution?: PlayerSyncResolution;
+  /**
+   * An admin re-queued this row (retry, or a review resolution): the Players panel shows it as
+   * "queued" until the push succeeds (the row is deleted) or it parks again.
+   */
+  requeuedAt?: string;
 }
 
 /** One candidate an admin must decide about. PERSONAL DATA. */

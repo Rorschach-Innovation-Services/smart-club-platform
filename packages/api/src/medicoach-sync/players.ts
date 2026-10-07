@@ -282,6 +282,11 @@ export interface PlayerFlushDeps extends PlayerPushDeps {
   log?: (line: string) => void;
   /** Rows per run (default PLAYER_FLUSH_MAX_PER_RUN). */
   maxRows?: number;
+  /**
+   * Flush ONLY these people (natural keys) — an admin's review resolution sends the affected
+   * rows at once. Parked rows are still skipped; everything else is the normal flush.
+   */
+  only?: string[];
   config?: TenantConfig | null;
 }
 
@@ -345,7 +350,9 @@ export async function flushPlayerOutbox(
   if (!playerSyncEnabled(config))
     return { status: 'disabled', pending: all.length - parked, parked, deferred: 0, counts };
   // Fresh rows before rows that keep failing, then oldest first.
+  const only = deps.only ? new Set(deps.only) : null;
   const live = all
+    .filter((r) => !only || only.has(r.naturalKey))
     .filter((r) => !r.parked)
     .sort((a, b) => a.attempts - b.attempts || a.enqueuedAt.localeCompare(b.enqueuedAt));
   if (!live.length) return { status: 'empty', pending: 0, parked, deferred: 0, counts };

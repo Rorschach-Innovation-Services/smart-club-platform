@@ -1359,6 +1359,14 @@ function Shell({
     queryFn: () => api.getPostponements(clubId),
     enabled: role === 'club' && !!clubId,
   });
+  // Medicoach sync (ADR 0016/0018): the nav badge counts what waits on an admin — held schedule
+  // changes, player reviews, players waiting for a team. Same query (and cache) as the page.
+  const medicoachStatusQuery = useQuery({
+    queryKey: qk.medicoachSync(),
+    queryFn: api.getMedicoachSyncStatus,
+    enabled: role === 'admin' && medicoachSyncOn,
+  });
+  const medicoachAttention = medicoachStatusQuery.data?.attention?.total ?? 0;
   const allPostponementsQuery = useQuery({
     queryKey: qk.allPostponements(),
     queryFn: () => api.getAllPostponements(),
@@ -2540,7 +2548,17 @@ function Shell({
           },
         ]
       : []),
-    ...(medicoachSyncOn ? [{ v: 'medicoach_sync', label: 'Medicoach sync', icon: Icon.Live }] : []),
+    ...(medicoachSyncOn
+      ? [
+          {
+            v: 'medicoach_sync',
+            label: 'Medicoach sync',
+            icon: Icon.Live,
+            num: medicoachAttention || undefined,
+            dot: medicoachAttention ? 'gold' : 'teal',
+          },
+        ]
+      : []),
     { v: 'team', label: 'Team & Access', icon: Icon.Users, num: users.length || undefined },
   ].sort((a, b) => a.label.localeCompare(b.label));
 

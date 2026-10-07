@@ -63,7 +63,7 @@ import {
 } from './medicoach-sync/series-results.js';
 import { MedicoachSyncError } from './medicoach-sync/puller.js';
 import { runTenantSync } from './medicoach-sync/run.js';
-import { playerSyncCoverageProbe } from './medicoach-sync/players.js';
+import { flushPlayerOutbox, playerSyncCoverageProbe } from './medicoach-sync/players.js';
 import { playerSyncEnabled } from './medicoach-sync/player-placement.js';
 import { explainSyncError } from './medicoach-sync/explain.js';
 import { carrySyncOwnedFields, fixtureSyncRef } from './fixture-identity.js';
@@ -5055,6 +5055,13 @@ app.get('/integrations/medicoach/status', async (c) => {
       .map((x) => conflictView(x)),
     // The player sync (ADR 0018): counts only — outbox rows hold natural keys, never shown.
     players: playersOn ? playerSyncStatus(playerRows, playerReviews.length) : { enabled: false },
+    // What needs an admin, at a glance (the nav badge + the page header read this).
+    attention: {
+      conflicts: conflicts.length,
+      playerReviews: playerReviews.length,
+      playersParked: playerRows.filter((r) => r.parked).length,
+      total: conflicts.length + playerReviews.length + playerRows.filter((r) => r.parked).length,
+    },
     pendingReports: markers.length,
     // Report notices that reached nobody (every channel failed) and are waiting on a retry.
     noticesFailed: markers.filter((m) => m.lastError?.startsWith(NOTICE_FAILED_ERROR)).length,
@@ -5250,12 +5257,15 @@ function playerSyncStatus(rows: PendingPlayerSync[], reviews: number) {
   const parked = rows.filter((r) => r.parked);
   const live = rows.filter((r) => !r.parked);
   const stuck = live.filter((r) => r.attempts >= STUCK_ATTEMPTS);
+  // Re-queued by an admin (retry / review resolution) and not sent yet.
+  const queued = live.filter((r) => !!r.requeuedAt);
   const lastError = [...stuck].sort((a, b) =>
     String(b.lastAttemptAt ?? '').localeCompare(String(a.lastAttemptAt ?? '')),
   )[0]?.lastError;
   return {
     enabled: true,
     pending: live.length,
+    queued: queued.length,
     parked: parked.length,
     stuck: stuck.length,
     reviews,
@@ -5316,6 +5326,45 @@ app.get('/integrations/medicoach/player-reviews', async (c) => {
 });
 
 /**
+ * Send the people an admin just resolved RIGHT AWAY (ADR 0018) through the normal flush,
+ * restricted to their rows — the admin sees the outcome instead of waiting for the cron. A
+ * dry run, a medicoach failure or a parked team leaves the row queued for the cron's retry
+ * (never an error to the admin). Answers per the whole set:
+ *  - `sent`: medicoach accepted every one (rows gone, no new review);
+ *  - `review`: medicoach (or the duplicate guard) needs another decision for one of them;
+ *  - `queued`: at least one is still waiting — it goes out on the next sync.
+ */
+async function deliverResolvedPlayers(
+  tenant: string,
+  config: TenantConfig,
+  naturalKeys: string[],
+): Promise<{ status: 'sent' | 'queued' | 'review'; sent: number; queued: number; review: number }> {
+  try {
+    await flushPlayerOutbox(tenant, 'manual', {
+      repo,
+      url: medicoachSyncUrl(),
+      secret: medicoachSyncSecret(),
+      config,
+      only: naturalKeys,
+    });
+  } catch (err) {
+    console.warn(
+      `[medicoach-sync] ${tenant}: immediate player send failed — ${err instanceof Error ? err.name : 'error'}; left for the next sync`,
+    );
+  }
+  let sent = 0;
+  let queued = 0;
+  let review = 0;
+  for (const nk of naturalKeys) {
+    if (await repo.getPendingPlayerSync(tenant, nk)) queued++;
+    else if (await repo.getPlayerReview(tenant, nk)) review++;
+    else sent++;
+  }
+  const status = queued ? 'queued' : review ? 'review' : 'sent';
+  return { status, sent, queued, review };
+}
+
+/**
  * Resolve a held player (ADR 0018). Actions:
  *  - `link` `{ medicoachPlayerId }` — one of the review's medicoach candidates: the next push
  *    binds this person to that player;
@@ -5366,7 +5415,7 @@ app.post('/integrations/medicoach/player-reviews/:nk/resolve', async (c) => {
       });
     }
     await repo.deletePlayerReview(tenant, nk);
-    return c.json({ status: 'queued' });
+    return c.json(await deliverResolvedPlayers(tenant, config, [nk]));
   }
   if (action === 'distinct') {
     if (review.reason !== 'smartclub-possible-duplicate')
@@ -5386,8 +5435,9 @@ app.post('/integrations/medicoach/player-reviews/:nk/resolve', async (c) => {
       )
         await repo.deletePlayerReview(tenant, other);
     }
-    await repo.recordPlayerSyncChange(tenant, [nk, ...others], { config, at });
-    return c.json({ status: 'queued' });
+    for (const x of [nk, ...others])
+      await repo.putPendingPlayerSync(tenant, x, at, { requeued: true });
+    return c.json(await deliverResolvedPlayers(tenant, config, [nk, ...others]));
   }
   throw new HttpError(400, 'action must be link, create, distinct or dismiss');
 });
