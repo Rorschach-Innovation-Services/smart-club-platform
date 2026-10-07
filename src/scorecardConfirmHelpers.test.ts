@@ -5,7 +5,6 @@ import { describe, it, expect } from 'vitest';
 import {
   FEEDBACK_MAX,
   extrasDetail,
-  extrasLine,
   fallOfWicketsLine,
   feedbackProblem,
   fmtRate,
@@ -62,6 +61,30 @@ describe('scorecard lines', () => {
     expect(inningsHint({ batters: [], bowlers: [] })).toBe('');
   });
 
+  it('stars a top scorer who was not out, retired not out included', () => {
+    const top = (howOut: string) =>
+      inningsHint({
+        batters: [
+          {
+            order: 1,
+            name: 'S. Naidoo',
+            runs: 64,
+            ballsFaced: 41,
+            fours: 0,
+            sixes: 0,
+            strikeRate: 0,
+            howOut,
+          },
+        ],
+        bowlers: [],
+      });
+    expect(top('not out')).toBe('Top score S. Naidoo 64* (41)');
+    expect(top('Not Out ')).toBe('Top score S. Naidoo 64* (41)');
+    expect(top('retired not out')).toBe('Top score S. Naidoo 64* (41)');
+    expect(top('retired hurt')).toBe('Top score S. Naidoo 64 (41)');
+    expect(top('c Pillay b Khumalo')).toBe('Top score S. Naidoo 64 (41)');
+  });
+
   it('describes the total and the extras parts', () => {
     expect(totalDetail({ wickets: 6, overs: '20.0' })).toBe('6 wkts, 20 ov');
     expect(totalDetail({ wickets: 1, overs: '12.4' })).toBe('1 wkt, 12.4 ov');
@@ -72,12 +95,12 @@ describe('scorecard lines', () => {
   });
 
   it('lists only the extras that happened', () => {
-    expect(extrasLine({ byes: 1, legByes: 0, wides: 6, noBalls: 2, penalties: 0, total: 9 })).toBe(
-      'Extras 9 (b 1, w 6, nb 2)',
-    );
-    expect(extrasLine({ byes: 0, legByes: 0, wides: 0, noBalls: 0, penalties: 0, total: 0 })).toBe(
-      'Extras 0',
-    );
+    expect(
+      extrasDetail({ byes: 1, legByes: 0, wides: 6, noBalls: 2, penalties: 1, total: 10 }),
+    ).toBe('b 1, w 6, nb 2, pen 1');
+    expect(
+      extrasDetail({ byes: 0, legByes: 0, wides: 0, noBalls: 0, penalties: 0, total: 0 }),
+    ).toBe('');
   });
 
   it('writes the fall of wickets in wicket order', () => {

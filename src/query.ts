@@ -39,6 +39,8 @@ export const qk = {
   medicoachSync: () => ['medicoach-sync', t()],
   clubCaptainsReports: (clubId: string) => ['club-captains-reports', t(), clubId],
   clubCaptainsReport: (id: string) => ['club-captains-report', t(), id],
+  // Every clubCaptainsReport entry, for invalidation; must match its first element.
+  clubCaptainsReportPrefix: () => ['club-captains-report'],
   // Global: the token names its own tenant.
   linkedCaptainsReport: (token: string) => ['captains-report-link', token],
   tenantConfig: () => ['tenant-config', t()],

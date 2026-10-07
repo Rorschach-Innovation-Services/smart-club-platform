@@ -1304,7 +1304,7 @@ export function CaptainsReportView({
   });
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: qk.clubCaptainsReports(club.id) });
-    void qc.invalidateQueries({ queryKey: ['club-captains-report'] });
+    void qc.invalidateQueries({ queryKey: qk.clubCaptainsReportPrefix() });
   };
 
   // This club's played fixtures (released series) with no report yet — the manual path.

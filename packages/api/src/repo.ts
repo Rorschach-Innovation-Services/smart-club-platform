@@ -1235,40 +1235,40 @@ export async function deleteFixtureScorecard(
 }
 
 /**
- * Which of the given fixtures have a stored scorecard row, its `available` flag and
- * `fetchedAt` — keyed `<seriesId>#<fixtureId>`. BatchGet over the exact pairs, projecting only
- * those fields (never the innings, which carry player names). Chunks of 100 run at most
- * `concurrency` at a time; UnprocessedKeys are retried, and any still unanswered after that
- * THROW rather than read as "no card" (the operator console must not mislabel a match).
+ * Which of the given fixtures have a stored scorecard row and its `available` flag — keyed
+ * `<seriesId>#<fixtureId>`. BatchGet over the exact pairs, projecting only the key fields and
+ * that flag (never the innings, which carry player names). Chunks of 100 run at most
+ * `concurrency` at a time; UnprocessedKeys are retried after a short jittered backoff, and any
+ * still unanswered after that THROW rather than read as "no card" (the operator console must
+ * not mislabel a match).
  */
 export async function getFixtureScorecardAvailability(
   tenant: string,
   pairs: Array<{ seriesId: string; fixtureId: string }>,
   concurrency = 4,
-): Promise<Map<string, { available: boolean; fetchedAt: string }>> {
-  const out = new Map<string, { available: boolean; fetchedAt: string }>();
+): Promise<Map<string, { available: boolean }>> {
+  const out = new Map<string, { available: boolean }>();
   const unique = [...new Map(pairs.map((p) => [`${p.seriesId}#${p.fixtureId}`, p])).values()];
   const chunks: Array<typeof unique> = [];
   for (let i = 0; i < unique.length; i += 100) chunks.push(unique.slice(i, i + 100));
   const runChunk = async (chunk: typeof unique) => {
     let batch = chunk.map((p) => fixtureScorecardKey(tenant, p.seriesId, p.fixtureId));
     for (let attempt = 0; attempt < 3 && batch.length; attempt++) {
+      if (attempt > 0)
+        await new Promise((r) => setTimeout(r, (50 + Math.random() * 100) * attempt));
       const res = await ddb.send(
         new BatchGetCommand({
           RequestItems: {
             [TABLE]: {
               Keys: batch,
-              ProjectionExpression: 'seriesId, fixtureId, #a, fetchedAt',
+              ProjectionExpression: 'seriesId, fixtureId, #a',
               ExpressionAttributeNames: { '#a': 'available' },
             },
           },
         }),
       );
       for (const item of res.Responses?.[TABLE] ?? [])
-        out.set(`${item.seriesId}#${item.fixtureId}`, {
-          available: item.available === true,
-          fetchedAt: String(item.fetchedAt ?? ''),
-        });
+        out.set(`${item.seriesId}#${item.fixtureId}`, { available: item.available === true });
       batch = (res.UnprocessedKeys?.[TABLE]?.Keys ?? []) as typeof batch;
     }
     if (batch.length)

@@ -21,7 +21,7 @@ export function inningsHeading(
 
 /**
  * The innings' one-line hint under its summary: the top scorer (most runs, then fewest balls;
- * `*` when not out) and the best bowling (most wickets, then fewest runs). Either half is left
+ * `*` when not out, retired not out included) and the best bowling (most wickets, then fewest runs). Either half is left
  * out when there is no one to name; empty when neither is.
  */
 export function inningsHint(inn: Pick<InningsScorecard, 'batters' | 'bowlers'>): string {
@@ -34,7 +34,7 @@ export function inningsHint(inn: Pick<InningsScorecard, 'batters' | 'bowlers'>):
   const parts: string[] = [];
   if (bat)
     parts.push(
-      `Top score ${bat.name} ${bat.runs}${/^not out$/i.test(bat.howOut.trim()) ? '*' : ''} (${bat.ballsFaced})`,
+      `Top score ${bat.name} ${bat.runs}${/\bnot out$/i.test(bat.howOut.trim()) ? '*' : ''} (${bat.ballsFaced})`,
     );
   if (bowl) parts.push(`Best bowling ${bowl.name} ${bowl.wickets}/${bowl.runsConceded}`);
   return parts.join(' · ');
@@ -54,12 +54,6 @@ export function extrasDetail(e: InningsScorecard['extras']): string {
     .filter(([, n]) => n > 0)
     .map(([k, n]) => `${k} ${n}`)
     .join(', ');
-}
-
-/** "Extras 12 (b 1, lb 2, w 6, nb 2, pen 1)" — zero parts left out; "Extras 0" when none. */
-export function extrasLine(e: InningsScorecard['extras']): string {
-  const detail = extrasDetail(e);
-  return detail ? `Extras ${e.total} (${detail})` : `Extras ${e.total}`;
 }
 
 /** "6 wkts, 20 ov" — "all out" at ten wickets, "1 wkt" for one. */
