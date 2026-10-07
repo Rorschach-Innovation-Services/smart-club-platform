@@ -32,6 +32,7 @@ vi.mock('./pathways-data', async () => {
 });
 
 import { PathwaysPage } from './pathways-page';
+import { ResultsScouting } from './results-scouting';
 import { qk } from './query';
 import { renderWithProviders } from './test-utils';
 
@@ -151,5 +152,56 @@ describe('Pathways → Route to professional', () => {
       'row',
     );
     for (const r of rows.slice(1)) expect(within(r).getAllByText('Pro').length).toBeGreaterThan(0);
+  });
+});
+
+describe('Schools → school players', () => {
+  const renderSchools = (q = '') =>
+    renderWithProviders(
+      <MemoryRouter initialEntries={[`/admin/scouting?view=schools${q}`]}>
+        <ResultsScouting site="school" />
+      </MemoryRouter>,
+      { seed: [[qk.proMatches(), []]] },
+    );
+
+  it('puts school players on the Overview, not just schools', () => {
+    renderSchools();
+    expect(screen.getByText('School players to watch')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /All school players/ })).toBeTruthy();
+  });
+
+  it('opens Leaderboards on the school players, with their school, and the schools behind a switch', async () => {
+    const user = userEvent.setup();
+    renderSchools('&pwtab=leaders');
+    const table = screen.getByRole('table', { name: 'Players' });
+    expect(within(table).getByRole('columnheader', { name: 'School' })).toBeTruthy();
+    const body = within(table).getAllByRole('row').slice(1);
+    expect(body.length).toBeGreaterThan(5);
+    // Only school games count: no club or franchise team appears.
+    for (const r of body) expect(within(r).queryByText(/^(Riverside|Highveld Hawks)$/)).toBeNull();
+    await user.click(screen.getByRole('tab', { name: 'Schools' }));
+    expect(screen.queryByRole('table', { name: 'Players' })).toBeNull();
+    expect(screen.getByRole('tab', { name: 'School players' })).toBeTruthy();
+  });
+
+  it('narrows to one school, and opens a player', async () => {
+    const user = userEvent.setup();
+    renderSchools('&pwtab=leaders');
+    await user.selectOptions(screen.getByLabelText('Players from school'), 'Hillcrest College');
+    const rows = within(screen.getByRole('table', { name: 'Players' }))
+      .getAllByRole('row')
+      .slice(1);
+    expect(rows.length).toBeGreaterThan(0);
+    await user.click(rows[0]);
+    expect(screen.getByRole('table', { name: /games by season and setting/ })).toBeTruthy();
+  });
+
+  it('lists a school’s players on its card', async () => {
+    const user = userEvent.setup();
+    renderSchools('&pwtab=teams');
+    const row = screen.getAllByRole('row').find((r) => /Hillcrest/.test(r.textContent ?? ''));
+    expect(row).toBeTruthy();
+    await user.click(row as HTMLElement);
+    expect(await screen.findByRole('table', { name: 'Hillcrest College players' })).toBeTruthy();
   });
 });

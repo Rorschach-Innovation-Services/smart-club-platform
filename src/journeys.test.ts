@@ -17,6 +17,8 @@ import {
   quantile,
   rungOf,
   routesToPro,
+  schoolOnly,
+  teamsOf,
   schoolOrigins,
   seasonsOf,
   strikeRate,
@@ -112,6 +114,40 @@ describe('a journey', () => {
     const n = player('n', [row({ season: 2025 })]);
     expect(journeyOf(a, 2025).status).toBe('active');
     expect(journeyOf(n, 2025).status).toBe('new');
+  });
+});
+
+describe('school players', () => {
+  it('keeps only school games, and drops players who never played for a school', () => {
+    const a = player('a', [
+      row({ season: 2022 }),
+      row({ season: 2023, setting: 'club', team: 'Park CC' }),
+    ]);
+    const b = player('b', [row({ season: 2023, setting: 'club', team: 'Park CC' })]);
+    const out = schoolOnly([a, b]);
+    expect(out.map((p) => p.id)).toEqual(['a']);
+    expect(out[0].rows.every((r) => r.setting === 'school')).toBe(true);
+    expect(a.rows).toHaveLength(2);
+  });
+
+  it('lists the teams a line was played for, oldest first', () => {
+    expect(
+      teamsOf([row({ season: 2024, team: 'High' }), row({ season: 2021, team: 'Primary' })]),
+    ).toEqual(['Primary', 'High']);
+  });
+
+  it('puts the invented players in the same schools as the invented results', async () => {
+    // The sample export itself, not whatever results are loaded on this machine.
+    const { parseResults } = await import('./pathways');
+    const { SAMPLE_RESULTS_CSV } = await import('./pathways-sample');
+    const results = new Set(
+      parseResults(SAMPLE_RESULTS_CSV)
+        .filter((m) => m.site === 'school')
+        .flatMap((m) => m.sides.map((s) => s.club)),
+    );
+    const schools = new Set(schoolOnly(samplePlayers()).flatMap((p) => teamsOf(p.rows)));
+    expect(schools.size).toBe(8);
+    for (const s of schools) expect(results.has(s)).toBe(true);
   });
 });
 

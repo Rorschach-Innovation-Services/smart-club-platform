@@ -393,6 +393,19 @@ export function improversAcross(bs: BracketBoard[], disc: Disc, minGain = 30): C
   return out.sort((a, b) => b.gain - a.gain);
 }
 
+/** The same players, keeping only their school games (and dropping anyone with none). */
+export function schoolOnly(players: JourneyPlayer[]): JourneyPlayer[] {
+  return players.flatMap((p) => {
+    const rows = p.rows.filter((r) => r.setting === 'school');
+    return rows.length ? [{ ...p, rows }] : [];
+  });
+}
+
+/** The teams a line was played for, in the order first seen: "Northgate Prep, Hillcrest College". */
+export const teamsOf = (rows: SeasonRow[]) => [
+  ...new Set([...rows].sort((a, b) => a.season - b.season).map((r) => r.team)),
+];
+
 /* ─── Journeys: who is where, who came in, who left ─── */
 
 export type Status = 'active' | 'new' | 'exited';

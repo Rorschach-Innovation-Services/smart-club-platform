@@ -141,6 +141,17 @@ Only what the data says is shown: "left the data" means no games recorded since 
 season, which may mean they stopped or moved to cricket that isn't recorded. **Location is not in
 yet.**
 
+**School players in the Schools tab** (`?view=schools`). The same player data, school games only,
+so Schools is about players first: the Overview has "School players to watch" (the school
+cricketers who stand out at their age bracket, with the eye); Leaderboards opens on a player
+leaderboard (school, age group, balls faced, average, median, rating; a school filter; click a
+player for their journey and every innings) with the schools' own table behind a switch; a
+school's card under Teams lists its players. A school player is rated only against school players
+of the same age group. `schoolOnly` and `teamsOf` (`src/journeys.ts`) do the narrowing; the page
+pieces are `PlayerPerformance({ scope: 'school' })`, `SchoolPlayersGlance` and `SchoolRoster` in
+`src/journeys-page.tsx`. The invented players attend the same invented schools as the sample
+results (three primaries to U13, five high schools after).
+
 **The data.** `src/journeys-data.ts` reads `src/scouting-local/journeys*.ts` (git-ignored), each
 exporting `JOURNEY_PLAYERS: JourneyPlayer[]`:
 
@@ -150,7 +161,7 @@ exporting `JOURNEY_PLAYERS: JourneyPlayer[]`:
            format, games, bat: [{ r, b, out }], bowl: [{ b, r, w }] }] }
 ```
 
-with no such file it shows 221 **invented** players (eight schools, five clubs, one franchise,
+with no such file it shows 245 **invented** players (eight schools, six clubs, one franchise,
 2016–2026) and says so. The sample is seeded, so the pages and the tests are stable. Turning real
 records into this shape (an upload, or a reader for the union's scorecards) is the open piece; see
 _Open points_.

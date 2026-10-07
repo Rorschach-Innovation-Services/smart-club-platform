@@ -13,6 +13,7 @@ import { useSearchParams } from 'react-router-dom';
 import { KPI, Pill, ScrollX } from './atoms';
 import {
   BANDS,
+  BRACKETS,
   SETTING_LABEL,
   SETTINGS,
   average,
@@ -29,10 +30,13 @@ import {
   medianScore,
   rungOf,
   routesToPro,
+  schoolOnly,
   schoolOrigins,
+  teamsOf,
   seasonsOf,
   settingMix,
   strikeRate,
+  tally,
   type BracketBoard,
   type BracketLine,
   type Disc,
@@ -133,9 +137,21 @@ const STATUS_TONE = { active: 'teal', new: 'navy', exited: 'coral' } as const;
 
 /* ═══════════════════════════ Players ═══════════════════════════ */
 
-export function PlayerPerformance() {
-  const { players, seasons, latest } = useJourneyData();
+export function PlayerPerformance({ scope = 'all' }: { scope?: 'all' | 'school' } = {}) {
+  const data = useJourneyData();
+  const { seasons, latest } = data;
+  // Schools: only school games count, so a school player is rated against school peers.
+  const players = useMemo(
+    () => (scope === 'school' ? schoolOnly(data.players) : data.players),
+    [data.players, scope],
+  );
+  const schoolNames = useMemo(
+    () => (scope === 'school' ? [...new Set(players.flatMap((p) => teamsOf(p.rows)))].sort() : []),
+    [players, scope],
+  );
   const { get, set } = useParam();
+  const schoolSel = scope === 'school' && schoolNames.includes(get('jsc')) ? get('jsc') : '';
+  const inSchool = (l: BracketLine) => !schoolSel || l.rows.some((r) => r.team === schoolSel);
   const watch = useWatchlist();
   const [all, setAll] = useState(false);
   const gender: Gender = get('jg') === 'women' ? 'women' : 'men';
@@ -155,8 +171,13 @@ export function PlayerPerformance() {
   const pctOf = (l: BracketLine) => (disc === 'bat' ? l.batPct : l.bowlPct);
   const isOut = (l: BracketLine) => (disc === 'bat' ? l.batOutlier : l.bowlOutlier);
   const inView = useMemo(
-    () => bs.filter((b) => bracket === 'all' || b.bracket === bracket).flatMap((b) => b.lines),
-    [bs, bracket],
+    () =>
+      bs
+        .filter((b) => bracket === 'all' || b.bracket === bracket)
+        .flatMap((b) => b.lines)
+        .filter(inSchool),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [bs, bracket, schoolSel],
   );
   const shown = useMemo(
     () =>
@@ -182,7 +203,7 @@ export function PlayerPerformance() {
     label: b.bracket,
     sub: `${(disc === 'bat' ? b.bat?.n : b.bowl?.n) ?? 0} rated`,
     spread: disc === 'bat' ? b.bat : b.bowl,
-    points: b.lines.flatMap((l) => {
+    points: b.lines.filter(inSchool).flatMap((l) => {
       const v = disc === 'bat' ? average(l.t) : economy(l.t);
       if (v === null || pctOf(l) === null) return [];
       return [
@@ -250,6 +271,22 @@ export function PlayerPerformance() {
             </option>
           ))}
         </select>
+        {scope === 'school' && (
+          <select
+            className="field-select"
+            aria-label="Players from school"
+            value={schoolSel}
+            onChange={(e) => set({ jsc: e.target.value || null })}
+            style={{ maxWidth: 190 }}
+          >
+            <option value="">Every school</option>
+            {schoolNames.map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+        )}
         <input
           className="field-input"
           type="search"
@@ -422,6 +459,7 @@ export function PlayerPerformance() {
                 {disc === 'bat' ? (
                   <tr>
                     <th>Player</th>
+                    <th>{scope === 'school' ? 'School' : 'Team'}</th>
                     <th>Age group</th>
                     <th className="num hide-narrow">Seasons</th>
                     <th className="num">Games</th>
@@ -437,6 +475,7 @@ export function PlayerPerformance() {
                 ) : (
                   <tr>
                     <th>Player</th>
+                    <th>{scope === 'school' ? 'School' : 'Team'}</th>
                     <th>Age group</th>
                     <th className="num hide-narrow">Seasons</th>
                     <th className="num">Games</th>
@@ -462,6 +501,7 @@ export function PlayerPerformance() {
                       <td>
                         <strong>{l.player.name}</strong>
                       </td>
+                      <td>{teamsOf(l.rows).slice(-1)[0]}</td>
                       <td>{l.bracket}</td>
                       <td className="num hide-narrow">{l.seasons.length}</td>
                       <td className="num">{l.t.games}</td>
@@ -518,6 +558,157 @@ export function PlayerPerformance() {
   );
 }
 
+/* ═══════════════════════ School players inside the Schools tab ═══════════════════════ */
+
+/** Who to look at first: the school players who stand out at their age bracket. */
+export function SchoolPlayersGlance({ open }: { open: (id?: string) => void }) {
+  const data = useJourneyData();
+  const watch = useWatchlist();
+  const players = useMemo(() => schoolOnly(data.players), [data.players]);
+  const view = useMemo(() => {
+    const gender: Gender = 'men';
+    const fmt = formatsOf(players, gender).includes('T20') ? 'T20' : formatsOf(players, gender)[0];
+    const bs = fmt ? boards(players, fmt, gender) : [];
+    const lines = bs.flatMap((b) => b.lines);
+    return {
+      fmt,
+      n: new Set(players.map((p) => p.id)).size,
+      rated: new Set(
+        lines.filter((l) => l.batPct !== null || l.bowlPct !== null).map((l) => l.player.id),
+      ).size,
+      bat: lines
+        .filter((l) => l.batOutlier)
+        .sort((a, b) => (b.batPct ?? 0) - (a.batPct ?? 0))
+        .slice(0, 5),
+      bowl: lines
+        .filter((l) => l.bowlOutlier)
+        .sort((a, b) => (b.bowlPct ?? 0) - (a.bowlPct ?? 0))
+        .slice(0, 4),
+    };
+  }, [players]);
+  return (
+    <Figure
+      title="School players to watch"
+      sub={`Players, not schools: the school cricketers who stand out at their age bracket (${view.fmt ?? '—'}, boys) · rated against school players of the same age group`}
+      aside={
+        <button type="button" className="pro-link" onClick={() => open()}>
+          All school players →
+        </button>
+      }
+    >
+      <SampleNote />
+      <div className="kpi-strip sc-kpis">
+        <KPI label="School players" num={view.n} sub="with a recorded school game" />
+        <KPI label="Rated" num={view.rated} sub="enough balls to rate fairly" />
+        <KPI
+          label="Batting outliers"
+          num={view.bat.length ? `${view.bat.length}+` : 0}
+          sub="top tenth, and quick"
+        />
+        <KPI
+          label="Bowling outliers"
+          num={view.bowl.length ? `${view.bowl.length}+` : 0}
+          sub="top tenth, and taking wickets"
+        />
+      </div>
+      <div className="pw-grid-2">
+        <div>
+          <div className="pro-mini-title">Batters</div>
+          <PlayerList
+            lines={view.bat}
+            disc="bat"
+            watch={watch}
+            pick={(id) => open(id)}
+            empty="No batting outliers yet."
+          />
+        </div>
+        <div>
+          <div className="pro-mini-title">Bowlers</div>
+          <PlayerList
+            lines={view.bowl}
+            disc="bowl"
+            watch={watch}
+            pick={(id) => open(id)}
+            empty="No bowling outliers yet."
+          />
+        </div>
+      </div>
+    </Figure>
+  );
+}
+
+/** The players a school has had in the data: years, age groups, games, balls faced and bowled. */
+export function SchoolRoster({ school, open }: { school: string; open: (id: string) => void }) {
+  const data = useJourneyData();
+  const watch = useWatchlist();
+  const rows = useMemo(
+    () =>
+      schoolOnly(data.players)
+        .map((p) => {
+          const mine = p.rows.filter((r) => r.team.toLowerCase() === school.toLowerCase());
+          return { p, mine, t: tally(mine) };
+        })
+        .filter((x) => x.mine.length)
+        .sort((a, b) => b.t.balls + b.t.bBalls - (a.t.balls + a.t.bBalls)),
+    [data.players, school],
+  );
+  if (!rows.length) return null;
+  return (
+    <>
+      <div className="pro-mini-title">Players ({rows.length})</div>
+      <div className="tbl-w">
+        <ScrollX label="School players">
+          <table className="tbl sc-tbl pw-ladder jn-tbl" aria-label={`${school} players`}>
+            <thead>
+              <tr>
+                <th>Player</th>
+                <th>Years</th>
+                <th>Age groups</th>
+                <th className="num">Games</th>
+                <th className="num">Balls faced</th>
+                <th className="num">Runs</th>
+                <th className="num">Overs</th>
+                <th className="num">Wkts</th>
+                <th aria-label="Watch" />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.slice(0, 40).map(({ p, mine, t }) => {
+                const yrs = mine.map((r) => r.season);
+                const ages = mine.map((r) => rungOf(r.bracket)).sort((a, b) => a - b);
+                return (
+                  <tr key={p.id} className="pick" onClick={() => open(p.id)}>
+                    <td>
+                      <strong>{p.name}</strong>
+                    </td>
+                    <td>
+                      {Math.min(...yrs)}–{Math.max(...yrs)}
+                    </td>
+                    <td>
+                      {BRACKETS[ages[0]]}
+                      {ages[ages.length - 1] !== ages[0]
+                        ? `–${BRACKETS[ages[ages.length - 1]]}`
+                        : ''}
+                    </td>
+                    <td className="num">{t.games}</td>
+                    <td className="num">{t.balls.toLocaleString()}</td>
+                    <td className="num">{t.runs.toLocaleString()}</td>
+                    <td className="num">{t.bBalls ? overs(t.bBalls) : '–'}</td>
+                    <td className="num">{t.bBalls ? t.wkts : '–'}</td>
+                    <td onClick={(e) => e.stopPropagation()}>
+                      <WatchButton player={watchId(p)} watch={watch} compact />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </ScrollX>
+      </div>
+    </>
+  );
+}
+
 function PlayerList({
   lines,
   disc,
@@ -539,7 +730,9 @@ function PlayerList({
           <button type="button" className="jn-name" onClick={() => pick(l.player.id)}>
             {l.player.name}
           </button>
-          <span className="jn-sub">{l.bracket}</span>
+          <span className="jn-sub">
+            {l.bracket} · {teamsOf(l.rows).slice(-1)[0]}
+          </span>
           <span className="jn-gain">
             {disc === 'bat'
               ? `avg ${f1(average(l.t))} · SR ${f0(strikeRate(l.t))}`

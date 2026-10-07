@@ -3,7 +3,7 @@
  * own records are loaded. Every name, school, club and number here is made up; nothing is taken
  * from a real player. Deterministic (a seeded generator), so the pages and tests are stable.
  *
- * The invented world: eight schools and five clubs in the Highveld, one franchise (the Hawks),
+ * The invented world: eight schools (three primary, five high) and six clubs in the Highveld, one franchise (the Hawks),
  * eleven seasons (2016–2026), players born 1998–2016. Players are only recorded from 2016, so
  * the oldest cohorts appear mid-way up the ladder and the youngest only at the bottom — exactly
  * the shape real data has before it has run for a decade. Talent, a yearly growth rate (a few
@@ -12,17 +12,18 @@
  */
 import type { JourneyPlayer, SeasonRow, Innings, Spell, Bracket, Format, Gender } from './journeys';
 
+/** The same invented schools as the sample results export: primaries to U13, high schools after. */
 export const SAMPLE_SCHOOLS = [
-  { name: 'Hawthorn College', weight: 1.6 },
-  { name: "St Aldric's", weight: 1.5 },
-  { name: 'Bluegum Ridge', weight: 1.1 },
-  { name: 'Eastgate Academy', weight: 1 },
-  { name: 'Marlow Park', weight: 1 },
-  { name: 'Northvale College', weight: 0.9 },
-  { name: 'Cedar Hill', weight: 0.7 },
-  { name: 'Sunridge High', weight: 0.6 },
-];
-const CLUBS = ['Riverside CC', 'Highveld CC', 'Westend CC', 'Parkview CC', 'Lakeside CC'];
+  { name: 'Northgate Prep', phase: 'primary', weight: 1.4 },
+  { name: 'Lakeside Primary', phase: 'primary', weight: 1 },
+  { name: 'Brookfield Prep', phase: 'primary', weight: 1.1 },
+  { name: 'Hillcrest College', phase: 'high', weight: 1.6 },
+  { name: 'Summit College', phase: 'high', weight: 1.5 },
+  { name: 'Valley High', phase: 'high', weight: 1 },
+  { name: 'Ridgeway High', phase: 'high', weight: 0.9 },
+  { name: 'Stonebridge High', phase: 'high', weight: 0.7 },
+] as const;
+const CLUBS = ['Riverside', 'Old Summit', 'Westvale', 'Meadow Park', 'Granite City', 'Fernhill'];
 const FRANCHISE = 'Highveld Hawks';
 
 const BOYS = [
@@ -240,11 +241,12 @@ function build(): JourneyPlayer[] {
     } while (p > L && k < 20);
     return k - 1;
   };
-  const weighted = () => {
-    const total = SAMPLE_SCHOOLS.reduce((a, s) => a + s.weight, 0);
+  const weighted = (phase: 'primary' | 'high') => {
+    const pool = SAMPLE_SCHOOLS.filter((s) => s.phase === phase);
+    const total = pool.reduce((a, s) => a + s.weight, 0);
     let x = rand() * total;
-    for (const s of SAMPLE_SCHOOLS) if ((x -= s.weight) <= 0) return s.name;
-    return SAMPLE_SCHOOLS[0].name;
+    for (const s of pool) if ((x -= s.weight) <= 0) return s.name;
+    return pool[0].name;
   };
 
   const used = new Set<string>();
@@ -338,7 +340,8 @@ function build(): JourneyPlayer[] {
         growth: rand() < 0.1 ? 0.16 + rand() * 0.08 : norm() * 0.07,
         role,
       };
-      const school = weighted();
+      const primary = weighted('primary');
+      const high = weighted('high');
       const club = pick(CLUBS);
       const entry =
         gender === 'men'
@@ -400,7 +403,7 @@ function build(): JourneyPlayer[] {
             team(
               p,
               talent,
-              { season, setting: 'school', team: school, level, bracket },
+              { season, setting: 'school', team: age <= 12 ? primary : high, level, bracket },
               a0,
               age,
               6 + Math.floor(rand() * 7),

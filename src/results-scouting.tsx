@@ -6,7 +6,7 @@
  * Scouting → Pathways → Pyramid & leagues (the whole pyramid). Everything is a graph behind one
  * filter bar; the drill-downs live in the URL and the shortlist in the browser.
  */
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { KPI, Pill } from './atoms';
 import {
@@ -35,6 +35,7 @@ import {
   type Site,
   type Tier,
 } from './pathways';
+import { PlayerPerformance, SchoolPlayersGlance, SchoolRoster } from './journeys-page';
 import { PATHWAYS_IS_SAMPLE, PATH_MATCHES } from './pathways-data';
 import { Figure, HeatGrid, Pyramid, WeekColumns, type PyramidRow } from './pathways-charts';
 import { useProMatches } from './pro-library';
@@ -384,8 +385,21 @@ export function ResultsScouting({ site }: { site?: Site } = {}) {
             pickComp={(c) => set({ comp: c })}
           />
         ))}
+      {tab === 'overview' && site === 'school' && !comp && (
+        <SchoolPlayersGlance open={(id) => set({ pwtab: 'leaders', lb: null, jp: id ?? null })} />
+      )}
       {tab === 'matches' && <MatchesView ms={ms} />}
-      {tab === 'leaders' && <LeaderboardsView ms={ms} tracked={tracked} openClub={openClub} />}
+      {tab === 'leaders' &&
+        (site === 'school' ? (
+          <SchoolLeaders
+            mode={get('lb') === 'schools' ? 'schools' : 'players'}
+            setMode={(m) => set({ lb: m === 'players' ? null : m })}
+          >
+            <LeaderboardsView ms={ms} tracked={tracked} openClub={openClub} />
+          </SchoolLeaders>
+        ) : (
+          <LeaderboardsView ms={ms} tracked={tracked} openClub={openClub} />
+        ))}
       {tab === 'map' && (
         <PerformanceMapView
           ms={ms}
@@ -397,10 +411,56 @@ export function ResultsScouting({ site }: { site?: Site } = {}) {
         />
       )}
       {tab === 'teams' && (
-        <TeamsView ms={ms} club={club} tracked={tracked} pick={(k) => set({ club: k })} />
+        <TeamsView
+          ms={ms}
+          club={club}
+          tracked={tracked}
+          pick={(k) => set({ club: k })}
+          openPlayer={
+            site === 'school' ? (id) => set({ pwtab: 'leaders', lb: null, jp: id }) : undefined
+          }
+        />
       )}
       {tab === 'shortlist' && <ShortlistView ms={all} tracked={tracked} openClub={openClub} />}
     </div>
+  );
+}
+
+/** Schools → Leaderboards: the school players first, the schools' own table behind a switch. */
+function SchoolLeaders({
+  mode,
+  setMode,
+  children,
+}: {
+  mode: 'players' | 'schools';
+  setMode: (m: 'players' | 'schools') => void;
+  children: ReactNode;
+}) {
+  return (
+    <>
+      <div className="ml-bar">
+        <div className="ml-seg" role="tablist" aria-label="Leaderboard of">
+          {(
+            [
+              ['players', 'School players'],
+              ['schools', 'Schools'],
+            ] as const
+          ).map(([k, label]) => (
+            <button
+              key={k}
+              type="button"
+              role="tab"
+              aria-selected={mode === k}
+              className={mode === k ? 'on' : ''}
+              onClick={() => setMode(k)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {mode === 'players' ? <PlayerPerformance scope="school" /> : children}
+    </>
   );
 }
 
@@ -1193,11 +1253,13 @@ function TeamsView({
   club,
   tracked,
   pick,
+  openPlayer,
 }: {
   ms: PathMatch[];
   club: string | null;
   tracked: Tracked;
   pick: (c: string | null) => void;
+  openPlayer?: (id: string) => void;
 }) {
   const rows = useMemo(() => pipeline(ms).filter((p) => p.matches >= 3), [ms]);
   const ages = AGES.filter((a) => ms.some((m) => m.age === a));
@@ -1228,7 +1290,15 @@ function TeamsView({
   const breadth4 = rows.filter((p) => p.breadth >= 4).length;
   return (
     <>
-      {sel && <ClubCard p={sel} ms={ms} tracked={tracked} close={() => pick(null)} />}
+      {sel && (
+        <ClubCard
+          p={sel}
+          ms={ms}
+          tracked={tracked}
+          close={() => pick(null)}
+          openPlayer={openPlayer}
+        />
+      )}
       <div className="kpi-strip sc-kpis">
         <KPI label="Clubs & schools" num={rows.length} sub="with 3+ matches" />
         <KPI label="Fielding 4+ age rungs" num={breadth4} sub="the ladder in one place" />
@@ -1312,11 +1382,13 @@ function ClubCard({
   ms,
   tracked,
   close,
+  openPlayer,
 }: {
   p: PipelineRow;
   ms: PathMatch[];
   tracked: Tracked;
   close: () => void;
+  openPlayer?: (id: string) => void;
 }) {
   const mine = useMemo(
     () => ms.filter((m) => m.sides.some((s) => s.clubKey === p.clubKey)),
@@ -1414,6 +1486,7 @@ function ClubCard({
           </tbody>
         </table>
       </div>
+      {p.site === 'school' && openPlayer && <SchoolRoster school={p.club} open={openPlayer} />}
     </Figure>
   );
 }
