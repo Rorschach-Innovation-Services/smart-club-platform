@@ -21,7 +21,6 @@ const {
   scorecardConfirmDueParams,
   sendCaptainsReportOpsDigestWhatsApp,
   sendScorecardConfirmDueWhatsApp,
-  WhatsAppTemplatePendingError,
   urlButtonComponent,
 } = await import('../src/notify/whatsapp.js');
 const { WHATSAPP_TEMPLATES } = await import('../src/notify/whatsapp-templates.js');
@@ -261,17 +260,15 @@ describe('scorecard confirmation digest template', () => {
     );
   });
 
-  test('while pending in Meta the sender refuses (skipped as template-pending, not sent)', async () => {
-    assert.equal(due.status, 'pending');
-    await assert.rejects(
-      sendScorecardConfirmDueWhatsApp({
-        to: '+27000000000',
-        chairName: 'A',
-        clubName: 'B',
-        weekLabel: 'C',
-        token: 'tok.sig',
-      }),
-      WhatsAppTemplatePendingError,
-    );
+  test('the sender sends once registered (dry-run without credentials)', async () => {
+    assert.equal(due.status, 'registered');
+    const { messageId } = await sendScorecardConfirmDueWhatsApp({
+      to: '+27000000000',
+      chairName: 'A',
+      clubName: 'B',
+      weekLabel: 'C',
+      token: 'tok.sig',
+    });
+    assert.match(messageId, /^dry-run-/);
   });
 });

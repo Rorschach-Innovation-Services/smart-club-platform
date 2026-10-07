@@ -248,8 +248,7 @@ export const WHATSAPP_TEMPLATES = {
    *
    * NOT yet created in Meta. Like `captainsReportDue`, this status IS read at runtime: the
    * sender throws `WhatsAppTemplatePendingError` until it is "registered", so the channel is
-   * skipped as `template-pending` (the email still goes). Create it under this name with the
-   * body and button below, then flip to "registered".
+   * skipped as `template-pending` (the email still goes).
    */
   scorecardConfirmDue: {
     name: 'scorecard_confirm_due',
@@ -259,7 +258,8 @@ export const WHATSAPP_TEMPLATES = {
     bodyText:
       "Hi {{1}}, please review and confirm {{2}}'s match scorecards for the weekend of {{3}}. " +
       'Tap below to view each scorecard and confirm or request a correction.',
-    status: 'pending',
+    // Approved in Meta on 7 Oct 2026 (ID 920518190917996, button label "Confirm scorecards").
+    status: 'registered',
     urlButton: {
       urlTemplate: 'https://platform.club.medicoach.co.za/sc/{{1}}',
       suffix: 'signed scorecard digest token',
