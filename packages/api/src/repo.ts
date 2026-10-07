@@ -2748,15 +2748,24 @@ export async function rotateScorecardConfirmMemberId(
   return memberId;
 }
 
+/** How long an `in_progress` digest-send claim holds before a later run may take it over. */
+export const SCORECARD_CLAIM_LEASE_MS = 15 * 60_000;
+
 /**
  * Claim the right to send a club's digest for a week. True ⇒ the caller sends; false ⇒ a send
  * was already claimed (a re-run, the operator "Run now") and nothing must go out again.
+ *
+ * Lease takeover: an `in_progress` claim older than {@link SCORECARD_CLAIM_LEASE_MS} is a run
+ * that crashed between claim and complete/release — it is re-claimed, so it cannot block the
+ * week's send for the ledger's whole TTL. A `completed` claim is never taken over.
  */
 export async function claimScorecardConfirmNotify(
   tenant: string,
   weekKey: string,
   clubId: string,
+  opts: { now?: Date } = {},
 ): Promise<boolean> {
+  const now = opts.now ?? new Date();
   try {
     await ddb.send(
       new PutCommand({
@@ -2764,10 +2773,15 @@ export async function claimScorecardConfirmNotify(
         Item: {
           ...scorecardConfirmNotifyKey(tenant, weekKey, clubId),
           status: 'in_progress',
-          startedAt: new Date().toISOString(),
-          expiresAt: Math.floor(Date.now() / 1000) + NOTIFY_LEDGER_TTL_SECONDS,
+          startedAt: now.toISOString(),
+          expiresAt: Math.floor(now.getTime() / 1000) + NOTIFY_LEDGER_TTL_SECONDS,
         },
-        ConditionExpression: 'attribute_not_exists(pk)',
+        ConditionExpression: 'attribute_not_exists(pk) OR (#s = :ip AND startedAt < :stale)',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: {
+          ':ip': 'in_progress',
+          ':stale': new Date(now.getTime() - SCORECARD_CLAIM_LEASE_MS).toISOString(),
+        },
       }),
     );
     return true;
@@ -8127,7 +8141,7 @@ export class PlayerErasureBlockedError extends Error {
   }
 }
 
-/** What a scrubbed captain's-report name field reads after erasure. */
+/** What a scrubbed name (captain's report, scorecard, digest feedback) reads after erasure. */
 export const ERASED_NAME = '[removed]';
 
 const normName = (s: string | undefined | null) =>
@@ -8138,6 +8152,30 @@ const normCell = (s: string | undefined | null) => {
   const d = (s ?? '').replace(/\D/g, '');
   return d.length >= 9 ? d.slice(-9) : '';
 };
+
+/**
+ * A copy of `card` with every batter / bowler / fall-of-wicket name matching `hit` replaced by
+ * {@link ERASED_NAME}, or null when no name matched (nothing to write).
+ */
+function scrubScorecardNames(
+  card: StoredFixtureScorecard,
+  hit: (name: string | undefined) => boolean,
+): StoredFixtureScorecard | null {
+  if (!card.innings?.length) return null;
+  let changed = false;
+  const swap = (name: string) => {
+    if (!hit(name)) return name;
+    changed = true;
+    return ERASED_NAME;
+  };
+  const innings = card.innings.map((inn) => ({
+    ...inn,
+    batters: inn.batters.map((b) => ({ ...b, name: swap(b.name) })),
+    bowlers: inn.bowlers.map((b) => ({ ...b, name: swap(b.name) })),
+    fallOfWickets: inn.fallOfWickets.map((f) => ({ ...f, batterName: swap(f.batterName) })),
+  }));
+  return changed ? { ...card, innings } : null;
+}
 
 /**
  * Erase ONE person (by natural key) from every club in the tenant — the admin's POPIA "right to
@@ -8157,7 +8195,12 @@ const normCell = (s: string | undefined | null) => {
  *    place, not deleted (the report is the club's and the umpires' record too);
  *  - pending REPORTOPEN# markers whose captain ref is this person's player ref have that ref
  *    REMOVED (the marker stays — it is the retry queue for both clubs' reports; with no captain
- *    ref the scoring side's report goes to the club chair).
+ *    ref the scoring side's report goes to the club chair);
+ *  - cached medicoach scorecards (FIXSCORECARD#): batter / bowler / fall-of-wicket names that
+ *    match the person are SCRUBBED in place, and a scrubbed card is marked `terminal` so the
+ *    sweep never re-fetches the name from medicoach;
+ *  - scorecard digests (SCORECONF#): the person's name inside a chair's correction `feedback`
+ *    is replaced (case-insensitive, whole words) — the digest itself is the club's record.
  *
  * Gate: a pending clearance naming the person, or any `clearance-pending` row, throws
  * {@link PlayerErasureBlockedError} BEFORE anything is touched. Returns null when nothing in any
@@ -8302,6 +8345,88 @@ export async function erasePlayerData(
       captainsReportsScrubbed++;
     } catch (err: unknown) {
       if (!isCcf(err)) throw err; // deleted concurrently — nothing left to scrub
+    }
+  }
+
+  // ── Cached medicoach scorecards: scrub batter / bowler / fall-of-wicket names ──
+  // A modified card is also marked `terminal` so the sweep never re-fetches it (and with it the
+  // name) from medicoach. Conditional on the card not having been replaced meanwhile; a
+  // replaced card is re-read and scrubbed afresh.
+  for (const listed of await listFixtureScorecards(tenant)) {
+    let card: StoredFixtureScorecard | null = listed;
+    for (let attempt = 0; card && attempt < 3; attempt++) {
+      const scrubbed = scrubScorecardNames(card, nameHit);
+      if (!scrubbed) break;
+      try {
+        await ddb.send(
+          new PutCommand({
+            TableName: TABLE,
+            Item: {
+              ...scrubbed,
+              terminal: true,
+              ...fixtureScorecardKey(tenant, card.seriesId, card.fixtureId),
+            },
+            ConditionExpression: 'fetchedAt = :f',
+            ExpressionAttributeValues: { ':f': card.fetchedAt },
+          }),
+        );
+        break;
+      } catch (err: unknown) {
+        if (!isCcf(err)) throw err;
+        card = await getFixtureScorecard(tenant, card.seriesId, card.fixtureId);
+      }
+    }
+  }
+
+  // ── Scorecard digest feedback: the chair's free text may name the person ──
+  const namePatterns = [...names].map(
+    (n) =>
+      new RegExp(
+        `(?<![\\p{L}\\p{N}])${n
+          .split(' ')
+          .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+          .join('\\s+')}(?![\\p{L}\\p{N}])`,
+        'giu',
+      ),
+  );
+  const scrubText = (s: string) => namePatterns.reduce((t, re) => t.replace(re, ERASED_NAME), s);
+  for (const listed of await listScorecardConfirmations(tenant)) {
+    // Conditional on each scrubbed feedback being unchanged; a digest changed meanwhile (an
+    // entry re-answered after a clear) is re-read and scrubbed afresh.
+    let d: ScorecardConfirmation | null = listed;
+    for (let attempt = 0; d && attempt < 3; attempt++) {
+      const sets: string[] = [];
+      const conds: string[] = [];
+      const attrNames: Record<string, string> = {};
+      const values: Record<string, unknown> = {};
+      for (const [k, e] of Object.entries(d.entries ?? {})) {
+        if (!e.feedback) continue;
+        const next = scrubText(e.feedback);
+        if (next === e.feedback) continue;
+        const i = sets.length;
+        attrNames[`#k${i}`] = k;
+        values[`:fb${i}`] = next;
+        values[`:old${i}`] = e.feedback;
+        sets.push(`entries.#k${i}.feedback = :fb${i}`);
+        conds.push(`entries.#k${i}.feedback = :old${i}`);
+      }
+      if (!sets.length) break;
+      try {
+        await ddb.send(
+          new UpdateCommand({
+            TableName: TABLE,
+            Key: scorecardConfirmKey(tenant, d.weekKey, d.clubId),
+            UpdateExpression: `SET ${sets.join(', ')}, updatedAt = :now`,
+            ConditionExpression: conds.join(' AND '),
+            ExpressionAttributeNames: attrNames,
+            ExpressionAttributeValues: { ...values, ':now': at },
+          }),
+        );
+        break;
+      } catch (err: unknown) {
+        if (!isCcf(err)) throw err;
+        d = await getScorecardConfirmation(tenant, d.weekKey, d.clubId);
+      }
     }
   }
 

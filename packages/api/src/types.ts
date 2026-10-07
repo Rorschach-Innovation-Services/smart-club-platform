@@ -1642,7 +1642,11 @@ export interface ScorecardConfirmEntry {
   feedback?: string;
   submittedAt?: string;
   submittedVia?: 'link';
-  /** The FIXSCORECARD# `fetchedAt` the chair confirmed against (absent ⇒ headline only). */
+  /**
+   * The FIXSCORECARD# `fetchedAt` the chair ANSWERED against — set for a confirm AND a
+   * correction alike, despite the name (kept for storage compatibility). Absent ⇒ no
+   * scorecard was available (headline only); the stale check then uses `submittedAt`.
+   */
   confirmedAgainstFetchedAt?: string;
   /** A newer scorecard arrived after the chair submitted: the answer may be out of date. */
   staleConfirmation?: boolean;

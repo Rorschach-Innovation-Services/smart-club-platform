@@ -120,9 +120,17 @@ export const SyncResultSchema = z.object({
    * The medicoach match (PostMatchAnalysis) id behind this result and its tournament id —
    * together the key for `GET /integrations/smartclub/matches/:matchId/scorecard?tournamentId=`.
    * Optional: older senders omit them; a scorecard is fetched only when both are present.
+   * Both match the documented `[A-Za-z0-9_-]{1,128}` id shape — a malformed id fails here.
+   * An empty string is tolerated as another spelling of "absent" (the puller drops it).
    */
-  medicoachMatchId: z.string().optional(),
-  medicoachTournamentId: z.string().optional(),
+  medicoachMatchId: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{0,128}$/)
+    .optional(),
+  medicoachTournamentId: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{0,128}$/)
+    .optional(),
 });
 
 export const FixtureChangeSchema = z.object({

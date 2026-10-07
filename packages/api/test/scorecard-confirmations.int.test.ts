@@ -449,6 +449,22 @@ describe('the Monday cron', () => {
     assert.equal(after.memberId, before.memberId);
   });
 
+  test('send claim lease: a fresh in_progress claim blocks; one older than 15 minutes is taken over; a completed one never is', async () => {
+    const t0 = new Date('2026-01-05T05:00:00.000Z');
+    const at = (min: number) => ({ now: new Date(t0.getTime() + min * 60_000) });
+    assert.equal(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(0)), true);
+    assert.equal(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(1)), false);
+    assert.equal(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(14)), false);
+    // The first run crashed between claim and release: a later run takes the stuck claim over…
+    assert.equal(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(16)), true);
+    // …and its own fresh lease blocks again.
+    assert.equal(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(17)), false);
+    await repo.completeScorecardConfirmNotify(T, WEEK, 'umzinto', [
+      { channel: 'email', status: 'sent' },
+    ]);
+    assert.equal(await repo.claimScorecardConfirmNotify(T, WEEK, 'umzinto', at(24 * 60)), false);
+  });
+
   test('a total send failure releases the claim so the next run retries', async () => {
     const failing = async (n: Notice) =>
       n.channels.map((channel) => ({
@@ -732,6 +748,69 @@ describe('the public link', () => {
     assert.ok(stored.submittedAt! > NEWER, 'submitted after the newer card arrived');
 
     // The newer card's stale check flags the answer: the chair saw the older card.
+    assert.equal(await sc.flagStaleScorecardEntries(repo, T, S1, 'f1', NEWER), 1);
+    assert.equal((await digest('umzinto'))!.entries[`${S1}#f1`].staleConfirmation, true);
+  });
+
+  const putCard = (fetchedAt: string) =>
+    repo.putFixtureScorecard(T, {
+      seriesId: S1,
+      fixtureId: 'f1',
+      medicoachMatchId: 'pma-f1',
+      medicoachTournamentId: 'tour-9',
+      schemaVersion: 1,
+      fetchedAt,
+      available: true,
+      innings: innings(),
+    });
+
+  test('PUT ignores a FORGED echo (future, or later than the stored card): the real card version is stored and a later refetch still flags stale', async () => {
+    const REAL = '2026-01-02T10:05:00.000Z';
+    const NEWER = '2026-01-02T11:00:00.000Z';
+    await putCard(REAL);
+    await run();
+    const forged = '2099-01-01T00:00:00.000Z';
+    const ok = await answer(noticeFor('umzinto').token, S1, 'f1', {
+      action: 'confirm',
+      scorecardFetchedAt: forged,
+    });
+    assert.equal(ok.status, 200);
+    assert.equal((await digest('umzinto'))!.entries[`${S1}#f1`].confirmedAgainstFetchedAt, REAL);
+    // A past echo that is still LATER than the stored card is not plausible either.
+    const ok2 = await answer(noticeFor('african-warriors').token, S1, 'f1', {
+      action: 'correction',
+      feedback: 'wrong total',
+      scorecardFetchedAt: NEWER,
+    });
+    assert.equal(ok2.status, 200);
+    assert.equal(
+      (await digest('african-warriors'))!.entries[`${S1}#f1`].confirmedAgainstFetchedAt,
+      REAL,
+    );
+
+    await putCard(NEWER);
+    assert.equal(await sc.flagStaleScorecardEntries(repo, T, S1, 'f1', NEWER), 2);
+    assert.equal((await digest('umzinto'))!.entries[`${S1}#f1`].staleConfirmation, true);
+    assert.equal((await digest('african-warriors'))!.entries[`${S1}#f1`].staleConfirmation, true);
+  });
+
+  test('PUT correction stores its (older) echo too, and is flagged stale once a newer card lands', async () => {
+    const RENDERED = '2026-01-02T10:05:00.000Z';
+    const NEWER = '2026-01-02T11:00:00.000Z';
+    await putCard(RENDERED);
+    await run();
+    // The newer card lands while the chair is writing the correction against the old one.
+    await putCard(NEWER);
+    const res = await answer(noticeFor('umzinto').token, S1, 'f1', {
+      action: 'correction',
+      feedback: 'Batter 1 scored 46, not 64.',
+      scorecardFetchedAt: RENDERED,
+    });
+    assert.equal(res.status, 200);
+    const stored = (await digest('umzinto'))!.entries[`${S1}#f1`];
+    assert.equal(stored.status, 'correction');
+    assert.equal(stored.confirmedAgainstFetchedAt, RENDERED);
+    assert.ok(stored.submittedAt! > NEWER, 'submitted after the newer card arrived');
     assert.equal(await sc.flagStaleScorecardEntries(repo, T, S1, 'f1', NEWER), 1);
     assert.equal((await digest('umzinto'))!.entries[`${S1}#f1`].staleConfirmation, true);
   });
@@ -1078,6 +1157,22 @@ describe('operator console', () => {
     assert.equal(bad.status, 400);
   });
 
+  test('POST run refuses the in-progress (and any later) week: only completed weeks run', async () => {
+    const plusDays = (d: string, n: number) =>
+      new Date(Date.parse(`${d}T00:00:00Z`) + n * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    for (const week of [plusDays(WEEK, 7), plusDays(WEEK, 14)]) {
+      const res = await app.request('/platform/scorecard-confirmations/run', {
+        method: 'POST',
+        headers: json(OPERATOR),
+        body: JSON.stringify({ week }),
+      });
+      assert.equal(res.status, 400, week);
+    }
+    // Nothing was claimed or created for the in-progress week.
+    assert.deepEqual(await repo.listScorecardConfirmations(T, plusDays(WEEK, 7)), []);
+    assert.equal(notices.length, 0);
+  });
+
   test('the operator tenant write accepts scorecardConfirmations.enabled; the admin write strips it', async () => {
     const put = await app.request(`/platform/tenants/${T}`, {
       method: 'PUT',
@@ -1107,5 +1202,102 @@ describe('erasure', () => {
     await run();
     await repo.eraseTenantData(T);
     assert.deepEqual(await repo.listScorecardConfirmations(T), []);
+  });
+
+  test("player erasure scrubs the person's scorecard names (marking the card terminal) and their name inside digest feedback", async () => {
+    const X = 'Xolani Zulu';
+    const NK = 'nk-xolani';
+    await repo.createPlayer(T, {
+      naturalKey: NK,
+      clubId: 'umzinto',
+      firstName: 'Xolani',
+      lastName: 'Zulu',
+      email: 'xolani@umzinto.test',
+      cell: '0839876543',
+      isMinor: false,
+    } as never);
+    const card = innings();
+    card[0].batters.push({ ...card[0].batters[0], order: 2, name: X });
+    card[0].bowlers.push({ ...card[0].bowlers[0], order: 2, name: '  xolani   ZULU ' });
+    card[0].fallOfWickets.push({ wicket: 2, runs: 40, overs: '5.1', batterName: X });
+    await repo.putFixtureScorecard(T, {
+      seriesId: S1,
+      fixtureId: 'f1',
+      medicoachMatchId: 'pma-f1',
+      medicoachTournamentId: 'tour-9',
+      schemaVersion: 1,
+      fetchedAt: '2026-01-02T10:05:00.000Z',
+      available: true,
+      innings: card,
+    });
+    await run();
+    const feedback =
+      'XOLANI  zulu was out caught, not bowled. Xolani Zuluness is fine. A Batter ok.';
+    assert.equal(
+      (
+        await answer(noticeFor('umzinto').token, S1, 'f1', {
+          action: 'correction',
+          feedback,
+        })
+      ).status,
+      200,
+    );
+
+    const counts = await repo.erasePlayerData(T, NK, { by: 'admin@union.test' });
+    assert.ok(counts);
+
+    const scrubbed = (await repo.getFixtureScorecard(T, S1, 'f1'))!;
+    assert.equal(scrubbed.terminal, true);
+    const inn = scrubbed.innings![0];
+    assert.deepEqual(
+      inn.batters.map((b) => b.name),
+      ['A Batter', repo.ERASED_NAME],
+    );
+    assert.deepEqual(
+      inn.bowlers.map((b) => b.name),
+      ['C Bowler', repo.ERASED_NAME],
+    );
+    assert.deepEqual(
+      inn.fallOfWickets.map((f) => f.batterName),
+      ['B Batter', repo.ERASED_NAME],
+    );
+    // Everything else on the card is untouched.
+    assert.equal(inn.batters[1].runs, card[0].batters[0].runs);
+    assert.equal(scrubbed.fetchedAt, '2026-01-02T10:05:00.000Z');
+
+    const entry = (await digest('umzinto'))!.entries[`${S1}#f1`];
+    assert.equal(entry.status, 'correction');
+    assert.equal(
+      entry.feedback,
+      `${repo.ERASED_NAME} was out caught, not bowled. Xolani Zuluness is fine. A Batter ok.`,
+    );
+    assert.doesNotMatch(
+      JSON.stringify(await repo.listScorecardConfirmations(T)),
+      /xolani\s+zulu\b/i,
+    );
+  });
+
+  test('player erasure leaves a scorecard that does not name the person untouched (not terminal)', async () => {
+    await repo.createPlayer(T, {
+      naturalKey: 'nk-other',
+      clubId: 'umzinto',
+      firstName: 'Someone',
+      lastName: 'Else',
+      isMinor: false,
+    } as never);
+    await repo.putFixtureScorecard(T, {
+      seriesId: S1,
+      fixtureId: 'f1',
+      medicoachMatchId: 'pma-f1',
+      medicoachTournamentId: 'tour-9',
+      schemaVersion: 1,
+      fetchedAt: '2026-01-02T10:05:00.000Z',
+      available: true,
+      innings: innings(),
+    });
+    assert.ok(await repo.erasePlayerData(T, 'nk-other', { by: 'admin@union.test' }));
+    const card = (await repo.getFixtureScorecard(T, S1, 'f1'))!;
+    assert.equal(card.terminal, undefined);
+    assert.deepEqual(card.innings, innings());
   });
 });

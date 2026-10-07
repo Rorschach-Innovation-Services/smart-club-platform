@@ -246,9 +246,12 @@ export const WHATSAPP_TEMPLATES = {
    * one message per club per week, its link a URL BUTTON whose dynamic suffix is the signed
    * digest token (`/sc/<token>`, tenant-independent like `/r/`, on the PLATFORM host).
    *
-   * NOT yet created in Meta. Like `captainsReportDue`, this status IS read at runtime: the
-   * sender throws `WhatsAppTemplatePendingError` until it is "registered", so the channel is
-   * skipped as `template-pending` (the email still goes).
+   * Approved in Meta 7 Oct 2026 (template ID 920518190917996; Utility, English, 3 body params,
+   * dynamic URL button "Confirm scorecards" → `https://platform.club.medicoach.co.za/sc/{{1}}`).
+   * `bodyText` is the exact approved copy. Like `captainsReportDue`, this status IS read at
+   * runtime: were it ever set back to pending, the sender would throw
+   * `WhatsAppTemplatePendingError` and the channel would be skipped as `template-pending`
+   * (the email still goes).
    */
   scorecardConfirmDue: {
     name: 'scorecard_confirm_due',
@@ -258,7 +261,6 @@ export const WHATSAPP_TEMPLATES = {
     bodyText:
       "Hi {{1}}, please review and confirm {{2}}'s match scorecards for the weekend of {{3}}. " +
       'Tap below to view each scorecard and confirm or request a correction.',
-    // Approved in Meta on 7 Oct 2026 (ID 920518190917996, button label "Confirm scorecards").
     status: 'registered',
     urlButton: {
       urlTemplate: 'https://platform.club.medicoach.co.za/sc/{{1}}',

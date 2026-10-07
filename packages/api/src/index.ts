@@ -256,6 +256,7 @@ import {
   UNLISTED_SERIES_ID,
 } from './captains-reports.js';
 import {
+  answeredAgainstFetchedAt,
   isWeekKey,
   lastCompletedWeekKey,
   loadLinkedScorecardConfirmation,
@@ -266,7 +267,6 @@ import {
   scorecardFixtureLine,
   toPlatformScorecardTenant,
   toScorecardConfirmView,
-  weekKeyFor,
   weekLabel,
 } from './scorecard-confirmations.js';
 import {
@@ -7100,8 +7100,9 @@ app.get('/scorecard-confirm-link/:token', async (c) => {
 /**
  * Answer one match of the digest: `{action: 'confirm' | 'correction', feedback?,
  * scorecardFetchedAt?}` (feedback required for a correction, ≤ 2,000 chars;
- * `scorecardFetchedAt` echoes the rendered card's version and is stored as the confirm's
- * `confirmedAgainstFetchedAt`). First submit wins: 404 for a match not in the
+ * `scorecardFetchedAt` echoes the rendered card's version and is stored — clamped to the
+ * stored card's version, see answeredAgainstFetchedAt — as the answer's
+ * `confirmedAgainstFetchedAt`, for a confirm and a correction alike). First submit wins: 404 for a match not in the
  * digest, 409 `entry_closed` once answered (or void). A correction emails the PLATFORM
  * OPERATORS (never tenant admins) — best-effort, it never fails the submit.
  */
@@ -7119,17 +7120,15 @@ app.put('/scorecard-confirm-link/:token/fixtures/:seriesId/:fixtureId', async (c
   }
   const entry = record.entries?.[entryKey];
   if (!entry) throw new HttpError(404, 'that match is not in this digest');
-  // The card the chair confirmed against: the version the page rendered (echoed back as
-  // `scorecardFetchedAt`) when sent, else the card stored now.
-  const card =
-    answer.action === 'confirm' && !answer.scorecardFetchedAt
-      ? await repo.getFixtureScorecard(tenant, seriesId, fixtureId)
-      : null;
-  const confirmedAgainstFetchedAt =
-    answer.action !== 'confirm'
-      ? undefined
-      : (answer.scorecardFetchedAt ??
-        (card?.available && card.fetchedAt ? card.fetchedAt : undefined));
+  // The card the chair answered against (confirm or correction): the version the page
+  // rendered (echoed back as `scorecardFetchedAt`) when it is a plausible past value no later
+  // than the card stored now, else the stored card's version.
+  const card = await repo.getFixtureScorecard(tenant, seriesId, fixtureId);
+  const confirmedAgainstFetchedAt = answeredAgainstFetchedAt(
+    answer.scorecardFetchedAt,
+    card,
+    new Date(),
+  );
   let saved: ScorecardConfirmation;
   try {
     saved = await repo.submitScorecardConfirmEntry(
@@ -11273,8 +11272,10 @@ app.post('/platform/scorecard-confirmations/run', async (c) => {
   if (body.week !== undefined && !isWeekKey(body.week))
     throw new HttpError(400, 'week must be a Sunday (YYYY-MM-DD)');
   const week = body.week as string | undefined;
-  if (week && week > weekKeyFor(tenantDate()))
-    throw new HttpError(400, 'week must not be in the future');
+  // Only a COMPLETED week: running the in-progress one would claim each chair's send for a
+  // half-week digest (Monday's cron then only tops up, and the chair is never re-notified).
+  if (week && week > lastCompletedWeekKey(new Date()))
+    throw new HttpError(400, 'week must be a completed week');
   const summary = await runScorecardConfirmations({}, week ? { week } : {});
   return c.json(summary);
 });

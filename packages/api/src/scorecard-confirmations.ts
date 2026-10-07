@@ -267,6 +267,28 @@ export function parseScorecardAnswer(raw: unknown): {
   return { action: 'confirm', ...(feedback ? { feedback } : {}), ...echoed };
 }
 
+/**
+ * The card version an answer (confirm OR correction) was given against, stored as the entry's
+ * `confirmedAgainstFetchedAt`. The page echoes the `scorecardFetchedAt` it rendered; that echo
+ * is client-supplied, so it is trusted only as a plausible PAST value no later than the card
+ * stored now — a forged future echo would otherwise defeat every later stale check. Anything
+ * else (later than the stored card, in the future, or no echo) falls back to the stored
+ * card's `fetchedAt`. No available card stored ⇒ undefined (the stale check then uses
+ * `submittedAt`). Returned in `toISOString()` form so DynamoDB's string compare stays sound.
+ */
+export function answeredAgainstFetchedAt(
+  echo: string | undefined,
+  card: { available: boolean; fetchedAt?: string } | null,
+  now: Date,
+): string | undefined {
+  const stored = card?.available && card.fetchedAt ? card.fetchedAt : undefined;
+  if (!stored) return undefined;
+  if (echo === undefined) return stored;
+  const ms = Date.parse(echo);
+  if (!Number.isFinite(ms) || ms > Date.parse(stored) || ms > now.getTime()) return stored;
+  return new Date(ms).toISOString();
+}
+
 // ───────────────────────── The public view ─────────────────────────
 
 export interface ScorecardConfirmEntryView {

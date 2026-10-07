@@ -316,3 +316,7 @@ number — effectively the ID number. So:
 - **Names only.** The card names players and nothing else: no player ids, emails or refs. A
   player with no usable name reads `"Unknown"`. Nothing in the scorecard is personal data
   beyond a display name.
+- **Player erasure scrubs cached cards.** A tenant-wide player erasure replaces the person's
+  batter, bowler and fall-of-wicket names in every cached scorecard with `[removed]` and marks
+  that card `terminal`, so the sweep never re-fetches the name from medicoach. Cards outside the
+  sweep window were already stable (never re-fetched), so the scrub holds for them as well.

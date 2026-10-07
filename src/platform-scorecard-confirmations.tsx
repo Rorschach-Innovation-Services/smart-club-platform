@@ -318,6 +318,10 @@ function RunNow({
             and have no digest get one, and their chair gets the link. Existing digests gain any
             late results. A chair who already has this week&apos;s link is never messaged again.
           </p>
+          <p style={{ fontSize: 13, margin: '8px 0 0' }}>
+            A large run may report a timeout while it carries on in the background. Running it again
+            is safe — nothing already sent goes out twice.
+          </p>
           {err && <div style={ERR}>{err}</div>}
         </Modal>
       )}
@@ -468,7 +472,12 @@ export function ScorecardConfirmationsCard({
       </p>
       {err && <div style={{ ...ERR, marginBottom: 8 }}>{err}</div>}
       <div style={{ marginTop: 12 }}>
-        <Btn tone="teal" size="sm" onClick={saveIt} disabled={enabled === saved || busy}>
+        <Btn
+          tone="teal"
+          size="sm"
+          onClick={() => void saveIt()}
+          disabled={enabled === saved || busy}
+        >
           {busy ? 'Saving…' : 'Save'}
         </Btn>
       </div>

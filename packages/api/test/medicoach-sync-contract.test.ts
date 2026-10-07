@@ -328,6 +328,26 @@ describe('scorecard contract', () => {
     assert.equal(parsed.fixtures[0].result!.medicoachTournamentId, 'tour-9');
   });
 
+  test('a malformed medicoach match or tournament id fails the contract', () => {
+    const raw = JSON.parse(readFileSync(path.join(EXAMPLES, 'changes-live-result.json'), 'utf8'));
+    for (const [field, bad] of [
+      ['medicoachMatchId', 'pma 1/2'],
+      ['medicoachTournamentId', 'x'.repeat(129)],
+      ['medicoachTournamentId', 'tour?9'],
+    ] as const) {
+      const copy = structuredClone(raw);
+      copy.fixtures[0].result.medicoachMatchId = 'pma-123';
+      copy.fixtures[0].result.medicoachTournamentId = 'tour-9';
+      copy.fixtures[0].result[field] = bad;
+      assert.equal(ChangesResponseSchema.safeParse(copy).success, false, `${field}=${bad}`);
+    }
+    // An empty id is another spelling of "absent" (the puller drops it), not malformed.
+    const empty = structuredClone(raw);
+    empty.fixtures[0].result.medicoachMatchId = '';
+    empty.fixtures[0].result.medicoachTournamentId = 'x'.repeat(128);
+    assert.equal(ChangesResponseSchema.safeParse(empty).success, true);
+  });
+
   test('scorecard path: match id encoded, tournamentId always in the query', () => {
     assert.equal(
       scorecardPathAndQuery('pma 1/2', 'tour-9'),
