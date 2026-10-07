@@ -48,6 +48,10 @@ export function explainSyncError(technical: string | null | undefined): string {
     return 'There were more changes than one run fetches. The next run carries on automatically.';
   if (t === 'internal error')
     return `Something went wrong on our side while applying medicoach's changes. ${RETRY} If it keeps happening, report it.`;
+  if (t === 'medicoach returned no result for this player')
+    return `medicoach didn't confirm this player. ${RETRY}`;
+  if (t.startsWith('the player does not fit the sync contract'))
+    return "This player can't be sent: their registration is missing something the sync needs (see Details). Correct the registration and it is sent again.";
   if (t === 'medicoach returned no result for this fixture')
     return `medicoach didn't confirm this change. ${RETRY}`;
   if (t === 'the stored schedule does not fit the v1 contract')

@@ -528,6 +528,50 @@ export const pendingSyncListKey = (tenant: string) => ({
 });
 
 /**
+ * The PLAYER outbox (ADR 0018): one row per natural key (one person, tenant-wide) saying "this
+ * player changed since `changedAt`". The row holds the key + timing only — the payload is
+ * rebuilt from live data at flush — except an `erase` tombstone, whose source rows are gone.
+ */
+export const pendingPlayerSyncKey = (tenant: string, naturalKey: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `PENDINGPLAYERSYNC#${naturalKey}`,
+});
+
+export const pendingPlayerSyncListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  skPrefix: 'PENDINGPLAYERSYNC#',
+});
+
+/**
+ * A player push held for admin review (ADR 0018): medicoach answered `needs-review`, or the
+ * flush found another smart-club person with the same name + dob. Holds medicoach candidates'
+ * personal data, so it self-expires (`expiresAt`) and is deleted by resolve and by erasure.
+ */
+export const playerReviewKey = (tenant: string, naturalKey: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `PLAYERREVIEW#${naturalKey}`,
+});
+
+export const playerReviewsListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  skPrefix: 'PLAYERREVIEW#',
+});
+
+/**
+ * An admin's "these are different people" answer to a possible-duplicate review: the two
+ * natural keys in sorted order. The flush-time guard never flags that pair again.
+ */
+export const playerDistinctKey = (tenant: string, a: string, b: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `PLAYERDISTINCT#${a < b ? `${a}#${b}` : `${b}#${a}`}`,
+});
+
+export const playerDistinctListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  skPrefix: 'PLAYERDISTINCT#',
+});
+
+/**
  * A stored result whose captain's reports still have to be opened + notified. Written in the
  * same step as the result and deleted once that succeeded, so a failure is retried by the
  * next run instead of being lost (the puller never re-fires the hook for a replay).

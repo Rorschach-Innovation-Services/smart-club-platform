@@ -91,6 +91,12 @@ import {
   syncConflictsListKey,
   pendingSyncKey,
   pendingSyncListKey,
+  pendingPlayerSyncKey,
+  pendingPlayerSyncListKey,
+  playerReviewKey,
+  playerReviewsListKey,
+  playerDistinctKey,
+  playerDistinctListKey,
   reportOpenKey,
   reportOpenListKey,
   umpireKey,
@@ -139,6 +145,9 @@ import type {
   SyncLogEntry,
   SyncConflict,
   PendingScheduleSync,
+  PendingPlayerSync,
+  PlayerSyncResolution,
+  PlayerSyncReview,
   ReportOpenMarker,
   Umpire,
   FixtureOfficials,
@@ -150,6 +159,7 @@ import type {
 import { tableName } from './env.js';
 import { teamIdsForClub } from './teams.js';
 import { isoInstant } from './medicoach-sync-contract.js';
+import { playerSyncEnabled } from './medicoach-sync/player-placement.js';
 
 const TABLE = tableName();
 // DYNAMO_ENDPOINT points at a local DynamoDB (dynalite) for offline dev; any
@@ -903,6 +913,19 @@ export async function putExportLog(tenant: string, entry: ExportLogEntry): Promi
   );
 }
 
+/** The tenant's medicoach bundle exports (export-medicoach --confirm), oldest first. */
+export async function listMedicoachExportLogs(tenant: string): Promise<ExportLogEntry[]> {
+  const { pk, skPrefix } = exportLogsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items
+    .map((i) => stripKeys<ExportLogEntry>(i)!)
+    .filter((e) => e.kind === 'medicoach-export');
+}
+
 /** Enumerate a tenant's export-log item keys (for erasure — these sit above the pk-prefix sweep). */
 async function listExportLogKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
   const { pk, skPrefix } = exportLogsListKey(tenant);
@@ -1415,6 +1438,387 @@ export async function resetPendingSyncAttempts(
     if (isCcf(err)) return false;
     throw err;
   }
+}
+
+// ── Medicoach PLAYER sync: outbox, reviews, distinct pairs (ADR 0018) ──
+// All in the tenant's SYNC partition, so tenant erasure and cohort clearing (which delete that
+// whole partition) remove them. Natural keys are hashed ID numbers: never log one.
+
+/** Fields a fresh change clears from a row (a parked / failed / tombstoned row starts over). */
+const PLAYER_ROW_RESET = 'parked, parkedAt, missingTeamRefs, lastError, lastAttemptAt';
+
+/**
+ * Enqueue (or collapse onto) a person's outbox row: "this player changed at `changedAt`".
+ * Conditional on the stored `changedAt` being OLDER, so a slower writer never rewinds a newer
+ * row; an equal or older change is a silent no-op (the newer row goes out and is rebuilt
+ * from live data anyway). A newer change un-parks the row and restarts its attempts.
+ *
+ * A row that is an `erase` tombstone is REPLACED (the person registered again after the
+ * erasure): it becomes a plain change flagged `eraseFirst`, so the flush still sends the erase
+ * before the new registration's upsert. A stored `resolution` rides along unless `resolution`
+ * is passed (null clears it).
+ */
+export async function putPendingPlayerSync(
+  tenant: string,
+  naturalKey: string,
+  changedAt: string,
+  opts: { resolution?: PlayerSyncResolution | null } = {},
+): Promise<void> {
+  const c = isoInstant(changedAt);
+  const resolutionSet = opts.resolution ? ', resolution = :r' : '';
+  const resolutionRemove = opts.resolution === null ? ', resolution' : '';
+  const values: Record<string, unknown> = { ':nk': naturalKey, ':c': c, ':zero': 0 };
+  if (opts.resolution) values[':r'] = opts.resolution;
+  // A tombstone first: replace it, remembering that the erase must still go out.
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: pendingPlayerSyncKey(tenant, naturalKey),
+        UpdateExpression:
+          `SET naturalKey = :nk, changedAt = :c, enqueuedAt = :c, attempts = :zero, ` +
+          `eraseFirst = :t${resolutionSet} REMOVE #op, ${PLAYER_ROW_RESET}${resolutionRemove}`,
+        ConditionExpression: '#op = :erase AND changedAt < :c',
+        ExpressionAttributeNames: { '#op': 'op' },
+        ExpressionAttributeValues: { ...values, ':t': true, ':erase': 'erase' },
+      }),
+    );
+    return;
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: pendingPlayerSyncKey(tenant, naturalKey),
+        UpdateExpression:
+          `SET naturalKey = :nk, changedAt = :c, enqueuedAt = :c, attempts = :zero` +
+          `${resolutionSet} REMOVE ${PLAYER_ROW_RESET}${resolutionRemove}`,
+        ConditionExpression:
+          'attribute_not_exists(pk) OR (changedAt < :c AND (attribute_not_exists(#op) OR #op <> :erase))',
+        ExpressionAttributeNames: { '#op': 'op' },
+        ExpressionAttributeValues: { ...values, ':erase': 'erase' },
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
+/**
+ * The POPIA erasure tombstone (erasePlayerData only): REPLACES whatever row the person had,
+ * so the flush pushes `erase` rather than a rebuild (the source rows are already gone).
+ */
+export async function putPlayerSyncTombstone(
+  tenant: string,
+  naturalKey: string,
+  changedAt: string,
+): Promise<void> {
+  const c = isoInstant(changedAt);
+  const row: PendingPlayerSync = {
+    naturalKey,
+    changedAt: c,
+    enqueuedAt: c,
+    attempts: 0,
+    op: 'erase',
+  };
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...row, ...pendingPlayerSyncKey(tenant, naturalKey) },
+    }),
+  );
+}
+
+export async function listPendingPlayerSync(tenant: string): Promise<PendingPlayerSync[]> {
+  const { pk, skPrefix } = pendingPlayerSyncListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<PendingPlayerSync>(i)!);
+}
+
+export async function getPendingPlayerSync(
+  tenant: string,
+  naturalKey: string,
+): Promise<PendingPlayerSync | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: pendingPlayerSyncKey(tenant, naturalKey) }),
+  );
+  return stripKeys<PendingPlayerSync>(res.Item);
+}
+
+/** Run a conditional write on a player-outbox row; false when the row moved on (or is gone). */
+async function updatePlayerRowIf(
+  tenant: string,
+  naturalKey: string,
+  changedAt: string,
+  update: string,
+  values: Record<string, unknown> = {},
+  names: Record<string, string> = {},
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: pendingPlayerSyncKey(tenant, naturalKey),
+        UpdateExpression: update,
+        ConditionExpression: 'attribute_exists(pk) AND changedAt = :c',
+        ...(Object.keys(names).length ? { ExpressionAttributeNames: names } : {}),
+        ExpressionAttributeValues: { ...values, ':c': changedAt },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/**
+ * Delete a person's outbox row ONLY while it still holds the change that was sent: a change
+ * enqueued while the push was in flight moved `changedAt` on and must still go out.
+ */
+export async function deletePendingPlayerSyncIfUnchanged(
+  tenant: string,
+  naturalKey: string,
+  changedAt: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new DeleteCommand({
+        TableName: TABLE,
+        Key: pendingPlayerSyncKey(tenant, naturalKey),
+        ConditionExpression: 'changedAt = :c',
+        ExpressionAttributeValues: { ':c': changedAt },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/** Drop a person's outbox row whatever it holds (review dismissed: do not sync). */
+export async function deletePendingPlayerSync(tenant: string, naturalKey: string): Promise<void> {
+  await ddb.send(
+    new DeleteCommand({ TableName: TABLE, Key: pendingPlayerSyncKey(tenant, naturalKey) }),
+  );
+}
+
+/** A failed push of THIS change: attempts + 1, lastError (field paths only — never a value). */
+export async function markPendingPlayerSyncFailed(
+  tenant: string,
+  naturalKey: string,
+  changedAt: string,
+  error: string,
+  at: string,
+): Promise<void> {
+  await updatePlayerRowIf(
+    tenant,
+    naturalKey,
+    changedAt,
+    'SET attempts = if_not_exists(attempts, :zero) + :one, lastError = :e, lastAttemptAt = :at',
+    { ':zero': 0, ':one': 1, ':e': error.slice(0, 300), ':at': at },
+  );
+}
+
+/**
+ * Park THIS change: medicoach lacks one of the player's teams, so resending every run only
+ * repeats the personal data. Retried by the admin's retry or after a bundle top-up.
+ */
+export async function parkPendingPlayerSync(
+  tenant: string,
+  naturalKey: string,
+  changedAt: string,
+  missingTeamRefs: string[],
+  at: string,
+): Promise<void> {
+  await updatePlayerRowIf(
+    tenant,
+    naturalKey,
+    changedAt,
+    'SET parked = :t, parkedAt = :at, missingTeamRefs = :m, lastAttemptAt = :at',
+    { ':t': true, ':at': at, ':m': missingTeamRefs.slice(0, 20) },
+  );
+}
+
+/** The erase that preceded a re-registration went out: the row is now a plain change. */
+export async function clearPendingPlayerSyncEraseFirst(
+  tenant: string,
+  naturalKey: string,
+  changedAt: string,
+): Promise<boolean> {
+  return updatePlayerRowIf(tenant, naturalKey, changedAt, 'REMOVE eraseFirst');
+}
+
+/**
+ * Un-park and restart a row (the admin's Retry): it goes out on the next flush with the same
+ * `changedAt` (medicoach never applied it). Returns false when there is no such row.
+ */
+export async function retryPendingPlayerSync(tenant: string, naturalKey: string): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: pendingPlayerSyncKey(tenant, naturalKey),
+        UpdateExpression: `SET attempts = :zero REMOVE ${PLAYER_ROW_RESET}`,
+        ConditionExpression: 'attribute_exists(pk)',
+        ExpressionAttributeValues: { ':zero': 0 },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/** PLAYERREVIEW# rows self-expire after this long (they hold medicoach candidates' PII). */
+export const PLAYER_REVIEW_TTL_SECONDS = 60 * 24 * 3600;
+
+export async function putPlayerReview(tenant: string, review: PlayerSyncReview): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...review,
+        ...playerReviewKey(tenant, review.naturalKey),
+        expiresAt: Math.floor(Date.parse(review.detectedAt) / 1000) + PLAYER_REVIEW_TTL_SECONDS,
+      },
+    }),
+  );
+}
+
+/** Strip the TTL attribute, and treat an expired-but-not-yet-swept row as gone. */
+function liveReview(item: Record<string, unknown> | undefined): PlayerSyncReview | null {
+  const row = stripKeys<PlayerSyncReview & { expiresAt?: number }>(item);
+  if (!row) return null;
+  const { expiresAt, ...rest } = row;
+  if (typeof expiresAt === 'number' && expiresAt * 1000 < Date.now()) return null;
+  return rest;
+}
+
+export async function getPlayerReview(
+  tenant: string,
+  naturalKey: string,
+): Promise<PlayerSyncReview | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: playerReviewKey(tenant, naturalKey) }),
+  );
+  return liveReview(res.Item);
+}
+
+export async function listPlayerReviews(tenant: string): Promise<PlayerSyncReview[]> {
+  const { pk, skPrefix } = playerReviewsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map(liveReview).filter((r): r is PlayerSyncReview => r !== null);
+}
+
+export async function deletePlayerReview(tenant: string, naturalKey: string): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: TABLE, Key: playerReviewKey(tenant, naturalKey) }));
+}
+
+/** Record that two natural keys are different people (never flagged as duplicates again). */
+export async function putPlayerDistinct(tenant: string, a: string, b: string): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...playerDistinctKey(tenant, a, b),
+        a: a < b ? a : b,
+        b: a < b ? b : a,
+        at: new Date().toISOString(),
+      },
+    }),
+  );
+}
+
+/** Every confirmed-distinct pair, as `${a}#${b}` with a < b. */
+export async function listPlayerDistinctPairs(tenant: string): Promise<Set<string>> {
+  const { pk, skPrefix } = playerDistinctListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    ProjectionExpression: 'sk',
+  });
+  return new Set(items.map((i) => String(i.sk).slice(skPrefix.length)));
+}
+
+/**
+ * Note that this person changed, for the medicoach player sync (ADR 0018). Called from every
+ * repo write that changes a player row, so routes AND import CLIs are covered. A no-op unless
+ * the tenant has the player sync on. Best-effort: a failed enqueue never fails the write that
+ * already landed (the backfill CLI re-enqueues everyone) — it warns with no player data.
+ */
+export async function recordPlayerSyncChange(
+  tenant: string,
+  naturalKeys: string | string[],
+  opts: { config?: TenantConfig | null; at?: string } = {},
+): Promise<number> {
+  const keys = [...new Set(Array.isArray(naturalKeys) ? naturalKeys : [naturalKeys])].filter(
+    Boolean,
+  );
+  if (!keys.length) return 0;
+  try {
+    const config = opts.config !== undefined ? opts.config : await getTenantConfig(tenant);
+    if (!playerSyncEnabled(config)) return 0;
+    const at = opts.at ?? new Date().toISOString();
+    for (const nk of keys) await putPendingPlayerSync(tenant, nk, at);
+    return keys.length;
+  } catch (err) {
+    console.warn(
+      `[medicoach-sync] ${tenant}: player sync enqueue failed for ${keys.length} player(s) — ` +
+        `${err instanceof Error ? err.name : 'error'}; re-run enqueue-players to recover`,
+    );
+    return 0;
+  }
+}
+
+/**
+ * The erasure counterpart (erasePlayerData only): an `erase` tombstone when the sync is on,
+ * and the person's review + distinct-pair markers deleted ALWAYS (they name the person).
+ * Unlike the change hook this throws — an erasure must not report success with PII left.
+ */
+export async function recordPlayerSyncErase(
+  tenant: string,
+  naturalKey: string,
+  at: string,
+): Promise<void> {
+  await deletePlayerReview(tenant, naturalKey);
+  // Another person's possible-duplicate review that lists THIS person as a candidate names
+  // them too: drop it, and re-queue that person so the guard re-evaluates without them.
+  const requeue: string[] = [];
+  for (const r of await listPlayerReviews(tenant)) {
+    if (!r.candidates.some((c) => c.naturalKey === naturalKey)) continue;
+    await deletePlayerReview(tenant, r.naturalKey);
+    requeue.push(r.naturalKey);
+  }
+  await recordPlayerSyncChange(tenant, requeue, { at });
+  const { pk, skPrefix } = playerDistinctListKey(tenant);
+  const markers = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    ProjectionExpression: 'pk, sk',
+  });
+  for (const m of markers) {
+    const [a, b] = String(m.sk).slice(skPrefix.length).split('#');
+    if (a === naturalKey || b === naturalKey)
+      await ddb.send(new DeleteCommand({ TableName: TABLE, Key: { pk: m.pk, sk: m.sk } }));
+  }
+  if (playerSyncEnabled(await getTenantConfig(tenant)))
+    await putPlayerSyncTombstone(tenant, naturalKey, at);
+  else await deletePendingPlayerSync(tenant, naturalKey);
 }
 
 export async function putReportOpenMarker(tenant: string, marker: ReportOpenMarker): Promise<void> {
@@ -2692,7 +3096,7 @@ export async function reconcilePlayerCount(
  * `playerCount` is a display-only denormalization — the source of truth is the
  * PLAYER# items, so it's recomputable from `listPlayers` if it ever drifts.
  */
-export async function createPlayer(tenant: string, player: PlayerRegistration): Promise<void> {
+async function createPlayerUnsynced(tenant: string, player: PlayerRegistration): Promise<void> {
   await ddb.send(
     new PutCommand({
       TableName: TABLE,
@@ -2731,7 +3135,7 @@ export async function createPlayer(tenant: string, player: PlayerRegistration): 
  * player. Returns false (instead of throwing) when the guard fails — the row
  * already has a team, or vanished — so the backfill can count skips cheaply.
  */
-export async function setPlayerTeamIfAbsent(
+async function setPlayerTeamIfAbsentUnsynced(
   tenant: string,
   clubId: string,
   naturalKey: string,
@@ -2778,7 +3182,7 @@ export async function setPlayerTeamIfAbsent(
  * maps it to 409) before reaching the decrement, so the count can't be driven negative;
  * the `!removed` guard below is belt-and-suspenders for that already-impossible path.
  */
-export async function deletePlayer(tenant: string, player: PlayerRegistration): Promise<void> {
+async function deletePlayerUnsynced(tenant: string, player: PlayerRegistration): Promise<void> {
   const res = await ddb.send(
     new DeleteCommand({
       TableName: TABLE,
@@ -2874,7 +3278,7 @@ export async function findPlayerAcrossClubs(
  * legacy rows without one are treated as 0). Used by the ID-doc mark and roster
  * edits. A lost race throws VersionConflictError (→ 409).
  */
-export async function updatePlayer(
+async function updatePlayerUnsynced(
   tenant: string,
   clubId: string,
   naturalKey: string,
@@ -4066,7 +4470,7 @@ function clearanceItems(tenant: string, c: PlayerClearance) {
  * (otherwise a rejected create would orphan the canonical/mirror pair). Production uses
  * the all-or-nothing transaction, where ordering is irrelevant.
  */
-export async function createClearance(tenant: string, c: PlayerClearance): Promise<void> {
+async function createClearanceUnsynced(tenant: string, c: PlayerClearance): Promise<void> {
   const { canonical, mirror } = clearanceItems(tenant, c);
   const playerStatusUpdate = {
     TableName: TABLE,
@@ -4154,7 +4558,7 @@ export async function createClearance(tenant: string, c: PlayerClearance): Promi
  * (same swallowed post-write style as createPlayer) — resolveClearance deliberately
  * skips its increment for registration-origin clearances.
  */
-export async function createPlayerWithClearance(
+async function createPlayerWithClearanceUnsynced(
   tenant: string,
   player: PlayerRegistration,
   c: PlayerClearance,
@@ -4297,7 +4701,7 @@ export async function createPlayerWithClearance(
  * person is clearance-pending anywhere) is what keeps that window to a true race rather than
  * a reachable sequence — do not assume the invariant holds here.
  */
-export async function createPlayerWithSourcelessClearance(
+async function createPlayerWithSourcelessClearanceUnsynced(
   tenant: string,
   player: PlayerRegistration,
   c: PlayerClearance,
@@ -4780,7 +5184,7 @@ const uniqueKeys = (keys: Array<{ pk: string; sk: string }>) => [
  * dynalite (offline/test) has no TransactWriteItems → sequential fallback in the same
  * order, with the same destination guard. Production uses the transaction.
  */
-export async function resolveClearance(
+async function resolveClearanceUnsynced(
   tenant: string,
   fromClubId: string,
   id: string,
@@ -5101,7 +5505,7 @@ export async function resolveClearance(
  * reading pending). The transactional branch is untested by the harness (dynalite has no
  * TransactWriteItems); its item arrays are single-sourced with the local ops so they can't drift.
  */
-export async function rejectClearance(
+async function rejectClearanceUnsynced(
   tenant: string,
   fromClubId: string,
   id: string,
@@ -5598,7 +6002,7 @@ export async function rejectClearance(
  * Local (dynalite) order + rollback mirror rejectClearance: canonical first, unwinds on a failed
  * row write, counts swallowed, mirror last.
  */
-export async function reopenClearance(
+async function reopenClearanceUnsynced(
   tenant: string,
   fromClubId: string,
   id: string,
@@ -6177,7 +6581,7 @@ export async function reopenClearance(
  * partition needs no cleanup, since nothing here touches it. A clearance moved out from under
  * a real source row would strand that row 'clearance-pending' forever.
  */
-export async function reassignClearanceSource(
+async function reassignClearanceSourceUnsynced(
   tenant: string,
   oldFromClubId: string,
   id: string,
@@ -7476,7 +7880,9 @@ export async function eraseClubData(
   // deleting the VETAFFIL rows, because these records are the ONLY index back to those rows —
   // a crash mid-erase must stay re-runnable. Conditional (only scrub a row STILL pointing here,
   // so a since-moved player isn't clobbered) and best-effort; a moved/removed row just no-ops.
+  const vetAffiliates: string[] = [];
   for (const a of await listVeteransAffiliations(tenant, club.id)) {
+    vetAffiliates.push(a.naturalKey);
     try {
       await ddb.send(
         new UpdateCommand({
@@ -7523,6 +7929,17 @@ export async function eraseClubData(
   // idempotent, so running it first changes nothing else.
   await deleteUploadObjects(objectKeys);
   await deleteUploadPrefixes(prefixes);
+
+  // Medicoach player sync (ADR 0018): every person this cascade touched gets a PLAIN change —
+  // never an erase tombstone: club cleanup is not consent-based erasure, and the person may
+  // still be active at another club (veterans). The flush rebuilds an upsert with fewer teams,
+  // or a `remove` when no row is left.
+  await recordPlayerSyncChange(tenant, [
+    ...players.map((p) => p.naturalKey),
+    ...outgoing.map((x) => x.playerNaturalKey),
+    ...inbound.map((x) => x.playerNaturalKey),
+    ...vetAffiliates,
+  ]);
 
   // Sweep DRAFT (unreleased) series so a deleted club doesn't linger in teams[]/fixtures.
   // Released series are left intact (they keep showing "Removed club" — preserves published
@@ -7767,6 +8184,9 @@ export async function erasePlayerData(
 
   // ── PLAYER# rows last (the re-run anchor) ──
   for (const p of rows) await deletePlayer(tenant, p);
+  // Medicoach player sync (ADR 0018): an `erase` tombstone (after the row deletes, whose own
+  // change hooks it replaces) and the person's PLAYERREVIEW#/PLAYERDISTINCT# rows.
+  await recordPlayerSyncErase(tenant, naturalKey, new Date().toISOString());
 
   const counts: PlayerErasureCounts = {
     playerRows: rows.length,
@@ -7787,4 +8207,112 @@ export async function erasePlayerData(
     counts,
   });
   return counts;
+}
+
+// ── Player-row writes + the medicoach player-sync hook (ADR 0018) ──
+// Every repo write that changes a PLAYER# row is wrapped here so the change reaches the
+// medicoach player outbox from routes AND import CLIs alike (`recordPlayerSyncChange` is a
+// no-op unless the tenant has the player sync on, and never fails the write). The wrapped
+// implementations (`…Unsynced`) carry the full contracts in their own docs above.
+
+/** {@link createPlayerUnsynced} + the player-sync hook. */
+export async function createPlayer(tenant: string, player: PlayerRegistration): Promise<void> {
+  await createPlayerUnsynced(tenant, player);
+  await recordPlayerSyncChange(tenant, player.naturalKey);
+}
+
+/** {@link setPlayerTeamIfAbsentUnsynced} + the player-sync hook (only when it wrote). */
+export async function setPlayerTeamIfAbsent(
+  tenant: string,
+  clubId: string,
+  naturalKey: string,
+  team: string,
+): Promise<boolean> {
+  const wrote = await setPlayerTeamIfAbsentUnsynced(tenant, clubId, naturalKey, team);
+  if (wrote) await recordPlayerSyncChange(tenant, naturalKey);
+  return wrote;
+}
+
+/** {@link deletePlayerUnsynced} + the player-sync hook. */
+export async function deletePlayer(tenant: string, player: PlayerRegistration): Promise<void> {
+  await deletePlayerUnsynced(tenant, player);
+  await recordPlayerSyncChange(tenant, player.naturalKey);
+}
+
+/** {@link updatePlayerUnsynced} + the player-sync hook. */
+export async function updatePlayer(
+  tenant: string,
+  clubId: string,
+  naturalKey: string,
+  patch: Partial<PlayerRegistration>,
+  outPreImage?: { value?: PlayerRegistration },
+): Promise<PlayerRegistration> {
+  const next = await updatePlayerUnsynced(tenant, clubId, naturalKey, patch, outPreImage);
+  await recordPlayerSyncChange(tenant, naturalKey);
+  return next;
+}
+
+/** {@link createClearanceUnsynced} + the player-sync hook. */
+export async function createClearance(tenant: string, c: PlayerClearance): Promise<void> {
+  await createClearanceUnsynced(tenant, c);
+  await recordPlayerSyncChange(tenant, c.playerNaturalKey);
+}
+
+/** {@link createPlayerWithClearanceUnsynced} + the player-sync hook. */
+export async function createPlayerWithClearance(
+  tenant: string,
+  player: PlayerRegistration,
+  c: PlayerClearance,
+): Promise<void> {
+  await createPlayerWithClearanceUnsynced(tenant, player, c);
+  await recordPlayerSyncChange(tenant, player.naturalKey);
+}
+
+/** {@link createPlayerWithSourcelessClearanceUnsynced} + the player-sync hook. */
+export async function createPlayerWithSourcelessClearance(
+  tenant: string,
+  player: PlayerRegistration,
+  c: PlayerClearance,
+): Promise<void> {
+  await createPlayerWithSourcelessClearanceUnsynced(tenant, player, c);
+  await recordPlayerSyncChange(tenant, player.naturalKey);
+}
+
+/**
+ * {@link resolveClearanceUnsynced} + the player-sync hook. Source and destination rows share
+ * the person's natural key, so the one change moves them between teams.
+ */
+export async function resolveClearance(
+  ...args: Parameters<typeof resolveClearanceUnsynced>
+): Promise<PlayerClearance> {
+  const c = await resolveClearanceUnsynced(...args);
+  await recordPlayerSyncChange(args[0], c.playerNaturalKey);
+  return c;
+}
+
+/** {@link rejectClearanceUnsynced} (incl. the transfer-window auto-reject) + the hook. */
+export async function rejectClearance(
+  ...args: Parameters<typeof rejectClearanceUnsynced>
+): Promise<PlayerClearance> {
+  const c = await rejectClearanceUnsynced(...args);
+  await recordPlayerSyncChange(args[0], c.playerNaturalKey);
+  return c;
+}
+
+/** {@link reopenClearanceUnsynced} + the player-sync hook. */
+export async function reopenClearance(
+  ...args: Parameters<typeof reopenClearanceUnsynced>
+): Promise<PlayerClearance> {
+  const c = await reopenClearanceUnsynced(...args);
+  await recordPlayerSyncChange(args[0], c.playerNaturalKey);
+  return c;
+}
+
+/** {@link reassignClearanceSourceUnsynced} + the player-sync hook. */
+export async function reassignClearanceSource(
+  ...args: Parameters<typeof reassignClearanceSourceUnsynced>
+): Promise<PlayerClearance> {
+  const c = await reassignClearanceSourceUnsynced(...args);
+  await recordPlayerSyncChange(args[0], c.playerNaturalKey);
+  return c;
 }

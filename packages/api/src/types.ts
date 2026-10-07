@@ -1343,11 +1343,13 @@ export interface SyncLogEntry {
    * `push` rows record an outbox flush (Slice 4); `new-fixtures` a write that added fixtures
    * to a mapped series which medicoach does not have (needs a bundle top-up); absent ⇒ a pull.
    */
-  kind?: 'pull' | 'push' | 'new-fixtures';
+  kind?: 'pull' | 'push' | 'new-fixtures' | 'player-push';
   /** Refs of the new fixtures (`new-fixtures` rows only). Fixture refs carry no PII. */
   newFixtureRefs?: string[];
   /** Outbox flush outcome counts (push rows only). */
   push?: SchedulePushCounts;
+  /** Player-outbox flush outcome counts (`player-push` rows only, ADR 0018). */
+  playerPush?: PlayerPushCounts;
   /** Technical failure text (field paths and statuses only — never a payload value). */
   error?: string;
   /** `error` in plain language for the admin page (medicoach-sync/explain.ts). */
@@ -1406,6 +1408,85 @@ export interface PendingScheduleSync {
    * revealed (the reveal re-queues the series with its real schedule).
    */
   heldUntilReveal?: boolean;
+}
+
+/** The admin's answer to a medicoach `needs-review`, sent with the next push (contract §3). */
+export type PlayerSyncResolution =
+  | { action: 'link'; playerId: string }
+  | { action: 'create'; acknowledgedCandidates: string[] };
+
+/**
+ * PENDINGPLAYERSYNC#<naturalKey> — one person changed and medicoach must get their current
+ * desired state (ADR 0018). Collapsed per person: a newer change overwrites `changedAt` and
+ * resets the attempts; the row is deleted only while it still holds the `changedAt` that was
+ * sent. No personal data is stored — the payload is rebuilt at flush — except `op: 'erase'`.
+ */
+export interface PendingPlayerSync {
+  naturalKey: string;
+  /** When the latest smart-club change happened (the push's `changedAt`). */
+  changedAt: string;
+  enqueuedAt: string;
+  attempts: number;
+  lastError?: string;
+  lastAttemptAt?: string;
+  /** POPIA erasure tombstone (erasePlayerData only): push `erase`, never rebuild. */
+  op?: 'erase';
+  /**
+   * The person was erased and has registered again before the erase went out: push the
+   * `erase` first (anonymising the old medicoach player), then the upsert creates a new one.
+   */
+  eraseFirst?: boolean;
+  /** Medicoach lacks one of the player's teams: not resent every run (admin retry / top-up). */
+  parked?: boolean;
+  parkedAt?: string;
+  /** The team refs medicoach did not know (team refs carry no personal data). */
+  missingTeamRefs?: string[];
+  /** An admin review resolution riding on the next push. */
+  resolution?: PlayerSyncResolution;
+}
+
+/** One candidate an admin must decide about. PERSONAL DATA. */
+export interface PlayerReviewCandidate {
+  /** Medicoach player id (`medicoach-needs-review`). */
+  playerId?: string;
+  /** The other smart-club person's natural key (`smartclub-possible-duplicate`). */
+  naturalKey?: string;
+  name: string;
+  dob: string | null;
+  /** The medicoach institution, or the smart-club club, the candidate belongs to. */
+  institutionName: string | null;
+}
+
+/**
+ * PLAYERREVIEW#<naturalKey> — a player not pushed until an admin decides (ADR 0018). Holds
+ * candidates' personal data: TTL'd (`expiresAt`), deleted on resolve and by erasePlayerData.
+ */
+export interface PlayerSyncReview {
+  naturalKey: string;
+  reason: 'medicoach-needs-review' | 'smartclub-possible-duplicate';
+  /** Medicoach's own reason (field paths / plain text, never a payload value). */
+  message?: string;
+  detectedAt: string;
+  playerName: string;
+  dob: string | null;
+  clubName: string | null;
+  candidates: PlayerReviewCandidate[];
+}
+
+/** What one player-outbox flush did (ADR 0018). Counts only. */
+export interface PlayerPushCounts {
+  sent: number;
+  created: number;
+  linked: number;
+  updated: number;
+  unchanged: number;
+  removed: number;
+  erased: number;
+  stale: number;
+  needsReview: number;
+  possibleDuplicates: number;
+  parked: number;
+  errors: number;
 }
 
 /** Who changed a fixture's schedule. `medicoach` = the Slice 3 inbound apply (never echoed). */

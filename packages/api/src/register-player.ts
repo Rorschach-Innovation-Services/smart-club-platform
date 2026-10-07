@@ -37,6 +37,7 @@ import {
   normalizeId,
   computeIsMinor,
 } from './player-identity.js';
+import { nameDobKey } from './medicoach-sync/player-placement.js';
 import type {
   Club,
   DirectoryClub,
@@ -176,6 +177,7 @@ export async function buildCrossClubIndex(
   tenant: string,
   clubs: Array<{ id: string; name: string }>,
   excludeClubId: string,
+  opts: { nameDob?: NameDobIndex } = {},
 ): Promise<CrossClubIndex> {
   const CONCURRENCY = 8;
   const index: CrossClubIndex = new Map();
@@ -185,6 +187,7 @@ export async function buildCrossClubIndex(
     // eslint-disable-next-line no-await-in-loop -- sequential slices, each internally parallel
     const rosters = await Promise.all(slice.map((c) => repo.listPlayers(tenant, c.id)));
     slice.forEach((c, k) => {
+      if (opts.nameDob) addToNameDobIndex(opts.nameDob, c.name, rosters[k]);
       for (const p of rosters[k]) {
         const hit: CrossClubHit = { clubId: c.id, clubName: c.name, status: p.status };
         const list = index.get(p.naturalKey);
@@ -194,6 +197,64 @@ export async function buildCrossClubIndex(
     });
   }
   return index;
+}
+
+/**
+ * normalised name + dob → every (natural key, club name) carrying it — the registration-time
+ * "possible existing registration" warning (ADR 0018), the same match the medicoach player
+ * sync's possible-duplicate guard makes. Placeholders are left out.
+ */
+export type NameDobIndex = Map<string, Array<{ naturalKey: string; clubName: string }>>;
+
+export function addToNameDobIndex(
+  index: NameDobIndex,
+  clubName: string,
+  roster: PlayerRegistration[],
+): void {
+  for (const p of roster) {
+    if (p.placeholder === true) continue;
+    const key = nameDobKey(p);
+    if (!key) continue;
+    const list = index.get(key) ?? [];
+    list.push({ naturalKey: p.naturalKey, clubName });
+    index.set(key, list);
+  }
+}
+
+/** Read every club's roster (bounded parallel) into a {@link NameDobIndex}. */
+export async function buildNameDobIndex(
+  tenant: string,
+  clubs: Array<{ id: string; name: string }>,
+): Promise<NameDobIndex> {
+  const CONCURRENCY = 8;
+  const index: NameDobIndex = new Map();
+  for (let i = 0; i < clubs.length; i += CONCURRENCY) {
+    const slice = clubs.slice(i, i + CONCURRENCY);
+    // eslint-disable-next-line no-await-in-loop -- sequential slices, each internally parallel
+    const rosters = await Promise.all(slice.map((c) => repo.listPlayers(tenant, c.id)));
+    slice.forEach((c, k) => addToNameDobIndex(index, c.name, rosters[k]));
+  }
+  return index;
+}
+
+/**
+ * Club names where someone with this player's name + dob is registered under a DIFFERENT
+ * identity (natural key) — a soft "possible existing registration at X" warning; it never
+ * blocks. Sorted, de-duplicated.
+ */
+export function possibleExistingRegistrations(
+  index: NameDobIndex,
+  player: Pick<PlayerRegistration, 'naturalKey' | 'firstName' | 'lastName' | 'dob'>,
+): string[] {
+  const key = nameDobKey(player);
+  if (!key) return [];
+  return [
+    ...new Set(
+      (index.get(key) ?? [])
+        .filter((h) => h.naturalKey !== player.naturalKey)
+        .map((h) => h.clubName),
+    ),
+  ].sort();
 }
 
 /**

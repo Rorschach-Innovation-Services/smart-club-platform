@@ -63,6 +63,8 @@ import {
 } from './medicoach-sync/series-results.js';
 import { MedicoachSyncError } from './medicoach-sync/puller.js';
 import { runTenantSync } from './medicoach-sync/run.js';
+import { playerSyncCoverageProbe } from './medicoach-sync/players.js';
+import { playerSyncEnabled } from './medicoach-sync/player-placement.js';
 import { explainSyncError } from './medicoach-sync/explain.js';
 import { carrySyncOwnedFields, fixtureSyncRef } from './fixture-identity.js';
 import {
@@ -159,6 +161,10 @@ import {
   registerPlayerForClub,
   resolveDeclaredPreviousClubId,
   buildCrossClubIndex,
+  buildNameDobIndex,
+  addToNameDobIndex,
+  possibleExistingRegistrations,
+  type NameDobIndex,
   type ClearanceOpenedNotifier,
   type RegisterPlayerOutcome,
 } from './register-player.js';
@@ -227,6 +233,8 @@ import type {
   WithheldField,
   ScheduleChangeOrigin,
   SyncConflict,
+  PendingPlayerSync,
+  PlayerSyncReview,
 } from './types.js';
 import { teamIdsForClub, resolveTeam } from './teams.js';
 import { orgCopy } from './branding.js';
@@ -2495,6 +2503,13 @@ app.post('/clubs/:id/players', async (c) => {
     throw new HttpError(409, 'transfers are closed');
   }
   const player = result.player;
+  // Soft duplicate warning (ADR 0018): the same name + dob under another identity elsewhere.
+  const possibleExistingAt = playerSyncEnabled(cfg)
+    ? possibleExistingRegistrations(
+        await buildNameDobIndex(ra.tenant, await repo.listClubs(ra.tenant)),
+        player,
+      )
+    : [];
   // Only an ACTIVE row materializes the veterans affiliation now (write-on-activation); a
   // clearance-pending row gets it when the clearance resolves (repo hooks). Best-effort.
   if (veteransClub && result.outcome !== 'clearance-opened') {
@@ -2516,6 +2531,7 @@ app.post('/clubs/:id/players', async (c) => {
     {
       ...player,
       outcome: result.outcome,
+      ...(possibleExistingAt.length ? { possibleExistingAt } : {}),
       ...(result.outcome === 'clearance-opened'
         ? {
             clearance: {
@@ -2570,6 +2586,8 @@ interface ChairBulkResult {
   naturalKey?: string;
   /** The club the opened (or already-open) clearance comes from, when known. */
   fromClubName?: string;
+  /** Clubs where the same name + dob is registered under another identity (soft warning). */
+  possibleExistingAt?: string[];
   error?: string;
 }
 
@@ -2605,9 +2623,20 @@ async function registerChairRows(
 ): Promise<{ results: ChairBulkResult[]; playerCount: number }> {
   const results: ChairBulkResult[] = [];
   const toRegister = rows.filter((r) => r.fields);
+  // The soft duplicate warning (ADR 0018) rides the same roster reads: other clubs via the
+  // cross-club index, this club's own roster read once more.
+  const nameDob: NameDobIndex | undefined =
+    toRegister.length && playerSyncEnabled(cfg) ? new Map() : undefined;
   const crossClubIndex = toRegister.length
-    ? await buildCrossClubIndex(ra.tenant, await repo.listClubs(ra.tenant), club.id)
+    ? await buildCrossClubIndex(ra.tenant, await repo.listClubs(ra.tenant), club.id, {
+        ...(nameDob ? { nameDob } : {}),
+      })
     : undefined;
+  if (nameDob) addToNameDobIndex(nameDob, club.name, await repo.listPlayers(ra.tenant, club.id));
+  const warnAt = (p: PlayerRegistration) => {
+    const at = nameDob ? possibleExistingRegistrations(nameDob, p) : [];
+    return at.length ? { possibleExistingAt: at } : {};
+  };
   const adminEmails = adminEmailsProvider(repo, ra.tenant);
   const adminBatch: PlayerClearance[] = [];
   const notifyOpened: ClearanceOpenedNotifier = (tenant, tenantConfig, fromClub, clearance, by) =>
@@ -2641,6 +2670,7 @@ async function registerChairRows(
           outcome: 'clearance-opened',
           naturalKey,
           fromClubName: r.clearance.fromClubName,
+          ...warnAt(r.player),
         });
       } else if (r.outcome === 'clearance-already-open') {
         results.push({ ...base, outcome: 'clearance-already-open', naturalKey });
@@ -2650,7 +2680,9 @@ async function registerChairRows(
         // Unreachable: without `windowClosed` the core refuses (409 → per-row error) instead.
         results.push({ ...base, outcome: 'error', naturalKey, error: 'transfers are closed' });
       } else {
-        results.push({ ...base, outcome: 'created', naturalKey });
+        results.push({ ...base, outcome: 'created', naturalKey, ...warnAt(r.player) });
+        // An in-request later row with the same name + dob under another ID is warned too.
+        if (nameDob) addToNameDobIndex(nameDob, club.name, [r.player]);
       }
     } catch (err) {
       if (err instanceof HttpError && err.status < 500) {
@@ -4958,14 +4990,18 @@ app.get('/integrations/medicoach/status', async (c) => {
   const config = await repo.getTenantConfig(tenant);
   const enabled = hasFeature(config, 'medicoachSync');
   if (!enabled) return c.json({ enabled: false });
-  const [cursor, logs, pending, conflicts, markers, health] = await Promise.all([
-    repo.getSyncCursorRow(tenant),
-    repo.listSyncLogs(tenant, 20),
-    repo.listPendingSync(tenant),
-    repo.listSyncConflicts(tenant),
-    repo.listReportOpenMarkers(tenant),
-    repo.getSyncHealth(tenant),
-  ]);
+  const playersOn = playerSyncEnabled(config);
+  const [cursor, logs, pending, conflicts, markers, health, playerRows, playerReviews] =
+    await Promise.all([
+      repo.getSyncCursorRow(tenant),
+      repo.listSyncLogs(tenant, 20),
+      repo.listPendingSync(tenant),
+      repo.listSyncConflicts(tenant),
+      repo.listReportOpenMarkers(tenant),
+      repo.getSyncHealth(tenant),
+      playersOn ? repo.listPendingPlayerSync(tenant) : Promise.resolve([]),
+      playersOn ? repo.listPlayerReviews(tenant) : Promise.resolve([]),
+    ]);
   return c.json({
     enabled: true,
     dryRun: !medicoachSyncUrl() || !medicoachSyncSecret(),
@@ -5016,6 +5052,8 @@ app.get('/integrations/medicoach/status', async (c) => {
     conflicts: conflicts
       .sort((a, b) => b.detectedAt.localeCompare(a.detectedAt))
       .map((x) => conflictView(x)),
+    // The player sync (ADR 0018): counts only — outbox rows hold natural keys, never shown.
+    players: playersOn ? playerSyncStatus(playerRows, playerReviews.length) : { enabled: false },
     pendingReports: markers.length,
     // Report notices that reached nobody (every channel failed) and are waiting on a retry.
     noticesFailed: markers.filter((m) => m.lastError?.startsWith(NOTICE_FAILED_ERROR)).length,
@@ -5200,6 +5238,157 @@ app.post('/integrations/medicoach/outbox/drop', async (c) => {
   if (!(await repo.deletePendingSyncIfUnchanged(tenant, row.ref, row.schedule.changedAt)))
     throw new HttpError(409, 'a newer change for that fixture was queued meanwhile; refresh');
   return c.json({ status: 'dropped' });
+});
+
+/**
+ * The admin page's Players panel numbers (ADR 0018): rows waiting, parked (medicoach lacks a
+ * team — the refs it named, which carry no personal data, tell the operator what to top up),
+ * stuck (STUCK_ATTEMPTS+ failed pushes, still retried) and reviews waiting on an admin.
+ */
+function playerSyncStatus(rows: PendingPlayerSync[], reviews: number) {
+  const parked = rows.filter((r) => r.parked);
+  const live = rows.filter((r) => !r.parked);
+  const stuck = live.filter((r) => r.attempts >= STUCK_ATTEMPTS);
+  const lastError = [...stuck].sort((a, b) =>
+    String(b.lastAttemptAt ?? '').localeCompare(String(a.lastAttemptAt ?? '')),
+  )[0]?.lastError;
+  return {
+    enabled: true,
+    pending: live.length,
+    parked: parked.length,
+    stuck: stuck.length,
+    reviews,
+    missingTeamRefs: [...new Set(parked.flatMap((r) => r.missingTeamRefs ?? []))].sort(),
+    ...(lastError ? { lastError, lastErrorText: explainSyncError(lastError) } : {}),
+  };
+}
+
+async function requirePlayerSync(tenant: string): Promise<TenantConfig> {
+  const config = await repo.getTenantConfig(tenant);
+  if (!config || !playerSyncEnabled(config))
+    throw new HttpError(409, 'the medicoach player sync is not enabled for this tenant');
+  return config;
+}
+
+/**
+ * Retry parked and/or stuck player rows (ADR 0018): their attempt count restarts and parked
+ * rows are un-parked, so the next sync run (or "Sync now") sends them again — after a bundle
+ * top-up added the missing teams, say. Body `{ scope?: 'parked' | 'stuck' | 'all' }`.
+ */
+app.post('/integrations/medicoach/players/retry', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  await requirePlayerSync(tenant);
+  const body = await c.req.json<{ scope?: unknown }>().catch(() => ({}) as { scope?: unknown });
+  const scope = body?.scope ?? 'all';
+  if (scope !== 'parked' && scope !== 'stuck' && scope !== 'all')
+    throw new HttpError(400, 'scope must be parked, stuck or all');
+  let requeued = 0;
+  for (const r of await repo.listPendingPlayerSync(tenant)) {
+    const stuck = !r.parked && r.attempts >= STUCK_ATTEMPTS;
+    if (scope === 'parked' && !r.parked) continue;
+    if (scope === 'stuck' && !stuck) continue;
+    if (scope === 'all' && !r.parked && !stuck) continue;
+    if (await repo.retryPendingPlayerSync(tenant, r.naturalKey)) requeued++;
+  }
+  return c.json({ requeued });
+});
+
+/** A review as the page shows it. The other person's natural key never leaves the server. */
+function playerReviewView(r: PlayerSyncReview) {
+  return {
+    ...r,
+    candidates: r.candidates.map(({ naturalKey: _nk, ...rest }) => rest),
+  };
+}
+
+/**
+ * Player pushes held for an admin (ADR 0018): medicoach's `needs-review` (uncertain match —
+ * pick a candidate or create) and smart club's own possible duplicates (same name + dob under
+ * another ID). Personal data — admins only, like the rest of /integrations.
+ */
+app.get('/integrations/medicoach/player-reviews', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const reviews = await repo.listPlayerReviews(tenant);
+  return c.json(
+    reviews.sort((a, b) => b.detectedAt.localeCompare(a.detectedAt)).map(playerReviewView),
+  );
+});
+
+/**
+ * Resolve a held player (ADR 0018). Actions:
+ *  - `link` `{ medicoachPlayerId }` — one of the review's medicoach candidates: the next push
+ *    binds this person to that player;
+ *  - `create` `{ acknowledgedCandidates }` — every candidate shown, explicitly: medicoach
+ *    creates a new player (and refuses if new exact candidates appeared since);
+ *  - `distinct` — a possible duplicate: these ARE different people; never flagged again for
+ *    those pairs, and both are pushed;
+ *  - `dismiss` — drop the review and the queued change, push nothing (until the next change).
+ * The review row (medicoach candidates' personal data) is deleted in every case.
+ */
+app.post('/integrations/medicoach/player-reviews/:nk/resolve', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const nk = c.req.param('nk');
+  const review = await repo.getPlayerReview(tenant, nk);
+  if (!review) throw new HttpError(404, 'review not found');
+  const body = await c.req
+    .json<{ action?: unknown; medicoachPlayerId?: unknown; acknowledgedCandidates?: unknown }>()
+    .catch(() => ({}) as Record<string, unknown>);
+  const action = body?.action;
+  const at = now();
+  if (action === 'dismiss') {
+    await repo.deletePlayerReview(tenant, nk);
+    await repo.deletePendingPlayerSync(tenant, nk);
+    return c.json({ status: 'dismissed' });
+  }
+  const config = await requirePlayerSync(tenant);
+  if (action === 'link' || action === 'create') {
+    if (review.reason !== 'medicoach-needs-review')
+      throw new HttpError(400, `${action} answers a medicoach review; use distinct or dismiss`);
+    const ids = review.candidates.map((x) => x.playerId).filter((x): x is string => !!x);
+    if (action === 'link') {
+      const playerId = body.medicoachPlayerId;
+      if (typeof playerId !== 'string' || !ids.includes(playerId))
+        throw new HttpError(400, 'medicoachPlayerId must be one of the review candidates');
+      await repo.putPendingPlayerSync(tenant, nk, at, {
+        resolution: { action: 'link', playerId },
+      });
+    } else {
+      const acked = body.acknowledgedCandidates;
+      if (
+        !Array.isArray(acked) ||
+        !acked.every((x) => typeof x === 'string') ||
+        !ids.every((id) => acked.includes(id))
+      )
+        throw new HttpError(400, 'acknowledgedCandidates must list every candidate shown');
+      await repo.putPendingPlayerSync(tenant, nk, at, {
+        resolution: { action: 'create', acknowledgedCandidates: ids },
+      });
+    }
+    await repo.deletePlayerReview(tenant, nk);
+    return c.json({ status: 'queued' });
+  }
+  if (action === 'distinct') {
+    if (review.reason !== 'smartclub-possible-duplicate')
+      throw new HttpError(400, 'distinct answers a possible-duplicate review');
+    const others = review.candidates.map((x) => x.naturalKey).filter((x): x is string => !!x);
+    for (const other of others) await repo.putPlayerDistinct(tenant, nk, other);
+    await repo.deletePlayerReview(tenant, nk);
+    // The other side's review is settled too when every one of ITS candidates is now distinct.
+    const distinct = await repo.listPlayerDistinctPairs(tenant);
+    for (const other of others) {
+      const theirs = await repo.getPlayerReview(tenant, other);
+      if (
+        theirs?.reason === 'smartclub-possible-duplicate' &&
+        theirs.candidates.every(
+          (x) => !x.naturalKey || distinct.has([other, x.naturalKey].sort().join('#')),
+        )
+      )
+        await repo.deletePlayerReview(tenant, other);
+    }
+    await repo.recordPlayerSyncChange(tenant, [nk, ...others], { config, at });
+    return c.json({ status: 'queued' });
+  }
+  throw new HttpError(400, 'action must be link, create, distinct or dismiss');
 });
 
 app.post('/series/:id/clash-check', requireAdmin, async (c) => {
@@ -9038,8 +9227,10 @@ function keepStoredCompetitions(incoming: League[], stored: League[]): League[] 
  * land between the reads and the final Put (same accepted window as branding).
  */
 /**
- * `integrations` on PUT /platform/tenants/:slug (operator-only). Only
- * `medicoach.goLiveDate` exists: YYYY-MM-DD, or ''/null to clear it.
+ * `integrations` on PUT /platform/tenants/:slug (operator-only):
+ *  - `medicoach.goLiveDate`: YYYY-MM-DD, or ''/null to clear it;
+ *  - `medicoach.playerSync` (ADR 0018): boolean; absent ⇒ the stored value is kept (the
+ *    caller merges it), so a goLiveDate-only save never switches the player sync off.
  */
 function validateIntegrations(value: unknown): TenantConfig['integrations'] {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -9048,15 +9239,20 @@ function validateIntegrations(value: unknown): TenantConfig['integrations'] {
   if (medicoach === undefined || medicoach === null) return {};
   if (typeof medicoach !== 'object' || Array.isArray(medicoach))
     throw new HttpError(400, 'integrations.medicoach must be an object');
+  const playerSync = (medicoach as { playerSync?: unknown }).playerSync;
+  if (playerSync !== undefined && typeof playerSync !== 'boolean')
+    throw new HttpError(400, 'integrations.medicoach.playerSync must be true or false');
+  const withPlayerSync = playerSync === undefined ? {} : { playerSync };
   const goLive = (medicoach as { goLiveDate?: unknown }).goLiveDate;
-  if (goLive === undefined || goLive === null || goLive === '') return { medicoach: {} };
+  if (goLive === undefined || goLive === null || goLive === '')
+    return { medicoach: { ...withPlayerSync } };
   if (
     typeof goLive !== 'string' ||
     !/^\d{4}-\d{2}-\d{2}$/.test(goLive) ||
     Number.isNaN(Date.parse(`${goLive}T00:00:00Z`))
   )
     throw new HttpError(400, 'integrations.medicoach.goLiveDate must be a date (YYYY-MM-DD)');
-  return { medicoach: { goLiveDate: goLive } };
+  return { medicoach: { goLiveDate: goLive, ...withPlayerSync } };
 }
 
 app.put('/platform/tenants/:slug', async (c) => {
@@ -9209,7 +9405,27 @@ app.put('/platform/tenants/:slug', async (c) => {
   if (body.fixtureReminders !== undefined) {
     patch.fixtureReminders = validateFixtureReminders(body.fixtureReminders);
   }
-  if (body.integrations !== undefined) patch.integrations = validateIntegrations(body.integrations);
+  // Player sync switched on by this save (ADR 0018) — probed for team coverage after the write.
+  let playerSyncSwitchedOn = false;
+  if (body.integrations !== undefined) {
+    const integrations = validateIntegrations(body.integrations) ?? {};
+    const current = await getCurrent();
+    const stored = current.integrations?.medicoach?.playerSync;
+    const asked = integrations.medicoach?.playerSync;
+    const playerSync = asked ?? stored;
+    if (integrations.medicoach && playerSync !== undefined)
+      integrations.medicoach = { ...integrations.medicoach, playerSync };
+    if (playerSync === true) {
+      const features = body.features !== undefined ? body.features : current.features;
+      if (features?.medicoachSync !== true)
+        throw new HttpError(
+          400,
+          'the medicoach player sync needs the medicoach sync (features.medicoachSync) switched on',
+        );
+      playerSyncSwitchedOn = !playerSyncEnabled(current);
+    }
+    patch.integrations = integrations;
+  }
   // Whole-key write (the card sends the full list); normalised: labels trimmed, sorted by start.
   if (body.transferWindows !== undefined) {
     patch.transferWindows = validateTransferWindows(body.transferWindows);
@@ -9226,6 +9442,17 @@ app.put('/platform/tenants/:slug', async (c) => {
   });
   if (body.tutorials !== undefined) {
     await cleanupOrphanTutorialAssets(slug, currentCfg?.tutorials ?? [], body.tutorials);
+  }
+  // Teams reach medicoach only via the bundle: warn (never block) when players would park.
+  if (playerSyncSwitchedOn && playerSyncEnabled(next)) {
+    try {
+      warnings.push(...(await playerSyncCoverageProbe(repo, slug, next)).warnings);
+    } catch (err) {
+      console.warn(
+        `[medicoach-sync] ${slug}: coverage probe failed — ${err instanceof Error ? err.name : 'error'}`,
+      );
+      warnings.push('Could not check team coverage in medicoach; verify the bundle import.');
+    }
   }
   // `warnings` is informational-only and additive — only present when non-empty, so an
   // unaffected save's response shape is byte-for-byte what it was before this existed.

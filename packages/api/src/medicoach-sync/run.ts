@@ -5,6 +5,8 @@
  *   1. flush the PENDINGSYNC# outbox to medicoach (Slice 4) — first, so a smart-club edit
  *      reaches medicoach before the pull compares schedules; a push failure never stops the
  *      pull (the rows stay queued with their attempt count);
+ *   1b. flush the PENDINGPLAYERSYNC# player outbox (ADR 0018) when the tenant has the player
+ *      sync on — same rules: a failure never stops the pull;
  *   2. pull and apply changes (`runMedicoachSync`) — throws on an HTTP/contract failure;
  *   3. retry captain's reports whose opening failed earlier (REPORTOPEN# markers) — always,
  *      even when the pull failed, since it needs nothing from medicoach;
@@ -36,10 +38,13 @@ import {
   type PullerDeps,
   type SyncRunSummary,
 } from './puller.js';
+import { flushPlayerOutbox, type PlayerFlushSummary } from './players.js';
+import { playerSyncEnabled } from './player-placement.js';
 import { flushScheduleOutbox, type FlushSummary } from './schedule.js';
 
 export interface TenantSyncSummary extends SyncRunSummary {
   push?: FlushSummary;
+  playerPush?: PlayerFlushSummary;
   reports?: ReportRetrySummary;
   reminders?: ReminderSummary;
 }
@@ -127,6 +132,25 @@ export async function runTenantSync(
       `[medicoach-sync] ${tenant}: outbox flush failed — ${err instanceof Error ? err.message : 'error'}`,
     );
   }
+  let playerPush: PlayerFlushSummary | undefined;
+  if (playerSyncEnabled(config)) {
+    try {
+      playerPush = await flushPlayerOutbox(tenant, trigger, {
+        repo,
+        url: deps.url,
+        secret: deps.secret,
+        config,
+        ...(deps.fetch ? { fetch: deps.fetch } : {}),
+        ...(deps.now ? { now: deps.now } : {}),
+        ...(deps.log ? { log: deps.log } : {}),
+      });
+    } catch (err) {
+      // A repo failure reading the tenant or the outbox: report it (no player data), still pull.
+      console.error(
+        `[medicoach-sync] ${tenant}: player outbox flush failed — ${err instanceof Error ? err.message : 'error'}`,
+      );
+    }
+  }
   // Report activity across the pull's report openings and the retries, for the ops digest.
   // Keyed by report id: a notice that fails in the pull and is retried in the same run counts
   // once, by its last outcome.
@@ -198,5 +222,11 @@ export async function runTenantSync(
       `[medicoach-sync] ${tenant}: report reminders failed — ${err instanceof Error ? err.message : 'error'}`,
     );
   }
-  return { ...summary, ...(push ? { push } : {}), reports, ...(reminders ? { reminders } : {}) };
+  return {
+    ...summary,
+    ...(push ? { push } : {}),
+    ...(playerPush ? { playerPush } : {}),
+    reports,
+    ...(reminders ? { reminders } : {}),
+  };
 }
