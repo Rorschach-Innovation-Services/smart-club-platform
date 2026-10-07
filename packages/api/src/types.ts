@@ -336,9 +336,11 @@ export interface TenantConfig {
    * it, only PUT /platform/tenants/:slug writes it.
    *  - medicoach.goLiveDate (YYYY-MM-DD): results for matches before this date never open
    *    captain's reports (Slice 2.3); stored now, read by the result hook.
+   *  - medicoach.playerSync (default false): push registrations to medicoach team rosters
+   *    (ADR 0018). Requires features.medicoachSync.
    */
   integrations?: {
-    medicoach?: { goLiveDate?: string };
+    medicoach?: { goLiveDate?: string; playerSync?: boolean };
   };
   /**
    * Operator "setup complete" milestone (D6) — informational only (the client is

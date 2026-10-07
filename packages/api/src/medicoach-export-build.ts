@@ -29,7 +29,7 @@
  *     never touched, so every pre-existing ref and teamRefs list stays byte-identical.
  */
 import { createHash } from 'node:crypto';
-import { clubTeamsForLeague, isVeteransLeague } from '../../engine/src/leagues.js';
+import { clubTeamsForLeague } from '../../engine/src/leagues.js';
 import { slotSource } from '../../engine/src/formats.js';
 import {
   BUNDLE_SCHEMA,
@@ -67,6 +67,7 @@ import type {
   VeteransAffiliation,
 } from './types.js';
 import { resolveVertical } from './vertical.js';
+import { desiredTeamRefs, isExcludedLeagueKey } from './medicoach-sync/player-placement.js';
 
 /* ─────────────────────────── Inputs / outputs ─────────────────────────── */
 
@@ -213,9 +214,8 @@ export function slugify(s: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
-export function isExcludedLeagueKey(key: string): boolean {
-  return key === 'demo' || key.startsWith('seed-');
-}
+/** Shared with the player sync's placement context (ADR 0018). */
+export { isExcludedLeagueKey };
 
 /* ─────────────────────────── PII masking ───────────────────────────
    Everything the CLI prints goes through these (or is a count/id). */
@@ -1544,11 +1544,14 @@ function buildPlayers(
     return t;
   };
   const includeInactive = input.options?.includeInactivePlayers === true;
-  const leagueKeys = new Set(leagues.map((l) => l.key));
-  const affiliationLeagues = leagues.filter((l) => !l.fixturesOnly);
-  const veteransLeagueKeys = leagues
-    .filter((l) => isVeteransLeague({ key: l.key, label: l.label }))
-    .map((l) => l.key);
+  // Shared with the player sync (ADR 0018) so the two paths can never place a player apart.
+  const placementCtx = {
+    leagues,
+    clubsById,
+    sidesOf: (clubId: string, leagueKey: string) =>
+      sidesOf(clubId, leagueKey).map((t) => t.externalRef),
+    squadRef: (clubId: string) => squadOf(clubId).externalRef,
+  };
 
   // Pick one row per naturalKey: active beats non-active, then the newest registration.
   const chosen = new Map<string, PlayerRegistration>();
@@ -1586,22 +1589,9 @@ function buildPlayers(
   for (const p of chosen.values()) {
     // Rows are read per club in clubsById, so the institution always exists.
     const inst = institutions.get(p.clubId)!;
-    const teamRefs: string[] = [];
-
-    // Main club side: the registered league, else the club's only affiliation league.
-    let leagueKey = p.team && leagueKeys.has(p.team) ? p.team : undefined;
-    let candidateCount = 0;
-    if (!p.team) {
-      const club = clubsById.get(p.clubId);
-      const candidates = (club?.leagues ?? []).filter((k) =>
-        affiliationLeagues.some((l) => l.key === k),
-      );
-      candidateCount = candidates.length;
-      if (candidates.length === 1) leagueKey = candidates[0];
-    }
-    const sides = leagueKey ? sidesOf(p.clubId, leagueKey) : [];
-    if (sides.length === 1) teamRefs.push(sides[0].externalRef);
-    else if (sides.length > 1) summary.players.ambiguousSide++;
+    const placed = desiredTeamRefs(p, placementCtx);
+    const teamRefs = placed.teamRefs;
+    summary.players.ambiguousSide += placed.ambiguousSides;
 
     // Veterans second club.
     let veteransInstitutionRef: string | undefined;
@@ -1609,34 +1599,11 @@ function buildPlayers(
       summary.veterans.playersWithVeteransClub++;
       const vInst = institutions.get(p.veteransClubId);
       if (vInst) veteransInstitutionRef = vInst.externalRef;
-      let resolved = false;
-      for (const k of veteransLeagueKeys) {
-        const vs = sidesOf(p.veteransClubId, k);
-        if (vs.length === 1 && !teamRefs.includes(vs[0].externalRef)) {
-          teamRefs.push(vs[0].externalRef);
-          resolved = true;
-        } else if (vs.length > 1) summary.players.ambiguousSide++;
-      }
-      if (resolved) summary.veterans.resolvedVeteransTeam++;
+      if (placed.veteransResolved) summary.veterans.resolvedVeteransTeam++;
     }
 
-    // Fallback placement, ONLY for a player the rules above left without any team: an
-    // already-placed player keeps exactly the teamRefs earlier exports gave it.
-    const placement = summary.players.placement;
-    if (sides.length === 1) placement.singleSide++;
-    else if (teamRefs.length) placement.veteransOnly++;
-    else if (sides.length > 1) {
-      for (const s of sides) teamRefs.push(s.externalRef);
-      placement.allSidesOfAmbiguous++;
-    } else {
-      teamRefs.push(squadOf(p.clubId).externalRef);
-      placement.clubSquad++;
-      const why = summary.players.clubSquadReasons;
-      if (p.team && !leagueKey) why.leagueNotExported++;
-      else if (leagueKey) why.noSideInLeague++;
-      else if (candidateCount > 1) why.multipleCandidateLeagues++;
-      else why.noRegisteredLeague++;
-    }
+    summary.players.placement[placed.placement]++;
+    if (placed.clubSquadReason) summary.players.clubSquadReasons[placed.clubSquadReason]++;
 
     if (teamRefs.length) summary.players.withTeam++;
     else summary.players.noTeam++;
