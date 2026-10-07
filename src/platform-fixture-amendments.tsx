@@ -63,6 +63,34 @@ function ChangeChips({ changes }: { changes: api.AmendmentRowChange[] }) {
   );
 }
 
+/** "Home v Away" for a matched fixture, keyed by series + fixture id (falls back to the id). */
+function fixtureNamer(preview: api.AmendmentPreview) {
+  const label = new Map<string, string>();
+  for (const s of preview.sheets)
+    for (const r of s.rows)
+      if (r.seriesId && r.fixtureId)
+        label.set(
+          `${r.seriesId}#${r.fixtureId}`,
+          r.fixture ? `${r.fixture.home} v ${r.fixture.away}` : `${r.sheet.home} v ${r.sheet.away}`,
+        );
+  return (seriesId: string, fixtureId: string) =>
+    label.get(`${seriesId}#${fixtureId}`) ?? fixtureId;
+}
+
+function OfficialsList({ preview }: { preview: api.AmendmentPreview }) {
+  const nameOf = fixtureNamer(preview);
+  return (
+    <ul style={{ margin: 0, paddingLeft: 18 }}>
+      {(preview.officials ?? []).map((o) => (
+        <li key={`${o.seriesId}#${o.fixtureId}`}>
+          {nameOf(o.seriesId, o.fixtureId)}: {o.umpires.join(', ') || '—'}
+          {o.referee ? ` · referee ${o.referee}` : ''}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export function FixtureAmendmentsPage({ toast }: { toast: Toast }) {
   const { slug = '' } = useParams();
   const navigate = useNavigate();
@@ -321,6 +349,19 @@ export function FixtureAmendmentsPage({ toast }: { toast: Toast }) {
               onToggle={toggleSkip}
             />
           ))}
+
+          {(p.officials ?? []).length > 0 && (
+            <section className="mcs-card" style={{ marginTop: 14 }} aria-labelledby="fa-officials">
+              <div className="mcs-card-title" id="fa-officials">
+                Umpire appointments affected
+              </div>
+              <p className="mcs-note">
+                These fixtures already have officials appointed. Applying the sheet keeps the
+                appointments; check they can still make the new date, time or ground.
+              </p>
+              <OfficialsList preview={p} />
+            </section>
+          )}
 
           {p.gate.preExisting.length > 0 && (
             <details className="insights-callout warn" style={{ marginTop: 14 }}>
@@ -628,16 +669,7 @@ function AmendmentResult({
   onAgain: () => void;
   onBack: () => void;
 }) {
-  const label = new Map<string, string>();
-  for (const s of preview.sheets)
-    for (const r of s.rows)
-      if (r.seriesId && r.fixtureId)
-        label.set(
-          `${r.seriesId}#${r.fixtureId}`,
-          r.fixture ? `${r.fixture.home} v ${r.fixture.away}` : `${r.sheet.home} v ${r.sheet.away}`,
-        );
-  const nameOf = (seriesId: string, fixtureId: string) =>
-    label.get(`${seriesId}#${fixtureId}`) ?? fixtureId;
+  const nameOf = fixtureNamer(preview);
   const seriesName = new Map(out.series.map((s) => [s.seriesId, s.seriesName]));
   const drifted = out.series.filter((s) => s.status === 'drifted');
   const officials = preview.officials ?? [];
@@ -724,14 +756,7 @@ function AmendmentResult({
           title="Check the umpire appointments"
           sub="These amended fixtures already have officials appointed. Make sure they can still make the new time or ground."
         >
-          <ul style={{ margin: 0, paddingLeft: 18 }}>
-            {officials.map((o) => (
-              <li key={`${o.seriesId}#${o.fixtureId}`}>
-                {nameOf(o.seriesId, o.fixtureId)}: {o.umpires.join(', ') || '—'}
-                {o.referee ? ` · referee ${o.referee}` : ''}
-              </li>
-            ))}
-          </ul>
+          <OfficialsList preview={preview} />
         </Card>
       )}
 

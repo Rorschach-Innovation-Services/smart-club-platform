@@ -233,6 +233,11 @@ describe('FixtureAmendmentsPage', () => {
     expect(screen.getByText('Already correct: 2')).toBeInTheDocument();
     expect(screen.getByText(/the v column moves between rows/i)).toBeInTheDocument();
     expect(screen.getByText(/1 clash already on these dates/i)).toBeInTheDocument();
+    // Officials on touched fixtures are listed BEFORE confirming, not only in the result.
+    const officials = screen.getByRole('region', { name: /umpire appointments affected/i });
+    expect(
+      within(officials).getByText(/Ilembe CC v Crusaders CC: J Smith, K Naidoo/),
+    ).toBeVisible();
     // Existing clashes are reported, never blocking.
     expect(screen.queryByText(/blocked — these amendments/i)).not.toBeInTheDocument();
     expect(applyBtn()).toBeEnabled();
