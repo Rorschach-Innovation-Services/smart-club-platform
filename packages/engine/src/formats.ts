@@ -65,15 +65,32 @@ const ordinal = (n: number): string => {
   return `${n}${['th', 'st', 'nd', 'rd'][n % 10] ?? 'th'}`;
 };
 
+/** "veterans-league" → "Veterans", "u9-platinum" → "U9 Platinum": a league slug as words,
+ * the generic trailing "-league" dropped. */
+const divisionWords = (slug: string): string =>
+  slug
+    .replace(/-league$/i, '')
+    .split('-')
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+
 /**
- * "Group 1 – 1st" for `pos:s-planb-premier-men-t20-1:1`. The group number is read off the
- * series id's trailing group token (`-1`, `-g2`); an id without one is shown as-is.
+ * "Group 1 – 1st" for `pos:s-planb-premier-men-t20-1:1`. The group is read off the series
+ * id's trailing token: a number (`-1`, `-g2`) or a letter group (`-g-a` → "Group A"); a
+ * single-letter division suffix on a `s-<tenant>-<league>-<x>` id names the division
+ * (`s-titans-veterans-league-a` → "Veterans A"). An id with none of these is shown as-is.
  */
 export function groupPositionLabel(id: string): string | null {
   const src = groupPositionSource(id);
   if (!src) return null;
-  const m = /-g?(\d+)$/i.exec(src.seriesId);
-  const group = m ? `Group ${Number(m[1])}` : src.seriesId;
+  const sid = src.seriesId;
+  let group = sid;
+  let m = /-g?(\d+)$/i.exec(sid);
+  if (m) group = `Group ${Number(m[1])}`;
+  else if ((m = /-g-([a-z])$/i.exec(sid))) group = `Group ${m[1].toUpperCase()}`;
+  else if ((m = /^s-[a-z0-9]+-([a-z0-9-]+?)-([a-z])$/i.exec(sid)))
+    group = `${divisionWords(m[1])} ${m[2].toUpperCase()}`;
   return `${group} – ${ordinal(src.rank)}`;
 }
 
@@ -105,6 +122,9 @@ export interface SlotFixture {
   round: number;
   home?: string;
   away?: string;
+  /** An explicit stage name the fixture was created with ("Semi-final", "Final") — wins over
+   * the round-shape inference when present. */
+  stage?: string;
 }
 
 /**
@@ -177,7 +197,8 @@ function bracketShape(fixtures: SlotFixture[]): {
  * and renders "Unknown team". A whole bracket beyond round one reads as
  * "Unknown team vs Unknown team".
  *
- * Falls back to the fixture's round number when the bracket shape can't be inferred, and
+ * A target fixture's explicit `stage` names the round when it has one; otherwise the name is
+ * inferred from the bracket shape. Falls back to the fixture's round number when the bracket shape can't be inferred, and
  * to a bare "Winner"/"Loser" when the referenced fixture is missing entirely — every
  * branch is more use than "Unknown team".
  */
@@ -193,7 +214,12 @@ export function slotRefLabel(id: string, fixtures: SlotFixture[] = []): string |
   const shape = bracketShape(fixtures);
   const inRound = fixtures.filter((f) => f?.round === target.round);
   let name: string;
-  if (target.round === shape.thirdPlaceRound) {
+  const stage = typeof target.stage === 'string' ? target.stage.trim() : '';
+  if (stage) {
+    // The fixture says what it is (an importer's sheet, a recipe's later fixture). Shape
+    // inference can't: a lone semi before a final reads as a play-in (1 ≠ 2^(2-1)).
+    name = stage;
+  } else if (target.round === shape.thirdPlaceRound) {
     name = 'Third-place playoff';
   } else if (
     // Only the FIRST round can be a play-in — 9 entrants give one preliminary before a

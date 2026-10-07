@@ -790,7 +790,7 @@ export function AdminFixtures({
                     }}
                   >
                     {s.teams.length} teams · {s.fixtures.length} fixtures ·{' '}
-                    {showOvers ? `${s.maxOvers} ov · ` : ''}
+                    {showOvers && s.maxOvers != null ? `${s.maxOvers} ov · ` : ''}
                     {s.endDate ? '' : 'start '}
                     {formatDay(s.startDate)}
                     {s.endDate ? ` – ${formatDay(s.endDate)}` : ''}
@@ -1335,7 +1335,7 @@ export function FixtureTable({
               series.seriesType,
               `${series.teams.length} teams`,
               `${series.fixtures.length} fixtures`,
-              showOvers && `${series.maxOvers} overs`,
+              showOvers && series.maxOvers != null && `${series.maxOvers} overs`,
               // A season-generated series has no category — the competition already says
               // what it is. Joining on the present parts avoids a dangling separator.
               series.category,
