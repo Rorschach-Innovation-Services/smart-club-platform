@@ -1181,6 +1181,33 @@ export async function putFixtureScorecard(
   );
 }
 
+/**
+ * A re-fetch found no card (404 / `available: false`) while an AVAILABLE card is stored:
+ * keep the card and only note when it was last checked. Conditional on the row still being
+ * the card fetched at `fetchedAt` — a concurrent fetch that stored a newer one wins.
+ */
+export async function touchFixtureScorecardCheckedAt(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+  fetchedAt: string,
+  checkedAt: string,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: fixtureScorecardKey(tenant, seriesId, fixtureId),
+        UpdateExpression: 'SET lastCheckedAt = :c',
+        ConditionExpression: 'fetchedAt = :f',
+        ExpressionAttributeValues: { ':c': checkedAt, ':f': fetchedAt },
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
 export async function getFixtureScorecard(
   tenant: string,
   seriesId: string,
@@ -2576,9 +2603,46 @@ export async function voidScorecardConfirmEntry(
 }
 
 /**
+ * A result re-recorded after a clear: a `void` entry goes back to `pending`, with any answer
+ * it carried before the clear removed (the chair answers the new result afresh). Only a void
+ * entry is touched. False when the entry is absent or not void.
+ */
+export async function restoreScorecardConfirmEntry(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+  entryKey: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: scorecardConfirmKey(tenant, weekKey, clubId),
+        UpdateExpression:
+          'SET entries.#k.#st = :pending, updatedAt = :at ' +
+          'REMOVE entries.#k.feedback, entries.#k.submittedAt, entries.#k.submittedVia, ' +
+          'entries.#k.confirmedAgainstFetchedAt, entries.#k.staleConfirmation',
+        ConditionExpression: 'attribute_exists(entries.#k) AND entries.#k.#st = :void',
+        ExpressionAttributeNames: { '#k': entryKey, '#st': 'status' },
+        ExpressionAttributeValues: {
+          ':pending': 'pending',
+          ':void': 'void',
+          ':at': new Date().toISOString(),
+        },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/**
  * A newer scorecard (fetched at `fetchedAt`) arrived for an ANSWERED entry: flag it stale so
- * the operator console shows the answer may predate the card. Only an entry submitted before
- * that fetch is flagged. False when nothing changed.
+ * the operator console shows the answer may predate the card. Only an entry answered against
+ * an older card is flagged — its `confirmedAgainstFetchedAt` when recorded, else its
+ * `submittedAt`. False when nothing changed.
  */
 export async function flagScorecardEntryStale(
   tenant: string,
@@ -2594,7 +2658,9 @@ export async function flagScorecardEntryStale(
         Key: scorecardConfirmKey(tenant, weekKey, clubId),
         UpdateExpression: 'SET entries.#k.staleConfirmation = :t, updatedAt = :at',
         ConditionExpression:
-          'attribute_exists(entries.#k) AND entries.#k.#st IN (:c, :x) AND entries.#k.submittedAt < :f',
+          'attribute_exists(entries.#k) AND entries.#k.#st IN (:c, :x) AND (' +
+          '(attribute_exists(entries.#k.confirmedAgainstFetchedAt) AND entries.#k.confirmedAgainstFetchedAt < :f) OR ' +
+          '(attribute_not_exists(entries.#k.confirmedAgainstFetchedAt) AND entries.#k.submittedAt < :f))',
         ExpressionAttributeNames: { '#k': entryKey, '#st': 'status' },
         ExpressionAttributeValues: {
           ':t': true,

@@ -12,8 +12,9 @@
  * (`scoreconf-link.v1.`), so a captain's-report token can never verify here or vice versa.
  * Rotating the memberId revokes the link. Each entry is answered once (first submit wins).
  *
- * A cleared result voids its entry; a newer scorecard fetched after the chair answered flags
- * the entry `staleConfirmation` (both via the medicoach sync, best-effort).
+ * A cleared result voids its entry (a re-recorded one restores it to pending); a newer
+ * scorecard fetched after the card the chair answered against flags the entry
+ * `staleConfirmation` (all via the medicoach sync, best-effort).
  *
  * PII: the digest holds club and team names, and the chair's own feedback. The public view
  * adds the scorecard's player names (already names-only) — never contacts or player refs.
@@ -239,6 +240,7 @@ export class ScorecardInputError extends Error {
 export function parseScorecardAnswer(raw: unknown): {
   action: 'confirm' | 'correction';
   feedback?: string;
+  scorecardFetchedAt?: string;
 } {
   if (!raw || typeof raw !== 'object') throw new ScorecardInputError('body must be an object');
   const b = raw as Record<string, unknown>;
@@ -249,11 +251,20 @@ export function parseScorecardAnswer(raw: unknown): {
   const feedback = typeof b.feedback === 'string' ? b.feedback.trim() : '';
   if (feedback.length > SCORECARD_FEEDBACK_MAX)
     throw new ScorecardInputError(`feedback is too long (max ${SCORECARD_FEEDBACK_MAX})`);
+  // The `fetchedAt` of the scorecard the page rendered (echoed from the view), if any.
+  const fa = b.scorecardFetchedAt;
+  if (
+    fa !== undefined &&
+    fa !== null &&
+    (typeof fa !== 'string' || fa.length > 40 || !Number.isFinite(Date.parse(fa)))
+  )
+    throw new ScorecardInputError('scorecardFetchedAt must be an ISO timestamp');
+  const echoed = typeof fa === 'string' ? { scorecardFetchedAt: fa } : {};
   if (b.action === 'correction') {
     if (!feedback) throw new ScorecardInputError('feedback is required to request a correction');
-    return { action: 'correction', feedback };
+    return { action: 'correction', feedback, ...echoed };
   }
-  return { action: 'confirm', ...(feedback ? { feedback } : {}) };
+  return { action: 'confirm', ...(feedback ? { feedback } : {}), ...echoed };
 }
 
 // ───────────────────────── The public view ─────────────────────────
@@ -279,6 +290,8 @@ export interface ScorecardConfirmEntryView {
   };
   medicoachMatchUrl?: string;
   scorecard?: { matchState?: string; innings: InningsScorecardWire[] };
+  /** The `fetchedAt` of the embedded scorecard — echoed back on submit (with `scorecard`). */
+  scorecardFetchedAt?: string;
 }
 
 export interface ScorecardBranding {
@@ -345,6 +358,7 @@ export function toScorecardConfirmView(
                 ...(card.matchState !== undefined ? { matchState: card.matchState } : {}),
                 innings: card.innings ?? [],
               },
+              scorecardFetchedAt: card.fetchedAt,
             }
           : {}),
       };
@@ -670,23 +684,74 @@ export async function notifyOperatorsOfCorrection(
   return out;
 }
 
-// ───────────────────────── Sync hooks (void / stale) ─────────────────────────
+/**
+ * Whether `next` (one notice attempt's deliveries) repeats the most recently recorded attempt:
+ * the same channels with the same statuses and reasons. A re-run that reaches nobody again
+ * (no contact, template still pending) is then not re-recorded, so `deliveries` stays bounded.
+ */
+export function repeatsLatestScorecardDeliveries(
+  recorded: CaptainsReportDelivery[] | undefined,
+  next: CaptainsReportDelivery[],
+): boolean {
+  const opened = (recorded ?? []).filter((d) => d.purpose === 'opened');
+  if (!next.length || opened.length < next.length) return false;
+  const sig = (ds: CaptainsReportDelivery[]) =>
+    ds
+      .map((d) => `${d.channel}|${d.status}|${d.reason ?? ''}`)
+      .sort()
+      .join(',');
+  return sig(opened.slice(-next.length)) === sig(next);
+}
+
+// ───────────────────────── Sync hooks (void / restore / stale) ─────────────────────────
 
 type HookRepo = Pick<
   RepoModule,
-  'listScorecardConfirmations' | 'voidScorecardConfirmEntry' | 'flagScorecardEntryStale'
+  | 'listScorecardConfirmations'
+  | 'voidScorecardConfirmEntry'
+  | 'restoreScorecardConfirmEntry'
+  | 'flagScorecardEntryStale'
 >;
 
-/** A cleared result: void its entry in every digest that lists it. Returns how many. */
+/** How many weeks back (counting the running week) the sync hooks look for digests. */
+export const SCORECARD_HOOK_WEEKS = 8;
+
+/**
+ * The digests the sync hooks consider: the running week's and the 7 before it (one prefix
+ * Query each on `SCORECONF#<weekKey>#`), plus the week `fixtureDate` falls in when the caller
+ * knows it. Bounded on purpose — a hook never Queries the tenant's whole SCORECONF partition.
+ * A digest older than that (its link expired weeks ago) is left as it is.
+ */
+async function hookDigests(
+  repo: Pick<RepoModule, 'listScorecardConfirmations'>,
+  tenant: string,
+  now: Date,
+  fixtureDate?: string,
+): Promise<ScorecardConfirmation[]> {
+  const current = dayjs.utc(weekKeyFor(sastDay(now.getTime())));
+  const weeks = new Set(
+    Array.from({ length: SCORECARD_HOOK_WEEKS }, (_, i) =>
+      current.subtract(7 * i, 'day').format('YYYY-MM-DD'),
+    ),
+  );
+  if (fixtureDate && WEEK_KEY_RE.test(fixtureDate.slice(0, 10))) weeks.add(weekKeyFor(fixtureDate));
+  const lists = await Promise.all(
+    [...weeks].map((w) => repo.listScorecardConfirmations(tenant, w)),
+  );
+  return lists.flat();
+}
+
+/** A cleared result: void its entry in every (recent) digest that lists it. Returns how many. */
 export async function voidScorecardEntriesForFixture(
   repo: HookRepo,
   tenant: string,
   seriesId: string,
   fixtureId: string,
+  opts: { now?: Date; fixtureDate?: string } = {},
 ): Promise<number> {
   const k = scorecardEntryKey(seriesId, fixtureId);
   let n = 0;
-  for (const r of await repo.listScorecardConfirmations(tenant)) {
+  for (const r of await hookDigests(repo, tenant, opts.now ?? new Date(), opts.fixtureDate)) {
     const e = r.entries?.[k];
     if (!e || e.status === 'void') continue;
     if (await repo.voidScorecardConfirmEntry(tenant, r.weekKey, r.clubId, k)) n++;
@@ -695,8 +760,31 @@ export async function voidScorecardEntriesForFixture(
 }
 
 /**
- * A scorecard was (re)fetched at `fetchedAt`: flag every ANSWERED entry for that fixture that
- * was submitted before it as `staleConfirmation`. Returns how many were flagged.
+ * A (non-import) result was stored again after a clear: every (recent) digest entry for the
+ * fixture that is `void` goes back to `pending`, so the chair's live link offers it again.
+ * Answered and open entries are never touched. Returns how many were restored.
+ */
+export async function restoreScorecardEntriesForFixture(
+  repo: HookRepo,
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+  opts: { now?: Date; fixtureDate?: string } = {},
+): Promise<number> {
+  const k = scorecardEntryKey(seriesId, fixtureId);
+  let n = 0;
+  for (const r of await hookDigests(repo, tenant, opts.now ?? new Date(), opts.fixtureDate)) {
+    if (r.entries?.[k]?.status !== 'void') continue;
+    if (await repo.restoreScorecardConfirmEntry(tenant, r.weekKey, r.clubId, k)) n++;
+  }
+  return n;
+}
+
+/**
+ * A scorecard was (re)fetched at `fetchedAt`: flag every ANSWERED entry for that fixture
+ * (in a recent digest) as `staleConfirmation` when it was answered against an older card —
+ * its `confirmedAgainstFetchedAt` (the card the chair saw) when recorded, else its
+ * `submittedAt`. Returns how many were flagged.
  */
 export async function flagStaleScorecardEntries(
   repo: HookRepo,
@@ -704,14 +792,16 @@ export async function flagStaleScorecardEntries(
   seriesId: string,
   fixtureId: string,
   fetchedAt: string,
+  opts: { now?: Date } = {},
 ): Promise<number> {
   const k = scorecardEntryKey(seriesId, fixtureId);
   let n = 0;
-  for (const r of await repo.listScorecardConfirmations(tenant)) {
+  for (const r of await hookDigests(repo, tenant, opts.now ?? new Date())) {
     const e = r.entries?.[k];
     if (!e || (e.status !== 'confirmed' && e.status !== 'correction') || e.staleConfirmation)
       continue;
-    if (!e.submittedAt || e.submittedAt >= fetchedAt) continue;
+    const against = e.confirmedAgainstFetchedAt ?? e.submittedAt;
+    if (!against || against >= fetchedAt) continue;
     if (await repo.flagScorecardEntryStale(tenant, r.weekKey, r.clubId, k, fetchedAt)) n++;
   }
   return n;

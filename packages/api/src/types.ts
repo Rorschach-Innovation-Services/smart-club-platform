@@ -1332,6 +1332,11 @@ export interface StoredFixtureScorecard {
   matchState?: string;
   innings?: InningsScorecardWire[];
   terminal?: boolean;
+  /**
+   * ISO instant of the last fetch that found no card while this AVAILABLE one was kept (a
+   * 404 / `available: false` never overwrites an available card).
+   */
+  lastCheckedAt?: string;
 }
 
 /** The read-only result joined onto a fixture in GET /series (no captain/player data). */

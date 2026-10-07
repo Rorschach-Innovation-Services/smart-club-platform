@@ -202,6 +202,8 @@ import {
 import type {
   CaptainsReport,
   ScorecardConfirmation,
+  StoredFixtureResult,
+  StoredFixtureScorecard,
   Club,
   ClubCommEvent,
   ClubSpec,
@@ -7058,21 +7060,32 @@ async function linkedScorecardOr410(c: Context<HonoEnv>) {
   return found;
 }
 
-/** The pinned GET /scorecard-confirm-link/:token payload (see ScorecardConfirmView). */
+/**
+ * The pinned GET /scorecard-confirm-link/:token payload (see ScorecardConfirmView). Reads
+ * only the digest's own entries' result + scorecard (two GetItems per entry, in parallel) —
+ * never the tenant's whole result/scorecard partitions.
+ */
 async function scorecardLinkPayload(tenant: string, record: ScorecardConfirmation) {
-  const [cfg, results, cards] = await Promise.all([
+  const entries = Object.entries(record.entries ?? {});
+  const [cfg, rows] = await Promise.all([
     repo.getTenantConfig(tenant),
-    repo.listFixtureResults(tenant),
-    repo.listFixtureScorecards(tenant),
+    Promise.all(
+      entries.map(async ([k, e]) => {
+        const [result, card] = await Promise.all([
+          repo.getFixtureResult(tenant, e.seriesId, e.fixtureId),
+          repo.getFixtureScorecard(tenant, e.seriesId, e.fixtureId),
+        ]);
+        return { k, result, card };
+      }),
+    ),
   ]);
-  const keys = new Set(Object.keys(record.entries ?? {}));
-  const byKey = <T extends { seriesId: string; fixtureId: string }>(rows: T[]) =>
-    new Map(
-      rows
-        .map((r) => [scorecardEntryKey(r.seriesId, r.fixtureId), r] as const)
-        .filter(([k]) => keys.has(k)),
-    );
-  return toScorecardConfirmView(record, byKey(cards), byKey(results), {
+  const results = new Map<string, StoredFixtureResult>();
+  const cards = new Map<string, StoredFixtureScorecard>();
+  for (const { k, result, card } of rows) {
+    if (result) results.set(k, result);
+    if (card) cards.set(k, card);
+  }
+  return toScorecardConfirmView(record, cards, results, {
     name: cfg ? orgCopy(cfg).name : tenant,
     logoUrl: cfg?.branding?.logoUrl ?? '',
     colors: cfg?.branding?.colors ?? {},
@@ -7085,8 +7098,10 @@ app.get('/scorecard-confirm-link/:token', async (c) => {
 });
 
 /**
- * Answer one match of the digest: `{action: 'confirm' | 'correction', feedback?}` (feedback
- * required for a correction, ≤ 2,000 chars). First submit wins: 404 for a match not in the
+ * Answer one match of the digest: `{action: 'confirm' | 'correction', feedback?,
+ * scorecardFetchedAt?}` (feedback required for a correction, ≤ 2,000 chars;
+ * `scorecardFetchedAt` echoes the rendered card's version and is stored as the confirm's
+ * `confirmedAgainstFetchedAt`). First submit wins: 404 for a match not in the
  * digest, 409 `entry_closed` once answered (or void). A correction emails the PLATFORM
  * OPERATORS (never tenant admins) — best-effort, it never fails the submit.
  */
@@ -7104,10 +7119,17 @@ app.put('/scorecard-confirm-link/:token/fixtures/:seriesId/:fixtureId', async (c
   }
   const entry = record.entries?.[entryKey];
   if (!entry) throw new HttpError(404, 'that match is not in this digest');
+  // The card the chair confirmed against: the version the page rendered (echoed back as
+  // `scorecardFetchedAt`) when sent, else the card stored now.
   const card =
-    answer.action === 'confirm'
+    answer.action === 'confirm' && !answer.scorecardFetchedAt
       ? await repo.getFixtureScorecard(tenant, seriesId, fixtureId)
       : null;
+  const confirmedAgainstFetchedAt =
+    answer.action !== 'confirm'
+      ? undefined
+      : (answer.scorecardFetchedAt ??
+        (card?.available && card.fetchedAt ? card.fetchedAt : undefined));
   let saved: ScorecardConfirmation;
   try {
     saved = await repo.submitScorecardConfirmEntry(
@@ -7118,7 +7140,7 @@ app.put('/scorecard-confirm-link/:token/fixtures/:seriesId/:fixtureId', async (c
       {
         status: answer.action === 'confirm' ? 'confirmed' : 'correction',
         ...(answer.feedback ? { feedback: answer.feedback } : {}),
-        ...(card?.available && card.fetchedAt ? { confirmedAgainstFetchedAt: card.fetchedAt } : {}),
+        ...(confirmedAgainstFetchedAt ? { confirmedAgainstFetchedAt } : {}),
         memberId,
       },
     );

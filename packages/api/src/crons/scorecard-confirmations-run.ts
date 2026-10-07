@@ -11,9 +11,13 @@
  *   reaches the digest), on/after goLiveDate, that have a stored, uncleared, NON-import
  *   result → an existing digest is TOPPED UP with the missing entries (no re-send); otherwise
  *   a new digest is created (SC-YYYY-NNNN) → unless the club opted out
- *   (`remindersOptIn === false`) or its chair has no email AND no cell, claim the
- *   `NOTIFY#SCORECONF#<weekKey>#<clubId>` ledger row → email + WhatsApp → record the
- *   deliveries → comm log. A send that reached nobody and failed releases the claim.
+ *   (`remindersOptIn === false`), claim the `NOTIFY#SCORECONF#<weekKey>#<clubId>` ledger row →
+ *   email + WhatsApp → record the deliveries → comm log. The claim is COMPLETED only when at
+ *   least one channel delivered; a send that reached nobody (every channel failed or was
+ *   skipped — no address, template not yet approved, dry run) releases it, so a later run
+ *   sends once the gap is fixed. A chair with no email AND no cell is recorded as skipped
+ *   (`no-contact`) without a claim. A repeat of the latest recorded outcome is not recorded
+ *   again, so re-runs that keep reaching nobody never grow `deliveries`.
  *
  * The claim gates the SEND only, never entry reconciliation: a re-run tops up entries of an
  * already-notified digest silently, and the chair's existing link shows them.
@@ -36,6 +40,7 @@ import { hasFeature } from '../features.js';
 import {
   defaultScorecardNoticeSender,
   lastCompletedWeekKey,
+  repeatsLatestScorecardDeliveries,
   scorecardDeliveryOf,
   scorecardEntryKey,
   scorecardExpiresText,
@@ -284,6 +289,8 @@ export async function runScorecardConfirmations(
               clubId: club.id,
               clubName: club.name,
               weekKey,
+              // Drawn BEFORE the conditional create: a run that loses the create race has
+              // burned a number, so gaps in SC-YYYY-NNNN are expected and accepted.
               ref: await repo.nextScorecardConfirmRef(tenant, weekKey.slice(0, 4)),
               memberId: randomUUID(),
               linkExpiresAt: new Date(
@@ -311,7 +318,24 @@ export async function runScorecardConfirmations(
 
           // ── The send (gated: opt-out, contact, link still live, the ledger claim) ──
           const chair = chairContactOf(club);
-          if (club.remindersOptIn === false || !hasContact(chair)) {
+          if (club.remindersOptIn === false) {
+            summary.skipped++;
+            continue;
+          }
+          if (!hasContact(chair)) {
+            // Recorded so the console says why ("no contact on file"), never claimed: once a
+            // chair's details are added, the next run sends. Only while nobody was notified,
+            // and not again when the latest recorded outcome already says so.
+            const current =
+              (await repo.getScorecardConfirmation(tenant, weekKey, club.id)) ?? record;
+            if (!current.notifiedAt) {
+              const at = deps.now().toISOString();
+              const deliveries = channels.map((channel) =>
+                scorecardDeliveryOf({ channel, status: 'skipped', reason: 'no-contact' }, at),
+              );
+              if (!repeatsLatestScorecardDeliveries(current.deliveries, deliveries))
+                await repo.recordScorecardConfirmDeliveries(tenant, weekKey, club.id, deliveries);
+            }
             summary.skipped++;
             continue;
           }
@@ -326,10 +350,10 @@ export async function runScorecardConfirmations(
             continue;
           }
           claimed = true;
-          const matchCount = Object.values(
-            (await repo.getScorecardConfirmation(tenant, weekKey, club.id))?.entries ??
-              record.entries,
-          ).filter((e) => e.status !== 'void').length;
+          const current = (await repo.getScorecardConfirmation(tenant, weekKey, club.id)) ?? record;
+          const matchCount = Object.values(current.entries).filter(
+            (e) => e.status !== 'void',
+          ).length;
           let outcome: NoticeResult[];
           try {
             outcome = await deps.sendNotice({
@@ -354,20 +378,25 @@ export async function runScorecardConfirmations(
               error: err instanceof Error ? err.message : 'send failed',
             }));
           }
-          sent = true;
           const at = deps.now().toISOString();
           const deliveries = outcome.map((r) => scorecardDeliveryOf(r, at));
           const delivered = deliveries.some((d) => d.status === 'sent');
-          const failed = !delivered && deliveries.some((d) => d.status === 'failed');
-          await repo.recordScorecardConfirmDeliveries(
-            tenant,
-            weekKey,
-            club.id,
-            deliveries,
-            delivered ? { notifiedAt: at } : {},
-          );
-          if (failed) {
-            // Reached nobody: free the claim so the next run (or the operator) can retry.
+          // Something reached the chair: from here the claim must never be released.
+          sent = delivered;
+          // A send that reached nobody again, exactly as last time, is not recorded twice.
+          const repeat =
+            !delivered && repeatsLatestScorecardDeliveries(current.deliveries, deliveries);
+          if (!repeat)
+            await repo.recordScorecardConfirmDeliveries(
+              tenant,
+              weekKey,
+              club.id,
+              deliveries,
+              delivered ? { notifiedAt: at } : {},
+            );
+          if (!delivered) {
+            // Reached nobody (failed or skipped on every channel): free the claim so the next
+            // run (or the operator) sends once the cause is fixed.
             await repo.releaseScorecardConfirmNotify(tenant, weekKey, club.id);
           } else {
             await repo.completeScorecardConfirmNotify(
@@ -383,7 +412,8 @@ export async function runScorecardConfirmations(
           }
           if (delivered) summary.sent++;
           else summary.skipped++;
-          await repo.appendClubCommEvents(tenant, club.id, commEvents(outcome, weekKey, at));
+          if (!repeat)
+            await repo.appendClubCommEvents(tenant, club.id, commEvents(outcome, weekKey, at));
         } catch (err) {
           summary.errors++;
           deps.captureException(err, {
@@ -396,8 +426,8 @@ export async function runScorecardConfirmations(
               err instanceof Error ? err.name : 'error'
             }`,
           );
-          // Nothing went out yet: free the claim so a retry can send. Once a send happened
-          // the claim stays, so a bookkeeping fault never double-sends.
+          // Nothing reached the chair: free the claim so a retry can send. Once a channel
+          // delivered the claim stays, so a bookkeeping fault never double-sends.
           if (claimed && !sent) {
             await repo.releaseScorecardConfirmNotify(tenant, weekKey, club.id).catch(() => {
               console.error(

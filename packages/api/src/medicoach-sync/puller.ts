@@ -21,8 +21,12 @@
  *                   as SYNCCONFLICT#.
  *   - unknown ref → counted as "unmapped" (no ref values logged).
  *   - scorecard   → a newly stored non-import result with both medicoach ids fetches its
- *                   scorecard (FIXSCORECARD#, scorecard-fetch.ts); a stored clear deletes it
- *                   and voids the fixture's chair scorecard-confirmation entries.
+ *                   scorecard (FIXSCORECARD#, scorecard-fetch.ts) — at most
+ *                   SCORECARD_INLINE_MAX_PER_PAGE per page, none after
+ *                   SCORECARD_SWEEP_MAX_CONSECUTIVE_FAILURES failures in a row (the rest fall
+ *                   to the run's sweep) — and restores the fixture's VOID chair
+ *                   scorecard-confirmation entries to pending; a stored clear deletes the card
+ *                   and voids those entries.
  *
  * A newly stored result is first marked `REPORTOPEN#<ref>`; the marker is deleted once the
  * hook succeeded, so a report/notify failure is retried by the next run
@@ -66,8 +70,14 @@ import {
 } from '../medicoach-sync-contract.js';
 import type { Series, StoredFixtureResult, SyncLogEntry, TenantConfig } from '../types.js';
 import { explainSyncError } from './explain.js';
-import { fetchAndStoreScorecard } from './scorecard-fetch.js';
-import { voidScorecardEntriesForFixture } from '../scorecard-confirmations.js';
+import {
+  fetchAndStoreScorecard,
+  SCORECARD_SWEEP_MAX_CONSECUTIVE_FAILURES,
+} from './scorecard-fetch.js';
+import {
+  restoreScorecardEntriesForFixture,
+  voidScorecardEntriesForFixture,
+} from '../scorecard-confirmations.js';
 import {
   applyInboundSchedule,
   wallClock,
@@ -86,6 +96,11 @@ export const PAGE_LIMIT = 200;
 /** Max schedule-differs refs kept on one SYNCLOG row. */
 const MAX_LOGGED_REFS = 50;
 const HTTP_TIMEOUT_MS = 10_000;
+/**
+ * Inline scorecard fetches per changes page: a page of 200 results must not spend the
+ * shared cron budget on 200 sequential fetches. The rest are left to the run's sweep.
+ */
+export const SCORECARD_INLINE_MAX_PER_PAGE = 10;
 
 /** Passed to `onResultStored` when a result is stored for the first time or replaced by a
  * newer one. Carries the full pulled result (captainRef included) — handle it as PII. */
@@ -377,6 +392,9 @@ export async function runMedicoachSync(
   };
 
   let moreToFetch = false;
+  // Inline scorecard fetches: failures in a row across the run (medicoach's scorecard
+  // endpoint down) stop them until the next run; the sweep picks up what is left.
+  let scorecardFailuresInARow = 0;
   try {
     for (let page = 0; page < MAX_PAGES_PER_RUN; page++) {
       const pq = changesPathAndQuery(tenant, cursor ?? undefined, PAGE_LIMIT);
@@ -424,6 +442,7 @@ export async function runMedicoachSync(
       // Knockout slot fills, grouped per series so each series is written once per page.
       const slotFills = new Map<string, Map<string, { home?: string; away?: string }>>();
       const scheduleQueue: FixtureChange[] = [];
+      let inlineScorecardFetches = 0;
       for (const change of data.fixtures) {
         const parsedRef = parseFixtureRef(change.ref);
         const target =
@@ -487,17 +506,39 @@ export async function runMedicoachSync(
                 `[medicoach-sync] ${tenant}: captain's reports for ${seriesId}/${fixtureId} will be retried`,
               );
             }
-            // The scorecard behind it (never for migrations/backfills). Never throws: a
-            // failed fetch is retried by the run's scorecard sweep.
-            if (change.result.source !== 'import')
-              await fetchAndStoreScorecard(
-                { repo, url: deps.url, secret: deps.secret, fetch: doFetch, now, log },
-                tenant,
-                seriesId,
-                fixtureId,
-                change.result.medicoachMatchId,
-                change.result.medicoachTournamentId,
-              );
+            if (change.result.source !== 'import') {
+              // A result re-recorded after a clear: its void chair scorecard-confirmation
+              // entries are open again (best-effort: a failure is a log line).
+              if (prior?.cleared)
+                await restoreScorecardEntriesForFixture(repo, tenant, seriesId, fixtureId, {
+                  now: now(),
+                  ...(target.fixture.date ? { fixtureDate: target.fixture.date } : {}),
+                }).catch((err: unknown) =>
+                  log(
+                    `[medicoach-sync] ${tenant}: could not restore scorecard confirmations for ${seriesId}/${fixtureId} — ${
+                      err instanceof Error ? err.name : 'error'
+                    }`,
+                  ),
+                );
+              // The scorecard behind it (never for migrations/backfills), within the page's
+              // inline budget. Never throws: a failed or deferred fetch is the sweep's.
+              if (
+                inlineScorecardFetches < SCORECARD_INLINE_MAX_PER_PAGE &&
+                scorecardFailuresInARow < SCORECARD_SWEEP_MAX_CONSECUTIVE_FAILURES
+              ) {
+                const outcome = await fetchAndStoreScorecard(
+                  { repo, url: deps.url, secret: deps.secret, fetch: doFetch, now, log },
+                  tenant,
+                  seriesId,
+                  fixtureId,
+                  change.result.medicoachMatchId,
+                  change.result.medicoachTournamentId,
+                );
+                if (outcome !== 'skipped') inlineScorecardFetches++;
+                if (outcome === 'error') scorecardFailuresInARow++;
+                else if (outcome !== 'skipped') scorecardFailuresInARow = 0;
+              }
+            }
           } else {
             counts.resultsStale++;
             if (mayStore) await repo.deleteReportOpenMarker(tenant, change.ref);
@@ -519,13 +560,15 @@ export async function runMedicoachSync(
             await repo.deleteFixtureScorecard(tenant, seriesId, fixtureId);
             // …and its chair scorecard-confirmation entries are void (best-effort: a
             // failure is a log line, never the sync run's).
-            await voidScorecardEntriesForFixture(repo, tenant, seriesId, fixtureId).catch(
-              (err: unknown) =>
-                log(
-                  `[medicoach-sync] ${tenant}: could not void scorecard confirmations for ${seriesId}/${fixtureId} — ${
-                    err instanceof Error ? err.name : 'error'
-                  }`,
-                ),
+            await voidScorecardEntriesForFixture(repo, tenant, seriesId, fixtureId, {
+              now: now(),
+              ...(target.fixture.date ? { fixtureDate: target.fixture.date } : {}),
+            }).catch((err: unknown) =>
+              log(
+                `[medicoach-sync] ${tenant}: could not void scorecard confirmations for ${seriesId}/${fixtureId} — ${
+                  err instanceof Error ? err.name : 'error'
+                }`,
+              ),
             );
           } else counts.resultsStale++;
         }

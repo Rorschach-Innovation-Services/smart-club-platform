@@ -192,7 +192,7 @@ async function seed() {
     startDate: '2026-10-04',
     teams: ['umzinto', 'warriors'],
     participants: [],
-    fixtures: [fx('f1'), fx('f2'), fx('f3'), fx('f4'), fx('f5')],
+    fixtures: Array.from({ length: 12 }, (_, i) => fx(`f${i + 1}`)),
     kind: 'series',
     approved: true,
     released: true,
@@ -341,6 +341,68 @@ describe('medicoach scorecard fetch', () => {
     requests.length = 0;
     assert.equal((await sweep()).candidates, 0);
     assert.equal(scorecardRequests().length, 0);
+  });
+
+  test('a later 404 or available:false never destroys an available card (kept; lastCheckedAt moves)', async () => {
+    cards = { 'pma-1': available('pma-1') };
+    pages = [page('c1', [change('f1', result())])];
+    await pull();
+    const before = (await repo.getFixtureScorecard(T, SERIES, 'f1'))!;
+    assert.equal(before.available, true);
+
+    const later = new Date(NOW.getTime() + 3_600_000);
+    const fetchAgain = (matchId = 'pma-1') =>
+      scorecards.fetchAndStoreScorecard(
+        deps({ now: () => later }),
+        T,
+        SERIES,
+        'f1',
+        matchId,
+        'tour-9',
+      );
+    cards = {}; // medicoach now answers 404
+    assert.equal(await fetchAgain(), 'not-found');
+    const kept = (await repo.getFixtureScorecard(T, SERIES, 'f1'))!;
+    assert.deepEqual(kept, { ...before, lastCheckedAt: later.toISOString() });
+
+    cards = { 'pma-1': [200, { available: false, matchId: 'pma-1' }] };
+    assert.equal(await fetchAgain(), 'unavailable');
+    assert.equal((await repo.getFixtureScorecard(T, SERIES, 'f1'))?.available, true);
+    assert.deepEqual((await repo.getFixtureScorecard(T, SERIES, 'f1'))?.innings, innings());
+
+    // A card for ANOTHER match is not this match's card: the stub replaces it.
+    assert.equal(await fetchAgain('pma-other'), 'not-found');
+    const stub = await repo.getFixtureScorecard(T, SERIES, 'f1');
+    assert.equal(stub?.available, false);
+    assert.equal(stub?.terminal, true);
+  });
+
+  test('inline scorecard fetches are capped at 10 per page; the sweep picks up the rest', async () => {
+    const ids = Array.from({ length: 12 }, (_, i) => `f${i + 1}`);
+    cards = Object.fromEntries(ids.map((f) => [`pma-${f}`, available(`pma-${f}`)]));
+    pages = [
+      page(
+        'c1',
+        ids.map((f) => change(f, result({ medicoachMatchId: `pma-${f}` }))),
+      ),
+    ];
+    assert.equal((await pull()).counts.resultsStored, 12);
+    assert.equal(scorecardRequests().length, 10);
+    assert.equal((await repo.listFixtureScorecards(T)).length, 10);
+    assert.deepEqual(await sweep(), { candidates: 2, fetched: 2, failed: 0 });
+  });
+
+  test('inline scorecard fetches stop after 3 failures in a row', async () => {
+    dropScorecards = true;
+    const ids = ['f1', 'f2', 'f3', 'f4', 'f5'];
+    pages = [
+      page(
+        'c1',
+        ids.map((f) => change(f, result({ medicoachMatchId: `pma-${f}` }))),
+      ),
+    ];
+    assert.equal((await pull()).counts.resultsStored, 5);
+    assert.equal(scorecardRequests().length, 3);
   });
 
   test('a network failure or 5xx is swallowed (result still stored) and the sweep retries', async () => {

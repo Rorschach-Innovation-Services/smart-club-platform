@@ -384,7 +384,16 @@ describe('the Monday cron', () => {
     assert.deepEqual(Object.keys(c.entries), [`${S2}#f7`]);
     assert.deepEqual(Object.keys(d.entries), [`${S2}#f7`]);
     assert.equal(c.notifiedAt, undefined);
-    assert.equal(d.deliveries, undefined);
+    assert.equal(c.deliveries, undefined);
+    // The no-contact club's digest says why nothing went out.
+    assert.equal(d.notifiedAt, undefined);
+    assert.deepEqual(
+      d.deliveries?.map((x) => [x.channel, x.status, x.reason, x.purpose, x.recipientKind]),
+      [
+        ['email', 'skipped', 'no-contact', 'opened', 'chair'],
+        ['whatsapp', 'skipped', 'no-contact', 'opened', 'chair'],
+      ],
+    );
 
     assert.deepEqual(notices.map((n) => n.clubId).sort(), ['african-warriors', 'umzinto']);
     const n = noticeFor('umzinto');
@@ -454,6 +463,98 @@ describe('the Monday cron', () => {
     assert.equal(notices.length, 2);
   });
 
+  test('a send that only SKIPPED (no email, WhatsApp template pending) releases the claim; once the template is registered the next run sends', async () => {
+    const { WHATSAPP_TEMPLATES } = await import('../src/notify/whatsapp-templates.js');
+    const tpl = WHATSAPP_TEMPLATES.scorecardConfirmDue as { status: string };
+    const realStatus = tpl.status;
+    // A cell-only chair for the club that had no contact at all.
+    const d = (await repo.getClub(T, 'd'))!;
+    await repo.putClub(T, {
+      ...d,
+      exco: { chair: { name: 'D Chair', cell: '0829876543' } },
+    } as never);
+    // The REAL sender (its template gate and address checks); a dry-run WhatsApp id stands
+    // for a real one so a registered template counts as delivered.
+    const realSender = async (n: Notice) =>
+      (await sc.sendScorecardNotice(n)).map((r) =>
+        r.messageId?.startsWith('dry-run-') ? { ...r, messageId: 'wamid.test' } : r,
+      );
+    const onlyD = async (n: Notice) => (n.clubId === 'd' ? realSender(n) : captureNotice(n));
+    try {
+      tpl.status = 'pending';
+      const first = await run({ sendNotice: onlyD });
+      assert.equal(first.errors, 0);
+      const d1 = (await digest('d'))!;
+      assert.equal(d1.notifiedAt, undefined);
+      assert.deepEqual(
+        d1.deliveries?.map((x) => [x.channel, x.status, x.reason]),
+        [
+          ['email', 'skipped', 'no-email'],
+          ['whatsapp', 'skipped', 'template-pending'],
+        ],
+      );
+      // An identical second run records nothing new (no unbounded growth, no comm-log spam).
+      await run({ sendNotice: onlyD });
+      assert.equal((await digest('d'))!.deliveries?.length, 2);
+      const commRows = async () =>
+        ((await repo.getClub(T, 'd'))?.commLog ?? []).filter((r) => r.kind === 'scorecard-confirm')
+          .length;
+      assert.equal(await commRows(), 2);
+
+      // The template is approved: the claim was released, so this run sends — and completes.
+      tpl.status = 'registered';
+      const third = await run({ sendNotice: onlyD });
+      assert.equal(third.sent, 1);
+      const d3 = (await digest('d'))!;
+      assert.ok(d3.notifiedAt);
+      assert.deepEqual(
+        d3.deliveries?.slice(-2).map((x) => [x.channel, x.status]),
+        [
+          ['email', 'skipped'],
+          ['whatsapp', 'sent'],
+        ],
+      );
+      // Completed: a further run sends nothing.
+      const fourth = await run({ sendNotice: onlyD });
+      assert.equal(fourth.sent, 0);
+      assert.equal((await digest('d'))!.deliveries?.length, 4);
+    } finally {
+      tpl.status = realStatus;
+    }
+  });
+
+  test('a no-contact chair is recorded skipped (no-contact) once; adding a contact lets the next run send', async () => {
+    await run();
+    await run();
+    const d1 = (await digest('d'))!;
+    assert.deepEqual(
+      d1.deliveries?.map((x) => [x.channel, x.status, x.reason]),
+      [
+        ['email', 'skipped', 'no-contact'],
+        ['whatsapp', 'skipped', 'no-contact'],
+      ],
+    );
+    assert.equal(notices.filter((n) => n.clubId === 'd').length, 0);
+
+    const d = (await repo.getClub(T, 'd'))!;
+    await repo.putClub(T, {
+      ...d,
+      exco: { chair: { name: 'D Chair', email: 'chair@d.test' } },
+    } as never);
+    const summary = await run();
+    assert.equal(summary.sent, 1);
+    assert.equal(noticeFor('d').to.email, 'chair@d.test');
+    const d2 = (await digest('d'))!;
+    assert.ok(d2.notifiedAt);
+    assert.deepEqual(
+      d2.deliveries?.slice(-2).map((x) => [x.channel, x.status]),
+      [
+        ['email', 'sent'],
+        ['whatsapp', 'sent'],
+      ],
+    );
+  });
+
   test('gating: switch off, no medicoach sync, or no goLiveDate ⇒ the tenant is skipped', async () => {
     for (const over of [
       { scorecardConfirmations: { enabled: false } },
@@ -509,7 +610,9 @@ describe('the public link', () => {
     );
     const [f3, f1] = view.entries;
     assert.deepEqual(f1.scorecard, { matchState: 'Umzinto won by 23 runs', innings: innings() });
+    assert.equal(f1.scorecardFetchedAt, '2026-01-02T10:05:00.000Z');
     assert.equal(f3.scorecard, undefined);
+    assert.equal(f3.scorecardFetchedAt, undefined);
     assert.deepEqual(f3.result, {
       homeScore: '184/6 (20)',
       awayScore: '161/9 (20)',
@@ -593,6 +696,44 @@ describe('the public link', () => {
     assert.equal((await digest('umzinto'))!.entries[`${S1}#f1`].status, 'confirmed');
     // Confirming never emails anyone.
     assert.equal(corrections.length, 0);
+  });
+
+  test('PUT confirm stores the ECHOED scorecard version, not the newer card on disk; that answer is later flagged stale', async () => {
+    const card = (fetchedAt: string) =>
+      repo.putFixtureScorecard(T, {
+        seriesId: S1,
+        fixtureId: 'f1',
+        medicoachMatchId: 'pma-f1',
+        medicoachTournamentId: 'tour-9',
+        schemaVersion: 1,
+        fetchedAt,
+        available: true,
+        innings: innings(),
+      });
+    const RENDERED = '2026-01-02T10:05:00.000Z';
+    const NEWER = '2026-01-02T11:00:00.000Z';
+    await card(RENDERED);
+    await run();
+    const token = noticeFor('umzinto').token;
+    const view = (await (await getLink(token)).json()) as View;
+    assert.equal(view.entries[0].scorecardFetchedAt, RENDERED);
+
+    // A newer card lands while the chair is reading the old one.
+    await card(NEWER);
+    assert.equal(
+      (await answer(token, S1, 'f1', { action: 'confirm', scorecardFetchedAt: 'yesterday' }))
+        .status,
+      400,
+    );
+    const ok = await answer(token, S1, 'f1', { action: 'confirm', scorecardFetchedAt: RENDERED });
+    assert.equal(ok.status, 200);
+    const stored = (await digest('umzinto'))!.entries[`${S1}#f1`];
+    assert.equal(stored.confirmedAgainstFetchedAt, RENDERED);
+    assert.ok(stored.submittedAt! > NEWER, 'submitted after the newer card arrived');
+
+    // The newer card's stale check flags the answer: the chair saw the older card.
+    assert.equal(await sc.flagStaleScorecardEntries(repo, T, S1, 'f1', NEWER), 1);
+    assert.equal((await digest('umzinto'))!.entries[`${S1}#f1`].staleConfirmation, true);
   });
 
   test('PUT 404 for a match not in the digest; 400 for a bad body, missing or over-long feedback', async () => {
@@ -721,6 +862,81 @@ describe('medicoach sync hooks', () => {
     assert.equal(res.status, 409);
   });
 
+  test('a cleared result re-recorded later restores its VOID entries to pending; answered entries are untouched', async () => {
+    await run();
+    // The warriors chair answered before the clear.
+    assert.equal(
+      (await answer(noticeFor('african-warriors').token, S1, 'f1', { action: 'confirm' })).status,
+      200,
+    );
+    const change = (over: Record<string, unknown>) => ({
+      ref: `smartclub:${T}:fixture:${S1}:f1`,
+      syncStamp: '2026-01-03T10:00:00.000Z',
+      schedule: {
+        scheduledTime: `${SAT}T09:00:00+02:00`,
+        timeTbc: false,
+        dateTbc: false,
+        venue: null,
+        postponed: false,
+        cancelled: false,
+        changedAt: '2026-01-01T10:00:00.000Z',
+      },
+      teams: { homeRef: null, awayRef: null },
+      result: null,
+      resultClearedAt: null,
+      ...over,
+    });
+    const sync = (fixtures: unknown[]) =>
+      puller.runMedicoachSync(T, 'manual', {
+        repo,
+        url: 'http://medicoach.test',
+        secret: 'stub-secret',
+        fetch: fakeFetch(page(fixtures)),
+        onResultStored: async () => {},
+        log: () => {},
+      });
+    await sync([change({ resultClearedAt: '2026-01-03T10:00:00.000Z' })]);
+    assert.equal((await digest('umzinto'))!.entries[`${S1}#f1`].status, 'void');
+    assert.equal((await digest('african-warriors'))!.entries[`${S1}#f1`].status, 'void');
+
+    const summary = await sync([
+      change({
+        syncStamp: '2026-01-04T10:00:00.000Z',
+        result: {
+          homeScore: '190/5 (20)',
+          awayScore: '161/9 (20)',
+          summary: 'Home won by 29 runs',
+          winner: 'home',
+          method: 'normal',
+          noResult: false,
+          source: 'live',
+          recordedAt: '2026-01-04T10:00:00.000Z',
+          scoringSide: 'home',
+          captainRef: null,
+          medicoachMatchUrl: null,
+          medicoachMatchId: 'pma-f1',
+          medicoachTournamentId: 'tour-9',
+        },
+      }),
+    ]);
+    assert.equal(summary.counts.resultsStored, 1);
+    const umz = (await digest('umzinto'))!.entries[`${S1}#f1`];
+    const aw = (await digest('african-warriors'))!.entries[`${S1}#f1`];
+    assert.equal(umz.status, 'pending');
+    // Restored clean: the pre-clear answer is gone, so the chair answers the new result.
+    assert.equal(aw.status, 'pending');
+    assert.equal(aw.submittedAt, undefined);
+    assert.equal(aw.confirmedAgainstFetchedAt, undefined);
+    // The live link offers the match again.
+    assert.equal(
+      (await answer(noticeFor('umzinto').token, S1, 'f1', { action: 'confirm' })).status,
+      200,
+    );
+    // A restore never touches an answered entry.
+    assert.equal(await sc.restoreScorecardEntriesForFixture(repo, T, S1, 'f1'), 0);
+    assert.equal((await digest('umzinto'))!.entries[`${S1}#f1`].status, 'confirmed');
+  });
+
   test('a scorecard refetched after the chair answered flags the entry staleConfirmation', async () => {
     await run();
     const token = noticeFor('umzinto').token;
@@ -807,8 +1023,11 @@ describe('operator console', () => {
       f7.sides.map((s) => [s.clubId, s.status, s.deliveries.length]),
       [
         ['c', 'pending', 0],
-        ['d', 'pending', 0],
+        ['d', 'pending', 2],
       ],
+    );
+    assert.ok(
+      f7.sides[1].deliveries.every((x) => x.status === 'skipped' && x.reason === 'no-contact'),
     );
     const umz = t.records.find((r) => r.clubId === 'umzinto')!;
     assert.deepEqual(umz.counts, { pending: 0, confirmed: 1, correction: 0, void: 0 });
