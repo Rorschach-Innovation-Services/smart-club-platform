@@ -43,6 +43,8 @@ const NOT_APPLIED: Partial<Record<api.AmendmentRowOutcome, { label: string; tone
   'venue-unknown': { label: 'Unknown ground', tone: 'gold' },
   'competition-unknown': { label: 'Unknown competition', tone: 'coral' },
   blocked: { label: 'Blocked', tone: 'coral' },
+  // Listed only with a note (a duplicate row, an already-moved postponement).
+  'matched-no-change': { label: 'No change', tone: 'muted' },
 };
 
 const optionsKey = (o: api.AmendmentOptions) =>

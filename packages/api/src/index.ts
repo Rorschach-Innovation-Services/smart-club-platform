@@ -11302,7 +11302,9 @@ app.post('/platform/tenants/:slug/fixture-amendments/confirm', async (c) => {
   const written = new Set(out.results.filter((r) => r.status === 'written').map((r) => r.seriesId));
   return c.json({
     backupKey,
-    fixturesAmended: rp.plan.diffs.filter((d) => written.has(d.seriesId)).length,
+    // Sheet amendments only; draft relocations are reported solely as draftMoves.
+    fixturesAmended: rp.plan.diffs.filter((d) => d.kind === 'patch' && written.has(d.seriesId))
+      .length,
     draftMoves: rp.plan.moves.filter((m) => written.has(m.seriesId)).length,
     series: out.results,
     splitSlotRisks: out.splitSlotRisks,

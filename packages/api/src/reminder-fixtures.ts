@@ -674,6 +674,11 @@ export function matchReminderRows(
       candidates = pair.filter(
         ({ f }) => f.date && Math.abs(dayDiff(f.date, row.date)) <= windowDays,
       );
+      // Same tie-break as the exact-date path before calling it ambiguous.
+      if (candidates.length > 1 && row.time) {
+        const byTime = candidates.filter(({ f }) => f.time === row.time);
+        if (byTime.length) candidates = byTime;
+      }
       dateMoved = candidates.length > 0;
     }
     if (!candidates.length) {
@@ -734,17 +739,30 @@ export function matchReminderRows(
         outcome: 'blocked',
         reason: 'the sheet marks it cancelled — cancel it in the admin console',
       };
-    const undatedPostponement = status === 'postponed' && !f.originalDate;
+    // Postponed with no new date: the `dateTbc` shape (the patch engine's `set.postponed`
+    // alone), or an older status-only flip that never recorded the date it left.
+    const undatedPostponement = status === 'postponed' && (f.dateTbc === true || !f.originalDate);
 
     const set: PatchSet = {};
     const changes: RowChange[] = [];
     if (row.postponed) {
-      if (dateMoved) {
+      // A fixture already moved off this weekend (rescheduled, or re-dated) that the sheet
+      // lists as postponed under its OLD date: the sheet is restating the postponement, never
+      // asking to move it back. At most a status flip — never a backwards set.date.
+      const alreadyMoved =
+        dateMoved && !!f.date && (row.date === f.originalDate || dayDiff(row.date, f.date) < 0);
+      if (dateMoved && !alreadyMoved) {
         set.date = row.date;
         set.postponed = true;
         changes.push({ field: 'date', before: f.date ?? '', after: row.date });
         if (status !== 'postponed')
           changes.push({ field: 'status', before: status, after: 'postponed' });
+      } else if (alreadyMoved) {
+        if (status !== 'postponed')
+          return {
+            ...base,
+            reason: `listed as postponed on ${row.date}, but it already plays on ${f.date} — not changed`,
+          };
       } else if (status !== 'postponed') {
         // Postponed with no new date: time/venue on the row are moot.
         set.postponed = true;
@@ -773,9 +791,10 @@ export function matchReminderRows(
       if (row.venue) {
         const sheetKey = groundKey(row.venue, aliases);
         const registry = venueByKey.get(sheetKey);
-        const same =
-          (registry && f.venueId === registry.id) ||
-          (current !== '' && groundKey(current, aliases) === sheetKey);
+        // Compared on the EFFECTIVE ground (venueOverride || venueName, else the home side's —
+        // the rule PatchExpect.venue guards on), never venueId: a stale venueId under a
+        // differing override is a change, not a no-op.
+        const same = current !== '' && groundKey(current, aliases) === sheetKey;
         if (!same) {
           if (!registry)
             return {
@@ -808,15 +827,30 @@ export function matchReminderRows(
     };
   });
 
-  // Two rows on one fixture: neither applies.
+  // Two rows on one fixture. Asking for the SAME change (or none) is a benign repeat: the first
+  // row stands, the rest become no-ops with a note. Conflicting rows: neither applies.
   const byRef = new Map<string, RowMatch[]>();
   for (const m of matches)
     if (m.fixtureId !== undefined) {
       const k = `${m.seriesId}#${m.fixtureId}`;
       byRef.set(k, [...(byRef.get(k) ?? []), m]);
     }
+  const changeSet = (m: RowMatch) =>
+    m.outcome === 'matched-change' || m.outcome === 'matched-no-change'
+      ? canonicalJson(m.entry?.set ?? {})
+      : undefined;
   for (const group of byRef.values()) {
     if (group.length < 2) continue;
+    const first = changeSet(group[0]);
+    if (first !== undefined && group.every((m) => changeSet(m) === first)) {
+      for (const m of group.slice(1)) {
+        m.outcome = 'matched-no-change';
+        m.reason = `duplicate of ${group[0].row.rowId} (same change) — applied once there`;
+        delete m.entry;
+        delete m.changes;
+      }
+      continue;
+    }
     for (const m of group) {
       m.outcome = 'ambiguous';
       m.reason = `${group.length} sheet rows map to ${m.seriesId}/${m.fixtureId} (${group
@@ -1070,9 +1104,11 @@ export function reminderPreview(
         competitions: rp.match.competitions
           .filter((c) => c.sheet === rep.sheet)
           .map(({ competition, seriesIds }) => ({ competition, seriesIds })),
-        alreadyCorrect: ms.filter((m) => m.outcome === 'matched-no-change').length,
+        // A no-change row WITH a reason (a benign duplicate, an already-moved postponement)
+        // is listed so the note is seen; plain already-correct rows are only counted.
+        alreadyCorrect: ms.filter((m) => m.outcome === 'matched-no-change' && !m.reason).length,
         rows: ms
-          .filter((m) => m.outcome !== 'matched-no-change')
+          .filter((m) => m.outcome !== 'matched-no-change' || m.reason)
           .map((m) => ({
             rowId: m.row.rowId,
             sheetRow: m.row.sheetRow,

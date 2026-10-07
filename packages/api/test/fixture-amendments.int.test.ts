@@ -318,6 +318,47 @@ describe('fixture amendments upload — confirm', () => {
     assert.equal(((await noop.json()) as { code: string }).code, 'nothing_to_apply');
   });
 
+  test('fixturesAmended counts only sheet amendments; draft relocations are draftMoves', async () => {
+    await seedTenant('fa-moves');
+    // A DRAFT fixture on Neutral Ground at 13:30 — the slot f3 takes from the sheet.
+    await repo.putSeries('fa-moves', {
+      id: 's-draft',
+      name: 'Women League · T20',
+      leagueKey: 'women',
+      startDate: '2026-10-04',
+      teams: CLUBS.map(([id]) => id),
+      participants: CLUBS.map(([id, name]) => ({ teamId: id, clubId: id, name })),
+      fixtures: [
+        {
+          id: 'd1',
+          round: 1,
+          date: SUN,
+          time: '13:30',
+          home: 'delta',
+          away: 'alpha',
+          venueName: 'Neutral Ground',
+        },
+      ],
+      kind: 'series',
+      approved: true,
+      approvedAt: '2026-09-01T00:00:00.000Z',
+      released: false,
+      releasedAt: null,
+      version: 1,
+    } as unknown as Series);
+    const dataBase64 = await baseline();
+    const body = { dataBase64, relocateDraftClashes: true };
+    const pv = (await (await post('fa-moves', 'preview', body)).json()) as Preview & {
+      moves: unknown[];
+    };
+    assert.equal(pv.moves.length, 1);
+    const res = await post('fa-moves', 'confirm', { ...body, planHash: pv.planHash });
+    assert.equal(res.status, 200);
+    const out = (await res.json()) as { fixturesAmended: number; draftMoves: number };
+    assert.equal(out.fixturesAmended, 2, 'the two sheet rows, not the relocated draft');
+    assert.equal(out.draftMoves, 1);
+  });
+
   test('a stale or missing planHash is refused with the fresh preview', async () => {
     await seedTenant('fa-stale');
     const dataBase64 = await baseline();

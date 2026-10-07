@@ -376,6 +376,20 @@ describe('matcher outcomes', () => {
     assert.equal(m.outcome, 'matched-no-change');
   });
 
+  test('a stale venueId under a differing venueOverride is a change, not a no-op', () => {
+    // f1 is still bound to v-beta, but its effective ground is the override.
+    const all = [premier({ f1: { venueOverride: 'Neutral Ground' } })];
+    const [m] = match([rowOf({ venue: 'Beta Park' })], all);
+    assert.equal(m.outcome, 'matched-change');
+    assert.deepEqual(m.entry?.set, { venueId: 'v-beta' });
+    assert.equal(m.entry?.expect.venue, 'Neutral Ground');
+    assert.deepEqual(m.changes, [{ field: 'venue', before: 'Neutral Ground', after: 'Beta Park' }]);
+    // Applies cleanly through the guard.
+    const rp = plan(parsedOf([rowOf({ venue: 'Beta Park' })]), all);
+    assert.deepEqual(rp.plan.errors, []);
+    assert.equal(rp.plan.diffs.length, 1);
+  });
+
   test('reversed orientation matches with a warning and never swaps sides', () => {
     const [m] = match([rowOf({ home: 'Beta', away: 'Alpha', time: '10:00' })], [premier()]);
     assert.equal(m.outcome, 'matched-change');
@@ -441,6 +455,23 @@ describe('matcher outcomes', () => {
     assert.match(m.reason!, /2 fixtures fit/);
   });
 
+  test('the fallback window breaks a tie on the row time before calling it ambiguous', () => {
+    const all = [
+      premier({ f2: { date: '2026-10-08' } }),
+      series('s-prem2', 'Premier League · T20 · Group 2', true, [
+        { id: 'g1', date: '2026-10-14', time: '15:00', home: 'gamma', away: 'delta' },
+      ]),
+    ];
+    const [m] = match(
+      [rowOf({ home: 'Gamma', away: 'Delta', date: SUN, time: '15:00', venue: '' })],
+      all,
+    );
+    assert.equal(m.outcome, 'matched-change');
+    assert.equal(m.seriesId, 's-prem2');
+    assert.equal(m.fixtureId, 'g1');
+    assert.deepEqual(m.entry?.set, { date: SUN });
+  });
+
   test('played fixtures are refused: completed status, an inline result, a stored result', () => {
     const all = [premier({ f2: { status: 'completed' }, f3: { result: { homeScore: '120/4' } } })];
     const [a, b, c] = match(
@@ -479,6 +510,37 @@ describe('matcher outcomes', () => {
     }
   });
 
+  test('two sheet rows asking for the SAME change on one fixture: the first applies once', () => {
+    const ms = match(
+      [rowOf({ sheetRow: 1, time: '10:00' }), rowOf({ sheetRow: 2, time: '10:00' })],
+      [premier()],
+    );
+    assert.equal(ms[0].outcome, 'matched-change');
+    assert.deepEqual(ms[0].entry?.set, { time: '10:00' });
+    assert.equal(ms[1].outcome, 'matched-no-change');
+    assert.equal(ms[1].entry, undefined);
+    assert.match(ms[1].reason!, /duplicate of S:1/);
+    // Identical no-change rows are no longer "ambiguous" either.
+    const same = match([rowOf({ sheetRow: 1 }), rowOf({ sheetRow: 2 })], [premier()]);
+    assert.deepEqual(
+      same.map((m) => m.outcome),
+      ['matched-no-change', 'matched-no-change'],
+    );
+    // Planner: one manifest entry; the preview lists the duplicate with its note.
+    const rp = plan(
+      parsedOf([rowOf({ sheetRow: 1, time: '10:00' }), rowOf({ sheetRow: 2, time: '10:00' })]),
+      [premier()],
+    );
+    assert.deepEqual(rp.plan.errors, []);
+    assert.equal(rp.manifest.entries.length, 1);
+    assert.deepEqual(rp.appliedRowIds, ['S:1']);
+    const pv = reminderPreview(rp, [premier()], clubs);
+    const dup = pv.sheets[0].rows.find((r) => r.rowId === 'S:2')!;
+    assert.equal(dup.outcome, 'matched-no-change');
+    assert.match(dup.reason!, /duplicate/);
+    assert.equal(pv.sheets[0].alreadyCorrect, 0);
+  });
+
   test('an unknown ground skips the whole row with the raw name shown', () => {
     const [m] = match([rowOf({ venue: 'Mystery Park', time: '10:00' })], [premier()]);
     assert.equal(m.outcome, 'venue-unknown');
@@ -512,7 +574,71 @@ describe('matcher outcomes', () => {
     assert.equal(again.outcome, 'matched-no-change');
   });
 
-  test('an undated postponement listed on a new date is rescheduled; on its old date, blocked', () => {
+  test('a postponed row matched via the fallback never re-dates backwards or onto originalDate', () => {
+    // f4 already rescheduled from SUN to the 17th.
+    const rescheduled = [
+      premier({ f4: { status: 'postponed', date: '2026-10-17', originalDate: SUN } }),
+    ];
+    const [onOriginal] = match(
+      [rowOf({ home: 'Delta', away: 'Alpha', time: '13:30', venue: '', postponed: true })],
+      rescheduled,
+    );
+    assert.equal(onOriginal.outcome, 'matched-no-change');
+    assert.equal(onOriginal.entry, undefined);
+    // Earlier than the live date (not the originalDate): still no set.date.
+    const moved = [
+      premier({ f4: { status: 'postponed', date: '2026-10-17', originalDate: '2026-10-04' } }),
+    ];
+    const [earlier] = match(
+      [rowOf({ home: 'Delta', away: 'Alpha', time: '13:30', venue: '', postponed: true })],
+      moved,
+    );
+    assert.equal(earlier.outcome, 'matched-no-change');
+    assert.equal(earlier.entry, undefined);
+    // Re-dated (not postponed) to the 17th: listed postponed on SUN ⇒ noted, not changed.
+    const [plain] = match(
+      [rowOf({ home: 'Delta', away: 'Alpha', time: '13:30', venue: '', postponed: true })],
+      [premier({ f4: { date: '2026-10-17' } })],
+    );
+    assert.equal(plain.outcome, 'matched-no-change');
+    assert.equal(plain.entry, undefined);
+    assert.match(plain.reason!, /already plays on 2026-10-17/);
+    // Forward is still a reschedule.
+    const [forward] = match(
+      [rowOf({ home: 'Delta', away: 'Alpha', date: '2026-10-17', venue: '', postponed: true })],
+      [premier()],
+    );
+    assert.deepEqual(forward.entry?.set, { date: '2026-10-17', postponed: true });
+  });
+
+  test('an undated (dateTbc) postponement listed on a new date is rescheduled; on its old date, blocked', () => {
+    const all = [premier({ f4: { status: 'postponed', dateTbc: true } })];
+    const [moved] = match(
+      [rowOf({ home: 'Delta', away: 'Alpha', date: '2026-10-17', time: '13:30', venue: '' })],
+      all,
+    );
+    assert.deepEqual(moved.entry?.set, { date: '2026-10-17', postponed: true });
+    const [same] = match(
+      [rowOf({ home: 'Delta', away: 'Alpha', time: '13:30', venue: 'Delta Fields' })],
+      all,
+    );
+    assert.equal(same.outcome, 'blocked');
+    assert.match(same.reason!, /reinstate/);
+    // Planned: the new date books its slot again — dateTbc cleared, originalDate stamped.
+    const rp = plan(
+      parsedOf([
+        rowOf({ home: 'Delta', away: 'Alpha', date: '2026-10-17', time: '13:30', venue: '' }),
+      ]),
+      all,
+    );
+    assert.deepEqual(rp.plan.errors, []);
+    const f4 = (rp.plan.next[0].fixtures as Fx[]).find((f) => f.id === 'f4')!;
+    assert.equal(f4.dateTbc, undefined);
+    assert.equal(f4.originalDate, SUN);
+    assert.equal(f4.date, '2026-10-17');
+  });
+
+  test('a legacy postponement (no originalDate, no dateTbc) listed on a new date is rescheduled; on its old date, blocked', () => {
     const all = [premier({ f4: { status: 'postponed' } })];
     const [moved] = match(
       [rowOf({ home: 'Delta', away: 'Alpha', date: '2026-10-17', time: '13:30', venue: '' })],
@@ -582,6 +708,24 @@ describe('planReminderAmendments', () => {
     assert.equal(again.manifest.entries.length, 0);
     assert.equal(again.plan.diffs.length, 0);
     assert.equal(again.gateVerdict.ok, true);
+  });
+
+  test('an undated postponement of a released fixture frees its ground (postponed + dateTbc)', () => {
+    // f1 (alpha v beta, Beta Park 09:00 SUN) postponed; f3 (beta v gamma, Beta Park) to 09:00.
+    const rows = [
+      rowOf({ sheetRow: 1, venue: '', postponed: true }),
+      rowOf({ sheetRow: 2, home: 'Beta', away: 'Gamma', time: '09:00', venue: 'Beta Park' }),
+    ];
+    const rp = plan(parsedOf(rows), [premier()]);
+    assert.deepEqual(rp.plan.errors, []);
+    assert.deepEqual(rp.gateVerdict.introduced, []);
+    const f1 = (rp.plan.next[0].fixtures as Fx[]).find((f) => f.id === 'f1')!;
+    assert.equal(f1.status, 'postponed');
+    assert.equal(f1.dateTbc, true);
+    assert.equal(f1.date, SUN);
+    // Without the postponement the same move is an introduced clash.
+    const blocked = plan(parsedOf([rows[1]]), [premier()]);
+    assert.ok(blocked.gateVerdict.introduced.length > 0);
   });
 
   test('an introduced clash aborts the plan; a pre-existing one only reports', () => {
