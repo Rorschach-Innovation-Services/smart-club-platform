@@ -12,7 +12,7 @@ later decision with its own rules (see [Releasing later](#releasing-later)).
 
 | file                                  | npm alias                          | role                                                                  |
 | ------------------------------------- | ---------------------------------- | --------------------------------------------------------------------- |
-| `import-titans-fixtures.ts`           | `import-titans-fixtures`           | parse, `--append-sides`, import, `--revert`                           |
+| `import-titans-fixtures.ts`           | `import-titans-fixtures`           | parse, `--append-sides`, import, `--revert`, `--restore-clubs`        |
 | `bootstrap-titans-fixture-prereqs.ts` | `bootstrap-titans-fixture-prereqs` | league keys, venue aliases, venue registry                            |
 | `titans-fixture-map.ts`               |                                    | sheet manifest, time rules, venue aliases, `HELD_BACK` (pure, no AWS) |
 | `titans-sides.ts`                     |                                    | side resolution and the `--append-sides` club patches (pure)          |
@@ -23,14 +23,13 @@ every blocker aborts with its reason, a JSON backup is written before any write,
 
 ## What gets written
 
-| what                    | detail                                                                                                                                                                                                        |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Series                  | 44 drafts, 1,398 fixtures. 4 more fixtures are parsed but held back (see below). T20 knockouts are **not** written (they need PR B).                                                                          |
-| Tenant config           | +3 league keys (`mens-t20`, `womens-t20` fixtures-only; `womens-junior-league`), +15 misspelling-only venue aliases                                                                                           |
-| Venue registry          | ~77 new rows (`v-*`, surfaces 1). The 21 existing rows that match are reused untouched.                                                                                                                       |
-| Clubs, `--append-sides` | TUKS: `third-league` grows 1 → 2 (TUKS 5, TUKS 6) and `u11` gains TUKS C. Pretoria: `veterans-league` key + 2 sides. Pretoria East: `u11` gains PRETORIA EAST C. Counters (`teams/women/juniors`) recomputed. |
-| Clubs, club sync        | 6 clubs gain league keys they now have fixtures in (5 × `womens-junior-league`, Atteridgeville `second-league`)                                                                                               |
-| Clubs, cup keys         | 19 clubs gain `mens-t20` and/or `womens-t20` on `club.leagues` only. T20 sides reuse existing league side ids, so no roster changes.                                                                          |
+| what                    | detail                                                                                                                                                                                                                                                                                   |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Series                  | 44 drafts, 1,398 fixtures. 4 more fixtures are parsed but held back (see below). T20 knockouts are **not** written (they need PR B).                                                                                                                                                     |
+| Tenant config           | +3 league keys (`mens-t20`, `womens-t20` fixtures-only; `womens-junior-league`), +15 misspelling-only venue aliases                                                                                                                                                                      |
+| Venue registry          | ~77 new rows (`v-*`, surfaces 1). The 21 existing rows that match are reused untouched.                                                                                                                                                                                                  |
+| Clubs, `--append-sides` | TUKS: `third-league` grows 1 → 2 (TUKS 5, TUKS 6) and `u11` gains TUKS C. Pretoria: `veterans-league` key + 2 sides. Pretoria East: `u11` gains PRETORIA EAST C. Counters (`teams/women/juniors`) recomputed.                                                                            |
+| Clubs, club sync        | 19 clubs gain league keys they now have fixtures in: 5 × `womens-junior-league`, Atteridgeville `second-league`, and `mens-t20` / `womens-t20` on 19 clubs. T20 sides reuse existing league side ids, and the sync only ever adds a fixtures-only cup's KEY (never a roster or a count). |
 
 So "drafts only" still changes club records. Take the snapshot in step 0 before anything else.
 
@@ -165,7 +164,9 @@ Check in the dry run:
 
 - `── Leagues`: the 13 workbook keys `exists, untouched`, plus `add league mens-t20`,
   `womens-t20` (both fixtures-only) and `womens-junior-league`. Nothing else added.
-- `── Venue aliases: 15 to add, 0 already present`. Any "mapped to" conflict line is a STOP.
+- `── Venue aliases: 15 to add, 0 already present`. A key already mapped to a different value
+  makes the bootstrap refuse (`✗ … venue alias conflict(s)`): STOP and resolve it in the console.
+  The importer refuses on the same conflict, because the API gate uses the tenant's value.
 - `── Venue registry: 22 existing · 21 matched (id reused, row untouched) · 77 to create · 1
 existing not in the workbook`. The one unused row is `irene-oval-cricket-ground-de34e6`
   (see [cleanup](#cleanup)). A `homeClubIds differ (not changed)` note on FH ODENDAAL is
@@ -194,7 +195,9 @@ tuks-cricket-club → tm_tuks-cricket-club_third-league_0 "TUKS 5" (no reference
 - WOMENS LEAGUE placement: all 11 clubs `✓`.
 - Two `⚠` notes are expected and harmless: Sinoville `veterans-league` (leagueTeams 1 vs a
   2-entry roster) and Adelaar `u15` (two entries share side "A").
-- Ends `[dry-run] 3 club(s) would change`, no `✗ Refusing`.
+- Ends `[dry-run] 3 club(s) would change`, no `✗ Refusing`. Every club patch is checked with
+  `validateClubPatch` (the rep PATCH guard) in the dry run, so a patch the API would reject is a
+  dry-run blocker, never a half-applied `--confirm`.
 
 `--confirm` writes `titans-append-sides-backup-<ts>.json` first, then `wrote <clubId>` ×3 and
 `Done. 3 club(s) written`. A `changed since the read — NOT written` line means someone edited
@@ -213,8 +216,9 @@ Check:
   `medicoachSync feature: off`.
 - `Side resolution: 303 side(s) — 170 roster, 133 bare club id`, and no "Sides the clubs do not
   have yet" block (that would mean step 3 didn't land).
-- `── Held back (4) — parsed, never written`: U11 Plat B f12 and U11 Gold A f11 (24 Oct, Laerskool
-  Anton van Wouw), U15 Plat A f10 and U15 Gold A f7 (25 Oct, Irene Oval).
+- `── Held back (4) — parsed, never written`: U11 Plat B and U11 Gold A (24 Oct, Laerskool Anton van
+  Wouw), U15 Plat A and U15 Gold A (25 Oct, Irene Oval). Held-back fixtures take the ids AFTER the
+  written ones (first import: f36, f28, f28, f21), so they never collide with a written fixture.
 - `CLASH SCAN before HELD_BACK`: 2 provisional-vs-provisional clashes (the pairs above).
 - **`CLASH SCAN after HELD_BACK`: `✓ no clashes`.** This is the gate.
 - `Release-gate preview after HELD_BACK`: **3 sheet-vs-sheet clashes, all Vets B TBC fixtures**
@@ -223,11 +227,11 @@ Check:
 - `Shared ground-days … 98` and `Other ground-days … 40`: report-only.
 - `Time sources (written fixtures): t20-marker 47, sheet 148, provisional 1199`.
 - `── Series (44) as DRAFTS` and `44 draft series (1398 fixtures) would be written.`
-- Club sync preview: `6 club(s) would change, 2 CONFLICT(s), 0 orphan series`. The two
-  CONFLICTs are **expected and harmless**: `tuks-cricket-club / u9` and `cbcob-cricket-club /
-u11`. Both clubs store more (or reordered) junior sides than the workbook uses, so the sync
-  skips those rosters. Both clubs already carry those league keys.
-- `── Cup league keys … 19 club(s)`.
+- Club sync preview: `19 club(s) would change, 2 CONFLICT(s), 0 orphan series` (6 clubs gain a
+  league key, and the T20 cup keys go on 19 clubs). The two CONFLICTs are **expected and
+  harmless**: `tuks-cricket-club / u9` and `cbcob-cricket-club / u11`. Both clubs store more (or
+  reordered) junior sides than the workbook uses, so the sync skips those rosters. Both clubs
+  already carry those league keys.
 - **0 blockers**: no `✗ Refusing to pass the dry run` block.
 
 `Fixtures dated before <today>` is informational (97 on 7 Oct). Those are already-played
@@ -240,22 +244,33 @@ npx sst shell --stage prod -- npm --prefix packages/api run import-titans-fixtur
 ```
 
 It writes `titans-clubs-backup-<ts>.json` and `titans-fixtures-backup-<ts>.json`, then 44
-`wrote s-titans-… v1` lines, the club sync (`6 club(s) patched — 2 conflict`), `Cup league
-keys: 19 club(s)`, and `Post-write verification (stored tenant) ✓ no clashes`. It ends:
+`wrote s-titans-… v1` lines, the club sync (`19 club(s) patched — 2 conflict`), and
+`Post-write verification (stored tenant) ✓ no clashes`. It ends:
 
 ```
 Done. 44 draft series written. Backup: …. Nothing is released — approve and release from the console (tick "Withhold start times").
 ```
 
 Then re-run the step 4 dry run once. Every series should say `(replaces stored v1 draft)` with
-no drift warnings, the club sync preview should show `0 club(s) would change` (2 CONFLICTs
-still), and cup keys `0 club(s)`. That proves the write is stable and idempotent.
+no drift warnings, and the club sync preview should show `0 club(s) would change` (2 CONFLICTs
+still). That proves the write is stable and idempotent.
+
+**If a write aborts part-way** (a network or AWS error, not a version conflict), the CLI prints
+`✗ ABORTED after N of M … — RE-RUN REQUIRED` and stops. Re-run the same command: written series
+are replaced in place with the same ids, and the rest are written. For `--append-sides`, re-run
+the dry run first (it lists only what is still missing), or undo the written clubs with
+`--restore-clubs <the append backup>`. A version conflict (`changed since the read — NOT
+written`) is not an abort: re-run after checking who edited the club or series.
 
 ### STOP conditions (any step)
 
 - Any `✗ Refusing …` / `Gate FAILED` blocker block.
 - Any 1 → 2 growth line that doesn't say `(no references found)`, or a `would change the single
-side … but it is referenced` / `roster id … would change — refusing` line.
+side … but it is referenced` / `roster id … would change — refusing` line. The guard checks
+  stored series, season-run entrants and coach `teamIds`.
+- `roster entries … unmatched while appending …`: a stored side under another name (a rename).
+  Rename it in the console to the sheet name, or decide; never append beside it.
+- A `venue alias conflict` or `is not fixtures-only` blocker.
 - Any clash in `CLASH SCAN after HELD_BACK`. Never work around it: no `--allow-clashes` exists,
   by standing rule.
 - A Release-gate preview clash that isn't one of the 3 Vets B TBC ones.
@@ -277,49 +292,33 @@ npx sst shell --stage prod -- npm --prefix packages/api run import-titans-fixtur
 sync state). A released series in scope makes `--confirm` refuse unless you pass
 `--include-released`. Other `s-titans-*` series aren't touched.
 
-**What `--revert` does NOT undo:**
+**What `--revert` does NOT undo** (it says so when it finishes):
 
-- **Club records**: the `--append-sides` rosters, `leagueTeams` and counters (TUKS, Pretoria,
-  Pretoria East, including Pretoria's `veterans-league` key), the club-sync league keys (6
-  clubs) and the cup keys (19 clubs).
 - **Bootstrap**: the 3 league keys, the 15 venue aliases and the ~77 registry venues.
+- **`--append-sides`**: the new rosters, `leagueTeams` and counters (TUKS, Pretoria, Pretoria
+  East, including Pretoria's `veterans-league` key).
+- **Club sync**: the league keys it added (6 clubs) and any rosters it wrote.
+- **Cup keys**: `mens-t20` / `womens-t20` on 19 clubs' `club.leagues`.
 
 Leaving all of that in place is harmless: a re-import reuses it. Only restore clubs if the
 union rejects the structure itself.
 
-**Restoring club structure from the step 0 snapshot** (only after `--revert --confirm`, since
-fixtures reference the new side ids). Save outside the repo, then dry-run and confirm:
+**Restoring club structure: `--restore-clubs`** (only after `--revert --confirm`, since fixtures
+reference the new side ids). It takes any club backup — the step 0 snapshot's `clubs.json`,
+`titans-clubs-backup-<ts>.json` (taken just before the import) or
+`titans-append-sides-backup-<ts>.json` (just before `--append-sides`):
 
-```ts
-// npx sst shell --stage prod -- npx tsx <this file> <snapshot>/clubs.json [--confirm]
-import { readFileSync } from 'node:fs';
-const repo = await import(`${process.cwd()}/packages/api/src/repo.ts`);
-const [file, flag] = process.argv.slice(2);
-const FIELDS = ['leagues', 'leagueTeams', 'teamRosters', 'teams', 'women', 'juniors'];
-for (const snap of JSON.parse(readFileSync(file, 'utf8'))) {
-  const cur = await repo.getClub('titans', snap.id);
-  if (!cur) continue;
-  const changed = FIELDS.filter((k) => JSON.stringify(cur[k]) !== JSON.stringify(snap[k]));
-  if (!changed.length) continue;
-  console.log(
-    `${flag === '--confirm' ? 'restore' : '[dry-run]'} ${snap.id}: ${changed.join(', ')}`,
-  );
-  if (flag === '--confirm')
-    await repo.updateClub(
-      'titans',
-      snap.id,
-      { ...Object.fromEntries(FIELDS.map((k) => [k, snap[k]])), version: cur.version },
-      'titans-fixtures restore',
-      new Date().toISOString(),
-    );
-}
+```bash
+npx sst shell --stage prod -- npm --prefix packages/api run import-titans-fixtures -- --restore-clubs ~/titans-snapshot/prod-before/clubs.json
+npx sst shell --stage prod -- npm --prefix packages/api run import-titans-fixtures -- --restore-clubs ~/titans-snapshot/prod-before/clubs.json --confirm
 ```
 
-It patches only the six structure fields, version-pinned, so compliance docs or contacts edited
-since the snapshot survive. Expect up to 21 clubs listed (the 3 appended plus the league-key
-gains). The full pre-images in `titans-append-sides-backup-*.json` and `titans-clubs-backup-*.json`
-are the fallback if the snapshot is missing. Remove bootstrap venues and leagues by hand in the
-console if you must; nothing scripts that.
+The dry run prints every field it would change, per club, old → new. It restores only
+`leagues`, `leagueTeams`, `teamRosters`, `teams`, `women` and `juniors` (only those the backup
+carries, only where they differ), version-pinned, and checks every patch with
+`validateClubPatch` before writing anything, so compliance docs or contacts edited since the
+backup survive and nothing half-applies. A re-run is a no-op. Remove bootstrap venues and
+leagues by hand in the console if you must; nothing scripts that.
 
 ## Releasing later
 
@@ -368,7 +367,10 @@ drafts in place without forking ids.
 - **Union answers on the held-back fixtures:** remove the entries from `HELD_BACK` in
   `titans-fixture-map.ts` (a stale entry is fatal), apply the move in a reissued workbook, then
   dry-run and `--confirm` with `--only s-titans-u11-platinum-b,s-titans-u11-gold-a,…`. `--only`
-  takes full series ids.
+  takes full series ids and isolates the run: side and name blockers are scoped to those series
+  (a playoff id brings its division in, since its participants are the division's), the strict
+  clash gate ignores other stored series' TBC fixtures, and only those series are written.
+  HELD_BACK problems stay global. `--append-sides --only …` scopes the side plan the same way.
 - **Amended workbook:** pass `--file <path>` and update each sheet's expected count in the
   manifest. A stored fixture missing from the new workbook is a blocker. Re-import replaces a
   draft wholesale, so console edits are lost: the dry run lists each series that "differs from

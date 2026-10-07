@@ -10,14 +10,19 @@ import assert from 'node:assert/strict';
 import ExcelJS from 'exceljs';
 import type { Club, Series } from '../src/types.js';
 
-const { planSides, sideSuffixFor } = await import('../src/titans-sides.js');
+const { planSides, sideSuffixFor, singleSideReferences } = await import('../src/titans-sides.js');
 const { leaguePlan, aliasMerge, registryDiff } =
   await import('../src/bootstrap-titans-fixture-prereqs.js');
 const {
   buildTitansSeries,
   buildVeteransKnockouts,
   clubsFromMap,
-  cupLeaguePatches,
+  planClubRestore,
+  runScope,
+  scanTitansClashes,
+  sideNeeds,
+  titansAliasState,
+  usableGround,
   t20HostLeagues,
   parseArgs,
   stabiliseIds,
@@ -405,32 +410,6 @@ describe("T20 sides reuse the clubs' existing league ids", () => {
     assert.equal(p.fatal.length, 1);
     assert.equal(p.patches.length, 0);
   });
-
-  test('cup series add only the league key to club.leagues', () => {
-    const series = [
-      {
-        id: 's-titans-mens-t20-g-e',
-        leagueKey: 'mens-t20',
-        participants: [
-          { teamId: 'tuks-cricket-club', clubId: 'tuks-cricket-club', name: 'TUKS 1' },
-          {
-            teamId: 'tm_tuks-cricket-club_premier-league_1',
-            clubId: 'tuks-cricket-club',
-            name: 'TUKS 2',
-          },
-        ],
-      },
-      {
-        id: 's-titans-second-league',
-        leagueKey: 'second-league',
-        participants: [{ teamId: 'brits-cricket-club', clubId: 'brits-cricket-club', name: 'x' }],
-      },
-    ] as unknown as Series[];
-    const withKey = club('irene-villagers-cricket-club', { leagues: ['mens-t20'] });
-    assert.deepEqual(cupLeaguePatches([tuks, brits, withKey], series, new Set(['mens-t20'])), [
-      { clubId: 'tuks-cricket-club', add: ['mens-t20'] },
-    ]);
-  });
 });
 
 describe('t20HostLeagues', () => {
@@ -741,5 +720,215 @@ describe('CLI flag guards', () => {
     assert.throws(() => parseArgs(['--parse-only', '--confirm']));
     assert.equal(parseArgs(['--only', 's-titans-veterans-league-a-ko']).only.length, 1);
     assert.equal(parseArgs(['--append-sides']).mode, 'append-sides');
+  });
+});
+
+describe('review fixes', () => {
+  test('appending beside an unmatched roster entry is refused (a renamed side is not duplicated)', () => {
+    const tuks = club('tuks-cricket-club', {
+      leagues: ['u11'],
+      leagueTeams: { u11: 2 },
+      teamRosters: {
+        u11: [
+          { id: 'tm_tuks-cricket-club_u11_0', name: 'TUKS A' },
+          { id: 'tm_tuks-cricket-club_u11_1', name: 'Tuks Seconds' },
+        ],
+      },
+    });
+    const plan = planSides(
+      [
+        { leagueKey: 'u11', name: 'TUKS A' },
+        { leagueKey: 'u11', name: 'TUKS B' },
+      ],
+      [tuks],
+      { allowAppend: true },
+    );
+    assert.equal(plan.patches.length, 0);
+    assert.match(plan.fatal.join('\n'), /Tuks Seconds.*unmatched while appending TUKS B/);
+  });
+
+  test('a season run listing the club id as an entrant blocks a 1 → 2 growth', () => {
+    const tuks = club('tuks-cricket-club', {
+      leagues: ['third-league'],
+      leagueTeams: { 'third-league': 1 },
+    });
+    const run = {
+      id: 'run-1',
+      leagueKey: 'third-league',
+      stages: [
+        {
+          specId: 's',
+          status: 'generated',
+          groups: [{ id: 'g', label: 'G', entrants: ['tuks-cricket-club'] }],
+        },
+      ],
+    } as never;
+    assert.deepEqual(singleSideReferences(tuks, 'third-league', [], [run]), ['season run run-1']);
+    const plan = planSides(
+      [
+        { leagueKey: 'third-league', name: 'TUKS 5' },
+        { leagueKey: 'third-league', name: 'TUKS 6' },
+      ],
+      [tuks],
+      { allowAppend: true, seasonRuns: [run] },
+    );
+    assert.equal(plan.patches.length, 0);
+    assert.match(plan.fatal.join('\n'), /season run run-1/);
+  });
+
+  test('--only scopes the sides; a playoff id brings its division into scope', () => {
+    assert.equal(runScope([]), null);
+    const sc = runScope(['s-titans-veterans-league-a-ko'])!;
+    assert.ok(sc.has('s-titans-veterans-league-a'));
+    const sheet = vetsSheet();
+    assert.equal(sideNeeds([sheet], new Set(['s-titans-u9-gold-a'])).length, 0);
+    assert.equal(sideNeeds([sheet], sc).length, 2);
+  });
+
+  test('unresolved sides are recorded per series (so --only can scope them)', () => {
+    const sheet = vetsSheet();
+    const out = buildTitansSeries([sheet], wouldBeRegistry([sheet], clubsFromMap()), [], {
+      sideOf: () => undefined,
+    });
+    assert.equal(out.unresolvedBySeries.get('s-titans-veterans-league-a')!.length, 2);
+  });
+
+  test("the strict scan drops a stored series' marked-TBC fixtures, keeps legacy venue-less ones", () => {
+    const clubs = [
+      { id: 'c1', name: 'C1', ground: { venue: 'ALOE PARK' } },
+      { id: 'c2', name: 'C2', ground: { venue: 'ALOE PARK' } },
+    ] as unknown as Club[];
+    const venues = [{ id: 'v-aloe', name: 'ALOE PARK', surfaces: 1 }];
+    const p = (id: string) => ({ teamId: id, clubId: id, name: id });
+    const subject = {
+      id: 's-new',
+      name: 'New',
+      participants: [p('c1'), p('x')],
+      fixtures: [
+        {
+          id: 'f1',
+          date: '2026-10-18',
+          time: '14:00',
+          home: 'c1',
+          away: 'x',
+          venueName: 'ALOE PARK',
+          timeSource: 'sheet',
+        },
+      ],
+    } as unknown as Series;
+    const storedTbc = {
+      id: 's-stored',
+      name: 'Stored',
+      participants: [p('c2'), p('y')],
+      fixtures: [
+        {
+          id: 'f1',
+          date: '2026-10-18',
+          time: '14:00',
+          home: 'c2',
+          away: 'y',
+          venueStatus: 'unresolved',
+        },
+      ],
+    } as unknown as Series;
+    assert.equal(
+      scanTitansClashes([subject], clubs, venues, { existingOther: [storedTbc] }).length,
+      0,
+    );
+    assert.equal(
+      scanTitansClashes([subject], clubs, venues, { existingOther: [storedTbc], includeTbc: true })
+        .length,
+      1,
+    );
+    const legacy = {
+      ...storedTbc,
+      fixtures: [{ id: 'f1', date: '2026-10-18', time: '14:00', home: 'c2', away: 'y' }],
+    } as unknown as Series;
+    assert.equal(
+      scanTitansClashes([subject], clubs, venues, { existingOther: [legacy] }).length,
+      1,
+    );
+  });
+
+  test('aliases: the gate map once all titans keys are stored equal; conflicts and gaps are reported', () => {
+    const all = { competitionDefaults: { venueAliases: { ...TITANS_VENUE_ALIASES } } } as never;
+    const ok = titansAliasState(all);
+    assert.deepEqual([ok.missing, ok.conflicts], [[], []]);
+    const [k] = Object.keys(TITANS_VENUE_ALIASES);
+    const bad = titansAliasState({
+      competitionDefaults: { venueAliases: { ...TITANS_VENUE_ALIASES, [k]: 'elsewhere' } },
+    } as never);
+    assert.equal(bad.conflicts.length, 1);
+    assert.equal(
+      titansAliasState({} as never).missing.length,
+      Object.keys(TITANS_VENUE_ALIASES).length,
+    );
+  });
+
+  test('junk club grounds never become registry rows', () => {
+    for (const j of ['N/A', '-', 'None', 'TBC', '  ', '!!'])
+      assert.equal(usableGround(j), false, `"${j}"`);
+    assert.equal(usableGround('ALOE PARK'), true);
+    const clubs = [
+      { id: 'a', name: 'A', ground: { venue: '-' } },
+      { id: 'b', name: 'B', ground: { venue: 'N/A' } },
+    ] as unknown as Club[];
+    assert.equal(wouldBeRegistry([], clubs).length, 0);
+  });
+
+  test('--restore-clubs plans only the structure fields that differ, and only ones the backup has', () => {
+    const cur = club('tuks-cricket-club', {
+      leagues: ['premier-league', 'mens-t20'],
+      leagueTeams: { 'premier-league': 2 },
+      teams: 2,
+    });
+    const plan = planClubRestore(
+      [
+        {
+          id: 'tuks-cricket-club',
+          leagues: ['premier-league'],
+          leagueTeams: { 'premier-league': 2 },
+        },
+        { id: 'not-on-tenant', leagues: [] },
+      ],
+      [cur],
+    );
+    assert.equal(plan.length, 1);
+    assert.deepEqual(plan[0].fields, ['leagues']);
+    assert.deepEqual(plan[0].patch, { leagues: ['premier-league'] });
+    assert.equal(plan[0].version, 3);
+  });
+
+  test('held-back ids come after the kept ones; a re-import with HELD_BACK keeps every stored id', () => {
+    const sheet = vetsSheet();
+    const venues = wouldBeRegistry([sheet], clubsFromMap());
+    const held = [
+      {
+        sheet: 'TITANS VETERANS LEAGUE A',
+        date: '2026-09-13',
+        home: 'BRITS VETERANS 1',
+        away: 'PRETORIA 1',
+        venue: 'BRITS OVAL',
+        reason: 't',
+      },
+    ];
+    const first = buildTitansSeries([sheet], venues, held);
+    const b = first.built[0];
+    assert.deepEqual(
+      b.fixtures.map((f) => f.id),
+      ['f1'],
+    );
+    assert.equal(first.held[0].fixtureId, 'f2');
+    // stored = what the first run wrote; the second run must keep f1 and report the held id after it
+    const stored = new Map([
+      [String(b.series.id), { ...b.series, fixtures: b.fixtures } as Series],
+    ]);
+    const again = buildTitansSeries([sheet], venues, held, { stored });
+    assert.deepEqual(
+      again.built[0].fixtures.map((f) => f.id),
+      ['f1'],
+    );
+    assert.equal(again.held[0].fixtureId, 'f2');
+    assert.equal(again.removedBySeries.size, 0);
   });
 });

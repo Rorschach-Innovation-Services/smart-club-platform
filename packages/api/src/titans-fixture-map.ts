@@ -294,6 +294,12 @@ export const T20_PM_TIME = '13:30';
 export const JUNIOR_DEFAULT_TIME = '08:30';
 export const SENIOR_DEFAULT_TIME = '13:00';
 
+/** A sheet start time outside daylight cricket hours is a typo ("1:00" meaning 13:00). */
+export const SHEET_TIME_RANGE = '07:00–18:30';
+export function plausibleSheetTime(time: string): boolean {
+  return time >= '07:00' && time <= '18:30';
+}
+
 export function provisionalTime(junior: boolean): string {
   return junior ? JUNIOR_DEFAULT_TIME : SENIOR_DEFAULT_TIME;
 }
@@ -962,6 +968,14 @@ export function parseTitansSheet(ws: ExcelJS.Worksheet, spec: TitansSheetSpec): 
       continue;
     }
     if (sd) {
+      // A corrected year must still run forward from the sheet's running date — otherwise it
+      // is not the 2026→2027 slip but a different error, and fatal.
+      if (sd.corrected && date && sd.date < date) {
+        out.errors.push(
+          `${where}: date ${sd.corrected} reads as ${sd.date} after a year fix, but that is before the running date ${date}`,
+        );
+        continue;
+      }
       date = sd.date;
       if (sd.corrected)
         out.dateCorrections.push(
@@ -980,6 +994,8 @@ export function parseTitansSheet(ws: ExcelJS.Worksheet, spec: TitansSheetSpec): 
             `${where}: stand-alone time "${texts[0]}" with no fixture directly above`,
           );
         else {
+          if (!plausibleSheetTime(c1Time.time))
+            out.errors.push(`${where}: start time ${c1Time.time} outside ${SHEET_TIME_RANGE}`);
           lastFixtureRow.ref.time = c1Time.time;
           lastFixtureRow.ref.timeSource = 'sheet';
           out.timeRows.push({ row: r, appliedTo: lastFixtureRow.row, time: c1Time.time });
@@ -1018,6 +1034,10 @@ export function parseTitansSheet(ws: ExcelJS.Worksheet, spec: TitansSheetSpec): 
       const hasRaw = raw instanceof Date || cellText(raw) !== '';
       const parsed = hasRaw ? parseTitansTime(raw) : null;
       if (hasRaw && !parsed) out.errors.push(`${where}: unreadable time "${cellText(raw)}"`);
+      if (parsed && !plausibleSheetTime(parsed.time))
+        out.errors.push(
+          `${where}: start time ${parsed.time} ("${cellText(raw) || 'time cell'}") outside ${SHEET_TIME_RANGE} — an AM/PM slip?`,
+        );
       time = parsed ?? { time: provisionalTime(spec.junior), source: 'provisional' };
     }
     for (let c = 4; c < values.length; c++)

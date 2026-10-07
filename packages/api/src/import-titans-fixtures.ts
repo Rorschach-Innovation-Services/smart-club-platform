@@ -1,22 +1,25 @@
 /**
- * Titans 2026-27 fixture import — the 36-sheet union workbook (1,398 fixtures) → `s-titans-*`
- * Series rows on the `titans` tenant, as DRAFTS.
+ * Titans 2026-27 fixture import — the 36-sheet union workbook (1,398 fixtures) → 44 `s-titans-*`
+ * Series rows on the `titans` tenant, as DRAFTS. Runbook: docs/runbooks/titans-fixtures-import.md.
  *
- *   npx tsx src/import-titans-fixtures.ts --parse-only [--report-out <path>]   # no AWS at all
+ *   npx tsx src/import-titans-fixtures.ts --parse-only [--report-out <path>]      # no AWS at all
+ *   npx sst shell --stage <s> -- npx tsx src/import-titans-fixtures.ts …           # live tenant:
+ *     (no mode flag)            import dry run   [--only <ids>] [--report-out <path>]
+ *     --confirm                 import: backup → write series → club sync → post-write re-scan
+ *     --append-sides            plan the club sides the sheets need (dry run), --confirm writes
+ *     --revert                  delete the manifest series (dry run), --confirm [--include-released]
+ *     --restore-clubs <backup>  restore club structure fields from a backup (dry run), --confirm
+ *   common: --file, --structure, --backup-dir, --today, --no-club-sync
  *
- * STEP A0 (the gate) implements --parse-only only: parse every sheet, resolve every team name
- * to a CLUB_MAP club, build the series in memory with provisional side ids, and run the
- * season-wide clash scan against the WOULD-BE venue registry (canonical ground names, one
- * pitch each, the misspellings-only alias table). The tenant dry-run, `--confirm`, `--only`
- * and `--revert` arrive with the write path (A3); until then any other mode refuses to run.
+ * Parse every sheet, resolve every side to a live club side (titans-sides.ts), build the series
+ * with stable fixture ids, and run the season-wide clash scan with release-gate semantics. The
+ * `--structure` workbook (the August league-structure sheet) supplies club grounds in
+ * --parse-only, so the release-gate preview can place TBC fixtures at the home club's ground.
  *
- * The optional `--structure` workbook (the August league-structure sheet) supplies each club's
- * `ground.venue` exactly as the compliance import wrote it, so the release-gate preview can
- * place TBC-venue fixtures at the home club's ground the way the API gate does.
- *
- * Fail-closed: a sheet off its measured count, an unparseable row, a team name that resolves to
- * no club, a stale HELD_BACK entry or any residual clash fails the gate. There is NO
- * --allow-clashes (standing rule).
+ * Fail-closed: a sheet off its measured count, an unparseable row, a side with no live team, a
+ * stale HELD_BACK entry, a conflicting venue alias or any residual clash refuses the run. There
+ * is NO --allow-clashes (standing rule). With `--only`, side/name blockers are scoped to the
+ * series being written; HELD_BACK problems stay global.
  */
 import ExcelJS from 'exceljs';
 import { existsSync } from 'node:fs';
@@ -31,6 +34,7 @@ import {
   groundKey,
   normaliseName,
   venueAliasesFor,
+  JUNK_GROUND,
   DEFAULT_VENUE_ALIASES,
   type Clash,
 } from './venue-clash.js';
@@ -54,6 +58,7 @@ import {
   KNOWN_SERIES_IDS,
   T20_KO_SERIES_IDS,
   TITANS_LEAGUE_KEYS,
+  TITANS_FIXTURE_SHEETS,
   TITANS_NEW_LEAGUES,
   TITANS_SERIES_PREFIX,
   TITANS_TENANT,
@@ -123,9 +128,14 @@ export interface TitansBuildOutcome {
     { name: string; leagueKey: string; clubId: string; clubName: string; teamId: string }
   >;
   unresolvedNames: string[];
+  /** The same, per series id — so `--only` can scope the blocker to the series it writes. */
+  unresolvedBySeries: Map<string, string[]>;
+  /** Stored fixtures the workbook no longer has, per series (fatal for that series). */
+  removedBySeries: Map<string, string[]>;
   held: Array<{
     entry: HeldBackFixture;
     seriesId: string;
+    /** Read AFTER stable ids are assigned. */
     fixtureId: string;
     raw: TitansRawFixture;
   }>;
@@ -149,15 +159,19 @@ export interface BuildOptions {
   sideOf?: (leagueKey: string, name: string) => ResolvedSide | undefined;
   /** League label for series names (the tenant's own on a real run). */
   labelOf?: (key: string) => string;
-  /** Registry lookup aliases (the tenant's merged under the titans map on a real run). */
+  /** Registry lookup aliases (the tenant's own on a real run). */
   aliases?: Record<string, string>;
+  /** The tenant's stored series by id — fixture ids are reconciled against them. */
+  stored?: Map<string, Series>;
 }
 
 /**
  * Build every Series (planb/lions shape: participants snapshot, team-id home/away, `f<n>` ids,
- * dateMode 'reference', drafts). Ids are assigned over ALL parsed fixtures of a series in row
- * order BEFORE held-back fixtures are removed, so adding one back later keeps every id stable.
- * Round = rank of the fixture's date among the series' distinct dates. Pure.
+ * dateMode 'reference', drafts). Fixture ids are STABLE: the kept fixtures are reconciled
+ * against the stored series (fixture-identity.ts; `f1..fN` in row order on a first import),
+ * then the held-back fixtures get the ids after the highest one the series has ever held, so
+ * they never collide with a written fixture. Round = rank of the fixture's date among the
+ * series' distinct dates. Pure.
  */
 export function buildTitansSeries(
   sheets: ParsedTitansSheet[],
@@ -173,6 +187,8 @@ export function buildTitansSeries(
     built: [],
     resolutions: new Map(),
     unresolvedNames: [],
+    unresolvedBySeries: new Map(),
+    removedBySeries: new Map(),
     held: [],
     heldProblems: [],
     tbc: [],
@@ -186,17 +202,21 @@ export function buildTitansSeries(
       const leagueKey = spec.leagueKey;
       const participants: SeriesParticipant[] = [];
       const teamIds: string[] = [];
+      const unresolved = (u: string) => {
+        if (!outcome.unresolvedNames.includes(u)) outcome.unresolvedNames.push(u);
+        const list = outcome.unresolvedBySeries.get(spec.seriesId) ?? [];
+        if (!list.includes(u)) list.push(u);
+        outcome.unresolvedBySeries.set(spec.seriesId, list);
+      };
       const side = (name: string): string => {
         const club = resolveTeamClub(name);
         if (!club) {
-          const u = `${sheet.spec.sheet}: "${name}"`;
-          if (!outcome.unresolvedNames.includes(u)) outcome.unresolvedNames.push(u);
+          unresolved(`${sheet.spec.sheet}: "${name}"`);
           return name;
         }
         const live = opts.sideOf ? opts.sideOf(leagueKey, name) : undefined;
         if (opts.sideOf && !live) {
-          const u = `${sheet.spec.sheet}: "${name}" (${leagueKey}) has no side on the live club`;
-          if (!outcome.unresolvedNames.includes(u)) outcome.unresolvedNames.push(u);
+          unresolved(`${sheet.spec.sheet}: "${name}" (${leagueKey}) has no side on the live club`);
           return name;
         }
         const teamId = live?.teamId ?? provisionalSideId(leagueKey, name);
@@ -250,22 +270,44 @@ export function buildTitansSeries(
         return wf;
       });
       const kept: TitansFixture[] = [];
+      const heldHere: Array<{ entry: HeldBackFixture; wf: TitansFixture; raw: TitansRawFixture }> =
+        [];
       all.forEach((wf, i) => {
         const h = isHeldBack(raw[i], heldBack);
         if (h) {
           heldHits.set(h, (heldHits.get(h) ?? 0) + 1);
-          outcome.held.push({ entry: h, seriesId: spec.seriesId, fixtureId: wf.id, raw: raw[i] });
-          return;
-        }
-        kept.push(wf);
-        if (raw[i].venue == null)
+          heldHere.push({ entry: h, wf, raw: raw[i] });
+        } else kept.push(wf);
+      });
+      // Stable ids: kept fixtures against the stored series, then held-back ones after.
+      const storedSeries = opts.stored?.get(spec.seriesId);
+      const r = stabiliseIds(kept, storedSeries);
+      if (r.removed.length) outcome.removedBySeries.set(spec.seriesId, r.removed);
+      const idNum = (id?: string) => Number(/^f(\d+)$/.exec(id ?? '')?.[1] ?? 0);
+      let next = Math.max(
+        0,
+        ...kept.map((f) => idNum(f.id)),
+        ...((storedSeries?.fixtures as WrittenFixture[] | undefined) ?? []).map((f) => idNum(f.id)),
+      );
+      for (const h of heldHere) {
+        h.wf.id = `f${++next}`;
+        outcome.held.push({
+          entry: h.entry,
+          seriesId: spec.seriesId,
+          fixtureId: h.wf.id,
+          raw: h.raw,
+        });
+      }
+      kept.forEach((wf) => {
+        const rf = raw[all.indexOf(wf)];
+        if (rf.venue == null)
           outcome.tbc.push({
             seriesId: spec.seriesId,
             fixtureId: wf.id,
             date: wf.date,
             time: wf.time ?? '',
-            home: raw[i].home,
-            away: raw[i].away,
+            home: rf.home,
+            away: rf.away,
           });
       });
       const keptDates = kept.map((f) => f.date).sort();
@@ -316,6 +358,7 @@ export function buildTitansSeries(
 export function wouldBeRegistry(sheets: ParsedTitansSheet[], clubs: Club[]): Venue[] {
   const byKey = new Map<string, Venue>();
   const add = (rawName: string, clubId?: string) => {
+    if (!usableGround(rawName)) return;
     const name = canonicalVenueName(rawName);
     const k = titansGroundKey(name);
     let v = byKey.get(k);
@@ -347,6 +390,13 @@ export function wouldBeRegistry(sheets: ParsedTitansSheet[], clubs: Club[]): Ven
   return [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/** A ground name that names a real ground: not TBC, not a junk placeholder ("N/A", "-",
+ * "None" — venue-clash.ts's JUNK_GROUND), and not empty once normalised. */
+export function usableGround(name: string | null | undefined): boolean {
+  const t = (name ?? '').trim();
+  return !!t && !isTbcVenue(t) && !JUNK_GROUND.test(t) && normaliseName(t) !== '';
+}
+
 /** CLUB_MAP as skeletal Club records, with `ground.venue` from the structure workbook when given
  * (what the August compliance import wrote to each club). */
 export function clubsFromMap(groundByClub: Map<string, string> = new Map()): Club[] {
@@ -369,6 +419,18 @@ export interface TaggedClash extends Clash {
   seriesName: string;
   /** Time sources of the two fixtures, sorted: `sheet-vs-provisional` etc. */
   tag: ClashTag;
+}
+
+/** A stored series without the fixtures explicitly marked venue-TBC (`venueStatus:
+ * 'unresolved'` and no ground). Unlike `withoutTbc` it keeps a legacy fixture that simply
+ * carries no venue fields — the gate rightly books that one at the home club's ground. */
+function withoutMarkedTbc(s: Series): Series {
+  return {
+    ...s,
+    fixtures: ((s.fixtures as WrittenFixture[]) ?? []).filter(
+      (f) => !(f.venueStatus === 'unresolved' && !f.venueOverride && !f.venueName),
+    ),
+  };
 }
 
 function withoutTbc(s: Series): Series {
@@ -399,12 +461,17 @@ export function scanTitansClashes(
   for (const s of built)
     for (const f of s.fixtures as TitansFixture[]) sourceOf.set(`${s.id}/${f.id}`, f.timeSource);
   const subjects = opts.includeTbc ? built : built.map(withoutTbc);
+  // The strict scan drops TBC fixtures on BOTH sides: a stored series outside this run (an
+  // --only re-import) must not reintroduce its venue-less fixtures at the club ground.
+  const others = opts.includeTbc
+    ? (opts.existingOther ?? [])
+    : (opts.existingOther ?? []).map(withoutMarkedTbc);
   const out: TaggedClash[] = [];
   for (let i = 0; i < subjects.length; i++) {
     const subject = subjects[i];
     for (const c of findClashes(
       subject,
-      [...(opts.existingOther ?? []), ...subjects.slice(0, i)],
+      [...others, ...subjects.slice(0, i)],
       clubs,
       venues,
       opts.aliases ?? TITANS_GATE_ALIASES,
@@ -885,7 +952,9 @@ export function renderUnionMarkdown(r: UnionReport): string {
 // ───────────────────────── CLI ─────────────────────────
 
 export interface Args {
-  mode: 'import' | 'append-sides' | 'revert';
+  mode: 'import' | 'append-sides' | 'revert' | 'restore-clubs';
+  /** --restore-clubs: the club backup / snapshot JSON to restore from. */
+  restoreFrom: string;
   file: string;
   structure: string;
   parseOnly: boolean;
@@ -906,6 +975,7 @@ export const WRITABLE_SERIES_IDS = [...KNOWN_SERIES_IDS, ...VETERANS_KO_SERIES_I
 export function parseArgs(argv: string[]): Args {
   const args: Args = {
     mode: 'import',
+    restoreFrom: '',
     ...DEFAULT_PATHS,
     parseOnly: false,
     confirm: false,
@@ -931,7 +1001,10 @@ export function parseArgs(argv: string[]): Args {
     else if (a === '--confirm') args.confirm = true;
     else if (a === '--append-sides') args.mode = 'append-sides';
     else if (a === '--revert') args.mode = 'revert';
-    else if (a === '--no-club-sync') args.noClubSync = true;
+    else if (a === '--restore-clubs') {
+      args.mode = 'restore-clubs';
+      args.restoreFrom = need(++i, a);
+    } else if (a === '--no-club-sync') args.noClubSync = true;
     else if (a === '--include-released') args.includeReleased = true;
     else if (a === '--backup-dir') args.backupDir = need(++i, a);
     else if (a === '--only')
@@ -943,9 +1016,10 @@ export function parseArgs(argv: string[]): Args {
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(args.today)) throw new Error('--today needs YYYY-MM-DD');
   if (args.parseOnly && (args.confirm || args.mode !== 'import'))
-    throw new Error('--parse-only takes no --confirm, --append-sides or --revert');
-  if (args.mode !== 'import' && (args.only.length || args.reportOut))
-    throw new Error('--only and --report-out are import flags');
+    throw new Error('--parse-only takes no --confirm, --append-sides, --revert or --restore-clubs');
+  if (args.mode !== 'import' && args.reportOut) throw new Error('--report-out is an import flag');
+  if (args.only.length && args.mode !== 'import' && args.mode !== 'append-sides')
+    throw new Error('--only is an import / --append-sides flag');
   if (args.includeReleased && args.mode !== 'revert')
     throw new Error('--include-released is a --revert flag');
   for (const id of args.only)
@@ -1002,38 +1076,54 @@ export function t20HostLeagues(
   };
 }
 
-/** Clubs a set of cup (T20) series needs the cup league key added for — `club.leagues` only:
- * a cup side is an existing league side, so no roster and no leagueTeams entry (which would
- * duplicate ids and double-count the club's teams). */
-export function cupLeaguePatches(
-  clubs: Club[],
-  series: Series[],
-  cupKeys: Set<string>,
-): Array<{ clubId: string; add: string[] }> {
-  const want = new Map<string, Set<string>>();
-  for (const s of series) {
-    const key = String(s.leagueKey);
-    if (!cupKeys.has(key)) continue;
-    for (const p of s.participants ?? [])
-      want.set(p.clubId, (want.get(p.clubId) ?? new Set()).add(key));
-  }
-  const out: Array<{ clubId: string; add: string[] }> = [];
-  for (const [clubId, keys] of want) {
-    const club = clubs.find((c) => c.id === clubId);
-    if (!club) continue;
-    const add = [...keys].filter((k) => !(club.leagues ?? []).includes(k));
-    if (add.length) out.push({ clubId, add });
-  }
-  return out.sort((a, b) => a.clubId.localeCompare(b.clubId));
+/**
+ * The scan's alias map, and why it may not be the gate's yet. Once every titans alias is stored
+ * on the tenant with the same value, the scan uses exactly what the API gate uses
+ * (`venueAliasesFor(cfg)` — a tenant entry wins). A missing key or a conflicting value is fatal
+ * for the run; until then the merged map is shown for information only. Pure.
+ */
+export function titansAliasState(cfg: Pick<TenantConfig, 'competitionDefaults'>): {
+  missing: string[];
+  conflicts: string[];
+  aliases: Record<string, string>;
+} {
+  const storedAliases = cfg.competitionDefaults?.venueAliases ?? {};
+  const missing = Object.keys(TITANS_VENUE_ALIASES).filter((k) => !(k in storedAliases));
+  const conflicts = Object.entries(TITANS_VENUE_ALIASES)
+    .filter(([k, v]) => k in storedAliases && storedAliases[k] !== v)
+    .map(
+      ([k, v]) => `"${k}" is mapped to "${storedAliases[k]}" on the tenant (titans map: "${v}")`,
+    );
+  const aliases =
+    missing.length || conflicts.length
+      ? { ...venueAliasesFor(cfg), ...TITANS_VENUE_ALIASES }
+      : venueAliasesFor(cfg);
+  return { missing, conflicts, aliases };
 }
 
-/** Every (league, sheet side) the written series name — the input to the side plan. */
-export function sideNeeds(sheets: ParsedTitansSheet[]): SideNeed[] {
+/**
+ * The series whose sides and names a run must resolve: `--only` plus, for a veterans playoff
+ * id, its division (the playoff's participants ARE the division's). null ⇒ every series.
+ * Writes are still exactly the `--only` ids.
+ */
+export function runScope(only: string[]): Set<string> | null {
+  if (!only.length) return null;
+  const scope = new Set(only);
+  for (const sh of TITANS_FIXTURE_SHEETS)
+    if (sh.koSeriesId && scope.has(sh.koSeriesId)) scope.add(sh.series[0].seriesId);
+  return scope;
+}
+
+/** Every (league, sheet side) the in-scope series name — the input to the side plan. */
+export function sideNeeds(
+  sheets: ParsedTitansSheet[],
+  scope: Set<string> | null = null,
+): SideNeed[] {
   const seen = new Set<string>();
   const out: SideNeed[] = [];
   for (const s of sheets)
     for (const f of s.fixtures)
-      for (const name of [f.home, f.away]) {
+      for (const name of scope && !scope.has(f.seriesId) ? [] : [f.home, f.away]) {
         const k = sideKey(s.spec.leagueKey, name);
         if (seen.has(k)) continue;
         seen.add(k);
@@ -1132,7 +1222,7 @@ function printSidePlan(plan: SidePlan, opts: { appendMode: boolean }) {
 }
 
 /** `--append-sides`: plan (dry-run) or write the missing sides onto the live clubs. */
-async function runAppendSides(args: Args) {
+export async function runAppendSides(args: Args) {
   const parsed = await parseAndPrint(args);
   if (!parsed) return;
   const repo = await import('./repo.js');
@@ -1140,9 +1230,15 @@ async function runAppendSides(args: Args) {
   if (!config) throw new Error(`no tenant config for "${TITANS_TENANT}"`);
   const clubs = await repo.listClubs(TITANS_TENANT);
   console.log(`\nTenant "${TITANS_TENANT}": ${clubs.length} club(s)`);
-  const storedSeries = await repo.listSeries(TITANS_TENANT);
-  const plan = planSides(sideNeeds(parsed.sheets), clubs, {
+  const [storedSeries, seasonRuns] = await Promise.all([
+    repo.listSeries(TITANS_TENANT),
+    repo.listSeasonRuns(TITANS_TENANT),
+  ]);
+  const scope = runScope(args.only);
+  if (scope) console.log(`── --only: sides of ${[...scope].join(', ')}`);
+  const plan = planSides(sideNeeds(parsed.sheets, scope), clubs, {
     storedSeries,
+    seasonRuns,
     hostLeagues: t20HostLeagues(parsed.sheets),
     allowAppend: true,
     fixturesOnlyKeys: fixturesOnlyKeys(config),
@@ -1222,34 +1318,43 @@ async function runAppendSides(args: Args) {
   );
   console.log(`\nBackup written: ${backup}`);
   let raced = 0;
-  for (const p of plan.patches) {
-    const fresh = await repo.getClub(TITANS_TENANT, p.clubId);
-    if (!fresh || fresh.version !== p.version) {
-      console.error(`✗ ${p.clubId} changed since the read — NOT written (re-run)`);
-      raced++;
-      continue;
+  let done = 0;
+  try {
+    for (const p of plan.patches) {
+      const fresh = await repo.getClub(TITANS_TENANT, p.clubId);
+      if (!fresh || fresh.version !== p.version) {
+        console.error(`✗ ${p.clubId} changed since the read — NOT written (re-run)`);
+        raced++;
+        continue;
+      }
+      const patch = patchFor(p);
+      const invalid = invalidFor(p, fresh);
+      if (invalid) {
+        console.error(`✗ ${p.clubId}: ${invalid} — NOT written`);
+        raced++;
+        continue;
+      }
+      try {
+        await repo.updateClub(
+          TITANS_TENANT,
+          p.clubId,
+          patch,
+          'import-titans-fixtures --append-sides',
+          new Date().toISOString(),
+        );
+        console.log(`wrote ${p.clubId}`);
+        done++;
+      } catch (err) {
+        if ((err as { name?: string }).name !== 'VersionConflictError') throw err;
+        console.error(`✗ ${p.clubId} changed mid-write — NOT written (re-run)`);
+        raced++;
+      }
     }
-    const patch = patchFor(p);
-    const invalid = invalidFor(p, fresh);
-    if (invalid) {
-      console.error(`✗ ${p.clubId}: ${invalid} — NOT written`);
-      raced++;
-      continue;
-    }
-    try {
-      await repo.updateClub(
-        TITANS_TENANT,
-        p.clubId,
-        patch,
-        'import-titans-fixtures --append-sides',
-        new Date().toISOString(),
-      );
-      console.log(`wrote ${p.clubId}`);
-    } catch (err) {
-      if ((err as { name?: string }).name !== 'VersionConflictError') throw err;
-      console.error(`✗ ${p.clubId} changed mid-write — NOT written (re-run)`);
-      raced++;
-    }
+  } catch (err) {
+    console.error(
+      `\n✗ ABORTED after ${done} of ${plan.patches.length} club(s) — RE-RUN REQUIRED (the dry run will list only what is still missing; --restore-clubs ${backup} undoes the written ones)`,
+    );
+    throw err;
   }
   if (raced) process.exitCode = 1;
   console.log(`Done. ${plan.patches.length - raced} club(s) written. Backup: ${backup}`);
@@ -1280,7 +1385,144 @@ async function backupTitansSeries(series: Series[], dir: string, clubs?: Club[])
   return path;
 }
 
-async function runRevert(args: Args) {
+/** The structure fields --restore-clubs puts back (compliance docs, contacts and the rest of
+ * the club record are never touched). */
+export const RESTORE_FIELDS = [
+  'leagues',
+  'leagueTeams',
+  'teamRosters',
+  'teams',
+  'women',
+  'juniors',
+] as const;
+
+/** Per club, the RESTORE_FIELDS that differ between a backup and the live record (only fields
+ * the backup actually carries). Pure. */
+export function planClubRestore(
+  backup: Array<Partial<Club> & { id: string }>,
+  current: Club[],
+): Array<{
+  clubId: string;
+  name: string;
+  fields: string[];
+  patch: Partial<Club>;
+  version: number | undefined;
+}> {
+  const byId = new Map(current.map((c) => [c.id, c]));
+  const out: Array<{
+    clubId: string;
+    name: string;
+    fields: string[];
+    patch: Partial<Club>;
+    version: number | undefined;
+  }> = [];
+  for (const snap of backup) {
+    const cur = byId.get(snap.id);
+    if (!cur) continue;
+    const rec = (x: object) => x as Record<string, unknown>;
+    const fields = RESTORE_FIELDS.filter(
+      (k) =>
+        k in snap && JSON.stringify(rec(cur)[k] ?? null) !== JSON.stringify(rec(snap)[k] ?? null),
+    );
+    if (!fields.length) continue;
+    out.push({
+      clubId: cur.id,
+      name: cur.name,
+      fields: [...fields],
+      patch: Object.fromEntries(fields.map((k) => [k, rec(snap)[k]])) as Partial<Club>,
+      version: cur.version,
+    });
+  }
+  return out.sort((a, b) => a.clubId.localeCompare(b.clubId));
+}
+
+/** `--restore-clubs <backup.json>`: put a club backup's structure fields back, version-pinned
+ * and validated up front (one invalid patch refuses the run). */
+export async function runRestoreClubs(args: Args) {
+  const repo = await import('./repo.js');
+  const { readFile } = await import('node:fs/promises');
+  const backup = JSON.parse(await readFile(args.restoreFrom, 'utf8')) as Array<
+    Partial<Club> & { id: string }
+  >;
+  if (!Array.isArray(backup))
+    throw new Error(`${args.restoreFrom}: expected a JSON array of clubs`);
+  const config = await repo.getTenantConfig(TITANS_TENANT);
+  if (!config) throw new Error(`no tenant config for "${TITANS_TENANT}"`);
+  const clubs = await repo.listClubs(TITANS_TENANT);
+  const plan = planClubRestore(backup, clubs);
+  console.log(
+    `Restore from ${args.restoreFrom}: ${backup.length} club(s) in the backup, ${plan.length} differ`,
+  );
+  const { validateClubPatch, resolveRequiredDocs, resolveDistricts } =
+    await import('./catalogue.js');
+  const { resolveVertical } = await import('./vertical.js');
+  const requiredDocs = resolveRequiredDocs(config);
+  const configured = new Set((config.leagues ?? []).map((l) => l.key));
+  const fatal: string[] = [];
+  for (const r of plan) {
+    const cur = clubs.find((c) => c.id === r.clubId)!;
+    for (const f of r.fields) {
+      const rec = (x: object) => x as Record<string, unknown>;
+      console.log(
+        `  ${r.clubId} ${f}: ${JSON.stringify(rec(cur)[f] ?? null)} → ${JSON.stringify(rec(r.patch)[f] ?? null)}`,
+      );
+    }
+    const invalid = validateClubPatch(
+      { ...r.patch, version: r.version } as Partial<Club>,
+      new Set([...configured, ...(cur.leagues ?? []), ...((r.patch.leagues as string[]) ?? [])]),
+      new Set([
+        ...requiredDocs.map((d) => d.key),
+        ...Object.keys(cur.docs ?? {}),
+        ...Object.keys(cur.docMeta ?? {}),
+      ]),
+      new Set([...resolveDistricts(config), ...(cur.district ? [cur.district] : [])]),
+      requiredDocs,
+      cur.docMeta,
+      resolveVertical(config).sport,
+    );
+    if (invalid) fatal.push(`${r.clubId}: restore patch fails validateClubPatch — ${invalid}`);
+  }
+  if (fatal.length) {
+    console.error(`\n✗ Refusing to restore — ${fatal.length} blocker(s):`);
+    for (const f of fatal) console.error(`   ${f}`);
+    process.exitCode = 1;
+    return;
+  }
+  if (!plan.length) {
+    console.log('Nothing to restore — every club already matches the backup.');
+    return;
+  }
+  if (!args.confirm) {
+    console.log(`\n[dry-run] ${plan.length} club(s) would be restored. Re-run with --confirm.`);
+    return;
+  }
+  let done = 0;
+  try {
+    for (const r of plan) {
+      try {
+        await repo.updateClub(
+          TITANS_TENANT,
+          r.clubId,
+          { ...r.patch, version: r.version },
+          'import-titans-fixtures --restore-clubs',
+          new Date().toISOString(),
+        );
+        done++;
+        console.log(`restored ${r.clubId} (${r.fields.join(', ')})`);
+      } catch (err) {
+        if ((err as { name?: string }).name !== 'VersionConflictError') throw err;
+        console.error(`✗ ${r.clubId} changed since the read — NOT restored (re-run)`);
+        process.exitCode = 1;
+      }
+    }
+  } catch (err) {
+    console.error(`\n✗ ABORTED after ${done} of ${plan.length} club(s) — RE-RUN REQUIRED`);
+    throw err;
+  }
+  console.log(`Done. ${done} club(s) restored.`);
+}
+
+export async function runRevert(args: Args) {
   const repo = await import('./repo.js');
   const all = await repo.listSeries(TITANS_TENANT);
   const mine = all.filter((s) => WRITABLE_SERIES_IDS.includes(String(s.id)));
@@ -1316,12 +1558,12 @@ async function runRevert(args: Args) {
   }
   console.log(
     args.confirm
-      ? `Reverted ${mine.length} series. Club records are NOT reverted (restore them from the snapshot if needed).`
+      ? `Reverted ${mine.length} series. NOT reverted: bootstrap leagues/aliases/venues, --append-sides rosters, club-sync league keys/rosters and cup league keys (see the runbook; --restore-clubs puts club structure back).`
       : `Re-run with --confirm to delete these ${mine.length} series.`,
   );
 }
 
-async function runImport(args: Args) {
+export async function runImport(args: Args) {
   const parsed = await parseAndPrint(args);
   if (!parsed) return;
   const { sheets, total, byes, koRows } = parsed;
@@ -1337,6 +1579,9 @@ async function runImport(args: Args) {
   let sidePlan: SidePlan | null = null;
   let wouldBeVenues = false;
   let missingAliasKeys: string[] = [];
+  let aliasConflicts: string[] = [];
+  let seasonRuns: Awaited<ReturnType<RepoModule['listSeasonRuns']>> = [];
+  const scope = runScope(args.only);
   let grounds: Map<string, string> | null = null;
   if (args.parseOnly) {
     grounds = await structureGrounds(args.structure);
@@ -1352,16 +1597,18 @@ async function runImport(args: Args) {
     repo = await import('./repo.js');
     config = await repo.getTenantConfig(TITANS_TENANT);
     if (!config) throw new Error(`no tenant config for "${TITANS_TENANT}"`);
-    [clubs, venues, stored] = await Promise.all([
+    [clubs, venues, stored, seasonRuns] = await Promise.all([
       repo.listClubs(TITANS_TENANT),
       repo.listVenues(TITANS_TENANT),
       repo.listSeries(TITANS_TENANT),
+      repo.listSeasonRuns(TITANS_TENANT),
     ]);
     const cfg = config;
     labelOf = (k) => (cfg.leagues ?? []).find((l) => l.key === k)?.label ?? leagueLabel(k);
-    aliases = { ...venueAliasesFor(cfg), ...TITANS_VENUE_ALIASES };
-    const storedAliases = cfg.competitionDefaults?.venueAliases ?? {};
-    missingAliasKeys = Object.keys(TITANS_VENUE_ALIASES).filter((k) => !(k in storedAliases));
+    // The scan must see what the API gate sees: venueAliasesFor(cfg). Until every titans alias
+    // is stored with the same value (missing ⇒ fatal, conflicting ⇒ fatal) the dry run shows
+    // the merged map for information only.
+    ({ missing: missingAliasKeys, conflicts: aliasConflicts, aliases } = titansAliasState(cfg));
     const mine = stored.filter((s) => String(s.id).startsWith(TITANS_SERIES_PREFIX));
     console.log(
       `\nTenant "${TITANS_TENANT}": ${clubs.length} club(s), ${venues.length} registry venue(s), ${stored.length} series (${mine.length} ${TITANS_SERIES_PREFIX}*)`,
@@ -1376,8 +1623,9 @@ async function runImport(args: Args) {
         `  ⚠ venue registry is EMPTY — scanning against the would-be registry (${venues.length} grounds); run bootstrap-titans-fixture-prereqs --confirm before --confirm`,
       );
     }
-    sidePlan = planSides(sideNeeds(sheets), clubs, {
+    sidePlan = planSides(sideNeeds(sheets, scope), clubs, {
       storedSeries: stored,
+      seasonRuns,
       hostLeagues: t20HostLeagues(sheets),
       allowAppend: false,
       fixturesOnlyKeys: fixturesOnlyKeys(cfg),
@@ -1387,18 +1635,23 @@ async function runImport(args: Args) {
 
   // ── Build ──
   const plan = sidePlan;
+  const storedById = new Map(stored.map((s) => [String(s.id), s]));
+  // Build EVERY series (a playoff needs its division's participants); only the writes and the
+  // side/name blockers are restricted to --only.
   const outcome = buildTitansSeries(
     sheets,
     venues,
     HELD_BACK,
-    plan ? { sideOf: (k, n) => plan.resolve.get(sideKey(k, n)), labelOf, aliases } : {},
+    plan
+      ? { sideOf: (k, n) => plan.resolve.get(sideKey(k, n)), labelOf, aliases, stored: storedById }
+      : { stored: storedById },
   );
-  if (args.only.length) {
-    outcome.built = outcome.built.filter((b) => args.only.includes(String(b.series.id)));
-    console.log(`\n── --only: restricted to ${args.only.join(', ')}`);
-  }
+  const writes = (id: string) => !args.only.length || args.only.includes(id);
+  const inScope = (id: string) => !scope || scope.has(id);
+  const writeBuilt = outcome.built.filter((b) => writes(String(b.series.id)));
+  if (args.only.length) console.log(`\n── --only: writing ${args.only.join(', ')}`);
   const vets = buildVeteransKnockouts(sheets, outcome.built, labelOf);
-  const koSeries = vets.series.filter((s) => !args.only.length || args.only.includes(String(s.id)));
+  const koSeries = vets.series.filter((s) => writes(String(s.id)));
   console.log(`\n── Name resolution (${outcome.resolutions.size} league side(s))`);
   const byClub = new Map<string, Set<string>>();
   for (const r of outcome.resolutions.values())
@@ -1408,10 +1661,13 @@ async function runImport(args: Args) {
     );
   for (const [club, names] of [...byClub].sort((a, b) => a[0].localeCompare(b[0])))
     console.log(`  ${club}: ${[...names].sort().join(', ')}`);
+  const scopedUnresolved = [...outcome.unresolvedBySeries]
+    .filter(([sid]) => inScope(sid))
+    .flatMap(([, names]) => names);
   console.log(
-    outcome.unresolvedNames.length
-      ? `  ✗ ${outcome.unresolvedNames.length} unresolved name(s):\n    ${outcome.unresolvedNames.join('\n    ')}`
-      : '  ✓ unresolved names: 0',
+    scopedUnresolved.length
+      ? `  ✗ ${scopedUnresolved.length} unresolved name(s):\n    ${scopedUnresolved.join('\n    ')}`
+      : `  ✓ unresolved names: 0${scope ? ' (in the --only scope; other series are not resolved)' : ''}`,
   );
 
   // ── Venues ──
@@ -1482,28 +1738,24 @@ async function runImport(args: Args) {
   );
   for (const s of splitRounds) console.log(`    ${s.sheet} ${s.date}: ${s.rows} row(s)`);
 
-  // ── Stable ids against the stored series ──
-  const storedById = new Map(stored.map((s) => [String(s.id), s]));
+  // ── Stable ids: league series were reconciled in the build; playoffs here ──
   const idProblems: string[] = [];
-  for (const b of outcome.built) {
-    const r = stabiliseIds(b.allFixtures, storedById.get(String(b.series.id)));
-    for (const x of r.removed)
+  for (const b of writeBuilt)
+    for (const x of outcome.removedBySeries.get(String(b.series.id)) ?? [])
       idProblems.push(`${b.series.id}: stored fixture ${x} is not in the workbook`);
-  }
   for (const s of koSeries) {
     const r = stabiliseIds(s.fixtures as TitansFixture[], storedById.get(String(s.id)));
     for (const x of r.removed)
       idProblems.push(`${s.id}: stored fixture ${x} is not in the workbook`);
   }
-  const writeSet: Series[] = [...outcome.built.map((b) => b.series), ...koSeries];
+  const writeSet: Series[] = [...writeBuilt.map((b) => b.series), ...koSeries];
   const writeIds = new Set(writeSet.map((s) => String(s.id)));
-  const cupKeys = new Set(Object.keys(T20_HOST_LEAGUES));
 
   // ── Clash scan ──
   const existingOther = stored.filter((s) => !writeIds.has(String(s.id)));
   const scanOpts = { existingOther, aliases };
   const before = scanTitansClashes(
-    [...withHeldBack(outcome.built), ...koSeries],
+    [...withHeldBack(writeBuilt), ...koSeries],
     clubs,
     venues,
     scanOpts,
@@ -1513,10 +1765,10 @@ async function runImport(args: Args) {
   const gatePreview = canPreview
     ? scanTitansClashes(writeSet, clubs, venues, { ...scanOpts, includeTbc: true })
     : null;
-  const scope = args.parseOnly
+  const scanScope = args.parseOnly
     ? 'would-be registry, 1 pitch each'
     : `live tenant: ${existingOther.length} other series${wouldBeVenues ? ', WOULD-BE registry' : ''}`;
-  printClashes(`CLASH SCAN before HELD_BACK (${scope}, TBC excluded)`, before);
+  printClashes(`CLASH SCAN before HELD_BACK (${scanScope}, TBC excluded)`, before);
   printClashes('CLASH SCAN after HELD_BACK (residual — the gate)', after);
   if (gatePreview)
     printClashes(
@@ -1673,7 +1925,8 @@ async function runImport(args: Args) {
 
   // ── Gate ──
   const fatal: string[] = [];
-  for (const n of outcome.unresolvedNames) fatal.push(`unresolved side ${n}`);
+  for (const [sid, names] of outcome.unresolvedBySeries)
+    if (inScope(sid)) for (const n of names) fatal.push(`unresolved side ${n}`);
   fatal.push(...outcome.heldProblems);
   fatal.push(...vets.errors);
   fatal.push(...idProblems);
@@ -1699,10 +1952,28 @@ async function runImport(args: Args) {
       fatal.push(
         `${missingAliasKeys.length} titans venue alias(es) not in the tenant config — run bootstrap-titans-fixture-prereqs --confirm`,
       );
-    if (outcome.registryMisses.size)
+    for (const c of aliasConflicts)
+      fatal.push(`venue alias conflict: ${c} — resolve it in the console`);
+    const misses = new Set(
+      writeSet.flatMap((s) =>
+        (s.fixtures as WrittenFixture[])
+          .filter((f) => f.venueOverride)
+          .map((f) => f.venueOverride!),
+      ),
+    );
+    if (misses.size)
       fatal.push(
-        `${outcome.registryMisses.size} venue(s) not in the registry — run bootstrap-titans-fixture-prereqs --confirm`,
+        `${misses.size} venue(s) not in the registry (${[...misses].slice(0, 5).join(', ')}${misses.size > 5 ? ', …' : ''}) — run bootstrap-titans-fixture-prereqs --confirm`,
       );
+    // T20 sides reuse other leagues' ids: the cup keys MUST be fixtures-only, or the club sync
+    // would write a roster of borrowed ids under them.
+    for (const k of Object.keys(T20_HOST_LEAGUES)) {
+      const l = (config!.leagues ?? []).find((x) => x.key === k);
+      if (l && l.fixturesOnly !== true)
+        fatal.push(
+          `league "${k}" exists but is not fixtures-only — the club sync would write a roster of borrowed ids under it`,
+        );
+    }
     for (const s of writeSet) {
       const st = storedById.get(String(s.id));
       if (st?.released)
@@ -1742,24 +2013,20 @@ async function runImport(args: Args) {
     console.log(`\n${writeSet.length} draft series (${nFixtures} fixtures) would be written.`);
     if (!fatal.length) console.log('[dry-run] nothing written. Re-run with --confirm to import.');
     if (!args.noClubSync) {
-      console.log('\n── Club league sync (dry-run preview, includeDrafts):');
+      console.log(
+        '\n── Club league sync (dry-run preview, includeDrafts; fixtures-only T20 cups add their league key only):',
+      );
       const { syncClubLeaguesFromSeries } = await import('./sync-club-leagues-from-series.js');
-      const syncSet = writeSet.filter((s) => !cupKeys.has(String(s.leagueKey)));
       const res = await syncClubLeaguesFromSeries(TITANS_TENANT, {
         confirm: false,
-        only: syncSet.map((s) => String(s.id)),
+        only: [...writeIds],
         includeDrafts: true,
-        series: syncSet,
+        series: writeSet,
       });
       console.log(
         `  club sync preview: ${res.wouldPatch} club(s) would change, ${res.conflicts} CONFLICT(s), ${res.orphanSeries} orphan series`,
       );
-      const cup = cupLeaguePatches(clubs, writeSet, cupKeys);
-      console.log(
-        `\n── Cup league keys (T20 series reuse league side ids; only club.leagues gains the key): ${cup.length} club(s)`,
-      );
-      for (const c of cup) console.log(`  [dry-run] ${c.clubId}: +[${c.add.join(', ')}]`);
-    }
+    } else console.log('\n── --no-club-sync: club league sync AND T20 cup league keys skipped');
     return;
   }
 
@@ -1771,54 +2038,42 @@ async function runImport(args: Args) {
   );
   const written: string[] = [];
   const drifted: string[] = [];
-  for (const s of writeSet) {
-    const st = storedById.get(String(s.id)) ?? null;
-    const outcome2 = await writeSeriesFromSnapshot(repo, TITANS_TENANT, st, s, {
-      error: (l) => console.error(l),
-    });
-    if (outcome2 === 'drifted') drifted.push(String(s.id));
-    else {
-      written.push(String(s.id));
-      console.log(
-        `wrote ${s.id} v${s.version} (${(s.fixtures as unknown[]).length} fixtures)${st ? ' (replaced draft)' : ''}`,
-      );
+  try {
+    for (const s of writeSet) {
+      const st = storedById.get(String(s.id)) ?? null;
+      const outcome2 = await writeSeriesFromSnapshot(repo, TITANS_TENANT, st, s, {
+        error: (l) => console.error(l),
+      });
+      if (outcome2 === 'drifted') drifted.push(String(s.id));
+      else {
+        written.push(String(s.id));
+        console.log(
+          `wrote ${s.id} v${s.version} (${(s.fixtures as unknown[]).length} fixtures)${st ? ' (replaced draft)' : ''}`,
+        );
+      }
     }
+  } catch (err) {
+    console.error(
+      `\n✗ ABORTED after ${written.length} of ${writeSet.length} series — RE-RUN REQUIRED: a re-run replaces the written drafts in place (stable ids) and writes the rest; the club sync has NOT run. Backup: ${backupPath}`,
+    );
+    throw err;
   }
-  if (!args.noClubSync && written.length) {
-    console.log('\n── Club league sync (includeDrafts):');
+  if (args.noClubSync)
+    console.log('\n── --no-club-sync: club league sync AND T20 cup league keys skipped');
+  else if (written.length) {
+    console.log(
+      '\n── Club league sync (includeDrafts; fixtures-only T20 cups add their league key only):',
+    );
     const { syncClubLeaguesFromSeries } = await import('./sync-club-leagues-from-series.js');
     const res = await syncClubLeaguesFromSeries(TITANS_TENANT, {
       confirm: true,
-      only: written.filter(
-        (id) => !cupKeys.has(String(writeSet.find((s) => s.id === id)?.leagueKey)),
-      ),
+      only: written,
       includeDrafts: true,
     });
     if (res.conflicts) console.warn(`⚠ ${res.conflicts} club-sync CONFLICT(s) — see above`);
-    // T20 cups: add the league key only (fresh read, version-pinned) — never a roster.
-    const freshClubs = await repo.listClubs(TITANS_TENANT);
-    const cup = cupLeaguePatches(
-      freshClubs,
-      writeSet.filter((s) => written.includes(String(s.id))),
-      cupKeys,
-    );
-    console.log(`\n── Cup league keys: ${cup.length} club(s)`);
-    for (const c of cup) {
-      const club = freshClubs.find((x) => x.id === c.clubId)!;
-      try {
-        await repo.updateClub(
-          TITANS_TENANT,
-          c.clubId,
-          { version: club.version, leagues: [...(club.leagues ?? []), ...c.add] },
-          'import-titans-fixtures (cup league keys)',
-          new Date().toISOString(),
-        );
-        console.log(`  ${c.clubId}: +[${c.add.join(', ')}]`);
-      } catch (err) {
-        if ((err as { name?: string }).name !== 'VersionConflictError') throw err;
-        console.error(`  ✗ ${c.clubId} changed mid-run — cup key NOT added (re-run)`);
-        process.exitCode = 1;
-      }
+    if (res.raced) {
+      console.error(`✗ ${res.raced} club(s) changed mid-sync — re-run the import (idempotent)`);
+      process.exitCode = 1;
     }
   }
   // Post-write verification against the stored tenant, release-gate semantics.
@@ -1850,6 +2105,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.mode === 'append-sides') return runAppendSides(args);
   if (args.mode === 'revert') return runRevert(args);
+  if (args.mode === 'restore-clubs') return runRestoreClubs(args);
   return runImport(args);
 }
 

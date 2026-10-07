@@ -13,8 +13,8 @@
  *      deliberately, never minted by a bootstrap).
  *   2. VENUE ALIASES — merges TITANS_VENUE_ALIASES (misspellings only) into
  *      `competitionDefaults.venueAliases`, so the API's release/in-season clash gates resolve
- *      ground spellings the way the importer's scan does. Missing keys only; a key mapped
- *      elsewhere is reported, never overwritten.
+ *      ground spellings the way the importer's scan does. Missing keys only; a key already mapped
+ *      to a DIFFERENT value is a blocker (the run refuses), never overwritten.
  *   3. VENUE REGISTRY — one row per canonical ground in the workbook (plus each club's own
  *      ground), `surfaces` 1 until the union answers the capacity question, `homeClubIds` = the
  *      clubs hosting 2+ home fixtures there (veterans central-venue days excluded) plus the club whose
@@ -223,7 +223,16 @@ async function main() {
     `\n── Venue aliases: ${nAliases} to ${args.confirm ? 'add' : 'add [dry-run]'}, ${Object.keys(TITANS_VENUE_ALIASES).length - nAliases - conflicts.length} already present`,
   );
   for (const [k, v] of Object.entries(addAliases)) console.log(`    ${k} → ${v}`);
-  for (const c of conflicts) console.log(`  ⚠ alias conflict left alone: ${c}`);
+  if (conflicts.length) {
+    // The API gate resolves through the TENANT's value; the importer's scan must agree with it,
+    // so a conflicting value is a blocker, never something to leave or overwrite silently.
+    console.error(
+      `\n✗ ${conflicts.length} venue alias conflict(s) — refusing (resolve in the console first):`,
+    );
+    for (const c of conflicts) console.error(`   ${c}`);
+    process.exitCode = 1;
+    return;
+  }
 
   // ── Registry ──
   const aliases = { ...venueAliasesFor(config), ...TITANS_VENUE_ALIASES };

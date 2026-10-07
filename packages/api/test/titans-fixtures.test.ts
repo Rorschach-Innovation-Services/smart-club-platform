@@ -204,6 +204,45 @@ describe('flat sheets — carry-down, BYE, times, counts', () => {
   });
 });
 
+describe('date and time sanity', () => {
+  test('a year fix that would run backwards from the running date is fatal', () => {
+    const ws = sheetWith([
+      HEADER,
+      [dateCell(2027, 3, 6), 'TUKS 1', 'TUT 1', 'TUKS OVAL'],
+      [dateCell(2026, 1, 17), 'TUKS 2', 'TUT 2', 'TUKS B'],
+    ]);
+    const p = parseTitansSheet(ws, specFor('SECOND', [2]));
+    assert.ok(
+      p.errors.some((e) => /before the running date 2027-03-06/.test(e)),
+      p.errors.join('\n'),
+    );
+  });
+
+  test('a forward year fix is accepted and reported', () => {
+    const ws = sheetWith([
+      HEADER,
+      [dateCell(2027, 1, 16), 'TUKS 1', 'TUT 1', 'TUKS OVAL'],
+      [dateCell(2026, 1, 17), 'TUKS 2', 'TUT 2', 'TUKS B'],
+    ]);
+    const p = parseTitansSheet(ws, specFor('SECOND', [2]));
+    assert.deepEqual(p.errors, []);
+    assert.equal(p.fixtures[1].date, '2027-01-17');
+    assert.equal(p.dateCorrections.length, 1);
+  });
+
+  test('a sheet time outside 07:00–18:30 is fatal ("1:00" with no AM/PM)', () => {
+    const ws = sheetWith([
+      [...HEADER, 'TIME'],
+      [dateCell(2026, 10, 10), 'TUKS A', 'TUT A', 'TUKS B', '1:00'],
+    ]);
+    const p = parseTitansSheet(ws, specFor('U13 SILVER', [1]));
+    assert.ok(
+      p.errors.some((e) => /01:00.*outside 07:00/.test(e)),
+      p.errors.join('\n'),
+    );
+  });
+});
+
 describe('team names', () => {
   test('whitespace collapses and "CC" before the side number drops', () => {
     assert.equal(canonicalTeamName('CENTURION KAVALIERS CC 2'), 'CENTURION KAVALIERS 2');
@@ -461,7 +500,7 @@ describe('HELD_BACK + clash scan', () => {
     assert.equal(clashes[0].tag, 'provisional-vs-provisional');
   });
 
-  test('held-back fixtures are not written, keep their ids reserved, and clear the clash', () => {
+  test('held-back fixtures are not written, take ids after the kept ones, and clear the clash', () => {
     const out = buildTitansSeries(sheets, venues, held);
     assert.deepEqual(out.heldProblems, []);
     assert.deepEqual(

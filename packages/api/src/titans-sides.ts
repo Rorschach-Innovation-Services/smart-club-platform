@@ -23,7 +23,7 @@
  * a decision for the union (risk R6), listed as fatal. Any change to an existing roster id is
  * fatal by construction.
  */
-import type { Club, ClubTeam, Series } from './types.js';
+import type { Club, ClubTeam, SeasonRun, Series } from './types.js';
 import { CLUB_MAP, type ClubMapEntry } from './titans-import-map.js';
 import { canonicalTeamName, resolveTeamClub } from './titans-fixture-map.js';
 import { deriveTeamPlanCounts } from './team-plan.js';
@@ -99,11 +99,26 @@ function directSide(
 
 /**
  * Where a club's single side (its club id) is referenced for one league: stored series of that
- * league naming the club id as a participant or a fixture side, and coaches of the club whose
- * `teamIds` hold the club id. Empty ⇒ the id may move to a tm_ id. Pure.
+ * league naming the club id as a participant or a fixture side, season runs of that league
+ * listing it as a stage entrant, and coaches of the club whose `teamIds` hold the club id. Empty ⇒ the id may move to a tm_ id. Pure.
  */
-export function singleSideReferences(club: Club, leagueKey: string, series: Series[]): string[] {
+export function singleSideReferences(
+  club: Club,
+  leagueKey: string,
+  series: Series[],
+  seasonRuns: SeasonRun[] = [],
+): string[] {
   const refs: string[] = [];
+  // Season runs store stage entrants as team ids.
+  for (const r of seasonRuns) {
+    if (r.leagueKey !== leagueKey) continue;
+    const hit = (r.stages ?? []).some(
+      (st) =>
+        (st.groups ?? []).some((g) => (g.entrants ?? []).includes(club.id)) ||
+        Object.prototype.hasOwnProperty.call(st.carriedPoints ?? {}, club.id),
+    );
+    if (hit) refs.push(`season run ${r.id}`);
+  }
   for (const s of series) {
     if (s.leagueKey !== leagueKey) continue;
     const inParticipants = (s.participants ?? []).some((p) => p.teamId === club.id);
@@ -203,8 +218,9 @@ export function planSides(
      * ordinary league. A borrowed side is never appended and adds no roster entry.
      */
     hostLeagues?: (leagueKey: string, name: string) => string[] | null;
-    /** The tenant's stored series — the reference guard for a 1 → 2 growth. */
+    /** The tenant's stored series and season runs — the reference guard for a 1 → 2 growth. */
     storedSeries?: Series[];
+    seasonRuns?: SeasonRun[];
   },
 ): SidePlan {
   const plan: SidePlan = {
@@ -313,6 +329,16 @@ export function planSides(
             });
           else missing.push(n);
         }
+        // A roster entry no sheet name matched may be the same side under another name
+        // ("Tuks Seconds"): appending would create a phantom extra side. Refuse instead.
+        const wanted = new Set(names.map((n) => sideSuffixFor(n, entry)));
+        const unmatched = roster.filter((t) => !wanted.has(sideSuffixFor(t.name ?? '', entry)));
+        if (missing.length && unmatched.length) {
+          plan.fatal.push(
+            `${where}: roster entries ${unmatched.map((t) => `${t.id} "${t.name}"`).join(', ')} unmatched while appending ${missing.join(', ')} — rename the roster entry or decide`,
+          );
+          continue;
+        }
       } else if (count >= 2) {
         plan.fatal.push(
           `${where}: leagueTeams says ${count} but there is no roster — the side ids are undefined; needs a decision`,
@@ -345,7 +371,12 @@ export function planSides(
       // changes id from the club id, so the reference guard runs first.
       const next = [...roster];
       if (!roster.length) {
-        const refs = singleSideReferences(club, leagueKey, opts.storedSeries ?? []);
+        const refs = singleSideReferences(
+          club,
+          leagueKey,
+          opts.storedSeries ?? [],
+          opts.seasonRuns ?? [],
+        );
         if (refs.length) {
           plan.fatal.push(
             `${where}: growing 1 → ${names.length} would change the single side ${clubId} → tm_ id, but it is referenced: ${refs.join('; ')} — needs a decision`,
