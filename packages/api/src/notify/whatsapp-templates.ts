@@ -42,8 +42,9 @@
  * `status` is documentation, not a runtime gate — nothing here can verify Meta's
  * state, and the send path fails open (attempts the send) for every entry. The three
  * exceptions are `fixtureReminder` (the FixtureReminders cron skips WhatsApp until it is
- * "registered"), and `captainsReportDue` / `captainsReportOpsDigest` (their senders skip the
- * channel as template-pending until it is "registered") — see those entries.
+ * "registered"), and `captainsReportDue` / `captainsReportOpsDigest` / `scorecardConfirmDue`
+ * (their senders skip the channel as template-pending until it is "registered") — see those
+ * entries.
  */
 
 export type WhatsAppTemplateDefinition = {
@@ -238,6 +239,31 @@ export const WHATSAPP_TEMPLATES = {
       'Automated status message for union administrators.',
     // Approved in Meta on 6 Oct 2026.
     status: 'registered',
+  },
+
+  /**
+   * Monday scorecard-confirmation digest to a club chair (the ScorecardConfirmations cron):
+   * one message per club per week, its link a URL BUTTON whose dynamic suffix is the signed
+   * digest token (`/sc/<token>`, tenant-independent like `/r/`, on the PLATFORM host).
+   *
+   * NOT yet created in Meta. Like `captainsReportDue`, this status IS read at runtime: the
+   * sender throws `WhatsAppTemplatePendingError` until it is "registered", so the channel is
+   * skipped as `template-pending` (the email still goes). Create it under this name with the
+   * body and button below, then flip to "registered".
+   */
+  scorecardConfirmDue: {
+    name: 'scorecard_confirm_due',
+    lang: 'en',
+    paramCount: 3,
+    params: ['chair first name', 'club name', 'weekend label'],
+    bodyText:
+      "Hi {{1}}, please review and confirm {{2}}'s match scorecards for the weekend of {{3}}. " +
+      'Tap below to view each scorecard and confirm or request a correction.',
+    status: 'pending',
+    urlButton: {
+      urlTemplate: 'https://platform.club.medicoach.co.za/sc/{{1}}',
+      suffix: 'signed scorecard digest token',
+    },
   },
 } as const satisfies Record<string, WhatsAppTemplateDefinition>;
 

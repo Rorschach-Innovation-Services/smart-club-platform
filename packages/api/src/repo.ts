@@ -106,6 +106,11 @@ import {
   captainsReportNotifyKey,
   whatsappMessageKey,
   captainsReportPartitionPk,
+  scorecardConfirmPartitionPk,
+  scorecardConfirmKey,
+  scorecardConfirmsListKey,
+  scorecardConfirmCounterKey,
+  scorecardConfirmNotifyKey,
 } from './keys.js';
 import { PLATFORM_TENANT, TRANSFER_WINDOW_REJECTOR } from './types.js';
 import { refs as medicoachRefs } from './medicoach-bundle.js';
@@ -148,6 +153,8 @@ import type {
   FixtureOfficialsRecord,
   CaptainsReport,
   CaptainsReportDelivery,
+  ScorecardConfirmation,
+  ScorecardConfirmEntry,
 } from './types.js';
 
 import { tableName } from './env.js';
@@ -2373,6 +2380,388 @@ async function listCaptainsReportPartitionKeys(
     TableName: TABLE,
     KeyConditionExpression: 'pk = :p',
     ExpressionAttributeValues: { ':p': captainsReportPartitionPk(tenant) },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+// ── Chair scorecard confirmations (SCORECONF#) ──
+// One tenant partition: the weekly digests, the SC-YYYY-NNNN counters and the NOTIFY# ledger.
+
+/**
+ * Why a scorecard-confirmation write was refused. `code` picks the HTTP answer:
+ * `not_found` (no digest) / `unknown_entry` → 404, `entry_closed` (already answered or void)
+ * → 409, `link_revoked` (the digest's memberId was rotated) → 410.
+ */
+export class ScorecardConfirmStateError extends Error {
+  constructor(
+    readonly code: 'not_found' | 'unknown_entry' | 'entry_closed' | 'link_revoked',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ScorecardConfirmStateError';
+  }
+}
+
+export async function getScorecardConfirmation(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+): Promise<ScorecardConfirmation | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: scorecardConfirmKey(tenant, weekKey, clubId) }),
+  );
+  return stripKeys<ScorecardConfirmation>(res.Item);
+}
+
+/** A tenant's digests — every week, or one week (`weekKey`). One Query on one partition. */
+export async function listScorecardConfirmations(
+  tenant: string,
+  weekKey?: string,
+): Promise<ScorecardConfirmation[]> {
+  const { pk, skPrefix } = scorecardConfirmsListKey(tenant, weekKey);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<ScorecardConfirmation>(i)!);
+}
+
+/** Store a NEW digest; false when one already exists for that club + week. */
+export async function createScorecardConfirmation(
+  tenant: string,
+  record: ScorecardConfirmation,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { ...record, ...scorecardConfirmKey(tenant, record.weekKey, record.clubId) },
+        ConditionExpression: 'attribute_not_exists(pk)',
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/**
+ * Add fixtures to an existing digest (a result that arrived after it was created). Each entry
+ * is written only when the digest lacks it — or holds it VOID (a cleared result re-recorded):
+ * an open or answered entry is never overwritten. Returns the keys actually added.
+ */
+export async function topUpScorecardConfirmEntries(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+  entries: Record<string, ScorecardConfirmEntry>,
+): Promise<string[]> {
+  const added: string[] = [];
+  for (const [k, entry] of Object.entries(entries)) {
+    try {
+      await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: scorecardConfirmKey(tenant, weekKey, clubId),
+          UpdateExpression: 'SET entries.#k = :e, updatedAt = :at',
+          ConditionExpression:
+            'attribute_exists(pk) AND (attribute_not_exists(entries.#k) OR entries.#k.#st = :void)',
+          ExpressionAttributeNames: { '#k': k, '#st': 'status' },
+          ExpressionAttributeValues: {
+            ':e': entry,
+            ':void': 'void',
+            ':at': new Date().toISOString(),
+          },
+        }),
+      );
+      added.push(k);
+    } catch (err) {
+      if (!isCcf(err)) throw err;
+    }
+  }
+  return added;
+}
+
+/**
+ * Answer one entry — FIRST SUBMIT WINS. Succeeds only while the entry is `pending` and (link
+ * path) the digest is still addressed to `memberId`. A refusal is re-read to say why
+ * (ScorecardConfirmStateError: not_found / unknown_entry / entry_closed / link_revoked).
+ */
+export async function submitScorecardConfirmEntry(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+  entryKey: string,
+  answer: {
+    status: 'confirmed' | 'correction';
+    feedback?: string;
+    confirmedAgainstFetchedAt?: string;
+    memberId: string;
+  },
+): Promise<ScorecardConfirmation> {
+  const at = new Date().toISOString();
+  const sets = [
+    'entries.#k.#st = :status',
+    'entries.#k.submittedAt = :at',
+    'entries.#k.submittedVia = :via',
+    'updatedAt = :at',
+  ];
+  const values: Record<string, unknown> = {
+    ':status': answer.status,
+    ':at': at,
+    ':via': 'link',
+    ':pending': 'pending',
+    ':m': answer.memberId,
+  };
+  if (answer.feedback) {
+    sets.push('entries.#k.feedback = :fb');
+    values[':fb'] = answer.feedback;
+  }
+  if (answer.confirmedAgainstFetchedAt) {
+    sets.push('entries.#k.confirmedAgainstFetchedAt = :cf');
+    values[':cf'] = answer.confirmedAgainstFetchedAt;
+  }
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: scorecardConfirmKey(tenant, weekKey, clubId),
+        UpdateExpression: `SET ${sets.join(', ')}`,
+        ConditionExpression:
+          'attribute_exists(pk) AND memberId = :m AND attribute_exists(entries.#k) AND entries.#k.#st = :pending',
+        ExpressionAttributeNames: { '#k': entryKey, '#st': 'status' },
+        ExpressionAttributeValues: values,
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return stripKeys<ScorecardConfirmation>(res.Attributes)!;
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+  const fresh = await getScorecardConfirmation(tenant, weekKey, clubId);
+  if (!fresh) throw new ScorecardConfirmStateError('not_found', 'not found');
+  if (fresh.memberId !== answer.memberId)
+    throw new ScorecardConfirmStateError('link_revoked', 'this link is no longer valid');
+  if (!fresh.entries?.[entryKey])
+    throw new ScorecardConfirmStateError('unknown_entry', 'that match is not in this digest');
+  throw new ScorecardConfirmStateError('entry_closed', 'this match has already been answered');
+}
+
+/** A cleared result: its entry becomes `void` (whatever its state). False when absent/void. */
+export async function voidScorecardConfirmEntry(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+  entryKey: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: scorecardConfirmKey(tenant, weekKey, clubId),
+        UpdateExpression: 'SET entries.#k.#st = :void, updatedAt = :at',
+        ConditionExpression: 'attribute_exists(entries.#k) AND entries.#k.#st <> :void',
+        ExpressionAttributeNames: { '#k': entryKey, '#st': 'status' },
+        ExpressionAttributeValues: { ':void': 'void', ':at': new Date().toISOString() },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/**
+ * A newer scorecard (fetched at `fetchedAt`) arrived for an ANSWERED entry: flag it stale so
+ * the operator console shows the answer may predate the card. Only an entry submitted before
+ * that fetch is flagged. False when nothing changed.
+ */
+export async function flagScorecardEntryStale(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+  entryKey: string,
+  fetchedAt: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: scorecardConfirmKey(tenant, weekKey, clubId),
+        UpdateExpression: 'SET entries.#k.staleConfirmation = :t, updatedAt = :at',
+        ConditionExpression:
+          'attribute_exists(entries.#k) AND entries.#k.#st IN (:c, :x) AND entries.#k.submittedAt < :f',
+        ExpressionAttributeNames: { '#k': entryKey, '#st': 'status' },
+        ExpressionAttributeValues: {
+          ':t': true,
+          ':c': 'confirmed',
+          ':x': 'correction',
+          ':f': fetchedAt,
+          ':at': new Date().toISOString(),
+        },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/** The next `SC-YYYY-NNNN` for a tenant/year — an atomic ADD on the counter item. */
+export async function nextScorecardConfirmRef(tenant: string, year: string): Promise<string> {
+  const res = await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: scorecardConfirmCounterKey(tenant, year),
+      UpdateExpression: 'ADD n :one',
+      ExpressionAttributeValues: { ':one': 1 },
+      ReturnValues: 'UPDATED_NEW',
+    }),
+  );
+  const n = Number(res.Attributes?.n ?? 0);
+  return `SC-${year}-${String(n).padStart(4, '0')}`;
+}
+
+/** Append notice outcomes to a digest; `notifiedAt` is set the first time a channel sent. */
+export async function recordScorecardConfirmDeliveries(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+  deliveries: CaptainsReportDelivery[],
+  opts: { notifiedAt?: string } = {},
+): Promise<void> {
+  const sets = [
+    'deliveries = list_append(if_not_exists(deliveries, :empty), :d)',
+    'updatedAt = :at',
+  ];
+  const values: Record<string, unknown> = {
+    ':d': deliveries,
+    ':empty': [],
+    ':at': new Date().toISOString(),
+  };
+  if (opts.notifiedAt) {
+    sets.push('notifiedAt = if_not_exists(notifiedAt, :n)');
+    values[':n'] = opts.notifiedAt;
+  }
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: scorecardConfirmKey(tenant, weekKey, clubId),
+        UpdateExpression: `SET ${sets.join(', ')}`,
+        ConditionExpression: 'attribute_exists(pk)',
+        ExpressionAttributeValues: values,
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err; // erased meanwhile: nothing to record on
+  }
+}
+
+/** Revoke a digest's link: a new memberId, so every token minted for the old one 410s. */
+export async function rotateScorecardConfirmMemberId(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+): Promise<string> {
+  const memberId = randomUUID();
+  await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: scorecardConfirmKey(tenant, weekKey, clubId),
+      UpdateExpression: 'SET memberId = :m, updatedAt = :at',
+      ConditionExpression: 'attribute_exists(pk)',
+      ExpressionAttributeValues: { ':m': memberId, ':at': new Date().toISOString() },
+    }),
+  );
+  return memberId;
+}
+
+/**
+ * Claim the right to send a club's digest for a week. True ⇒ the caller sends; false ⇒ a send
+ * was already claimed (a re-run, the operator "Run now") and nothing must go out again.
+ */
+export async function claimScorecardConfirmNotify(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: {
+          ...scorecardConfirmNotifyKey(tenant, weekKey, clubId),
+          status: 'in_progress',
+          startedAt: new Date().toISOString(),
+          expiresAt: Math.floor(Date.now() / 1000) + NOTIFY_LEDGER_TTL_SECONDS,
+        },
+        ConditionExpression: 'attribute_not_exists(pk)',
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/** Record a claimed digest send's per-channel outcome (status only — no addresses). */
+export async function completeScorecardConfirmNotify(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+  results: Array<{ channel: string; status: string; error?: string }>,
+): Promise<void> {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: scorecardConfirmNotifyKey(tenant, weekKey, clubId),
+      UpdateExpression: 'SET #s = :done, #res = :r, completedAt = :at',
+      ExpressionAttributeNames: { '#s': 'status', '#res': 'results' },
+      ExpressionAttributeValues: {
+        ':done': 'completed',
+        ':r': results,
+        ':at': new Date().toISOString(),
+      },
+    }),
+  );
+}
+
+/** Release a claimed digest send that reached nobody, so the next run may try again. */
+export async function releaseScorecardConfirmNotify(
+  tenant: string,
+  weekKey: string,
+  clubId: string,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new DeleteCommand({
+        TableName: TABLE,
+        Key: scorecardConfirmNotifyKey(tenant, weekKey, clubId),
+        ConditionExpression: '#s = :p',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':p': 'in_progress' },
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
+/** Every key in the scorecard-confirmation partition (digests, counters, ledger) — erasure. */
+async function listScorecardConfirmPartitionKeys(
+  tenant: string,
+): Promise<Array<{ pk: string; sk: string }>> {
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p',
+    ExpressionAttributeValues: { ':p': scorecardConfirmPartitionPk(tenant) },
     ProjectionExpression: 'pk, sk',
   });
   return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
@@ -7313,6 +7702,9 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   // Captain's reports carry names and ratings; the partition also holds the counters and the
   // NOTIFY# ledger. No gsi1/META listing — enumerate the partition.
   for (const k of await listCaptainsReportPartitionKeys(tenant)) keys.push(k);
+  // Scorecard confirmations carry club names and chairs' free-text feedback (+ counters and
+  // the NOTIFY# ledger). No gsi1/META listing — enumerate the partition.
+  for (const k of await listScorecardConfirmPartitionKeys(tenant)) keys.push(k);
 
   const unique = uniqueKeys(keys);
   await batchDelete(unique);
@@ -7392,6 +7784,8 @@ export async function clearCohort(tenant: string): Promise<number> {
 
   // Captain's reports hang off the fixtures being cleared (reports, counters, ledger).
   for (const k of await listCaptainsReportPartitionKeys(tenant)) keys.push(k);
+  // Scorecard confirmations hang off the same fixtures (digests, counters, ledger).
+  for (const k of await listScorecardConfirmPartitionKeys(tenant)) keys.push(k);
 
   // Safety: never delete the tenant config or any user record.
   for (const k of keys) {
@@ -7551,6 +7945,14 @@ export async function eraseClubData(
     if (r.clubId !== club.id) continue;
     keys.push(reportKeyOf(tenant, r));
     keys.push(...(await listCaptainsReportNotifyKeys(tenant, r.id)));
+  }
+
+  // This club's scorecard-confirmation digests (club name + the chair's feedback) and their
+  // NOTIFY# send claims.
+  for (const r of await listScorecardConfirmations(tenant)) {
+    if (r.clubId !== club.id) continue;
+    keys.push(scorecardConfirmKey(tenant, r.weekKey, r.clubId));
+    keys.push(scorecardConfirmNotifyKey(tenant, r.weekKey, r.clubId));
   }
 
   // Veterans affiliations WHERE THIS CLUB IS THE VETERANS CLUB (its affiliates). The pointing

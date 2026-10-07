@@ -428,6 +428,56 @@ export async function sendCaptainsReportOpsDigestWhatsApp(
   );
 }
 
+export interface ScorecardConfirmDueWhatsAppInput {
+  to: string; // already E.164 (see toE164)
+  /** The chair's name as stored; {{1}} is its first word. */
+  chairName: string;
+  clubName: string;
+  /** "5–11 Oct 2026" */
+  weekLabel: string;
+  /** The signed digest token — the URL button's dynamic suffix. Never logged. */
+  token: string;
+}
+
+/**
+ * Build the three body params for `scorecard_confirm_due`, in order: {{1}} the chair's FIRST
+ * name (fallback 'there'), {{2}} club name, {{3}} the week label ("5–11 Oct 2026"). The link
+ * is NOT a body param — it rides in the URL button (see `scorecardConfirmDue.urlButton`).
+ */
+export function scorecardConfirmDueParams(
+  input: Pick<ScorecardConfirmDueWhatsAppInput, 'chairName' | 'clubName' | 'weekLabel'>,
+): TemplateParam[] {
+  const first = input.chairName.trim().split(/\s+/)[0] ?? '';
+  return [
+    { type: 'text', text: cleanParam(first || 'there') },
+    { type: 'text', text: cleanParam(input.clubName) },
+    { type: 'text', text: cleanParam(input.weekLabel) },
+  ];
+}
+
+/**
+ * The scorecard-confirmation digest over WhatsApp (URL button with the token as its suffix).
+ * Throws `WhatsAppTemplatePendingError` while the registry entry is not `registered` — the
+ * channel is then skipped as `template-pending`, never failed.
+ */
+export async function sendScorecardConfirmDueWhatsApp(
+  input: ScorecardConfirmDueWhatsAppInput,
+): Promise<{ messageId: string }> {
+  const { name, lang } = WHATSAPP_TEMPLATES.scorecardConfirmDue;
+  // Widened: the `as const` literal would make the gate a type error once it is 'registered'.
+  const status = WHATSAPP_TEMPLATES.scorecardConfirmDue
+    .status as WhatsAppTemplateDefinition['status'];
+  if (status !== 'registered') throw new WhatsAppTemplatePendingError();
+  return sendTemplate(
+    input.to,
+    name,
+    lang,
+    scorecardConfirmDueParams(input),
+    `scorecard confirmation digest for ${input.clubName}`,
+    input.token,
+  );
+}
+
 /** No approved captain's-report template in Meta: the channel is skipped, not failed. */
 export class WhatsAppTemplatePendingError extends Error {
   constructor() {

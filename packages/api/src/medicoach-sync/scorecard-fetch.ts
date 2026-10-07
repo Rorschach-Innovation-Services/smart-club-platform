@@ -11,6 +11,9 @@
  *     that failed), or whose card is older than the result, are fetched again. Bounded and
  *     sequential.
  *
+ * A stored card with `available: true` flags any chair scorecard-confirmation entry answered
+ * before this fetch as `staleConfirmation` (best-effort).
+ *
  * Outcomes: 200 → the row is stored (`available` true or false; false is terminal); 404 →
  * a terminal stub (`available: false, terminal: true`) so the sweep stops asking; anything
  * else (network, 5xx, 401, a body that fails the schema) → logged, nothing written, and the
@@ -23,6 +26,7 @@ import {
   scorecardPathAndQuery,
   signRequest,
 } from '../medicoach-sync-contract.js';
+import { flagStaleScorecardEntries } from '../scorecard-confirmations.js';
 import type { StoredFixtureResult, StoredFixtureScorecard } from '../types.js';
 import type { PullerDeps } from './puller.js';
 
@@ -108,6 +112,17 @@ export async function fetchAndStoreScorecard(
       ...(card.available ? {} : { terminal: true }),
     };
     await deps.repo.putFixtureScorecard(tenant, row);
+    if (card.available)
+      // A chair who already answered saw an older card (or none): flag the answer stale.
+      // Best-effort — a failure is a log line, never the fetch's.
+      await flagStaleScorecardEntries(deps.repo, tenant, seriesId, fixtureId, base.fetchedAt).catch(
+        (err: unknown) =>
+          log(
+            `[medicoach-sync] ${where}: could not flag stale confirmations — ${
+              err instanceof Error ? err.name : 'error'
+            }`,
+          ),
+      );
     return card.available ? 'stored' : 'unavailable';
   } catch (err) {
     log(

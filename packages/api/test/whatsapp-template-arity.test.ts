@@ -18,7 +18,10 @@ const {
   fixtureReminderParams,
   captainsReportDueParams,
   captainsReportOpsDigestParams,
+  scorecardConfirmDueParams,
   sendCaptainsReportOpsDigestWhatsApp,
+  sendScorecardConfirmDueWhatsApp,
+  WhatsAppTemplatePendingError,
   urlButtonComponent,
 } = await import('../src/notify/whatsapp.js');
 const { WHATSAPP_TEMPLATES } = await import('../src/notify/whatsapp-templates.js');
@@ -66,6 +69,14 @@ const BUILDERS = [
     params: captainsReportOpsDigestParams({
       recipientName: 'Union admin',
       summary: 'Dolphins: 3 new results, 6 reports opened, 6 notices sent, 0 failed',
+    }),
+  },
+  {
+    key: 'scorecardConfirmDue' as const,
+    params: scorecardConfirmDueParams({
+      chairName: 'Thandi Nkosi',
+      clubName: 'Adelaar CC',
+      weekLabel: '5–11 Oct 2026',
     }),
   },
   {
@@ -225,5 +236,42 @@ describe("captain's report ops digest template", () => {
       summary: 'x',
     });
     assert.match(messageId, /^dry-run-/);
+  });
+});
+
+describe('scorecard confirmation digest template', () => {
+  const due = WHATSAPP_TEMPLATES.scorecardConfirmDue;
+
+  test('three body params (chair first name, club, week) and the /sc/ URL button', () => {
+    assert.equal(due.name, 'scorecard_confirm_due');
+    assert.equal(due.lang, 'en');
+    assert.equal(due.paramCount, 3);
+    assert.equal(due.urlButton.urlTemplate, 'https://platform.club.medicoach.co.za/sc/{{1}}');
+    assert.deepEqual(
+      scorecardConfirmDueParams({
+        chairName: '  Thandi  Nkosi ',
+        clubName: 'Adelaar CC',
+        weekLabel: '5–11 Oct 2026',
+      }).map((p) => p.text),
+      ['Thandi', 'Adelaar CC', '5–11 Oct 2026'],
+    );
+    assert.equal(
+      scorecardConfirmDueParams({ chairName: '', clubName: 'A', weekLabel: 'w' })[0].text,
+      'there',
+    );
+  });
+
+  test('while pending in Meta the sender refuses (skipped as template-pending, not sent)', async () => {
+    assert.equal(due.status, 'pending');
+    await assert.rejects(
+      sendScorecardConfirmDueWhatsApp({
+        to: '+27000000000',
+        chairName: 'A',
+        clubName: 'B',
+        weekLabel: 'C',
+        token: 'tok.sig',
+      }),
+      WhatsAppTemplatePendingError,
+    );
   });
 });

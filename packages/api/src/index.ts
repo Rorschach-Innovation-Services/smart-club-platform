@@ -80,7 +80,12 @@ import {
   seriesHoldsSchedule,
   type ScheduleFixture,
 } from './medicoach-sync/schedule.js';
-import { captainsReportLinkSecret, medicoachSyncSecret, medicoachSyncUrl } from './env.js';
+import {
+  captainsReportLinkBase,
+  captainsReportLinkSecret,
+  medicoachSyncSecret,
+  medicoachSyncUrl,
+} from './env.js';
 import { VersionConflictError, LastAdminError } from './repo.js';
 import { clubIdFromName } from './club-id.js';
 import {
@@ -196,6 +201,7 @@ import {
 } from './veterans.js';
 import type {
   CaptainsReport,
+  ScorecardConfirmation,
   Club,
   ClubCommEvent,
   ClubSpec,
@@ -247,6 +253,24 @@ import {
   reportView,
   UNLISTED_SERIES_ID,
 } from './captains-reports.js';
+import {
+  isWeekKey,
+  lastCompletedWeekKey,
+  loadLinkedScorecardConfirmation,
+  notifyOperatorsOfCorrection,
+  parseScorecardAnswer,
+  ScorecardInputError,
+  scorecardEntryKey,
+  scorecardFixtureLine,
+  toPlatformScorecardTenant,
+  toScorecardConfirmView,
+  weekKeyFor,
+  weekLabel,
+} from './scorecard-confirmations.js';
+import {
+  runScorecardConfirmations,
+  scorecardConfirmationsEnabled,
+} from './crons/scorecard-confirmations-run.js';
 import { applyWhatsAppStatuses, parseStatuses } from './notify/whatsapp-status.js';
 import {
   SYNC_SIGNATURE_HEADER,
@@ -7015,6 +7039,124 @@ app.put('/captains-report-link/:token', async (c) => {
   return c.json(await linkPayload(tenant, saved, isChairLink));
 });
 
+/**
+ * Public scorecard-confirmation link (`/sc/<token>`): a club chair's weekly digest. The token
+ * is the capability (HMAC over tenant + week + club + the digest's memberId + expiry, its own
+ * context — a captain's-report token never verifies here). Invalid / unknown digest → 404;
+ * expired or revoked (memberId rotated) → 410. Never cached, never leaks the URL onward.
+ */
+async function linkedScorecardOr410(c: Context<HonoEnv>) {
+  c.header('Cache-Control', 'no-store');
+  c.header('Referrer-Policy', 'no-referrer');
+  const found = await loadLinkedScorecardConfirmation(
+    repo,
+    c.req.param('token') ?? '',
+    Date.now(),
+    captainsReportLinkSecret(),
+  );
+  if (!found.ok) throw new HttpError(found.status, found.error);
+  return found;
+}
+
+/** The pinned GET /scorecard-confirm-link/:token payload (see ScorecardConfirmView). */
+async function scorecardLinkPayload(tenant: string, record: ScorecardConfirmation) {
+  const [cfg, results, cards] = await Promise.all([
+    repo.getTenantConfig(tenant),
+    repo.listFixtureResults(tenant),
+    repo.listFixtureScorecards(tenant),
+  ]);
+  const keys = new Set(Object.keys(record.entries ?? {}));
+  const byKey = <T extends { seriesId: string; fixtureId: string }>(rows: T[]) =>
+    new Map(
+      rows
+        .map((r) => [scorecardEntryKey(r.seriesId, r.fixtureId), r] as const)
+        .filter(([k]) => keys.has(k)),
+    );
+  return toScorecardConfirmView(record, byKey(cards), byKey(results), {
+    name: cfg ? orgCopy(cfg).name : tenant,
+    logoUrl: cfg?.branding?.logoUrl ?? '',
+    colors: cfg?.branding?.colors ?? {},
+  });
+}
+
+app.get('/scorecard-confirm-link/:token', async (c) => {
+  const { tenant, record } = await linkedScorecardOr410(c);
+  return c.json(await scorecardLinkPayload(tenant, record));
+});
+
+/**
+ * Answer one match of the digest: `{action: 'confirm' | 'correction', feedback?}` (feedback
+ * required for a correction, ≤ 2,000 chars). First submit wins: 404 for a match not in the
+ * digest, 409 `entry_closed` once answered (or void). A correction emails the PLATFORM
+ * OPERATORS (never tenant admins) — best-effort, it never fails the submit.
+ */
+app.put('/scorecard-confirm-link/:token/fixtures/:seriesId/:fixtureId', async (c) => {
+  const { tenant, record, memberId } = await linkedScorecardOr410(c);
+  const seriesId = c.req.param('seriesId');
+  const fixtureId = c.req.param('fixtureId');
+  const entryKey = scorecardEntryKey(seriesId, fixtureId);
+  let answer: ReturnType<typeof parseScorecardAnswer>;
+  try {
+    answer = parseScorecardAnswer(await c.req.json().catch(() => null));
+  } catch (err) {
+    if (err instanceof ScorecardInputError) throw new HttpError(400, err.message);
+    throw err;
+  }
+  const entry = record.entries?.[entryKey];
+  if (!entry) throw new HttpError(404, 'that match is not in this digest');
+  const card =
+    answer.action === 'confirm'
+      ? await repo.getFixtureScorecard(tenant, seriesId, fixtureId)
+      : null;
+  let saved: ScorecardConfirmation;
+  try {
+    saved = await repo.submitScorecardConfirmEntry(
+      tenant,
+      record.weekKey,
+      record.clubId,
+      entryKey,
+      {
+        status: answer.action === 'confirm' ? 'confirmed' : 'correction',
+        ...(answer.feedback ? { feedback: answer.feedback } : {}),
+        ...(card?.available && card.fetchedAt ? { confirmedAgainstFetchedAt: card.fetchedAt } : {}),
+        memberId,
+      },
+    );
+  } catch (err) {
+    if (err instanceof repo.ScorecardConfirmStateError) {
+      if (err.code === 'entry_closed')
+        throw new HttpError(409, err.message, { code: 'entry_closed' });
+      if (err.code === 'link_revoked') throw new HttpError(410, err.message);
+      throw new HttpError(404, err.message);
+    }
+    throw err;
+  }
+  if (answer.action === 'correction') {
+    try {
+      const cfg = await repo.getTenantConfig(tenant);
+      await notifyOperatorsOfCorrection(
+        { repo },
+        {
+          tenantName: cfg ? orgCopy(cfg).name : tenant,
+          clubName: saved.clubName,
+          ref: saved.ref,
+          fixtureLine: scorecardFixtureLine(entry),
+          feedback: answer.feedback ?? '',
+          consoleLink: `${captainsReportLinkBase()}/platform`,
+        },
+      );
+    } catch (err) {
+      // Never fails the submit: the answer is stored and the operator console shows it.
+      console.warn(
+        `[scorecard-confirm] ${tenant} ${saved.ref}: operator notice failed — ${
+          err instanceof Error ? err.name : 'error'
+        }`,
+      );
+    }
+  }
+  return c.json(await scorecardLinkPayload(tenant, saved));
+});
+
 /* ─── Season runs (ADR 0008) ───
    A run orchestrates one league setup's stages for one season; the fixtures still live on
    the Series each stage-group materialises into. Admin-only to write, reps read (their
@@ -8617,6 +8759,7 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   delete (patch as { clearanceCertTemplate?: unknown }).clearanceCertTemplate;
   delete (patch as { orgContact?: unknown }).orgContact;
   delete (patch as { fixtureReminders?: unknown }).fixtureReminders;
+  delete (patch as { scorecardConfirmations?: unknown }).scorecardConfirmations;
   delete (patch as { transferWindows?: unknown }).transferWindows;
   delete (patch as { sport?: unknown }).sport;
   delete (patch as { seasonLabel?: unknown }).seasonLabel;
@@ -9029,6 +9172,18 @@ function keepStoredCompetitions(incoming: League[], stored: League[]): League[] 
   });
 }
 
+/** 400 unless `v` is `{ enabled: boolean }` (unknown keys rejected). */
+function validateScorecardConfirmationsConfig(v: unknown): { enabled: boolean } {
+  if (v === null || typeof v !== 'object' || Array.isArray(v))
+    throw new HttpError(400, 'scorecardConfirmations must be an object');
+  for (const k of Object.keys(v))
+    if (k !== 'enabled') throw new HttpError(400, `scorecardConfirmations: unknown field "${k}"`);
+  const enabled = (v as { enabled?: unknown }).enabled;
+  if (typeof enabled !== 'boolean')
+    throw new HttpError(400, 'scorecardConfirmations.enabled must be a boolean');
+  return { enabled };
+}
+
 /**
  * PUT /platform/tenants/:slug — merge-patch branding / features / leagues /
  * districts / submissionDeadline (whitelisted: the operator portal edits nothing
@@ -9208,6 +9363,12 @@ app.put('/platform/tenants/:slug', async (c) => {
   // Whole-key write (the card sends the full object); normalised: leadDays deduped + sorted.
   if (body.fixtureReminders !== undefined) {
     patch.fixtureReminders = validateFixtureReminders(body.fixtureReminders);
+  }
+  // Whole-key write: `{enabled: boolean}` only.
+  if (body.scorecardConfirmations !== undefined) {
+    patch.scorecardConfirmations = validateScorecardConfirmationsConfig(
+      body.scorecardConfirmations,
+    );
   }
   if (body.integrations !== undefined) patch.integrations = validateIntegrations(body.integrations);
   // Whole-key write (the card sends the full list); normalised: labels trimmed, sorted by start.
@@ -11055,6 +11216,45 @@ app.post('/platform/tenants/:slug/clubs', async (c) => {
     .catch(() => ({}) as { name?: string; district?: string });
   const club = await createOperatorClub(slug, cfg, body);
   return c.json(club, 201);
+});
+
+/**
+ * GET /platform/scorecard-confirmations?week=YYYY-MM-DD — one week of chair scorecard
+ * confirmations across every tenant (default: the most recent completed Mon–Sun week).
+ * Per tenant: each fixture with BOTH clubs' answers side by side, plus each digest's delivery
+ * status. Lists tenants that have digests that week or have the feature switched on.
+ */
+app.get('/platform/scorecard-confirmations', async (c) => {
+  const week = c.req.query('week');
+  if (week !== undefined && !isWeekKey(week))
+    throw new HttpError(400, 'week must be a Sunday (YYYY-MM-DD)');
+  const weekKey = week ?? lastCompletedWeekKey(new Date());
+  const tenants = await repo.listTenants();
+  const out = [];
+  for (const cfg of tenants) {
+    const records = await repo.listScorecardConfirmations(cfg.tenant, weekKey);
+    const enabled = scorecardConfirmationsEnabled(cfg);
+    if (!records.length && !enabled) continue;
+    out.push(toPlatformScorecardTenant(cfg.tenant, orgCopy(cfg).name, weekKey, enabled, records));
+  }
+  out.sort((a, b) => a.tenantName.localeCompare(b.tenantName));
+  return c.json({ weekKey, weekLabel: weekLabel(weekKey), tenants: out });
+});
+
+/**
+ * POST /platform/scorecard-confirmations/run — body `{week?}` (a Sunday; default the most
+ * recent completed week). Runs the Monday cron now for every gated tenant: idempotent
+ * (a digest already sent is never re-sent) and it tops up digests with late results.
+ */
+app.post('/platform/scorecard-confirmations/run', async (c) => {
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as { week?: unknown };
+  if (body.week !== undefined && !isWeekKey(body.week))
+    throw new HttpError(400, 'week must be a Sunday (YYYY-MM-DD)');
+  const week = body.week as string | undefined;
+  if (week && week > weekKeyFor(tenantDate()))
+    throw new HttpError(400, 'week must not be in the future');
+  const summary = await runScorecardConfirmations({}, week ? { week } : {});
+  return c.json(summary);
 });
 
 /**

@@ -21,7 +21,8 @@
  *                   as SYNCCONFLICT#.
  *   - unknown ref → counted as "unmapped" (no ref values logged).
  *   - scorecard   → a newly stored non-import result with both medicoach ids fetches its
- *                   scorecard (FIXSCORECARD#, scorecard-fetch.ts); a stored clear deletes it.
+ *                   scorecard (FIXSCORECARD#, scorecard-fetch.ts); a stored clear deletes it
+ *                   and voids the fixture's chair scorecard-confirmation entries.
  *
  * A newly stored result is first marked `REPORTOPEN#<ref>`; the marker is deleted once the
  * hook succeeded, so a report/notify failure is retried by the next run
@@ -66,6 +67,7 @@ import {
 import type { Series, StoredFixtureResult, SyncLogEntry, TenantConfig } from '../types.js';
 import { explainSyncError } from './explain.js';
 import { fetchAndStoreScorecard } from './scorecard-fetch.js';
+import { voidScorecardEntriesForFixture } from '../scorecard-confirmations.js';
 import {
   applyInboundSchedule,
   wallClock,
@@ -515,6 +517,16 @@ export async function runMedicoachSync(
             await clearedHook({ tenant, seriesId, fixtureId, ref: change.ref });
             // A cleared result has no scorecard to confirm.
             await repo.deleteFixtureScorecard(tenant, seriesId, fixtureId);
+            // …and its chair scorecard-confirmation entries are void (best-effort: a
+            // failure is a log line, never the sync run's).
+            await voidScorecardEntriesForFixture(repo, tenant, seriesId, fixtureId).catch(
+              (err: unknown) =>
+                log(
+                  `[medicoach-sync] ${tenant}: could not void scorecard confirmations for ${seriesId}/${fixtureId} — ${
+                    err instanceof Error ? err.name : 'error'
+                  }`,
+                ),
+            );
           } else counts.resultsStale++;
         }
 
