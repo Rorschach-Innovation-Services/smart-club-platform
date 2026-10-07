@@ -79,4 +79,7 @@ export const qk = {
   platformTenant: (slug: string) => ['platform-tenant', slug],
   platformTenantOverview: (slug: string) => ['platform-tenant-overview', slug],
   platformTenantReps: (slug: string) => ['platform-tenant-reps', slug],
+  // The professional match library is platform-wide (one library, every union reads it).
+  proMatches: () => ['pro-matches'],
+  platformProMatches: () => ['platform-pro-matches'],
 };

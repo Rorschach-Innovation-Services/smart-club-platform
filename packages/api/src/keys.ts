@@ -593,3 +593,9 @@ export const whatsappMessageKey = (wamid: string) => ({
 
 /** Prefix used to erase an entire tenant's non-user items. */
 export const tenantErasurePrefix = (tenant: string) => `${tenantPrefix(tenant)}#`;
+
+/* ─── The platform match library (professional scorecards and ball-by-ball) ───
+ * One item per match, stored by the platform operator and read by every union's admins.
+ * Lives under the platform partition so it belongs to no single union. */
+export const PRO_MATCH_PK = 'TENANT#*#PROMATCH';
+export const proMatchKey = (key: string) => ({ pk: PRO_MATCH_PK, sk: `PROMATCH#${key}` });

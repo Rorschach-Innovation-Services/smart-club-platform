@@ -12,6 +12,7 @@
 
 import { Sentry } from './sentry';
 import { devAuthHeader } from './devAuth';
+import type { LibraryMatch } from './match-import';
 import type {
   TenantConfig,
   TransferWindow,
@@ -1182,9 +1183,6 @@ export const generateClubSignupLink = () =>
   request<{ clubSignupLink: ClubSignupLink }>('/admin/club-signup-link', { method: 'POST' });
 export const revokeClubSignupLink = () => request('/admin/club-signup-link', { method: 'DELETE' });
 
-// ── Veterans squad-selection requests (admin, ADR 0013) ──
-// Every veterans request in the tenant, listed once via the canonical gsi1 (public shape —
-// the PII natural key is stripped server-side). Drives the union-admin oversight console.
 export const getAllVeteransRequests = () =>
   request<VeteransRequestPublic[]>('/admin/veterans-requests');
 // Admin OVERRIDE of a veterans request. `action` picks the terminal route; the body carries
@@ -1670,3 +1668,49 @@ export async function uploadMultipartToS3(
   results.sort((a, b) => a.partNumber - b.partNumber);
   return results;
 }
+
+// ── Platform match library (professional scorecards + ball-by-ball) ──
+// The operator uploads standard matches (src/match-import.ts); union admins read them.
+
+export interface ProMatchSummary {
+  key: string;
+  date: string;
+  home: string;
+  away: string;
+  gender: string;
+  format: string;
+  competition?: string;
+  hasBalls: boolean;
+  sources: { kind: string; name: string }[];
+  updatedAt: string;
+  updatedBy: string;
+}
+
+async function allPages(path: string): Promise<LibraryMatch[]> {
+  const out: LibraryMatch[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await request<{ matches: LibraryMatch[]; next?: string }>(path, {
+      query: { cursor },
+    });
+    out.push(...page.matches);
+    cursor = page.next;
+  } while (cursor);
+  return out;
+}
+
+/** Union admin: the whole library (a page at a time under the hood). */
+export const getProMatches = () => allPages('/admin/pro/matches');
+/** Operator: the whole library. */
+export const platformGetProMatches = () => allPages('/platform/pro/matches');
+export const platformProMatchSummaries = () =>
+  request<{ summaries: ProMatchSummary[] }>('/platform/pro/matches', {
+    query: { summary: 1 },
+  }).then((r) => r.summaries);
+/** Operator: save up to 25 matches per call. */
+export const platformSaveProMatches = (matches: LibraryMatch[]) =>
+  request<{ saved: string[] }>('/platform/pro/matches', { method: 'POST', body: { matches } });
+export const platformDeleteProMatch = (key: string) =>
+  request<{ deleted: string }>(`/platform/pro/matches/${encodeURIComponent(key)}`, {
+    method: 'DELETE',
+  });
