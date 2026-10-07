@@ -23,7 +23,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import dayjs from 'dayjs';
 import dayjsUtc from 'dayjs/plugin/utc.js';
 import { formatSastWeekdayDay, formatWeekdayDayYear } from '../../../src/dates.js';
-import type { NoticeResult } from './captains-reports.js';
+import type { NoticeResult, ScorecardBranding } from './captains-reports.js';
 import { captainsReportLinkBase } from './env.js';
 import { httpUrlOrNull, type InningsScorecardWire } from './medicoach-sync-contract.js';
 import { toE164 } from './notify/e164.js';
@@ -40,12 +40,23 @@ import type {
 
 dayjs.extend(dayjsUtc);
 
+// Moved to captains-reports.ts (scorecard confirmation now lives in the captain's report);
+// re-exported here until the digest is removed.
+export {
+  answeredAgainstFetchedAt,
+  notifyOperatorsOfCorrection,
+  parseScorecardAnswer,
+  SCORECARD_FEEDBACK_MAX,
+  ScorecardInputError,
+  setDefaultScorecardCorrectionSender,
+  type ScorecardBranding,
+  type ScorecardCorrectionNotice,
+} from './captains-reports.js';
+
 type RepoModule = typeof import('./repo.js');
 
 /** The link works until the end of this SAST day after the digest was created. */
 export const SCORECARD_LINK_VALID_DAYS = 14;
-/** A correction request is capped at this many characters. */
-export const SCORECARD_FEEDBACK_MAX = 2000;
 
 const DAY_MS = 24 * 3600 * 1000;
 const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/;
@@ -229,66 +240,6 @@ export async function loadLinkedScorecardConfirmation(
 export const scorecardEntryKey = (seriesId: string, fixtureId: string) =>
   `${seriesId}#${fixtureId}`;
 
-export class ScorecardInputError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'ScorecardInputError';
-  }
-}
-
-/** A chair's answer from a request body: `{action: 'confirm' | 'correction', feedback?}`. */
-export function parseScorecardAnswer(raw: unknown): {
-  action: 'confirm' | 'correction';
-  feedback?: string;
-  scorecardFetchedAt?: string;
-} {
-  if (!raw || typeof raw !== 'object') throw new ScorecardInputError('body must be an object');
-  const b = raw as Record<string, unknown>;
-  if (b.action !== 'confirm' && b.action !== 'correction')
-    throw new ScorecardInputError("action must be 'confirm' or 'correction'");
-  if (b.feedback !== undefined && b.feedback !== null && typeof b.feedback !== 'string')
-    throw new ScorecardInputError('feedback must be text');
-  const feedback = typeof b.feedback === 'string' ? b.feedback.trim() : '';
-  if (feedback.length > SCORECARD_FEEDBACK_MAX)
-    throw new ScorecardInputError(`feedback is too long (max ${SCORECARD_FEEDBACK_MAX})`);
-  // The `fetchedAt` of the scorecard the page rendered (echoed from the view), if any.
-  const fa = b.scorecardFetchedAt;
-  if (
-    fa !== undefined &&
-    fa !== null &&
-    (typeof fa !== 'string' || fa.length > 40 || !Number.isFinite(Date.parse(fa)))
-  )
-    throw new ScorecardInputError('scorecardFetchedAt must be an ISO timestamp');
-  const echoed = typeof fa === 'string' ? { scorecardFetchedAt: fa } : {};
-  if (b.action === 'correction') {
-    if (!feedback) throw new ScorecardInputError('feedback is required to request a correction');
-    return { action: 'correction', feedback, ...echoed };
-  }
-  return { action: 'confirm', ...(feedback ? { feedback } : {}), ...echoed };
-}
-
-/**
- * The card version an answer (confirm OR correction) was given against, stored as the entry's
- * `confirmedAgainstFetchedAt`. The page echoes the `scorecardFetchedAt` it rendered; that echo
- * is client-supplied, so it is trusted only as a plausible PAST value no later than the card
- * stored now — a forged future echo would otherwise defeat every later stale check. Anything
- * else (later than the stored card, in the future, or no echo) falls back to the stored
- * card's `fetchedAt`. No available card stored ⇒ undefined (the stale check then uses
- * `submittedAt`). Returned in `toISOString()` form so DynamoDB's string compare stays sound.
- */
-export function answeredAgainstFetchedAt(
-  echo: string | undefined,
-  card: { available: boolean; fetchedAt?: string } | null,
-  now: Date,
-): string | undefined {
-  const stored = card?.available && card.fetchedAt ? card.fetchedAt : undefined;
-  if (!stored) return undefined;
-  if (echo === undefined) return stored;
-  const ms = Date.parse(echo);
-  if (!Number.isFinite(ms) || ms > Date.parse(stored) || ms > now.getTime()) return stored;
-  return new Date(ms).toISOString();
-}
-
 // ───────────────────────── The public view ─────────────────────────
 
 export interface ScorecardConfirmEntryView {
@@ -314,12 +265,6 @@ export interface ScorecardConfirmEntryView {
   scorecard?: { matchState?: string; innings: InningsScorecardWire[] };
   /** The `fetchedAt` of the embedded scorecard — echoed back on submit (with `scorecard`). */
   scorecardFetchedAt?: string;
-}
-
-export interface ScorecardBranding {
-  name: string;
-  logoUrl: string;
-  colors: Record<string, string>;
 }
 
 /** GET /scorecard-confirm-link/:token — the pinned shape the `/sc/` page builds against. */
@@ -642,29 +587,6 @@ export const scorecardExpiresText = (r: Pick<ScorecardConfirmation, 'linkExpires
 
 // ───────────────────────── Correction → operators ─────────────────────────
 
-export interface ScorecardCorrectionNotice {
-  to: string;
-  tenantName: string;
-  clubName: string;
-  ref: string;
-  fixtureLine: string;
-  feedback: string;
-  consoleLink?: string;
-}
-
-let defaultCorrectionSender: (
-  n: ScorecardCorrectionNotice,
-) => Promise<{ messageId: string }> = async (n) =>
-  (await import('./notify/email.js')).sendScorecardCorrectionEmail(n);
-
-/** The operator-email sender for correction requests. Tests/local only; `undefined` restores. */
-export function setDefaultScorecardCorrectionSender(
-  fn: ((n: ScorecardCorrectionNotice) => Promise<{ messageId: string }>) | undefined,
-): void {
-  defaultCorrectionSender =
-    fn ?? (async (n) => (await import('./notify/email.js')).sendScorecardCorrectionEmail(n));
-}
-
 /** "Umzinto CC v African Warriors (Premier T20), Sun 4 Oct 2026" */
 export function scorecardFixtureLine(e: ScorecardConfirmEntry): string {
   return (
@@ -672,38 +594,6 @@ export function scorecardFixtureLine(e: ScorecardConfirmEntry): string {
     (e.competition ? ` (${e.competition})` : '') +
     `, ${formatWeekdayDayYear(e.fixtureDate)}`
   );
-}
-
-/**
- * Email every platform operator about a chair's correction request. Best-effort: the caller
- * never fails the submit on it; failures are counted and logged (no address, no feedback).
- */
-export async function notifyOperatorsOfCorrection(
-  deps: {
-    repo: Pick<RepoModule, 'listOperators'>;
-    send?: (n: ScorecardCorrectionNotice) => Promise<{ messageId: string }>;
-    log?: (line: string) => void;
-  },
-  input: Omit<ScorecardCorrectionNotice, 'to'>,
-): Promise<{ sent: number; failed: number }> {
-  const { listOperatorEmails } = await import('./notify/operator-emails.js');
-  const log = deps.log ?? ((l: string) => console.warn(l));
-  const send = deps.send ?? defaultCorrectionSender;
-  const out = { sent: 0, failed: 0 };
-  for (const to of await listOperatorEmails({ repo: deps.repo })) {
-    try {
-      await send({ ...input, to });
-      out.sent++;
-    } catch (err) {
-      out.failed++;
-      log(
-        `[scorecard-confirm] correction notice ${input.ref}: an operator email failed — ${
-          err instanceof Error ? err.name : 'error'
-        }`,
-      );
-    }
-  }
-  return out;
 }
 
 /**

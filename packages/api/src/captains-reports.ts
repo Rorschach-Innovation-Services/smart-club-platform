@@ -1248,3 +1248,131 @@ export async function sendReportReminders(
   }
   return out;
 }
+
+// ───────────────────────── Scorecard confirmation ─────────────────────────
+
+/** A correction request is capped at this many characters. */
+export const SCORECARD_FEEDBACK_MAX = 2000;
+
+export class ScorecardInputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ScorecardInputError';
+  }
+}
+
+/** A chair's answer from a request body: `{action: 'confirm' | 'correction', feedback?}`. */
+export function parseScorecardAnswer(raw: unknown): {
+  action: 'confirm' | 'correction';
+  feedback?: string;
+  scorecardFetchedAt?: string;
+} {
+  if (!raw || typeof raw !== 'object') throw new ScorecardInputError('body must be an object');
+  const b = raw as Record<string, unknown>;
+  if (b.action !== 'confirm' && b.action !== 'correction')
+    throw new ScorecardInputError("action must be 'confirm' or 'correction'");
+  if (b.feedback !== undefined && b.feedback !== null && typeof b.feedback !== 'string')
+    throw new ScorecardInputError('feedback must be text');
+  const feedback = typeof b.feedback === 'string' ? b.feedback.trim() : '';
+  if (feedback.length > SCORECARD_FEEDBACK_MAX)
+    throw new ScorecardInputError(`feedback is too long (max ${SCORECARD_FEEDBACK_MAX})`);
+  // The `fetchedAt` of the scorecard the page rendered (echoed from the view), if any.
+  const fa = b.scorecardFetchedAt;
+  if (
+    fa !== undefined &&
+    fa !== null &&
+    (typeof fa !== 'string' || fa.length > 40 || !Number.isFinite(Date.parse(fa)))
+  )
+    throw new ScorecardInputError('scorecardFetchedAt must be an ISO timestamp');
+  const echoed = typeof fa === 'string' ? { scorecardFetchedAt: fa } : {};
+  if (b.action === 'correction') {
+    if (!feedback) throw new ScorecardInputError('feedback is required to request a correction');
+    return { action: 'correction', feedback, ...echoed };
+  }
+  return { action: 'confirm', ...(feedback ? { feedback } : {}), ...echoed };
+}
+
+/**
+ * The card version an answer (confirm OR correction) was given against, stored as the entry's
+ * `confirmedAgainstFetchedAt`. The page echoes the `scorecardFetchedAt` it rendered; that echo
+ * is client-supplied, so it is trusted only as a plausible PAST value no later than the card
+ * stored now — a forged future echo would otherwise defeat every later stale check. Anything
+ * else (later than the stored card, in the future, or no echo) falls back to the stored
+ * card's `fetchedAt`. No available card stored ⇒ undefined (the stale check then uses
+ * `submittedAt`). Returned in `toISOString()` form so DynamoDB's string compare stays sound.
+ */
+export function answeredAgainstFetchedAt(
+  echo: string | undefined,
+  card: { available: boolean; fetchedAt?: string } | null,
+  now: Date,
+): string | undefined {
+  const stored = card?.available && card.fetchedAt ? card.fetchedAt : undefined;
+  if (!stored) return undefined;
+  if (echo === undefined) return stored;
+  const ms = Date.parse(echo);
+  if (!Number.isFinite(ms) || ms > Date.parse(stored) || ms > now.getTime()) return stored;
+  return new Date(ms).toISOString();
+}
+
+export interface ScorecardBranding {
+  name: string;
+  logoUrl: string;
+  colors: Record<string, string>;
+}
+
+// ───────────────────────── Scorecard correction → operators ─────────────────────────
+
+export interface ScorecardCorrectionNotice {
+  to: string;
+  tenantName: string;
+  clubName: string;
+  ref: string;
+  fixtureLine: string;
+  feedback: string;
+  consoleLink?: string;
+}
+
+let defaultCorrectionSender: (
+  n: ScorecardCorrectionNotice,
+) => Promise<{ messageId: string }> = async (n) =>
+  (await import('./notify/email.js')).sendScorecardCorrectionEmail(n);
+
+/** The operator-email sender for correction requests. Tests/local only; `undefined` restores. */
+export function setDefaultScorecardCorrectionSender(
+  fn: ((n: ScorecardCorrectionNotice) => Promise<{ messageId: string }>) | undefined,
+): void {
+  defaultCorrectionSender =
+    fn ?? (async (n) => (await import('./notify/email.js')).sendScorecardCorrectionEmail(n));
+}
+
+/**
+ * Email every platform operator about a scorecard correction request. Best-effort: the caller
+ * never fails the submit on it; failures are counted and logged (no address, no feedback).
+ */
+export async function notifyOperatorsOfCorrection(
+  deps: {
+    repo: Pick<RepoModule, 'listOperators'>;
+    send?: (n: ScorecardCorrectionNotice) => Promise<{ messageId: string }>;
+    log?: (line: string) => void;
+  },
+  input: Omit<ScorecardCorrectionNotice, 'to'>,
+): Promise<{ sent: number; failed: number }> {
+  const { listOperatorEmails } = await import('./notify/operator-emails.js');
+  const log = deps.log ?? ((l: string) => console.warn(l));
+  const send = deps.send ?? defaultCorrectionSender;
+  const out = { sent: 0, failed: 0 };
+  for (const to of await listOperatorEmails({ repo: deps.repo })) {
+    try {
+      await send({ ...input, to });
+      out.sent++;
+    } catch (err) {
+      out.failed++;
+      log(
+        `[scorecard-confirm] correction notice ${input.ref}: an operator email failed — ${
+          err instanceof Error ? err.name : 'error'
+        }`,
+      );
+    }
+  }
+  return out;
+}

@@ -20,146 +20,12 @@ import { cleanLinkToken, fmtDate, fmtLinkExpiry } from './CaptainsReport';
 import { applyTheme } from './config';
 import { formatStamp } from './dates';
 import { qk } from './query';
-import {
-  FEEDBACK_MAX,
-  STATUS_LABEL,
-  STATUS_TONE,
-  byOrder,
-  extrasLine,
-  fallOfWicketsLine,
-  feedbackProblem,
-  fmtRate,
-  headlineScore,
-  inningsHeading,
-  ownSide,
-} from './scorecardConfirmHelpers';
-import type {
-  InningsScorecard,
-  ScorecardConfirmAnswer,
-  ScorecardConfirmEntry,
-  ScorecardConfirmView,
-} from './types';
+import { STATUS_LABEL, STATUS_TONE, feedbackProblem, ownSide } from './scorecardConfirmHelpers';
+import { CorrectionField, HeadlineResult, InningsCard } from './ScorecardView';
+import type { ScorecardConfirmAnswer, ScorecardConfirmEntry, ScorecardConfirmView } from './types';
 
 const errText = (err: unknown) =>
   err instanceof ApiError ? err.message : 'Something went wrong — try again.';
-
-/* ─── Scorecard tables ─── */
-
-function InningsCard({ inn }: { inn: InningsScorecard }) {
-  const fow = fallOfWicketsLine(inn.fallOfWickets);
-  return (
-    <div className="sc-innings">
-      <h3 className="sc-innings-head">{inningsHeading(inn)}</h3>
-      <div
-        className="sc-table-wrap"
-        role="region"
-        aria-label={`${inn.battingTeamName} batting`}
-        tabIndex={0}
-      >
-        <table className="sc-table">
-          <thead>
-            <tr>
-              <th>Batter</th>
-              <th>Dismissal</th>
-              <th className="num">R</th>
-              <th className="num">B</th>
-              <th className="num">4s</th>
-              <th className="num">6s</th>
-              <th className="num">SR</th>
-            </tr>
-          </thead>
-          <tbody>
-            {byOrder(inn.batters).map((b) => (
-              <tr key={`${b.order}-${b.name}`}>
-                <td className="sc-name">{b.name}</td>
-                <td className="sc-howout">{b.howOut}</td>
-                <td className="num">
-                  <strong>{b.runs}</strong>
-                </td>
-                <td className="num">{b.ballsFaced}</td>
-                <td className="num">{b.fours}</td>
-                <td className="num">{b.sixes}</td>
-                <td className="num">{fmtRate(b.strikeRate)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="sc-line">{extrasLine(inn.extras)}</div>
-      <div
-        className="sc-table-wrap"
-        role="region"
-        aria-label={`Bowling to ${inn.battingTeamName}`}
-        tabIndex={0}
-      >
-        <table className="sc-table">
-          <thead>
-            <tr>
-              <th>Bowler</th>
-              <th className="num">O</th>
-              <th className="num">M</th>
-              <th className="num">R</th>
-              <th className="num">W</th>
-              <th className="num">Econ</th>
-              <th className="num">Wd</th>
-              <th className="num">Nb</th>
-            </tr>
-          </thead>
-          <tbody>
-            {byOrder(inn.bowlers).map((b) => (
-              <tr key={`${b.order}-${b.name}`}>
-                <td className="sc-name">{b.name}</td>
-                <td className="num">{b.overs}</td>
-                <td className="num">{b.maidens}</td>
-                <td className="num">{b.runsConceded}</td>
-                <td className="num">
-                  <strong>{b.wickets}</strong>
-                </td>
-                <td className="num">{fmtRate(b.economy)}</td>
-                <td className="num">{b.wides}</td>
-                <td className="num">{b.noBalls}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {fow && (
-        <div className="sc-line">
-          <span className="sc-line-label">Fall of wickets:</span> {fow}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** No stored scorecard: the headline result, and medicoach's own page when there is one. */
-function HeadlineResult({ entry }: { entry: ScorecardConfirmEntry }) {
-  const score = headlineScore(entry);
-  return (
-    <div className="sc-headline">
-      {score ? (
-        <div className="sc-headline-score">{score}</div>
-      ) : (
-        !entry.result?.summary && <div className="cr-section-sub">No score was recorded.</div>
-      )}
-      {entry.result?.summary && <div className="sc-headline-summary">{entry.result.summary}</div>}
-      <div className="cr-section-sub" style={{ marginTop: 6 }}>
-        The full scorecard isn&apos;t available on this page.
-      </div>
-      {entry.medicoachMatchUrl && (
-        <a
-          className="sc-external"
-          href={entry.medicoachMatchUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          View full scorecard
-          <Icon.Arrow />
-        </a>
-      )}
-    </div>
-  );
-}
 
 /* ─── The answer: confirm, request a correction, or the locked outcome ─── */
 
@@ -242,35 +108,19 @@ function Answer({ entry, submit }: AnswerProps) {
       </div>
     );
 
-  const over = text.length > FEEDBACK_MAX;
   return (
     <div className="sc-correction">
-      <label className="field-label" htmlFor={fieldId}>
-        What needs correcting? <span className="req">*</span>
-      </label>
-      <textarea
-        ref={fieldRef}
+      <CorrectionField
         id={fieldId}
-        className="field-textarea"
+        counterId={counterId}
         value={text}
-        maxLength={FEEDBACK_MAX}
-        rows={4}
-        aria-describedby={counterId}
-        aria-invalid={problem ? true : undefined}
-        placeholder="e.g. S. Naidoo scored 46, not 36 — the 4 in the 12th over is missing."
-        onChange={(e) => {
-          setText(e.target.value);
+        problem={problem}
+        fieldRef={fieldRef}
+        onChange={(next) => {
+          setText(next);
           if (problem) setProblem(null);
         }}
       />
-      <div id={counterId} className={`sc-counter${over ? ' over' : ''}`}>
-        {text.length} / {FEEDBACK_MAX}
-      </div>
-      {problem && (
-        <div className="rp-validation" role="alert">
-          {problem}
-        </div>
-      )}
       <div className="sc-actions">
         <Btn tone="teal" disabled={busy} onClick={sendCorrection}>
           {busy ? 'Sending…' : 'Send correction'}
@@ -369,7 +219,7 @@ function MatchCard({
               ))}
             </div>
           ) : (
-            <HeadlineResult entry={entry} />
+            <HeadlineResult match={entry} />
           )}
           {notice && (
             <div className="cr-section-sub" role="status" style={{ marginTop: 12 }}>
