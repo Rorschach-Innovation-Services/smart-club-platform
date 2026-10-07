@@ -127,7 +127,7 @@ medicoach export and warns (never blocks) when players would park.
   people's possible-duplicate reviews that name the erased person as a candidate.
 - `erasePlayerData` writes the `erase` tombstone and deletes the person's `PLAYERDISTINCT#`
   pairs. Medicoach then soft-removes memberships, anonymises the player (name → "Erased player";
-  dob, gender, contact, guardian, ID and email cleared), releases identity claims and deletes both ref
+  dob, gender, race, nationality, contact, guardian, ID and email cleared), releases identity claims and deletes both ref
   rows.
 - **Medicoach-side erase tombstone.** Erasing deletes the ref rows, so medicoach keeps a
   short-lived marker on the forward ref recording `erasedAt`. A replayed or delayed `upsert`
