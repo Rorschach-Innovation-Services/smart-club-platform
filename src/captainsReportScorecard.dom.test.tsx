@@ -354,7 +354,7 @@ describe('the read-only report', () => {
       />,
     );
     const outcome = screen.getByTestId('report-scorecard-outcome');
-    expect(outcome).toHaveTextContent(/Correction requested for Umzinto CC/);
+    expect(outcome).toHaveTextContent(/Correction requested by Umzinto CC/);
     expect(within(outcome).getByLabelText('Correction request')).toHaveTextContent(
       'Extras are wrong',
     );
@@ -441,5 +441,52 @@ describe('a scorecard that arrives while the form is open', () => {
     await userEvent.click(within(sc).getByRole('radio', { name: /Confirm/ }));
     expect(within(sc).queryByRole('alert')).toBeNull();
     expect(submitButton()).toBeEnabled();
+  });
+});
+
+describe('the success card', () => {
+  it('after a correction, shows the submitted text under the scorecard answer', async () => {
+    const report = stored({
+      status: 'pending',
+      ref: undefined,
+      submittedAt: undefined,
+      captainName: '',
+      umpires: [],
+      declaration: false,
+    });
+    vi.mocked(api.getLinkedCaptainsReport).mockResolvedValue({
+      report,
+      registry: REGISTRY,
+      tenantBranding: { name: 'Dolphins Cricket', logoUrl: '', colors: {} },
+      ...WITH_CARD,
+    });
+    vi.mocked(api.putLinkedCaptainsReport).mockResolvedValue({
+      report: stored({
+        scorecard: { action: 'correction', feedback: 'S. Naidoo scored 46' },
+      }),
+      registry: REGISTRY,
+      tenantBranding: { name: 'Dolphins Cricket', logoUrl: '', colors: {} },
+    } as never);
+    renderWithProviders(
+      <MemoryRouter initialEntries={['/r/tok.sig']}>
+        <Routes>
+          <Route path="/r/:token" element={<CaptainsReportLinkPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByTestId('report-scorecard');
+    await fillTheRest();
+    await userEvent.click(within(section()).getByRole('radio', { name: /Request a correction/ }));
+    await userEvent.type(
+      within(section()).getByRole('textbox', { name: /What needs correcting/ }),
+      'S. Naidoo scored 46',
+    );
+    await userEvent.click(submitButton());
+
+    expect(await screen.findByText('Report submitted')).toBeInTheDocument();
+    expect(screen.getByText('Correction requested')).toBeInTheDocument();
+    expect(screen.getByLabelText('Submitted correction request')).toHaveTextContent(
+      'S. Naidoo scored 46',
+    );
   });
 });

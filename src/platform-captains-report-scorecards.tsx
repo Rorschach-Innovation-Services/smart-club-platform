@@ -6,7 +6,8 @@
  * `days` of matches across every tenant: one row per fixture, the home side first and the away
  * side next to it — a home "Confirmed" beside an away "Correction" is expected, not a
  * contradiction. Correction text opens on demand; a stale answer (the card changed after it
- * was given) carries a ⚠ and is not re-asked — the chip is the workflow.
+ * was given, or the result was withdrawn) carries a ⚠ and is not re-asked — the chip is the
+ * workflow.
  */
 import { useState, type CSSProperties } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -61,7 +62,7 @@ const REPORT_STATUS: Record<ScorecardConsoleCell['reportStatus'], string> = {
 };
 
 const staleTitle = (c: ScorecardConsoleCell) =>
-  `Answered against an older scorecard — a newer one arrived afterwards` +
+  `Answered against an older scorecard — it changed afterwards, or the result was withdrawn` +
   (c.answeredAction
     ? ` (the answer was: ${c.answeredAction === 'correction' ? 'correction requested' : 'confirmed'}).`
     : '.');

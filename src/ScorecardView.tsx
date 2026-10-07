@@ -339,7 +339,7 @@ export function ScorecardOutcome({
   return (
     <div className="sc-locked" role="status">
       <strong>
-        Correction requested for {clubName}
+        Correction requested by {clubName}
         {when}
       </strong>
       {answer.feedback && (

@@ -4462,9 +4462,23 @@
       }
       .scc-side {
         display: inline-flex;
+        flex-wrap: wrap;
         align-items: center;
         gap: 6px;
         font-size: 12.5px;
+      }
+      /* The table sizes to max-content (ScrollX), so two sides on one line push Date / Match
+         off-canvas below ~1400px — stack them, and cap each side (its ref / status / feedback
+         toggle wrap under the pill) and the opened feedback. */
+      @media (max-width: 1400px) {
+        .scc-sides {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+        .scc-side,
+        .scc-feedback {
+          max-width: 420px;
+        }
       }
       .scc-feedback {
         margin: 6px 0 0;

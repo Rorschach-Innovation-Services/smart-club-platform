@@ -412,9 +412,13 @@ test('away, in the club portal: a correction needs its text, then submits', asyn
   await expect(page.locator('.cr-summary-row', { hasText: 'Scorecard' })).toContainText(
     'Correction requested',
   );
+  // The success card repeats what was sent, read-only.
+  await expect(page.getByLabel('Submitted correction request')).toHaveText(FEEDBACK);
 });
 
 test('the operator console pairs both answers with the correction text', async ({ page }) => {
+  // A common laptop width: the sides must stack rather than push Date / Match off-canvas.
+  await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto('/');
   const picker = page.locator('select.field-select').first();
   await expect(picker).toBeVisible();
@@ -431,6 +435,13 @@ test('the operator console pairs both answers with the correction text', async (
   await expect(row.getByText(FEEDBACK)).toHaveCount(0);
   await row.getByRole('button', { name: /Show .* feedback/ }).click();
   await expect(row.getByText(FEEDBACK)).toBeVisible();
+  // Stacked at 1280px (away below home), and the table fits its wrapper — no sideways scroll.
+  const homeBox = (await row.getByTestId(`scc-side-${HOME}`).boundingBox())!;
+  const awayBox = (await row.getByTestId(`scc-side-${AWAY}`).boundingBox())!;
+  expect(awayBox.y).toBeGreaterThan(homeBox.y);
+  const scroller = row.locator('xpath=ancestor::div[contains(@class,"scroll-x-inner")]');
+  const fits = await scroller.evaluate((el) => el.scrollWidth <= el.clientWidth + 1);
+  expect(fits).toBe(true);
 
   // The correction filter keeps the row.
   await page

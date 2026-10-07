@@ -1027,6 +1027,17 @@ function SubmittedCard({ report, onBack }: { report: CaptainsReport; onBack?: ()
             </strong>
           </div>
         )}
+        {report.scorecard?.action === 'correction' && report.scorecard.feedback && (
+          <div className="cr-summary-row" style={{ display: 'block' }}>
+            <blockquote
+              className="sc-feedback"
+              aria-label="Submitted correction request"
+              style={{ margin: 0 }}
+            >
+              {report.scorecard.feedback}
+            </blockquote>
+          </div>
+        )}
         {report.umpires.map((u, i) => (
           <div key={i} className="cr-summary-row">
             <span>Umpire {i + 1}</span>
