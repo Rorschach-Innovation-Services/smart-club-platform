@@ -205,6 +205,14 @@ wave narrows it.
 - Tear down the rehearsal stage: `npx sst remove --stage league-rehearsal`
   (Claude can run this on request).
 
+## 10. Player sync (after the import, per tenant)
+
+New registrations reach medicoach rosters through the player sync (ADR 0018). Enable it per
+tenant only once that tenant's teams are imported: see
+[medicoach-player-sync.md](medicoach-player-sync.md) for deploy order (medicoach's `/players`
+route first), the duplicate audit, the coverage warning, the dry-run-first backfill and review
+resolution.
+
 ## Deferred, deliberately
 
 - **season-simplification**: re-plan against current main before executing —
