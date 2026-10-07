@@ -11,6 +11,8 @@
     "seed-cohort": "tsx src/seed-cohort.ts",
     "export-cohort": "tsx src/export-cohort.ts",
     "export-medicoach": "tsx src/export-medicoach.ts",
+    "enqueue-players": "tsx src/medicoach-sync/enqueue-players.ts",
+    "audit-player-duplicates": "tsx src/medicoach-sync/audit-player-duplicates.ts",
     "import-planb": "tsx src/import-planb-fixtures.ts",
     "create-recipe-knockouts": "tsx src/create-recipe-knockouts.ts",
     "import-umpire-appointments": "tsx src/import-umpire-appointments.ts",
