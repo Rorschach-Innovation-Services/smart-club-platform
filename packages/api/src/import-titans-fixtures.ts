@@ -28,6 +28,7 @@ import type { WrittenFixture } from './import-planb-fixtures.js';
 import { reconcileFixtureIds } from './fixture-identity.js';
 import {
   findClashes,
+  groundKey,
   normaliseName,
   venueAliasesFor,
   DEFAULT_VENUE_ALIASES,
@@ -146,6 +147,8 @@ export interface BuildOptions {
   sideOf?: (leagueKey: string, name: string) => ResolvedSide | undefined;
   /** League label for series names (the tenant's own on a real run). */
   labelOf?: (key: string) => string;
+  /** Registry lookup aliases (the tenant's merged under the titans map on a real run). */
+  aliases?: Record<string, string>;
 }
 
 /**
@@ -160,8 +163,9 @@ export function buildTitansSeries(
   heldBack: HeldBackFixture[] = HELD_BACK,
   opts: BuildOptions = {},
 ): TitansBuildOutcome {
+  const keyOf = (n: string) => (opts.aliases ? groundKey(n, opts.aliases) : titansGroundKey(n));
   const registry = new Map<string, Venue>();
-  for (const v of venues) registry.set(titansGroundKey(v.name), v);
+  for (const v of venues) registry.set(keyOf(v.name), v);
   const clubsById = new Map(CLUB_MAP.map((c) => [c.id, c]));
   const outcome: TitansBuildOutcome = {
     built: [],
@@ -231,7 +235,7 @@ export function buildTitansSeries(
           return wf;
         }
         wf.venueReason = 'Titans 2026-27 fixtures workbook — exact venue';
-        const v = registry.get(titansGroundKey(f.venue));
+        const v = registry.get(keyOf(f.venue));
         if (v) {
           wf.venueId = v.id;
           wf.venueName = v.name;
@@ -1299,7 +1303,7 @@ async function runImport(args: Args) {
     sheets,
     venues,
     HELD_BACK,
-    plan ? { sideOf: (k, n) => plan.resolve.get(sideKey(k, n)), labelOf } : {},
+    plan ? { sideOf: (k, n) => plan.resolve.get(sideKey(k, n)), labelOf, aliases } : {},
   );
   if (args.only.length) {
     outcome.built = outcome.built.filter((b) => args.only.includes(String(b.series.id)));

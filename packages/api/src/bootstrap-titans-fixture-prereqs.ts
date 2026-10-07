@@ -17,9 +17,11 @@
  *      elsewhere is reported, never overwritten.
  *   3. VENUE REGISTRY — one row per canonical ground in the workbook (plus each club's own
  *      ground), `surfaces` 1 until the union answers the capacity question, `homeClubIds` = the
- *      clubs hosting 2+ home fixtures there (veterans central-venue days excluded) plus the club whose ground it is. An existing row
- *      (matched by titans ground key) keeps its name/pin/surfaces; missing homeClubIds are
- *      unioned in.
+ *      clubs hosting 2+ home fixtures there (veterans central-venue days excluded) plus the club whose
+ *      ground it is. An EXISTING row is matched the way the clash gate's registryResolver
+ *      does (groundKey with the tenant aliases + the titans map) and reused as-is — id, name,
+ *      pin, surfaces and homeClubIds untouched; a homeClubIds difference is reported only.
+ *      Only unmatched grounds are created; never a duplicate of an existing venue.
  *
  * Fail-closed: a workbook that does not parse clean aborts before anything is read or written.
  */
@@ -29,10 +31,11 @@ import {
   TITANS_LEAGUE_KEYS,
   TITANS_NEW_LEAGUES,
   TITANS_TENANT,
+  TITANS_GATE_ALIASES,
   TITANS_VENUE_ALIASES,
   parseTitansWorkbook,
-  titansGroundKey,
 } from './titans-fixture-map.js';
+import { groundKey, venueAliasesFor } from './venue-clash.js';
 import { DEFAULT_PATHS, clubsFromMap, wouldBeRegistry } from './import-titans-fixtures.js';
 import { OVERARCHING_DISTRICT } from './catalogue.js';
 import { validateCompetitionDefaults } from './config-validation.js';
@@ -97,31 +100,61 @@ export function aliasMerge(config: Pick<TenantConfig, 'competitionDefaults'>): {
   return { add, conflicts };
 }
 
-/** The registry diff against what the tenant already holds (titans ground keys). */
+export interface VenueMatch {
+  wanted: Venue;
+  existing: Venue;
+  /** Derived homeClubIds the stored row lacks / stored ones the workbook does not derive —
+   * reported only; an existing row is never rewritten. */
+  homeMissing: string[];
+  homeExtra: string[];
+}
+
+/**
+ * The registry diff against what the tenant already holds. A wanted ground MATCHES an existing
+ * row the way the clash gate's `registryResolver` does — `groundKey(name, aliases)` with the
+ * tenant's aliases merged under the titans map — and the existing row (its id, name, pin,
+ * surfaces, homeClubIds) is reused untouched. Only unmatched grounds are created, and a new
+ * id that collides with an existing one is a problem, never an overwrite.
+ */
 export function registryDiff(
   wanted: Venue[],
   existing: Venue[],
-): { create: Venue[]; update: Array<{ venue: Venue; changes: string[] }>; untouched: number } {
+  aliases: Record<string, string> = TITANS_GATE_ALIASES,
+): { create: Venue[]; matched: VenueMatch[]; unused: Venue[]; problems: string[] } {
   const byKey = new Map<string, Venue>();
-  for (const v of existing) byKey.set(titansGroundKey(v.name), v);
+  const problems: string[] = [];
+  for (const v of existing) {
+    const k = groundKey(v.name, aliases);
+    const prior = byKey.get(k);
+    if (prior)
+      problems.push(
+        `existing venues "${prior.name}" (${prior.id}) and "${v.name}" (${v.id}) share ground key "${k}"`,
+      );
+    else byKey.set(k, v);
+  }
+  const ids = new Set(existing.map((v) => v.id));
   const create: Venue[] = [];
-  const update: Array<{ venue: Venue; changes: string[] }> = [];
-  let untouched = 0;
+  const matched: VenueMatch[] = [];
+  const used = new Set<string>();
   for (const w of wanted) {
-    const cur = byKey.get(titansGroundKey(w.name));
+    const cur = byKey.get(groundKey(w.name, aliases));
     if (!cur) {
+      if (ids.has(w.id))
+        problems.push(`new venue id ${w.id} ("${w.name}") already exists on another venue`);
       create.push(w);
       continue;
     }
-    const missing = (w.homeClubIds ?? []).filter((id) => !(cur.homeClubIds ?? []).includes(id));
-    if (missing.length)
-      update.push({
-        venue: { ...cur, homeClubIds: [...(cur.homeClubIds ?? []), ...missing] },
-        changes: [`+homeClubIds ${missing.join(', ')}`],
-      });
-    else untouched++;
+    used.add(cur.id);
+    const have = cur.homeClubIds ?? [];
+    const want = w.homeClubIds ?? [];
+    matched.push({
+      wanted: w,
+      existing: cur,
+      homeMissing: want.filter((id) => !have.includes(id)),
+      homeExtra: have.filter((id) => !want.includes(id)),
+    });
   }
-  return { create, update, untouched };
+  return { create, matched, unused: existing.filter((v) => !used.has(v.id)), problems };
 }
 
 async function main() {
@@ -193,20 +226,34 @@ async function main() {
   for (const c of conflicts) console.log(`  ⚠ alias conflict left alone: ${c}`);
 
   // ── Registry ──
-  const { create, update, untouched } = registryDiff(wanted, existingVenues);
+  const aliases = { ...venueAliasesFor(config), ...TITANS_VENUE_ALIASES };
+  const { create, matched, unused, problems } = registryDiff(wanted, existingVenues, aliases);
   console.log(
-    `\n── Venue registry: ${existingVenues.length} existing · ${create.length} to create · ${update.length} to update · ${untouched} untouched`,
+    `\n── Venue registry: ${existingVenues.length} existing · ${matched.length} matched (id reused, row untouched) · ${create.length} to create · ${unused.length} existing not in the workbook`,
   );
+  for (const m of matched)
+    console.log(
+      `  match "${m.wanted.name}" → existing ${m.existing.id} "${m.existing.name}"` +
+        (m.homeMissing.length || m.homeExtra.length
+          ? ` — homeClubIds differ (not changed): derived-but-absent [${m.homeMissing.join(', ')}], stored-not-derived [${m.homeExtra.join(', ')}]`
+          : ''),
+    );
   for (const v of create)
     console.log(
       `  ${args.confirm ? 'create' : '[dry-run] would create'} "${v.name}" (${v.id}, surfaces ${v.surfaces}, home of ${v.homeClubIds?.join(', ') || '—'})`,
     );
-  for (const u of update)
+  for (const v of unused)
     console.log(
-      `  ${args.confirm ? 'update' : '[dry-run] would update'} "${u.venue.name}": ${u.changes.join('; ')}`,
+      `  existing ${v.id} "${v.name}" (home of ${v.homeClubIds?.join(', ') || '—'}) — no workbook fixture uses it; untouched`,
     );
+  if (problems.length) {
+    console.error(`\n✗ ${problems.length} registry problem(s) — refusing:`);
+    for (const p of problems) console.error(`   ${p}`);
+    process.exitCode = 1;
+    return;
+  }
 
-  if (!addLeagues.length && !nAliases && !create.length && !update.length) {
+  if (!addLeagues.length && !nAliases && !create.length) {
     console.log('\nNothing to do — all prerequisites already in place.');
     return;
   }
@@ -232,10 +279,6 @@ async function main() {
   for (const v of create) {
     await repo!.putVenue(TITANS_TENANT, v);
     console.log(`wrote venue ${v.id}`);
-  }
-  for (const u of update) {
-    await repo!.putVenue(TITANS_TENANT, u.venue);
-    console.log(`updated venue ${u.venue.id}`);
   }
   console.log('Done.');
 }

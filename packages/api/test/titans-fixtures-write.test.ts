@@ -209,6 +209,34 @@ describe('planSides — resolution against live rosters', () => {
     assert.equal(plan.fatal.length, 2, plan.fatal.join('\n'));
   });
 
+  test('a stored roster under a count of 1 is ignored, as the engine does', () => {
+    const sin = club('sinoville-cricket-club', {
+      leagues: ['veterans-league'],
+      leagueTeams: { 'veterans-league': 1 },
+      teamRosters: {
+        'veterans-league': [
+          { id: 'tm_sinoville-cricket-club_veterans-league_0', name: 'SINOVILLE 1' },
+          { id: 'tm_sinoville-cricket-club_veterans-league_1', name: 'SINOVILLE 2' },
+        ],
+      },
+    });
+    const one = planSides([{ leagueKey: 'veterans-league', name: 'SINOVILLE 1' }], [sin], {
+      allowAppend: true,
+    });
+    assert.equal(one.resolve.get('veterans-league::SINOVILLE 1')!.teamId, 'sinoville-cricket-club');
+    assert.equal(one.warnings.length, 1);
+    const two = planSides(
+      [
+        { leagueKey: 'veterans-league', name: 'SINOVILLE 1' },
+        { leagueKey: 'veterans-league', name: 'SINOVILLE 2' },
+      ],
+      [sin],
+      { allowAppend: true },
+    );
+    assert.equal(two.fatal.length, 1);
+    assert.equal(two.patches.length, 0);
+  });
+
   test('fixtures-only cup sides are left out of the counters', () => {
     const tuks = club('tuks-cricket-club', {
       leagues: ['premier-league'],
@@ -251,21 +279,63 @@ describe('bootstrap diffs', () => {
     assert.equal(Object.keys(r.add).length, Object.keys(TITANS_VENUE_ALIASES).length - 1);
   });
 
-  test('registry rows are matched by ground key; homeClubIds are unioned', () => {
+  test('existing registry rows are matched (aliases too) and reused untouched, never duplicated', () => {
+    const existing = [
+      // prod's own spelling of Centurion Kavaliers' ground, with a prod-style id
+      {
+        id: 'high-school-uitisg-a-b26276',
+        name: 'HIGH SCHOOL UITISG A',
+        homeClubIds: ['c1'],
+        surfaces: 2,
+      },
+      { id: 'aloe-park-08c18e', name: 'Aloe Park', homeClubIds: ['police'], surfaces: 1 },
+      {
+        id: 'irene-oval-cricket-ground-de34e6',
+        name: 'irene Oval Cricket Ground',
+        homeClubIds: ['x'],
+      },
+    ];
     const r = registryDiff(
       [
-        { id: 'v-a', name: 'HIGH SCHOOL UITSIG A', homeClubIds: ['c1', 'c2'], surfaces: 1 },
-        { id: 'v-b', name: 'NEW GROUND', homeClubIds: [], surfaces: 1 },
+        {
+          id: 'v-high-school-uitsig-a',
+          name: 'HIGH SCHOOL UITSIG A',
+          homeClubIds: ['c1', 'c2'],
+          surfaces: 1,
+        },
+        { id: 'v-aloe-park', name: 'ALOE PARK', homeClubIds: ['police'], surfaces: 1 },
+        { id: 'v-irene-oval', name: 'IRENE OVAL', homeClubIds: [], surfaces: 1 },
       ],
-      [{ id: 'old', name: 'High School Uitisg A', homeClubIds: ['c1'], surfaces: 2 }],
+      existing,
+    );
+    assert.deepEqual(r.problems, []);
+    assert.deepEqual(
+      r.matched.map((m) => [m.wanted.name, m.existing.id]),
+      [
+        ['HIGH SCHOOL UITSIG A', 'high-school-uitisg-a-b26276'],
+        ['ALOE PARK', 'aloe-park-08c18e'],
+      ],
+    );
+    // the derived home club difference is reported, the stored row is not rewritten
+    assert.deepEqual(r.matched[0].homeMissing, ['c2']);
+    assert.deepEqual(existing[0].homeClubIds, ['c1']);
+    // "irene Oval Cricket Ground" is not merged into IRENE OVAL by guesswork
+    assert.deepEqual(
+      r.create.map((v) => v.name),
+      ['IRENE OVAL'],
     );
     assert.deepEqual(
-      r.create.map((v) => v.id),
-      ['v-b'],
+      r.unused.map((v) => v.id),
+      ['irene-oval-cricket-ground-de34e6'],
     );
-    assert.equal(r.update[0].venue.id, 'old');
-    assert.equal(r.update[0].venue.surfaces, 2);
-    assert.deepEqual(r.update[0].venue.homeClubIds, ['c1', 'c2']);
+  });
+
+  test('a new id colliding with an existing venue is a problem, not an overwrite', () => {
+    const r = registryDiff(
+      [{ id: 'v-new', name: 'NEW GROUND', homeClubIds: [], surfaces: 1 }],
+      [{ id: 'v-new', name: 'Something Else' }],
+    );
+    assert.equal(r.problems.length, 1);
   });
 });
 

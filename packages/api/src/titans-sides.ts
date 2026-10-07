@@ -204,7 +204,20 @@ export function planSides(
         plan.resolve.set(sideKey(leagueKey, name), side);
       const missing: string[] = [];
 
-      if (roster.length) {
+      // clubTeamsForLeague reads a roster only at a count of 2+; below that the club's single
+      // side IS the club id, whatever a stale roster says. Follow the engine.
+      if (roster.length && count < 2) {
+        plan.warnings.push(
+          `${where}: leagueTeams says ${count} but a ${roster.length}-entry roster is stored — the engine ignores it (single side = club id)`,
+        );
+        if (names.length > 1) {
+          plan.fatal.push(
+            `${where}: ${names.length} sheet sides, leagueTeams ${count} with a stale roster [${roster.map((t) => t.id).join(', ')}] — needs a decision (growing would rewrite those ids)`,
+          );
+          continue;
+        }
+      }
+      if (roster.length && count >= 2) {
         if (count !== roster.length)
           plan.warnings.push(
             `${where}: leagueTeams says ${count} but the roster lists ${roster.length}`,
