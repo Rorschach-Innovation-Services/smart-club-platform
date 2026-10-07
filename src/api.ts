@@ -1142,6 +1142,8 @@ export const forwardLinkedCaptainsReport = (token: string, candidateId: string) 
 // ── Chair scorecard confirmation ──
 // The public `/sc/<token>` digest: no auth, the token is the capability. Each match is answered
 // once (first submit wins → 409 `entry_closed`); every answer returns the whole digest again.
+// An answer carries the rendered card's `scorecardFetchedAt` so the server records the version
+// the chair actually saw.
 const scorecardLinkPath = (token: string) => `/scorecard-confirm-link/${encodeURIComponent(token)}`;
 export const getScorecardConfirmLink = (token: string) =>
   request<ScorecardConfirmView>(scorecardLinkPath(token), { auth: false });

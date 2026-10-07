@@ -217,7 +217,7 @@ function TenantSection({ t }: { t: PlatformScorecardTenant }) {
                       <td style={{ whiteSpace: 'nowrap', fontSize: 12.5 }}>
                         {r.notifiedAt ? formatStamp(r.notifiedAt) : '—'}
                       </td>
-                      <td>
+                      <td className="scc-notice">
                         <NoticeChips deliveries={r.deliveries} />
                       </td>
                     </tr>
@@ -243,19 +243,36 @@ export function runSummaryLine(s: ScorecardConfirmationsRunSummary): string {
   );
 }
 
+/** The last run's outcome — shown under the page head, so the controls never move. */
+function RunSummary({
+  summary,
+  weekKey,
+}: {
+  summary: ScorecardConfirmationsRunSummary;
+  weekKey: string;
+}) {
+  return (
+    <div role="status" style={{ ...MUTED, fontSize: 12.5, margin: '-12px 0 16px' }}>
+      Ran {summary.weekKey === weekKey ? 'this week' : `week ending ${summary.weekKey}`}:{' '}
+      {runSummaryLine(summary)}
+    </div>
+  );
+}
+
 function RunNow({
   weekKey,
   weekLabel,
   toast,
+  onRan,
 }: {
   weekKey: string;
   weekLabel: string;
   toast: Toast;
+  onRan: (summary: ScorecardConfirmationsRunSummary) => void;
 }) {
   const [asking, setAsking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
-  const [summary, setSummary] = useState<ScorecardConfirmationsRunSummary | null>(null);
   const qc = useQueryClient();
 
   async function run() {
@@ -263,7 +280,7 @@ function RunNow({
     setErr('');
     try {
       const res = await runScorecardConfirmations(weekKey);
-      setSummary(res);
+      onRan(res);
       setAsking(false);
       toast('Scorecard confirmations run complete');
       await qc.invalidateQueries({ queryKey: ['platform-scorecard-confirmations'] });
@@ -279,12 +296,6 @@ function RunNow({
       <Btn tone="teal" size="sm" icon={Icon.Bell} onClick={() => setAsking(true)}>
         Run now
       </Btn>
-      {summary && (
-        <div role="status" style={{ ...MUTED, fontSize: 12.5, marginTop: 8, width: '100%' }}>
-          Ran {summary.weekKey === weekKey ? 'this week' : `week ending ${summary.weekKey}`}:{' '}
-          {runSummaryLine(summary)}
-        </div>
-      )}
       {asking && (
         <Modal
           eyebrow="Scorecard confirmations"
@@ -319,6 +330,7 @@ function RunNow({
 export function ScorecardConfirmationsPage({ toast }: { toast: Toast }) {
   // '' = the server's default (the latest completed week); arrows set an explicit Sunday.
   const [week, setWeek] = useState('');
+  const [summary, setSummary] = useState<ScorecardConfirmationsRunSummary | null>(null);
   const q = useQuery({
     queryKey: qk.platformScorecardConfirmations(week),
     queryFn: () => listPlatformScorecardConfirmations(week || undefined),
@@ -365,9 +377,17 @@ export function ScorecardConfirmationsPage({ toast }: { toast: Toast }) {
               →
             </Btn>
           </div>
-          {data && <RunNow weekKey={data.weekKey} weekLabel={data.weekLabel} toast={toast} />}
+          {data && (
+            <RunNow
+              weekKey={data.weekKey}
+              weekLabel={data.weekLabel}
+              toast={toast}
+              onRan={setSummary}
+            />
+          )}
         </div>
       </div>
+      {summary && <RunSummary summary={summary} weekKey={shown} />}
 
       {q.isLoading ? (
         <p style={MUTED}>Loading confirmations…</p>

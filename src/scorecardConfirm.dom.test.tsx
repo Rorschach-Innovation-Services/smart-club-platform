@@ -117,7 +117,11 @@ describe('the digest page', () => {
     getLink().mockResolvedValue(view([entry()]));
     renderPage();
     const match = await card();
-    expect(screen.getByText(/UKZN CC \/ Scorecards · SC-2026-0007/)).toBeInTheDocument();
+    expect(screen.getByText(/UKZN CC \/ Scorecards ·/)).toHaveTextContent(
+      'UKZN CC / Scorecards · SC-2026-0007',
+    );
+    // The ref never breaks across lines on a phone.
+    expect(screen.getByText('SC-2026-0007')).toHaveStyle({ whiteSpace: 'nowrap' });
     expect(screen.getByText(/28 Sep – 4 Oct 2026/)).toBeInTheDocument();
     expect(screen.getByText('Dolphins Cricket')).toBeInTheDocument();
     // Own club is marked on the matchup.
@@ -188,6 +192,19 @@ describe('answering', () => {
     expect(screen.getByText(/All 1 match answered/)).toBeInTheDocument();
   });
 
+  it('echoes the version of the scorecard it rendered with the answer', async () => {
+    const user = userEvent.setup();
+    getLink().mockResolvedValue(view([entry({ scorecardFetchedAt: '2026-10-04T15:00:00.000Z' })]));
+    submit().mockResolvedValue(view([entry({ status: 'confirmed' })]));
+    renderPage('a.b');
+    const match = await card();
+    await user.click(within(match).getByRole('button', { name: /confirm — stats are correct/i }));
+    expect(submit()).toHaveBeenCalledWith('a.b', 's1', 'f1', {
+      action: 'confirm',
+      scorecardFetchedAt: '2026-10-04T15:00:00.000Z',
+    });
+  });
+
   it('requires correction text, caps it at 2000 characters and sends it trimmed', async () => {
     const user = userEvent.setup();
     getLink().mockResolvedValue(view([entry()]));
@@ -202,6 +219,8 @@ describe('answering', () => {
     expect(submit()).not.toHaveBeenCalled();
 
     const box = within(match).getByRole('textbox', { name: /what needs correcting/i });
+    // The error sends the chair straight back to the field.
+    expect(box).toHaveFocus();
     expect(box).toHaveAttribute('maxLength', '2000');
     await user.click(box);
     await user.paste('x'.repeat(2100));

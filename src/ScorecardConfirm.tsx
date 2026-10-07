@@ -11,7 +11,7 @@
  * phone, so every table scrolls sideways inside its own wrapper instead of widening the page.
  * No optimistic updates: the page always shows what the server returned.
  */
-import { useEffect, useId, useState, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { useParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Btn, Icon, Pill } from './atoms';
@@ -175,6 +175,7 @@ function Answer({ entry, submit }: AnswerProps) {
   const [busy, setBusy] = useState(false);
   const fieldId = useId();
   const counterId = useId();
+  const fieldRef = useRef<HTMLTextAreaElement>(null);
 
   if (entry.status === 'confirmed')
     return (
@@ -219,7 +220,9 @@ function Answer({ entry, submit }: AnswerProps) {
   function sendCorrection() {
     const why = feedbackProblem(text);
     setProblem(why);
-    if (!why) void go({ action: 'correction', feedback: text.trim() });
+    // Back to the field the error is about, so the chair can type straight away.
+    if (why) fieldRef.current?.focus();
+    else void go({ action: 'correction', feedback: text.trim() });
   }
 
   if (!correcting)
@@ -246,6 +249,7 @@ function Answer({ entry, submit }: AnswerProps) {
         What needs correcting? <span className="req">*</span>
       </label>
       <textarea
+        ref={fieldRef}
         id={fieldId}
         className="field-textarea"
         value={text}
@@ -421,12 +425,14 @@ export function ScorecardConfirmLinkPage() {
       return next;
     });
     try {
-      const view = await submitScorecardConfirmEntry(
-        token,
-        entry.seriesId,
-        entry.fixtureId,
-        answer,
-      );
+      // Echo the scorecard version this page rendered: the server records the answer
+      // against it, not whatever card it holds by the time the answer lands.
+      const view = await submitScorecardConfirmEntry(token, entry.seriesId, entry.fixtureId, {
+        ...answer,
+        ...(entry.scorecard && entry.scorecardFetchedAt
+          ? { scorecardFetchedAt: entry.scorecardFetchedAt }
+          : {}),
+      });
       qc.setQueryData<ScorecardConfirmView>(key, view);
     } catch (err) {
       if (err instanceof ApiError && (err.status === 409 || err.status === 410)) {
@@ -486,7 +492,8 @@ export function ScorecardConfirmLinkPage() {
         <div className="page-head">
           <div className="ph-left">
             <div className="ph-crumb">
-              {data.clubName} / Scorecards · {data.ref}
+              {data.clubName} / Scorecards ·{' '}
+              <span style={{ whiteSpace: 'nowrap' }}>{data.ref}</span>
             </div>
             <h1 className="ph-title">
               Weekend <em>scorecards</em>

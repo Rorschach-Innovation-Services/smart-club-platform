@@ -495,6 +495,8 @@ export interface ScorecardConfirmEntry {
   };
   medicoachMatchUrl?: string;
   scorecard?: { matchState?: string; innings: InningsScorecard[] };
+  /** The version (fetch instant) of `scorecard` — echoed back when the chair answers. */
+  scorecardFetchedAt?: string;
 }
 
 /** GET /scorecard-confirm-link/:token (and every PUT answer) — the chair's whole digest. */
@@ -512,6 +514,8 @@ export interface ScorecardConfirmView {
 export interface ScorecardConfirmAnswer {
   action: 'confirm' | 'correction';
   feedback?: string;
+  /** The `scorecardFetchedAt` of the entry as rendered: the card the chair answered against. */
+  scorecardFetchedAt?: string;
 }
 
 /** A digest notice's delivery row (the captain's-report shape; the API drops the message id). */
