@@ -4501,7 +4501,9 @@
       }
       @media (max-width: 1100px) {
         .cr-layout {
-          grid-template-columns: 1fr;
+          /* minmax(0, …): a bare 1fr never shrinks below its content's min width, so the
+             scorecard tables would widen the page instead of scrolling in their wrappers. */
+          grid-template-columns: minmax(0, 1fr);
         }
         /* The side panel's job moves to a sticky bottom bar on smaller screens. */
         .cr-aside {
