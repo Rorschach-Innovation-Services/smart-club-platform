@@ -179,7 +179,7 @@ describe("captain's report template (v2 copy, edited in place in Meta 4 Oct 2026
     const names = Object.values(WHATSAPP_TEMPLATES)
       .map((d) => d.name)
       .filter((n) => n.startsWith('captains_report'));
-    assert.deepEqual(names, ['captains_report_due', 'captains_report_ops_digest']);
+    assert.deepEqual(names, ['captains_report_due', 'captains_report_ops_digest_v2']);
     const linked = Object.values(WHATSAPP_TEMPLATES).filter(
       (d) => d.name.startsWith('captains_report') && 'urlButton' in d,
     );
@@ -193,8 +193,10 @@ describe("captain's report template (v2 copy, edited in place in Meta 4 Oct 2026
 describe("captain's report ops digest template", () => {
   const digest = WHATSAPP_TEMPLATES.captainsReportOpsDigest;
 
-  test('two body params, no URL button, registered in Meta (6 Oct 2026)', () => {
-    assert.equal(digest.name, 'captains_report_ops_digest');
+  test('two body params, no URL button, registered in Meta as UTILITY (v2, 7 Oct 2026)', () => {
+    // v1 (captains_report_ops_digest) was approved as MARKETING; category is immutable
+    // once approved, so v2 was created fresh as Utility with transaction-anchored copy.
+    assert.equal(digest.name, 'captains_report_ops_digest_v2');
     assert.equal(digest.lang, 'en');
     assert.equal(digest.status, 'registered');
     assert.equal(digest.paramCount, 2);
@@ -203,8 +205,9 @@ describe("captain's report ops digest template", () => {
     assert.equal(
       digest.bodyText,
       'Hello {{1}},\n\n' +
-        "Captain's report run update: {{2}}.\n\n" +
-        'Automated status message for union administrators.',
+        'Account status notification for your union administrator account.\n\n' +
+        "Latest captain's report processing run: {{2}}.\n\n" +
+        'This is an automated service message. No action is required.',
     );
   });
 

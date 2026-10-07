@@ -395,7 +395,7 @@ export interface CaptainsReportOpsDigestWhatsAppInput {
 }
 
 /**
- * Build the two body params for `captains_report_ops_digest`, in order: {{1}} recipient
+ * Build the two body params for `captains_report_ops_digest_v2`, in order: {{1}} recipient
  * name (fallback 'there'), {{2}} the one-line run summary (bounded at 300 chars).
  */
 export function captainsReportOpsDigestParams(

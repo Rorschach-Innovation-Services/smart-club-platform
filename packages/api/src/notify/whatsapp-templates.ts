@@ -223,20 +223,29 @@ export const WHATSAPP_TEMPLATES = {
    * one-line count summary ("Dolphins: 3 new results, 6 reports opened, 6 notices sent,
    * 0 failed") with no player, club-contact or link detail.
    *
-   * NOT yet created in Meta. Like `captainsReportDue`, this status IS read at runtime: the
-   * sender throws `WhatsAppTemplatePendingError` until it is "registered", and the sync run
-   * skips the digest silently. Create it under this name with the body below, then flip.
+   * Like `captainsReportDue`, this status IS read at runtime: the sender throws
+   * `WhatsAppTemplatePendingError` until it is "registered", and the sync run skips the
+   * digest silently.
+   *
+   * V2 HISTORY: the original `captains_report_ops_digest` (approved 6 Oct 2026, template id
+   * 1516075533660158) was auto-categorized MARKETING by Meta — its body was a greeting plus
+   * one free-text variable, nothing transactional for the classifier to anchor on. Category
+   * is immutable once approved, so this v2 was created fresh as UTILITY with
+   * transaction-anchored copy ("account status notification", "no action is required") and
+   * approved Active on 7 Oct 2026 (template id 29115540798081571). Delete the Marketing v1
+   * in Business Manager once this is deployed.
    */
   captainsReportOpsDigest: {
-    name: 'captains_report_ops_digest',
+    name: 'captains_report_ops_digest_v2',
     lang: 'en',
     paramCount: 2,
     params: ['recipient name', 'run summary'],
     bodyText:
       'Hello {{1}},\n\n' +
-      "Captain's report run update: {{2}}.\n\n" +
-      'Automated status message for union administrators.',
-    // Approved in Meta on 6 Oct 2026.
+      'Account status notification for your union administrator account.\n\n' +
+      "Latest captain's report processing run: {{2}}.\n\n" +
+      'This is an automated service message. No action is required.',
+    // Approved in Meta as UTILITY on 7 Oct 2026 (v2; v1 was approved-as-Marketing).
     status: 'registered',
   },
 } as const satisfies Record<string, WhatsAppTemplateDefinition>;
