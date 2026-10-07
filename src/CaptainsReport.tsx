@@ -16,7 +16,7 @@
  * Only an UNSENT draft lives in localStorage; submitted reports live on the server.
  */
 
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useId, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -29,6 +29,7 @@ import {
   createUnlistedCaptainsReport,
   forwardClubCaptainsReport,
   forwardLinkedCaptainsReport,
+  getClubCaptainsReport,
   getClubCaptainsReports,
   getClubReportForwardCandidates,
   getLinkedCaptainsReport,
@@ -56,7 +57,19 @@ import {
   type AppointedUmpire,
   type ReportUmpireEntry,
 } from '../packages/engine/src/captainsReport';
-import type { CaptainsReport, CaptainsReportFields } from './types';
+import {
+  HeadlineResult,
+  InningsCard,
+  ScorecardAnswer,
+  ScorecardOutcome,
+  type ScorecardChoice,
+} from './ScorecardView';
+import type {
+  CaptainsReport,
+  CaptainsReportFields,
+  CaptainsReportScorecardAnswer,
+  ScorecardContext,
+} from './types';
 
 const SUBSTITUTE = '__substitute';
 
@@ -442,11 +455,19 @@ export function UmpireCard({
 }
 
 /** The report's header facts (read-only: they come from the fixture and the result). */
-function MatchFacts({ report }: { report: ReportShell }) {
+function MatchFacts({ report, hasScorecard }: { report: ReportShell; hasScorecard?: boolean }) {
   const expires = fmtLinkExpiry(report.linkExpiresAt);
   return (
     <div className="rp-section">
-      <SectionHead n={1} title="Match details" sub="From the fixture list and the scorecard." />
+      <SectionHead
+        n={1}
+        title="Match details"
+        sub={
+          hasScorecard
+            ? 'From the fixture list and the result. Check the full scorecard below.'
+            : 'From the fixture list and the result.'
+        }
+      />
       <div className="cr-fixture-line" style={{ marginTop: 0 }}>
         <strong>{matchLine(report)}</strong>
       </div>
@@ -505,7 +526,106 @@ export type ReportShell = Pick<
   | 'umpires'
   | 'general'
   | 'declaration'
->;
+> &
+  Partial<Pick<CaptainsReport, 'scorecard'>>;
+
+/** Same name, ignoring case and outer spaces — no fuzzier than that. */
+const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+
+/** A stored answer as the form edits it (the server-only stamps dropped). */
+const toChoice = (
+  a?: CaptainsReportScorecardAnswer | ScorecardChoice,
+): ScorecardChoice | undefined =>
+  a ? { action: a.action, ...(a.feedback ? { feedback: a.feedback } : {}) } : undefined;
+
+/** Whether the scorecard step is done: confirmed, or a correction that says what. */
+const scorecardAnswered = (a?: ScorecardChoice) =>
+  !!a && (a.action === 'confirmed' || !!a.feedback?.trim());
+
+/**
+ * The match scorecard, between the match details and the umpires: every innings (own side
+ * anchored by the report's side) and the confirm-or-correct answer. No stored card yet: the
+ * headline result and medicoach's link, with nothing to answer. Nothing at all for a match
+ * without a result (an unlisted match, a by-hand filing).
+ */
+function MatchScorecardSection({
+  report,
+  context,
+  value,
+  onChange,
+  note,
+  sectionRef,
+  disabled,
+}: {
+  report: ReportShell;
+  context?: ScorecardContext;
+  value: ScorecardChoice | undefined;
+  onChange: (next: ScorecardChoice) => void;
+  note?: string | null;
+  sectionRef?: React.Ref<HTMLDivElement>;
+  disabled?: boolean;
+}) {
+  const headId = useId();
+  const card = context?.scorecard;
+  if (!card && !context?.result && !context?.medicoachMatchUrl) return null;
+  const home = report.side === 'home' ? report.clubName : report.opponentName;
+  const away = report.side === 'home' ? report.opponentName : report.clubName;
+  const team = (side: 'home' | 'away', name: string) =>
+    report.side === side ? <strong>{name}</strong> : <span>{name}</span>;
+  return (
+    <div
+      className="rp-section sc-report"
+      ref={sectionRef}
+      tabIndex={-1}
+      role="region"
+      aria-labelledby={headId}
+      data-testid="report-scorecard"
+    >
+      <SectionHead
+        n="1B"
+        title={<span id={headId}>Match scorecard</span>}
+        sub={
+          card
+            ? 'Check the stats, then confirm them or tell us what needs correcting.'
+            : 'The full scorecard is not available here yet.'
+        }
+      />
+      <div className="sc-match-title">
+        {team('home', home)} <span className="sc-vs">vs</span> {team('away', away)}
+        <span className="sc-side-tag">{report.side === 'home' ? 'Home' : 'Away'}</span>
+      </div>
+      {note && (
+        <div className="rp-validation" role="alert" style={{ marginTop: 10 }}>
+          {note}
+        </div>
+      )}
+      {card ? (
+        <>
+          {card.matchState && (
+            <div className="cr-section-sub" style={{ marginTop: 4 }}>
+              {card.matchState}
+            </div>
+          )}
+          <div className="sc-scorecard">
+            {card.innings.map((inn, i) => (
+              <InningsCard key={i} inn={inn} own={sameName(inn.battingTeamName, report.clubName)} />
+            ))}
+          </div>
+          <ScorecardAnswer value={value} onChange={onChange} disabled={disabled} />
+        </>
+      ) : (
+        <HeadlineResult
+          match={{
+            homeTeamName: home,
+            awayTeamName: away,
+            result: context?.result,
+            medicoachMatchUrl: context?.medicoachMatchUrl,
+          }}
+        />
+      )}
+    </div>
+  );
+}
 
 interface CaptainsReportFormProps {
   report: ReportShell;
@@ -515,6 +635,13 @@ interface CaptainsReportFormProps {
   onSaveDraft?: (fields: CaptainsReportFields) => Promise<unknown>;
   onSubmit: (fields: CaptainsReportFields) => Promise<unknown>;
   busy?: boolean;
+  /** The match scorecard to confirm (an available card makes the answer required). */
+  scorecardContext?: ScorecardContext;
+  /**
+   * The server refused the submit because a scorecard is attached that this form did not
+   * show (`code: 'scorecard_required'`): load it, so the section can be revealed.
+   */
+  onScorecardRequired?: (err: ApiError) => Promise<unknown> | void;
 }
 
 /** The fillable report — shared by the club portal and the public link page. */
@@ -526,6 +653,8 @@ export function CaptainsReportForm({
   onSaveDraft,
   onSubmit,
   busy,
+  scorecardContext,
+  onScorecardRequired,
 }: CaptainsReportFormProps) {
   const appointed = report.umpiresSnapshot ?? [];
   const mode = umpireCardMode(appointed);
@@ -537,25 +666,56 @@ export function CaptainsReportForm({
       umpires: report.umpires?.length ? report.umpires : initialUmpireCards(appointed),
       general: report.general ?? '',
       declaration: !!report.declaration,
+      ...(report.scorecard ? { scorecard: report.scorecard } : {}),
     };
   });
   const [captainName, setCaptainName] = useState(initial.captainName);
   const [umpires, setUmpires] = useState<ReportUmpireEntry[]>(initial.umpires);
   const [general, setGeneral] = useState(initial.general);
   const [declaration, setDeclaration] = useState(initial.declaration);
+  const [scorecard, setScorecard] = useState<ScorecardChoice | undefined>(() =>
+    toChoice(initial.scorecard),
+  );
+  // A scorecard the server said was attached after this form loaded (see submit()).
+  const [revealNote, setRevealNote] = useState<string | null>(null);
+  const scorecardRef = useRef<HTMLDivElement>(null);
   // Guide starts collapsed on phones, where five stacked descriptions push the form down.
   const [guideOpen] = useState(() => !window.matchMedia?.('(max-width: 640px)').matches);
 
-  const fields: CaptainsReportFields = { captainName, umpires, general, declaration };
+  // Only an AVAILABLE card is answered — and then the answer is required to submit.
+  const card = scorecardContext?.scorecard;
+  const answer = card ? scorecard : undefined;
+  const fields: CaptainsReportFields = {
+    captainName,
+    umpires,
+    general,
+    declaration,
+    ...(answer ? { scorecard: answer } : {}),
+  };
   // Keep an unsent draft in this browser only.
   useEffect(() => {
-    rememberDraft(report.id, { captainName, umpires, general, declaration });
-  }, [report.id, captainName, umpires, general, declaration]);
+    rememberDraft(report.id, {
+      captainName,
+      umpires,
+      general,
+      declaration,
+      ...(scorecard ? { scorecard } : {}),
+    });
+  }, [report.id, captainName, umpires, general, declaration, scorecard]);
 
-  const problems = submissionProblems(fields);
+  // The card arrived after a refused submit: bring the section into view.
+  const hasCard = !!card;
+  useEffect(() => {
+    if (!revealNote || !hasCard) return;
+    scorecardRef.current?.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
+    scorecardRef.current?.focus();
+  }, [revealNote, hasCard]);
+
+  const problems = submissionProblems({ ...fields, scorecardRequired: hasCard });
   const ready = problems.length === 0;
   const steps = [
     { label: "Captain's name", done: !!captainName.trim() },
+    ...(card ? [{ label: 'Confirm the scorecard', done: scorecardAnswered(answer) }] : []),
     ...umpires.map((u, i) => ({ label: `Umpire ${i + 1} rated`, done: umpireEntryComplete(u) })),
     { label: 'Declaration', done: declaration },
   ];
@@ -564,14 +724,38 @@ export function CaptainsReportForm({
 
   async function submit() {
     if (!ready) return;
-    await onSubmit(fields);
-    rememberDraft(report.id, null);
+    try {
+      // Echo the card version this form rendered: the server records the answer against it.
+      await onSubmit({
+        ...fields,
+        ...(answer && card ? { scorecard: { ...answer, againstFetchedAt: card.fetchedAt } } : {}),
+      });
+      rememberDraft(report.id, null);
+    } catch (err) {
+      // The caller already shows the error; a scorecard this form never saw is revealed.
+      if (err instanceof ApiError && err.code === 'scorecard_required') {
+        setRevealNote(
+          'The match scorecard has just come in. Confirm it or request a correction, then submit again.',
+        );
+        await onScorecardRequired?.(err);
+      }
+    }
   }
 
   return (
     <div className="cr-layout">
       <div className="rp-form">
-        <MatchFacts report={report} />
+        <MatchFacts report={report} hasScorecard={hasCard} />
+
+        <MatchScorecardSection
+          report={report}
+          context={scorecardContext}
+          value={scorecard}
+          onChange={setScorecard}
+          note={revealNote && !scorecardAnswered(answer) ? revealNote : null}
+          sectionRef={scorecardRef}
+          disabled={busy}
+        />
 
         <details className="cr-guide" open={guideOpen}>
           <summary className="cr-guide-title">Rating guide</summary>
@@ -649,8 +833,9 @@ export function CaptainsReportForm({
               onChange={(e) => setDeclaration(e.target.checked)}
             />
             <span>
-              I, <strong>{captainName || 'the captain'}</strong>, confirm this report is a true and
-              fair account of the match and will be submitted to the union office.
+              I, <strong>{captainName || 'the captain'}</strong>, confirm this report
+              {hasCard ? ', including the answer on the match scorecard,' : ''} is a true and fair
+              account of the match and will be submitted to the union office.
             </span>
           </label>
         </div>
@@ -731,6 +916,16 @@ export function CaptainsReportReadOnly({
         </div>
       </div>
       {report.resultSummary && <p className="cr-section-sub">Result: {report.resultSummary}</p>}
+      {report.status === 'submitted' && report.scorecard && (
+        <div className="cr-print-umpire" data-testid="report-scorecard-outcome">
+          <strong>Match scorecard</strong>
+          <ScorecardOutcome
+            answer={report.scorecard}
+            clubName={report.clubName}
+            submittedAt={report.submittedAt}
+          />
+        </div>
+      )}
       {report.umpires.map((u, i) => {
         const avg = avgRating(u);
         const concerns = CONCERN_AREAS.filter((a) => u.concerns?.[a.key]).map((a) =>
@@ -824,6 +1019,14 @@ function SubmittedCard({ report, onBack }: { report: CaptainsReport; onBack?: ()
           <span>Date</span>
           <strong>{fmtDate(report.matchDate)}</strong>
         </div>
+        {report.scorecard && (
+          <div className="cr-summary-row">
+            <span>Scorecard</span>
+            <strong>
+              {report.scorecard.action === 'confirmed' ? 'Confirmed' : 'Correction requested'}
+            </strong>
+          </div>
+        )}
         {report.umpires.map((u, i) => (
           <div key={i} className="cr-summary-row">
             <span>Umpire {i + 1}</span>
@@ -1068,8 +1271,19 @@ export function CaptainsReportView({
   const [newFixture, setNewFixture] = useState<string>('');
   const [unlisted, setUnlisted] = useState<'details' | UnlistedDetails | null>(null);
   const [done, setDone] = useState<CaptainsReport | null>(null);
+  // A by-hand filing has no report to load the scorecard from: the refused submit carries it.
+  const [manualContext, setManualContext] = useState<ScorecardContext | undefined>(undefined);
   const roster = useMemo(() => ownRoster(club, players), [club, players]);
-  const refresh = () => qc.invalidateQueries({ queryKey: qk.clubCaptainsReports(club.id) });
+  // The form is fed from the report's DETAIL (it carries the match scorecard); never the list.
+  const detailQuery = useQuery({
+    queryKey: qk.clubCaptainsReport(selected ?? ''),
+    queryFn: () => getClubCaptainsReport(selected!),
+    enabled: !!selected,
+  });
+  const refresh = () => {
+    void qc.invalidateQueries({ queryKey: qk.clubCaptainsReports(club.id) });
+    void qc.invalidateQueries({ queryKey: ['club-captains-report'] });
+  };
 
   // This club's played fixtures (released series) with no report yet — the manual path.
   const manualFixtures = useMemo(() => {
@@ -1178,9 +1392,9 @@ export function CaptainsReportView({
           Captain's <em>Report</em>
         </h1>
         <p className="ph-desc">
-          Rate the on-field umpires after each match. Reports open here when the result is in; the
-          captain or chair also gets a link (it expires on the date shown on the report). You can
-          file here at any time.
+          Rate the on-field umpires and confirm the match scorecard after each match. Reports open
+          here when the result is in; the captain or chair also gets a link (it expires on the date
+          shown on the report). You can file here at any time.
         </p>
       </div>
     </div>
@@ -1191,6 +1405,7 @@ export function CaptainsReportView({
     setNewFixture('');
     setUnlisted(null);
     setDone(null);
+    setManualContext(undefined);
   };
 
   if (done)
@@ -1201,7 +1416,33 @@ export function CaptainsReportView({
       </div>
     );
 
-  const current = selected ? reports.find((r) => r.id === selected) : null;
+  if (selected && !detailQuery.data) {
+    return (
+      <div>
+        {header}
+        <div style={{ marginBottom: 12 }}>
+          <Btn tone="ghost" size="sm" onClick={back}>
+            ← All reports
+          </Btn>
+        </div>
+        {detailQuery.error ? (
+          <div className="rp-section">
+            <div className="rp-validation" role="alert">
+              {errText(detailQuery.error)}
+            </div>
+            <div style={{ marginTop: 10 }}>
+              <Btn tone="teal" size="sm" onClick={() => void detailQuery.refetch()}>
+                Try again
+              </Btn>
+            </div>
+          </div>
+        ) : (
+          <div className="cr-section-sub">Loading the report…</div>
+        )}
+      </div>
+    );
+  }
+  const current = selected ? detailQuery.data : null;
   if (current) {
     return (
       <div>
@@ -1233,6 +1474,8 @@ export function CaptainsReportView({
               captainOptions={roster.players}
               captainGroupLabel={club.name}
               busy={save.isPending}
+              scorecardContext={current.scorecardContext}
+              onScorecardRequired={() => detailQuery.refetch()}
               onSaveDraft={(fields) => save.mutateAsync({ id: current.id, fields, submit: false })}
               onSubmit={(fields) => save.mutateAsync({ id: current.id, fields, submit: true })}
             />
@@ -1309,6 +1552,10 @@ export function CaptainsReportView({
           captainOptions={roster.players}
           captainGroupLabel={club.name}
           busy={create.isPending}
+          scorecardContext={manualContext}
+          onScorecardRequired={(err) =>
+            setManualContext(err.details?.scorecardContext as ScorecardContext | undefined)
+          }
           onSubmit={(fields) =>
             create.mutateAsync({ seriesId: manual.seriesId, fixtureId: manual.fixtureId, fields })
           }
@@ -1452,7 +1699,9 @@ export function CaptainsReportLinkPage() {
       if (v.submit) setDone(res.report);
       else qc.setQueryData(qk.linkedCaptainsReport(token), res);
     },
-    onError: (err) => setError(errText(err)),
+    // A scorecard the form never showed is revealed by the form itself (no banner).
+    onError: (err) =>
+      setError(err instanceof ApiError && err.code === 'scorecard_required' ? null : errText(err)),
   });
 
   const status = query.error instanceof ApiError ? query.error.status : null;
@@ -1502,7 +1751,10 @@ export function CaptainsReportLinkPage() {
               Captain's <em>Report</em>
             </h1>
             <p className="ph-desc">
-              Rate the on-field umpires for this match. You can save a draft and submit once.
+              {data.scorecard
+                ? 'Check the match scorecard and rate the on-field umpires for this match.'
+                : 'Rate the on-field umpires for this match.'}{' '}
+              You can save a draft and submit once.
               {data.report.linkExpiresAt
                 ? ` Link expires ${fmtLinkExpiry(data.report.linkExpiresAt)}.`
                 : ''}
@@ -1540,6 +1792,8 @@ export function CaptainsReportLinkPage() {
           report={data.report}
           registry={data.registry}
           busy={put.isPending}
+          scorecardContext={data}
+          onScorecardRequired={() => query.refetch()}
           onSaveDraft={(fields) => put.mutateAsync({ fields, submit: false })}
           onSubmit={(fields) => put.mutateAsync({ fields, submit: true })}
         />

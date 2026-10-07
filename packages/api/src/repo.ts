@@ -1828,8 +1828,33 @@ export async function createCaptainsReport(
 /** The editable fields of a report (what a draft save or a submit writes). */
 export type CaptainsReportFields = Pick<
   CaptainsReport,
-  'captainName' | 'umpires' | 'general' | 'declaration'
+  'captainName' | 'umpires' | 'general' | 'declaration' | 'scorecard'
 >;
+
+/**
+ * The scorecard answer's part of a fields write: SET it when given, REMOVE it when not — the
+ * SET list is fixed, so a cleared answer must be removed explicitly or the old one survives.
+ */
+function scorecardFieldWrite(fields: CaptainsReportFields): {
+  set: string;
+  remove: string;
+  values: Record<string, unknown>;
+} {
+  const sc = fields.scorecard;
+  if (!sc) return { set: '', remove: ' REMOVE scorecard', values: {} };
+  return {
+    set: ', scorecard = :sc',
+    remove: '',
+    values: {
+      ':sc': {
+        action: sc.action,
+        ...(sc.feedback ? { feedback: sc.feedback } : {}),
+        ...(sc.againstFetchedAt ? { againstFetchedAt: sc.againstFetchedAt } : {}),
+        ...(sc.stale ? { stale: true } : {}),
+      },
+    },
+  };
+}
 
 /**
  * Save a draft. Only a PENDING report takes it — and when `memberId` is given (the link
@@ -1841,13 +1866,16 @@ export async function saveCaptainsReportDraft(
   fields: CaptainsReportFields,
   opts: { memberId?: string } = {},
 ): Promise<CaptainsReport> {
+  const sc = scorecardFieldWrite(fields);
   try {
     const res = await ddb.send(
       new UpdateCommand({
         TableName: TABLE,
         Key: reportKeyOf(tenant, key),
         UpdateExpression:
-          'SET captainName = :c, umpires = :u, #gen = :g, declaration = :d, updatedAt = :at',
+          'SET captainName = :c, umpires = :u, #gen = :g, declaration = :d, updatedAt = :at' +
+          sc.set +
+          sc.remove,
         ConditionExpression:
           'attribute_exists(pk) AND #s = :pending' +
           (opts.memberId ? ' AND (recipient.memberId = :m OR chairMemberId = :m)' : ''),
@@ -1859,6 +1887,7 @@ export async function saveCaptainsReportDraft(
           ':d': !!fields.declaration,
           ':at': new Date().toISOString(),
           ':pending': 'pending',
+          ...sc.values,
           ...(opts.memberId ? { ':m': opts.memberId } : {}),
         },
         ReturnValues: 'ALL_NEW',
@@ -1926,6 +1955,7 @@ async function submitCaptainsReportFields(
   meta: { ref?: string; submittedBy: string; via: 'portal' | 'link'; memberId?: string },
 ): Promise<CaptainsReport> {
   const at = new Date().toISOString();
+  const sc = scorecardFieldWrite(fields);
   try {
     const res = await ddb.send(
       new UpdateCommand({
@@ -1934,7 +1964,9 @@ async function submitCaptainsReportFields(
         UpdateExpression:
           'SET captainName = :c, umpires = :u, #gen = :g, declaration = :d, #s = :submitted, ' +
           (meta.ref ? '#ref = :ref, ' : '') +
-          'submittedBy = :by, submittedVia = :via, submittedAt = :at, updatedAt = :at',
+          'submittedBy = :by, submittedVia = :via, submittedAt = :at, updatedAt = :at' +
+          sc.set +
+          sc.remove,
         ConditionExpression:
           'attribute_exists(pk) AND #s = :pending' +
           (meta.memberId ? ' AND (recipient.memberId = :m OR chairMemberId = :m)' : ''),
@@ -1954,6 +1986,7 @@ async function submitCaptainsReportFields(
           ':by': meta.submittedBy,
           ':via': meta.via,
           ':at': at,
+          ...sc.values,
           ...(meta.memberId ? { ':m': meta.memberId } : {}),
         },
         ReturnValues: 'ALL_NEW',
@@ -1964,6 +1997,49 @@ async function submitCaptainsReportFields(
     if (isCcf(err)) throw new CaptainsReportStateError("captain's report already submitted");
     throw err;
   }
+}
+
+/**
+ * A scorecard was (re)fetched at `fetchedAt`: flag the scorecard answer of every SUBMITTED
+ * report for the fixture `stale` when it was given against an older card — its
+ * `againstFetchedAt` when recorded, else its `submittedAt`. Reports without an answer (filed
+ * before the card was attached, or before answers existed) are never flagged. One keyed Query
+ * on the fixture's two reports. Returns how many were flagged.
+ */
+export async function flagStaleCaptainsReportScorecards(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+  fetchedAt: string,
+): Promise<number> {
+  let n = 0;
+  for (const r of await listCaptainsReportsForFixture(tenant, seriesId, fixtureId)) {
+    const sc = r.scorecard;
+    if (r.status !== 'submitted' || !sc?.action || sc.stale) continue;
+    const against = sc.againstFetchedAt ?? r.submittedAt;
+    if (!against || against >= fetchedAt) continue;
+    try {
+      await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: reportKeyOf(tenant, r),
+          UpdateExpression: 'SET scorecard.stale = :t, updatedAt = :at',
+          ConditionExpression:
+            '#s = :submitted AND attribute_exists(scorecard.#a) AND attribute_not_exists(scorecard.stale)',
+          ExpressionAttributeNames: { '#s': 'status', '#a': 'action' },
+          ExpressionAttributeValues: {
+            ':t': true,
+            ':submitted': 'submitted',
+            ':at': new Date().toISOString(),
+          },
+        }),
+      );
+      n++;
+    } catch (err) {
+      if (!isCcf(err)) throw err;
+    }
+  }
+  return n;
 }
 
 /**
@@ -8225,7 +8301,9 @@ function scrubScorecardNames(
  *    match the person are SCRUBBED in place, and a scrubbed card is marked `terminal` so the
  *    sweep never re-fetches the name from medicoach;
  *  - scorecard digests (SCORECONF#): the person's name inside a chair's correction `feedback`
- *    is replaced (case-insensitive, whole words) — the digest itself is the club's record.
+ *    is replaced (case-insensitive, whole words) — the digest itself is the club's record;
+ *  - a captain's report's scorecard correction `feedback` gets the same whole-word scrub, as
+ *    part of the captain's-report scrub (`reportScorecardFeedbackScrubbed`).
  *
  * Gate: a pending clearance naming the person, or any `clearance-pending` row, throws
  * {@link PlayerErasureBlockedError} BEFORE anything is touched. Returns null when nothing in any
@@ -8455,6 +8533,7 @@ export async function erasePlayerData(
 
   // ── Captain's reports: scrub mentions in place ──
   let captainsReportsScrubbed = 0;
+  let reportScorecardFeedbackScrubbed = 0;
   for (const r of await listCaptainsReports(tenant)) {
     const contact = r.recipientContact;
     const contactHit =
@@ -8472,11 +8551,19 @@ export async function erasePlayerData(
     if (nameHit(r.submittedBy) || (!!r.submittedBy && emails.has(normEmail(r.submittedBy)))) {
       sets.push('submittedBy = :erased');
     }
+    // The scorecard correction's free text may name the person (whole words, any case).
+    const feedback = r.scorecard?.feedback;
+    const scrubbedFeedback = feedback ? scrubText(feedback) : feedback;
+    const feedbackHit = !!feedback && scrubbedFeedback !== feedback;
+    if (feedbackHit) {
+      sets.push('scorecard.feedback = :fb');
+      values[':fb'] = scrubbedFeedback;
+    }
     // The stored contact is the recipient's — drop it when it is this person's, or when the
     // recipient IS this person by name.
     if (contact && (contactHit || nameHit(r.recipient?.name))) removes.push('recipientContact');
     if (!sets.length && !removes.length) continue;
-    if (sets.length) values[':erased'] = ERASED_NAME;
+    if (sets.some((x) => x.includes(':erased'))) values[':erased'] = ERASED_NAME;
     values[':now'] = at;
     sets.push('updatedAt = :now');
     const usesRn = sets.some((s) => s.includes('#rn'));
@@ -8492,6 +8579,7 @@ export async function erasePlayerData(
         }),
       );
       captainsReportsScrubbed++;
+      if (feedbackHit) reportScorecardFeedbackScrubbed++;
     } catch (err: unknown) {
       if (!isCcf(err)) throw err; // deleted concurrently — nothing left to scrub
     }
@@ -8521,6 +8609,7 @@ export async function erasePlayerData(
     captainsReportsScrubbed,
     scorecardsScrubbed,
     feedbackScrubbed,
+    reportScorecardFeedbackScrubbed,
     reportOpenMarkers,
   };
   await putPlayerEraseLog(tenant, {

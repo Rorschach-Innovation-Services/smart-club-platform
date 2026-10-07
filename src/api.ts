@@ -35,6 +35,7 @@ import type {
   FixtureOfficials,
   CaptainsReport,
   CaptainsReportFields,
+  ClubCaptainsReportDetail,
   LinkedCaptainsReport,
   SendResult,
   PlayerErasureCounts,
@@ -1069,6 +1070,9 @@ export const dropMedicoachOutbox = (ref: string) =>
 const reportPath = (id: string) => `/club/captains-reports/${encodeURIComponent(id)}`;
 export const getClubCaptainsReports = (clubId: string) =>
   request<CaptainsReport[]>('/club/captains-reports', { query: { clubId } });
+/** One report for the form: the view plus its match scorecard context (detail only). */
+export const getClubCaptainsReport = (id: string) =>
+  request<ClubCaptainsReportDetail>(reportPath(id));
 export const putClubCaptainsReport = (
   id: string,
   body: CaptainsReportFields & { submit?: boolean },

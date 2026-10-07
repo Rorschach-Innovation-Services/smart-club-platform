@@ -355,6 +355,7 @@ describe('full erasure across every category', () => {
       captainsReportsScrubbed: 1,
       scorecardsScrubbed: 0,
       feedbackScrubbed: 0,
+      reportScorecardFeedbackScrubbed: 0,
       reportOpenMarkers: 1,
     });
   });

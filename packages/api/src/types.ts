@@ -672,6 +672,11 @@ export interface PlayerErasureCounts {
   /** Scorecard-digest entries whose chair feedback named the person and was scrubbed in place. */
   feedbackScrubbed: number;
   /**
+   * Captain's reports whose scorecard correction `feedback` named the person and was scrubbed
+   * in place (also counted in `captainsReportsScrubbed`). Absent on audit rows written before.
+   */
+  reportScorecardFeedbackScrubbed: number;
+  /**
    * Pending REPORTOPEN# markers whose captain ref was this person: the ref is scrubbed, the
    * marker kept (its retry then addresses the scoring side's chair instead).
    */
@@ -1321,8 +1326,10 @@ export interface StoredFixtureResult {
  * (medicoach-sync/scorecard-fetch.ts) and, to scrub names, by player erasure. Holds player
  * names — personal data, erased with the tenant / cohort / series like FIXRESULT#.
  *
- * `terminal: true` = this fixture can never have a scorecard (medicoach answered 404 or
- * `available: false`): the sweep stops retrying. A newly stored result still re-fetches.
+ * `terminal: true` = this fixture can never have a scorecard (medicoach answered 404, or kept
+ * answering `available: false` for 3 days — until then such a stub is re-checked, with
+ * `fetchedAt` the first `available: false` and `lastCheckedAt` the latest): the sweep stops
+ * retrying. A newly stored result still re-fetches.
  * Player erasure also sets it on an AVAILABLE card it scrubbed, so the sweep never re-fetches
  * the card (and with it the erased name) from medicoach.
  */
@@ -1549,6 +1556,14 @@ export interface CaptainsReportDelivery {
   providerError?: string;
 }
 
+/** A captain's report's answer on the match scorecard (see `CaptainsReport.scorecard`). */
+export interface CaptainsReportScorecardAnswer {
+  action: 'confirmed' | 'correction';
+  feedback?: string;
+  againstFetchedAt?: string;
+  stale?: true;
+}
+
 /**
  * A captain's report: `CAPREPORT#<seriesId>#<fixtureId>#<clubId>`, one per fixture side.
  * Opened `pending` when medicoach reports a result (or created by hand from the portal),
@@ -1586,6 +1601,14 @@ export interface CaptainsReport {
   umpires: ReportUmpireEntry[];
   general: string;
   declaration?: boolean;
+  /**
+   * The answer on the match scorecard (FIXSCORECARD#): asked — and required to submit —
+   * whenever an available scorecard is attached. `feedback` (≤ 2,000 chars) is required for a
+   * correction, which emails the platform operators. `againstFetchedAt` is the card version
+   * answered against (server-clamped, set at submission). `stale`: a newer card arrived after
+   * that version — server-only, set at submission or by the scorecard sweep.
+   */
+  scorecard?: CaptainsReportScorecardAnswer;
   /** `CR-YYYY-NNNN`, assigned from the per-tenant counter at submission. */
   ref?: string;
   submittedBy?: string;

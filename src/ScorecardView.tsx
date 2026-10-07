@@ -7,26 +7,32 @@
  * Captains and chairs open these from WhatsApp on a phone, so every table scrolls sideways
  * inside its own focusable wrapper instead of widening the page.
  */
-import type { Ref } from 'react';
+import { useEffect, useId, useRef, useState, type Ref } from 'react';
 import { Icon } from './atoms';
+import { formatStamp } from './dates';
 import {
   FEEDBACK_MAX,
   byOrder,
   extrasLine,
   fallOfWicketsLine,
+  feedbackProblem,
   fmtRate,
   headlineScore,
   inningsHeading,
 } from './scorecardConfirmHelpers';
-import type { InningsScorecard } from './types';
+import type { CaptainsReportScorecardAnswer, InningsScorecard } from './types';
 
 /* ─── Scorecard tables ─── */
 
-export function InningsCard({ inn }: { inn: InningsScorecard }) {
+/** One innings. `own`: the viewer's own side batted — marked so it stands out. */
+export function InningsCard({ inn, own }: { inn: InningsScorecard; own?: boolean }) {
   const fow = fallOfWicketsLine(inn.fallOfWickets);
   return (
-    <div className="sc-innings">
-      <h3 className="sc-innings-head">{inningsHeading(inn)}</h3>
+    <div className={`sc-innings${own ? ' sc-innings-own' : ''}`}>
+      <h3 className="sc-innings-head">
+        {inningsHeading(inn)}
+        {own && <span className="sc-side-tag">Your innings</span>}
+      </h3>
       <div
         className="sc-table-wrap"
         role="region"
@@ -161,6 +167,7 @@ export interface CorrectionFieldProps {
   problem: string | null;
   fieldRef?: Ref<HTMLTextAreaElement>;
   disabled?: boolean;
+  onBlur?: () => void;
 }
 
 /** "What needs correcting?" — a ≤ FEEDBACK_MAX textarea with a live counter and its problem. */
@@ -172,6 +179,7 @@ export function CorrectionField({
   problem,
   fieldRef,
   disabled,
+  onBlur,
 }: CorrectionFieldProps) {
   const over = value.length > FEEDBACK_MAX;
   return (
@@ -191,6 +199,7 @@ export function CorrectionField({
         aria-invalid={problem ? true : undefined}
         placeholder="e.g. S. Naidoo scored 46, not 36 — the 4 in the 12th over is missing."
         onChange={(e) => onChange(e.target.value)}
+        onBlur={onBlur}
       />
       <div id={counterId} className={`sc-counter${over ? ' over' : ''}`}>
         {value.length} / {FEEDBACK_MAX}
@@ -201,5 +210,145 @@ export function CorrectionField({
         </div>
       )}
     </>
+  );
+}
+
+/* ─── The captain's report answer (controlled) ─── */
+
+/** The answer while it is being given: the choice and, for a correction, its text. */
+export interface ScorecardChoice {
+  action: 'confirmed' | 'correction';
+  feedback?: string;
+}
+
+export interface ScorecardAnswerProps {
+  value: ScorecardChoice | undefined;
+  onChange: (next: ScorecardChoice) => void;
+  disabled?: boolean;
+}
+
+/**
+ * "Confirm — these stats are correct" or "Request a correction" (two radios), the choice
+ * changeable until the report is submitted. A correction reveals the required text field and
+ * moves focus into it; leaving it blank shows the problem inline.
+ */
+export function ScorecardAnswer({ value, onChange, disabled }: ScorecardAnswerProps) {
+  const name = useId();
+  const fieldId = useId();
+  const counterId = useId();
+  const fieldRef = useRef<HTMLTextAreaElement>(null);
+  const [touched, setTouched] = useState(false);
+  const [justChose, setJustChose] = useState(false);
+  const correcting = value?.action === 'correction';
+  const text = value?.feedback ?? '';
+  const problem = correcting && touched ? feedbackProblem(text) : null;
+
+  useEffect(() => {
+    if (justChose && correcting) fieldRef.current?.focus();
+  }, [justChose, correcting]);
+
+  const choose = (action: ScorecardChoice['action']) => {
+    setJustChose(action === 'correction');
+    onChange(action === 'correction' ? { action, feedback: text } : { action });
+  };
+
+  return (
+    <div className="sc-answer">
+      <div className="sc-choices" role="radiogroup" aria-label="Are these stats correct?">
+        <label className={`sc-choice${value?.action === 'confirmed' ? ' on' : ''}`}>
+          <input
+            type="radio"
+            name={name}
+            checked={value?.action === 'confirmed'}
+            disabled={disabled}
+            onChange={() => choose('confirmed')}
+          />
+          <span>
+            <strong>Confirm</strong> — these stats are correct
+          </span>
+        </label>
+        <label className={`sc-choice${correcting ? ' on' : ''}`}>
+          <input
+            type="radio"
+            name={name}
+            checked={correcting}
+            disabled={disabled}
+            onChange={() => choose('correction')}
+          />
+          <span>
+            <strong>Request a correction</strong>
+          </span>
+        </label>
+      </div>
+      {correcting && (
+        <div className="sc-correction">
+          <CorrectionField
+            id={fieldId}
+            counterId={counterId}
+            value={text}
+            problem={problem}
+            fieldRef={fieldRef}
+            disabled={disabled}
+            // Leaving it blank is when the problem is called out; typing clears it again.
+            onBlur={() => setTouched(true)}
+            onChange={(next) => {
+              if (touched && next.trim()) setTouched(false);
+              onChange({ action: 'correction', feedback: next });
+            }}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A given answer, locked (after submission, read-only and printed reports). Attributed to the
+ * CLUB — whoever held the link answered for it, the chair as often as the captain.
+ */
+export function ScorecardOutcome({
+  answer,
+  clubName,
+  submittedAt,
+}: {
+  answer: CaptainsReportScorecardAnswer;
+  clubName: string;
+  submittedAt?: string;
+}) {
+  const when = submittedAt ? `, ${formatStamp(submittedAt)}` : '';
+  const stale = answer.stale ? (
+    <div className="cr-section-sub">
+      The scorecard was updated after this answer, so it may be out of date.
+    </div>
+  ) : null;
+  if (answer.action === 'confirmed')
+    return (
+      <div className="sc-locked sc-locked-ok" role="status">
+        <span className="sc-tick">
+          <Icon.Check />
+        </span>
+        <div>
+          <strong>
+            Stats confirmed for {clubName}
+            {when}
+          </strong>
+          {stale}
+        </div>
+      </div>
+    );
+  return (
+    <div className="sc-locked" role="status">
+      <strong>
+        Correction requested for {clubName}
+        {when}
+      </strong>
+      {answer.feedback && (
+        <blockquote className="sc-feedback" aria-label="Correction request">
+          {answer.feedback}
+        </blockquote>
+      )}
+      <div className="cr-section-sub">The union&apos;s operators follow up corrections.</div>
+      {stale}
+    </div>
   );
 }

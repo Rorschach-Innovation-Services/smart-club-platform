@@ -38,6 +38,7 @@ export const qk = {
   captainsReportContactGaps: () => ['captains-report-contact-gaps', t()],
   medicoachSync: () => ['medicoach-sync', t()],
   clubCaptainsReports: (clubId: string) => ['club-captains-reports', t(), clubId],
+  clubCaptainsReport: (id: string) => ['club-captains-report', t(), id],
   // Global: the token names its own tenant.
   linkedCaptainsReport: (token: string) => ['captains-report-link', token],
   linkedScorecardConfirm: (token: string) => ['scorecard-confirm-link', token],

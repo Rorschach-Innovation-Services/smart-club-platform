@@ -1,6 +1,6 @@
 /**
  * Medicoach scorecards (FIXSCORECARD#): the ball-by-ball card behind a pulled result, kept so
- * a club chair can later confirm it.
+ * each side's captain's report can show it and ask for it to be confirmed.
  *
  *   GET {MedicoachSyncUrl}/integrations/smartclub/matches/<matchId>/scorecard?tournamentId=<id>
  *
@@ -11,11 +11,15 @@
  *     that failed), or whose card is older than the result, are fetched again. Bounded and
  *     sequential.
  *
- * A stored card with `available: true` flags any chair scorecard-confirmation entry answered
- * before this fetch as `staleConfirmation` (best-effort).
+ * A stored card with `available: true` flags the scorecard answer of every SUBMITTED captain's
+ * report for the fixture answered against an older card as `stale` (best-effort).
  *
- * Outcomes: 200 → the row is stored (`available` true or false; false is terminal); 404 →
- * a terminal stub (`available: false, terminal: true`) so the sweep stops asking. A 404 or
+ * Outcomes: 200 → the row is stored. `available: false` is NOT terminal at first: medicoach can
+ * publish a card after the result (scoring finished later), so the stub is re-checked by the
+ * sweep at most every SCORECARD_UNAVAILABLE_RECHECK_MS for SCORECARD_UNAVAILABLE_WINDOW_MS
+ * after the first `available: false` (the stub's `fetchedAt`; `lastCheckedAt` moves), then
+ * flipped terminal. 404 → a terminal stub (`available: false, terminal: true`) straight away,
+ * so the sweep stops asking. A 404 or
  * `available: false` NEVER replaces an available card already stored for the same match: the
  * card is kept and only its `lastCheckedAt` moves. Anything else (network, 5xx, 401, a body
  * that fails the schema) → logged, nothing written, and the next sweep retries. Never throws.
@@ -27,6 +31,7 @@ import {
   scorecardPathAndQuery,
   signRequest,
 } from '../medicoach-sync-contract.js';
+// TEMP until the chair digest is deleted (Phase C): its entries are still stale-flagged too.
 import { flagStaleScorecardEntries } from '../scorecard-confirmations.js';
 import type { StoredFixtureResult, StoredFixtureScorecard } from '../types.js';
 import type { PullerDeps } from './puller.js';
@@ -40,6 +45,10 @@ export const SCORECARD_SWEEP_MAX_FETCHES = 25;
  * that is down must not spend the cron's 5-minute budget (shared by every tenant) on timeouts.
  */
 export const SCORECARD_SWEEP_MAX_CONSECUTIVE_FAILURES = 3;
+/** How long after the first `available: false` the sweep keeps re-checking for a card. */
+export const SCORECARD_UNAVAILABLE_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
+/** How often (at most) the sweep re-checks a non-terminal `available: false` stub. */
+export const SCORECARD_UNAVAILABLE_RECHECK_MS = 60 * 60 * 1000;
 const HTTP_TIMEOUT_MS = 10_000;
 
 export type ScorecardFetchDeps = Pick<
@@ -83,15 +92,14 @@ export async function fetchAndStoreScorecard(
       schemaVersion: 1 as const,
       fetchedAt: now().toISOString(),
     };
-    // "No card" must never destroy a card a chair may already be looking at: an available
-    // card stored for this same match is kept (its lastCheckedAt moves), else a terminal stub.
+    // "No card" must never destroy a card a captain may already be looking at: an available
+    // card stored for this same match is kept (its lastCheckedAt moves), else a stub.
     const storeNoCard = async (stub: StoredFixtureScorecard) => {
       const existing = await deps.repo.getFixtureScorecard(tenant, seriesId, fixtureId);
-      if (
-        existing?.available &&
-        existing.medicoachMatchId === medicoachMatchId &&
-        existing.medicoachTournamentId === medicoachTournamentId
-      ) {
+      const sameMatch =
+        existing?.medicoachMatchId === medicoachMatchId &&
+        existing?.medicoachTournamentId === medicoachTournamentId;
+      if (existing?.available && sameMatch) {
         await deps.repo.touchFixtureScorecardCheckedAt(
           tenant,
           seriesId,
@@ -99,6 +107,21 @@ export async function fetchAndStoreScorecard(
           existing.fetchedAt,
           base.fetchedAt,
         );
+        return;
+      }
+      // A non-terminal `available: false` stub for this match is still inside its re-check
+      // window: keep the window's start (`fetchedAt`), note this check, and flip terminal once
+      // the window has run out. A terminal stub (or none) starts a fresh window.
+      if (!stub.terminal && existing && sameMatch && !existing.available && !existing.terminal) {
+        const expired =
+          Date.parse(base.fetchedAt) - Date.parse(existing.fetchedAt) >=
+          SCORECARD_UNAVAILABLE_WINDOW_MS;
+        await deps.repo.putFixtureScorecard(tenant, {
+          ...stub,
+          fetchedAt: existing.fetchedAt,
+          lastCheckedAt: base.fetchedAt,
+          ...(expired ? { terminal: true } : {}),
+        });
         return;
       }
       await deps.repo.putFixtureScorecard(tenant, stub);
@@ -129,23 +152,26 @@ export async function fetchAndStoreScorecard(
       available: card.available,
       ...(card.matchState !== undefined ? { matchState: card.matchState } : {}),
       ...(card.available && card.innings ? { innings: card.innings } : {}),
-      // No card for this match now means none ever: stop the sweep asking.
-      ...(card.available ? {} : { terminal: true }),
     };
     if (card.available) await deps.repo.putFixtureScorecard(tenant, row);
     else await storeNoCard(row);
-    if (card.available)
-      // A chair who already answered saw an older card (or none): flag the answer stale.
+    if (card.available) {
+      // A captain who already answered saw an older card: flag the answer stale.
       // Best-effort — a failure is a log line, never the fetch's.
-      await flagStaleScorecardEntries(deps.repo, tenant, seriesId, fixtureId, base.fetchedAt, {
-        now: now(),
-      }).catch((err: unknown) =>
+      const failed = (err: unknown) =>
         log(
-          `[medicoach-sync] ${where}: could not flag stale confirmations — ${
+          `[medicoach-sync] ${where}: could not flag stale scorecard answers — ${
             err instanceof Error ? err.name : 'error'
           }`,
-        ),
-      );
+        );
+      await deps.repo
+        .flagStaleCaptainsReportScorecards(tenant, seriesId, fixtureId, base.fetchedAt)
+        .catch(failed);
+      // TEMP (Phase C deletes it): the chair digest's entries, until the digest is removed.
+      await flagStaleScorecardEntries(deps.repo, tenant, seriesId, fixtureId, base.fetchedAt, {
+        now: now(),
+      }).catch(failed);
+    }
     return card.available ? 'stored' : 'unavailable';
   } catch (err) {
     log(
@@ -174,7 +200,10 @@ export function needsScorecardFetch(
     return true;
   if (card.terminal) return false;
   // A kept card that a later fetch found gone counts as checked then (see storeNoCard).
-  return recordedMs > Date.parse(card.lastCheckedAt ?? card.fetchedAt);
+  const checkedMs = Date.parse(card.lastCheckedAt ?? card.fetchedAt);
+  // No card yet, but still inside its re-check window (non-terminal): ask again now and then.
+  if (!card.available && nowMs - checkedMs >= SCORECARD_UNAVAILABLE_RECHECK_MS) return true;
+  return recordedMs > checkedMs;
 }
 
 export interface ScorecardSweepSummary {

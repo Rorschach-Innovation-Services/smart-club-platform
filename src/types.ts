@@ -115,6 +115,8 @@ export interface CaptainsReport {
   umpires: _ReportUmpireEntry[];
   general: string;
   declaration?: boolean;
+  /** The answer on the match scorecard (MIRRORS the API's CaptainsReportScorecardAnswer). */
+  scorecard?: CaptainsReportScorecardAnswer;
   ref?: string;
   submittedBy?: string;
   submittedVia?: 'portal' | 'link';
@@ -143,15 +145,46 @@ export interface CaptainsReportDelivery {
   providerAt?: string;
   providerError?: string;
 }
+/**
+ * A report's answer on the match scorecard. `againstFetchedAt` is the card version answered
+ * against (the form echoes the `fetchedAt` it rendered; the server clamps it); `stale` is
+ * server-only — a newer card arrived after the answer.
+ */
+export interface CaptainsReportScorecardAnswer {
+  action: 'confirmed' | 'correction';
+  feedback?: string;
+  againstFetchedAt?: string;
+  stale?: true;
+}
 /** The editable part of a report, as PUT/POST bodies carry it. */
 export interface CaptainsReportFields {
   captainName: string;
   umpires: _ReportUmpireEntry[];
   general: string;
   declaration: boolean;
+  scorecard?: CaptainsReportScorecardAnswer;
+}
+/**
+ * The match scorecard a report's form shows (MIRRORS the API's ScorecardContext): an
+ * available card (its `fetchedAt` is echoed back with the answer), else the headline result
+ * and medicoach's link. Empty for an unlisted match or before the result is in.
+ */
+export interface ScorecardContext {
+  scorecard?: { matchState?: string; innings: InningsScorecard[]; fetchedAt: string };
+  result?: {
+    homeScore: string | null;
+    awayScore: string | null;
+    summary?: string;
+    winner?: 'home' | 'away' | 'tie' | 'none';
+  };
+  medicoachMatchUrl?: string;
+}
+/** GET /club/captains-reports/:id — one report plus its match scorecard context. */
+export interface ClubCaptainsReportDetail extends CaptainsReport {
+  scorecardContext?: ScorecardContext;
 }
 /** GET /captains-report-link/:token — one report, the registry names, the tenant's look. */
-export interface LinkedCaptainsReport {
+export interface LinkedCaptainsReport extends ScorecardContext {
   report: CaptainsReport;
   /** The chair's link: may "Send to captain". */
   canForward?: boolean;

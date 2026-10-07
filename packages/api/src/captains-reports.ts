@@ -48,12 +48,18 @@ import type {
   CaptainsReportDelivery,
   CaptainsReportDeliveryReason,
   CaptainsReportRecipient,
+  CaptainsReportScorecardAnswer,
   Club,
   Series,
   StoredFixtureResult,
+  StoredFixtureScorecard,
   TenantConfig,
 } from './types.js';
-import type { SyncResult } from './medicoach-sync-contract.js';
+import {
+  httpUrlOrNull,
+  type InningsScorecardWire,
+  type SyncResult,
+} from './medicoach-sync-contract.js';
 
 type RepoModule = typeof import('./repo.js');
 
@@ -300,12 +306,41 @@ const str = (v: unknown, max: number, field: string): string => {
 const RATING_KEYS = new Set<string>(RATING_CRITERIA.map((c) => c.key));
 const CONCERN_KEYS = new Set<string>(CONCERN_AREAS.map((c) => c.key));
 
+/**
+ * The scorecard answer from a request body: `{action: 'confirmed' | 'correction', feedback?,
+ * againstFetchedAt?}` (the `fetchedAt` of the card the form rendered, echoed back). `stale` is
+ * server-only and dropped. Feedback is kept for a correction only; whether a correction has
+ * its text is a submission rule (drafts save partial answers).
+ */
+function parseScorecardField(v: unknown): CaptainsReportScorecardAnswer | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== 'object' || Array.isArray(v))
+    throw new ReportInputError('scorecard must be an object');
+  const x = v as Record<string, unknown>;
+  if (x.action !== 'confirmed' && x.action !== 'correction')
+    throw new ReportInputError("scorecard action must be 'confirmed' or 'correction'");
+  const feedback = str(x.feedback, SCORECARD_FEEDBACK_MAX, 'the scorecard correction');
+  const fa = x.againstFetchedAt;
+  if (
+    fa !== undefined &&
+    fa !== null &&
+    (typeof fa !== 'string' || fa.length > 40 || !Number.isFinite(Date.parse(fa)))
+  )
+    throw new ReportInputError('scorecard againstFetchedAt must be an ISO timestamp');
+  return {
+    action: x.action,
+    ...(x.action === 'correction' && feedback ? { feedback } : {}),
+    ...(typeof fa === 'string' ? { againstFetchedAt: fa } : {}),
+  };
+}
+
 /** The editable fields of a report from a request body (unknown keys are dropped). */
 export function parseReportFields(raw: unknown): {
   captainName: string;
   umpires: ReportUmpireEntry[];
   general: string;
   declaration: boolean;
+  scorecard?: CaptainsReportScorecardAnswer;
 } {
   if (!raw || typeof raw !== 'object') throw new ReportInputError('body must be an object');
   const b = raw as Record<string, unknown>;
@@ -340,11 +375,13 @@ export function parseReportFields(raw: unknown): {
       comments: str(x.comments, 2000, 'comments'),
     };
   });
+  const scorecard = parseScorecardField(b.scorecard);
   return {
     captainName: str(b.captainName, 120, "captain's name"),
     umpires,
     general: str(b.general, 4000, 'general comments'),
     declaration: b.declaration === true,
+    ...(scorecard ? { scorecard } : {}),
   };
 }
 
@@ -1375,4 +1412,101 @@ export async function notifyOperatorsOfCorrection(
     }
   }
   return out;
+}
+
+/**
+ * A submitted scorecard answer, stamped by the server: `againstFetchedAt` is the card version
+ * answered against, from the client's echo clamped by {@link answeredAgainstFetchedAt} (an
+ * echo later than the stored card or in the future, or no echo ⇒ the stored card's
+ * `fetchedAt`). An echo OLDER than the stored card means the captain answered a card that has
+ * since been replaced, so the answer is stored `stale` straight away. No available card ⇒ no
+ * `againstFetchedAt` (the answer is kept as given). `stale` from the client never survives.
+ */
+export function stampScorecardAnswer(
+  answer: CaptainsReportScorecardAnswer,
+  card: Pick<StoredFixtureScorecard, 'available' | 'fetchedAt'> | null,
+  now: Date,
+): CaptainsReportScorecardAnswer {
+  const { againstFetchedAt: echo, stale: _s, ...rest } = answer;
+  const against = answeredAgainstFetchedAt(echo, card, now);
+  if (!against) return rest;
+  const stale = !!card?.available && Date.parse(against) < Date.parse(card.fetchedAt);
+  return { ...rest, againstFetchedAt: against, ...(stale ? { stale: true as const } : {}) };
+}
+
+/** A draft's scorecard answer: as given, without the submission-only stamps. */
+export function draftScorecardAnswer(
+  answer: CaptainsReportScorecardAnswer | undefined,
+): CaptainsReportScorecardAnswer | undefined {
+  if (!answer) return undefined;
+  const { againstFetchedAt: _a, stale: _s, ...rest } = answer;
+  return rest;
+}
+
+/** The match scorecard a report's form shows, and what to show when there is none. */
+export interface ScorecardContext {
+  /** An AVAILABLE stored card only; `fetchedAt` is echoed back with the answer. */
+  scorecard?: { matchState?: string; innings: InningsScorecardWire[]; fetchedAt: string };
+  /** The headline result — only a recorded result that was not cleared. */
+  result?: {
+    homeScore: string | null;
+    awayScore: string | null;
+    summary?: string;
+    winner?: 'home' | 'away' | 'tie' | 'none';
+  };
+  /** Medicoach's own match page (http(s) only). */
+  medicoachMatchUrl?: string;
+}
+
+/**
+ * The scorecard context for ONE report's detail view (the `/r/` link and the portal's report
+ * route — never lists): two GetItems. Empty for an unlisted match (it has no fixture).
+ */
+export async function attachScorecardContext(
+  repo: Pick<RepoModule, 'getFixtureScorecard' | 'getFixtureResult'>,
+  tenant: string,
+  report: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'source'>,
+): Promise<ScorecardContext> {
+  if (report.seriesId === UNLISTED_SERIES_ID || report.source === 'manual-unlisted') return {};
+  const [card, res] = await Promise.all([
+    repo.getFixtureScorecard(tenant, report.seriesId, report.fixtureId),
+    repo.getFixtureResult(tenant, report.seriesId, report.fixtureId),
+  ]);
+  const live = res && !res.cleared && res.recordedAt ? res : null;
+  const url = live ? httpUrlOrNull(live.medicoachMatchUrl) : null;
+  return {
+    ...(card?.available
+      ? {
+          scorecard: {
+            ...(card.matchState !== undefined ? { matchState: card.matchState } : {}),
+            innings: card.innings ?? [],
+            fetchedAt: card.fetchedAt,
+          },
+        }
+      : {}),
+    ...(live
+      ? {
+          result: {
+            homeScore: live.homeScore ?? null,
+            awayScore: live.awayScore ?? null,
+            ...(live.summary ? { summary: live.summary } : {}),
+            ...(live.winner ? { winner: live.winner } : {}),
+          },
+        }
+      : {}),
+    ...(url ? { medicoachMatchUrl: url } : {}),
+  };
+}
+
+/** "Umzinto CC v African Warriors (Premier T20), Sun 4 Oct 2026" — home side first. */
+export function reportFixtureLine(
+  r: Pick<CaptainsReport, 'side' | 'clubName' | 'opponentName' | 'competition' | 'matchDate'>,
+): string {
+  const home = r.side === 'home' ? r.clubName : r.opponentName;
+  const away = r.side === 'home' ? r.opponentName : r.clubName;
+  return (
+    `${home} v ${away}` +
+    (r.competition ? ` (${r.competition})` : '') +
+    `, ${formatWeekdayDayYear(r.matchDate)}`
+  );
 }

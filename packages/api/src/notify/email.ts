@@ -1511,10 +1511,10 @@ export function captainsReportDueEmailContent(input: CaptainsReportDueEmailInput
   const greet = recipientName || 'there';
   const subject = `${input.reminder ? 'Reminder: ' : ''}Captain's report open: ${matchLine} (${matchDateText})`;
   const ask = input.forwardedBy
-    ? `${input.forwardedBy} asked you to complete ${clubName}'s captain's report for ${matchLine} on ${matchDateText}. Please rate the umpires.`
+    ? `${input.forwardedBy} asked you to complete ${clubName}'s captain's report for ${matchLine} on ${matchDateText}. Please rate the umpires and check the match scorecard.`
     : recipientKind === 'captain'
-      ? `Please rate the umpires from ${clubName}'s match ${matchLine} on ${matchDateText}.`
-      : `${clubName}'s captain's report for ${matchLine} on ${matchDateText} is open. Please complete it, or use "Send to captain" on the report to pass it to the match captain.`;
+      ? `Please rate the umpires from ${clubName}'s match ${matchLine} on ${matchDateText}, and confirm the match scorecard (or tell us what needs correcting).`
+      : `${clubName}'s captain's report for ${matchLine} on ${matchDateText} is open. Please complete it — rate the umpires and confirm the match scorecard — or use "Send to captain" on the report to pass it to the match captain.`;
   const lead = input.reminder
     ? `A reminder: the captain's report is still open and the link expires soon. ${ask}`
     : ask;

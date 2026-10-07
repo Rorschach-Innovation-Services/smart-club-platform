@@ -241,29 +241,33 @@ import { applySetSide, orphanSides, parseSetSide } from './set-side.js';
 import { orgCopy } from './branding.js';
 import { chairContactOf } from './club-contacts.js';
 import {
+  answeredAgainstFetchedAt,
+  attachScorecardContext,
   captainsReportId,
   checkUmpireIds,
+  draftScorecardAnswer,
   forwardCandidates,
   forwardReport,
   hasContact,
   loadLinkedReport,
   MAX_FORWARDS,
   NOTICE_FAILED_ERROR,
+  notifyOperatorsOfCorrection,
   parseCaptainsReportId,
   parseReportFields,
+  parseScorecardAnswer,
   ReportFlowError,
   ReportInputError,
+  reportFixtureLine,
   reportView,
+  ScorecardInputError,
+  stampScorecardAnswer,
   UNLISTED_SERIES_ID,
 } from './captains-reports.js';
 import {
-  answeredAgainstFetchedAt,
   isWeekKey,
   lastCompletedWeekKey,
   loadLinkedScorecardConfirmation,
-  notifyOperatorsOfCorrection,
-  parseScorecardAnswer,
-  ScorecardInputError,
   scorecardEntryKey,
   scorecardFixtureLine,
   toPlatformScorecardTenant,
@@ -280,7 +284,7 @@ import {
   SYNC_TIMESTAMP_HEADER,
   verifySignature as verifySyncSignature,
 } from './medicoach-sync-contract.js';
-import { submissionProblems } from '../../engine/src/captainsReport.js';
+import { SCORECARD_ANSWER_PROBLEM, submissionProblems } from '../../engine/src/captainsReport.js';
 import { hasFeature, hasModule } from './features.js';
 import {
   resolveVertical,
@@ -6790,7 +6794,13 @@ app.post('/umpires/appointments/confirm', requireAdmin, async (c) => {
    use the submit-once link (`/captains-report-link/:token`, public). First submit wins. The
    union office reads every report through `GET /captains-reports` (admin). */
 
-/** A report's editable fields from a request body, with the umpire ids checked. */
+/**
+ * A report's editable fields from a request body, with the umpire ids checked. On submit, the
+ * scorecard answer is required whenever an AVAILABLE scorecard is stored for the fixture
+ * (never for an unlisted match) — a missing answer is a 400 with `code: 'scorecard_required'`
+ * so the form can reveal a card that arrived while it was being filled — and the answer is
+ * stamped with the card version it was given against (see stampScorecardAnswer).
+ */
 async function reportFieldsFrom(
   tenant: string,
   report: CaptainsReport,
@@ -6800,11 +6810,40 @@ async function reportFieldsFrom(
     const parsed = parseReportFields(raw);
     const umpires = await checkUmpireIds(repo, tenant, report, parsed.umpires);
     const submit = (raw as { submit?: unknown }).submit === true;
-    if (submit) {
-      const problems = submissionProblems({ ...parsed, umpires });
-      if (problems.length) throw new HttpError(400, problems[0], { problems });
+    if (!submit) {
+      const { scorecard, ...rest } = parsed;
+      const draft = draftScorecardAnswer(scorecard);
+      return { fields: { ...rest, umpires, ...(draft ? { scorecard: draft } : {}) }, submit };
     }
-    return { fields: { ...parsed, umpires }, submit };
+    const card =
+      report.seriesId === UNLISTED_SERIES_ID || report.source === 'manual-unlisted'
+        ? null
+        : await repo.getFixtureScorecard(tenant, report.seriesId, report.fixtureId);
+    const scorecardRequired = !!card?.available;
+    const problems = submissionProblems({ ...parsed, umpires, scorecardRequired });
+    if (problems.length) {
+      // A card the form did not show (it arrived while the form was open, or a by-hand filing
+      // that had no report to load it from): say so, with the context to reveal it.
+      const required = problems.includes(SCORECARD_ANSWER_PROBLEM);
+      throw new HttpError(400, problems[0], {
+        problems,
+        ...(required
+          ? {
+              code: 'scorecard_required',
+              scorecardContext: await attachScorecardContext(repo, tenant, report),
+            }
+          : {}),
+      });
+    }
+    const { scorecard, ...rest } = parsed;
+    return {
+      fields: {
+        ...rest,
+        umpires,
+        ...(scorecard ? { scorecard: stampScorecardAnswer(scorecard, card, new Date()) } : {}),
+      },
+      submit,
+    };
   } catch (err) {
     if (err instanceof ReportInputError) throw new HttpError(400, err.message);
     throw err;
@@ -6824,11 +6863,40 @@ async function writeReport(
     if (report.status !== 'pending')
       throw new repo.CaptainsReportStateError("captain's report already submitted");
     // The CR number is allocated only once the first-submit-wins write landed (repo).
-    return await repo.submitCaptainsReport(tenant, report, fields, meta);
+    const saved = await repo.submitCaptainsReport(tenant, report, fields, meta);
+    if (saved.scorecard?.action === 'correction') await notifyScorecardCorrection(tenant, saved);
+    return saved;
   } catch (err) {
     if (err instanceof repo.CaptainsReportStateError)
       throw new HttpError(409, err.message, { code: 'report_closed' });
     throw err;
+  }
+}
+
+/**
+ * A submitted report asked for a scorecard correction: email the platform operators.
+ * Best-effort — never fails the submit (the answer is stored either way); logs ids only.
+ */
+async function notifyScorecardCorrection(tenant: string, saved: CaptainsReport): Promise<void> {
+  try {
+    const cfg = await repo.getTenantConfig(tenant);
+    await notifyOperatorsOfCorrection(
+      { repo },
+      {
+        tenantName: cfg ? orgCopy(cfg).name : tenant,
+        clubName: saved.clubName,
+        ref: saved.ref ?? saved.id,
+        fixtureLine: reportFixtureLine(saved),
+        feedback: saved.scorecard?.feedback ?? '',
+        consoleLink: `${captainsReportLinkBase()}/platform`,
+      },
+    );
+  } catch (err) {
+    console.warn(
+      `[captains-report] ${tenant} ${saved.ref ?? saved.id}: scorecard correction notice failed — ${
+        err instanceof Error ? err.name : 'error'
+      }`,
+    );
   }
 }
 
@@ -6887,9 +6955,18 @@ app.get('/club/captains-reports', async (c) => {
   return c.json(await reportViews(ra.tenant, reports, ra.membership.role !== 'admin'));
 });
 
+/**
+ * One report for the portal's form: the view plus its `scorecardContext` (the match scorecard
+ * to confirm, the headline result, medicoach's link). Detail only — the list never carries it.
+ */
 app.get('/club/captains-reports/:id', async (c) => {
   const ra = c.get('requestAuth')!;
-  return c.json(await clubView(ra, await clubReport(ra, c.req.param('id'))));
+  const report = await clubReport(ra, c.req.param('id'));
+  const [view, scorecardContext] = await Promise.all([
+    clubView(ra, report),
+    attachScorecardContext(repo, ra.tenant, report),
+  ]);
+  return c.json({ ...view, scorecardContext });
 });
 
 /** "Send to captain" from the portal: the club's eligible players (names + opaque ids). */
@@ -7155,13 +7232,16 @@ async function linkedReportOr410(c: Context<HonoEnv>) {
 }
 
 async function linkPayload(tenant: string, report: CaptainsReport, isChairLink: boolean) {
-  const [cfg, umpires, views] = await Promise.all([
+  const [cfg, umpires, views, context] = await Promise.all([
     repo.getTenantConfig(tenant),
     repo.listUmpires(tenant),
     reportViews(tenant, [report], true),
+    attachScorecardContext(repo, tenant, report),
   ]);
   return {
     report: views[0],
+    // The match scorecard to confirm (+ headline result / medicoach link when there is none).
+    ...context,
     // "Send to captain" is offered to the CHAIR's link only; a captain's link never gets a
     // roster (the picker route answers 403 for it).
     canForward: isChairLink,

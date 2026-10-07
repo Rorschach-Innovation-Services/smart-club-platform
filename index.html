@@ -4418,6 +4418,42 @@
         white-space: pre-wrap;
         overflow-wrap: anywhere;
       }
+      /* The captain's report's "Match scorecard" section (CaptainsReport.tsx). */
+      .sc-report {
+        min-width: 0;
+      }
+      .sc-report:focus {
+        outline: 2px solid var(--green);
+        outline-offset: 2px;
+      }
+      .sc-innings-own .sc-innings-head {
+        color: var(--green);
+      }
+      .sc-choices {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 16px;
+      }
+      .sc-choice {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--white);
+        font-size: 13.5px;
+        cursor: pointer;
+        flex: 1 1 220px;
+      }
+      .sc-choice.on {
+        border-color: var(--green);
+        box-shadow: inset 0 0 0 1px var(--green);
+      }
+      .sc-choice input {
+        accent-color: var(--green);
+      }
       /* Operator console (platform-scorecard-confirmations.tsx). */
       .scc-week {
         display: inline-flex;
