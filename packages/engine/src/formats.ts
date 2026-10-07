@@ -34,6 +34,14 @@ export const LOSER_PREFIX = 'lose:';
  * fixture in the same series, so it never takes part in the bracket graph below.
  */
 export const POSITION_PREFIX = 'pos:';
+/**
+ * Reserved prefix for a side the union names in words but no rule can compute — "Best 3rd
+ * place", "Runner-up 2", "Community Cup winner" (ADR 0018). The label is URI-encoded after
+ * the prefix so the id stays one opaque token whatever the union wrote. An admin replaces
+ * it with a real team through the set-side action, which keeps the placeholder in
+ * `fixture.slots[side]` so it can be reverted.
+ */
+export const TBD_PREFIX = 'tbd:';
 
 /** A forward reference to the winner of a fixture. */
 export const winnerOf = (fixtureId: string): string => `${WINNER_PREFIX}${fixtureId}`;
@@ -44,11 +52,34 @@ export const loserOf = (fixtureId: string): string => `${LOSER_PREFIX}${fixtureI
 export const groupPositionOf = (seriesId: string, rank: number): string =>
   `${POSITION_PREFIX}${seriesId}:${rank}`;
 
+/** A named placeholder side: `tbdOf('Best 3rd place')` → `tbd:Best%203rd%20place`. The
+ * label is trimmed and whitespace-collapsed first so the same words always give the same id. */
+export const tbdOf = (label: string): string =>
+  `${TBD_PREFIX}${encodeURIComponent(String(label).replace(/\s+/g, ' ').trim())}`;
+
+/** The human label of a `tbd:` placeholder, or null if the id isn't one (or is empty). */
+export function tbdLabel(id: string): string | null {
+  if (typeof id !== 'string' || !id.startsWith(TBD_PREFIX)) return null;
+  const raw = id.slice(TBD_PREFIX.length);
+  let label: string;
+  try {
+    label = decodeURIComponent(raw);
+  } catch {
+    // Hand-written or truncated data: show what is there rather than throwing in a render.
+    label = raw;
+  }
+  label = label.trim();
+  return label || null;
+}
+
 /** True when an entrant id is a forward reference rather than a real team. */
 export function isSlotRef(id: string): boolean {
   return (
     typeof id === 'string' &&
-    (id.startsWith(WINNER_PREFIX) || id.startsWith(LOSER_PREFIX) || id.startsWith(POSITION_PREFIX))
+    (id.startsWith(WINNER_PREFIX) ||
+      id.startsWith(LOSER_PREFIX) ||
+      id.startsWith(POSITION_PREFIX) ||
+      id.startsWith(TBD_PREFIX))
   );
 }
 
@@ -203,6 +234,7 @@ function bracketShape(fixtures: SlotFixture[]): {
  * branch is more use than "Unknown team".
  */
 export function slotRefLabel(id: string, fixtures: SlotFixture[] = []): string | null {
+  if (typeof id === 'string' && id.startsWith(TBD_PREFIX)) return tbdLabel(id) ?? 'To be decided';
   const position = groupPositionLabel(id);
   if (position) return position;
   const src = slotSource(id);

@@ -203,3 +203,73 @@ describe('--restore-clubs', () => {
     assert.equal((await repo.getClub(TENANT, 'tuks-cricket-club'))!.version, v);
   });
 });
+
+describe('write loop (E28)', () => {
+  const quiet = () => {
+    const lines: string[] = [];
+    return {
+      lines,
+      log: { log: (l: string) => lines.push(l), error: (l: string) => lines.push(l) },
+    };
+  };
+
+  test('a series changed since the read is not written (drifted); the rest are', async () => {
+    const a = series('s-titans-third-league');
+    const b = series('s-titans-fourth-league');
+    await repo.putSeries(TENANT, a);
+    await repo.putSeries(TENANT, b);
+    const storedById = new Map([
+      [a.id, (await repo.getSeries(TENANT, a.id))!],
+      [b.id, (await repo.getSeries(TENANT, b.id))!],
+    ]);
+    // Someone edits `a` after the run read it.
+    await repo.putSeries(TENANT, { ...storedById.get(a.id)!, name: 'edited', version: 2 });
+    const { log, lines } = quiet();
+    const r = await cli.writeSeriesSet(
+      repo,
+      [
+        { ...a, name: 'import a' },
+        { ...b, name: 'import b' },
+      ],
+      storedById,
+      'backup.json',
+      log,
+    );
+    assert.deepEqual(r, { written: [b.id], drifted: [a.id] });
+    assert.match(lines.join('\n'), /changed since this run read it.*NOT written/);
+    assert.equal((await repo.getSeries(TENANT, a.id))!.name, 'edited', 'the edit survives');
+    assert.equal((await repo.getSeries(TENANT, b.id))!.name, 'import b');
+  });
+
+  test('a failing write aborts with "ABORTED after N of M — RE-RUN REQUIRED"; a re-run converges', async () => {
+    const ids = ['s-titans-fifth-league', 's-titans-sixth-league', 's-titans-second-league'];
+    const set = () => ids.map((id) => ({ ...series(id), name: `import ${id}` }));
+    let calls = 0;
+    const flaky = new Proxy(repo, {
+      get: (t, k) =>
+        k === 'putSeriesIfVersion'
+          ? async (...args: Parameters<typeof repo.putSeriesIfVersion>) => {
+              if (++calls === 2) throw new Error('network down');
+              return t.putSeriesIfVersion(...args);
+            }
+          : (t as unknown as Record<string | symbol, unknown>)[k],
+    });
+    const { log, lines } = quiet();
+    await assert.rejects(
+      cli.writeSeriesSet(flaky as typeof repo, set(), new Map(), 'backup.json', log),
+      /network down/,
+    );
+    assert.match(lines.join('\n'), /ABORTED after 1 of 3 series — RE-RUN REQUIRED/);
+    assert.ok(await repo.getSeries(TENANT, ids[0]));
+    assert.equal(await repo.getSeries(TENANT, ids[1]), null);
+    // Re-run from a fresh read: the written one is replaced in place, the rest are written.
+    const stored = new Map<string, Series>();
+    for (const id of ids) {
+      const s = await repo.getSeries(TENANT, id);
+      if (s) stored.set(id, s);
+    }
+    const again = await cli.writeSeriesSet(repo, set(), stored, 'backup.json', quiet().log);
+    assert.deepEqual(again, { written: ids, drifted: [] });
+    for (const id of ids) assert.equal((await repo.getSeries(TENANT, id))!.name, `import ${id}`);
+  });
+});

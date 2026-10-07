@@ -36,7 +36,7 @@
  * migration bundle carries its own `venueWithheld`/`timeWithheld`.
  */
 import { randomUUID } from 'node:crypto';
-import { isSlotRef } from '../../../engine/src/formats.js';
+import { isSlotRef, slotSource, tbdLabel } from '../../../engine/src/formats.js';
 import { fixtureSyncRef } from '../fixture-identity.js';
 import {
   capVenue,
@@ -155,6 +155,15 @@ export function fixtureSchedule(
     cancelled: f.status === 'cancelled',
     changedAt,
   };
+}
+
+/** True when a side is a placeholder the medicoach export can't carry: a `pos:` group position
+ * or a `tbd:` label (not a `win:`/`lose:` fixture link). Such a fixture is skipped by the
+ * export (`unresolved-side`), so medicoach never had it. */
+export function neverExported(f: Pick<ScheduleFixture, 'home' | 'away'>): boolean {
+  return [f.home, f.away].some(
+    (side) => typeof side === 'string' && isSlotRef(side) && !slotSource(side),
+  );
 }
 
 /** Same match before and after an edit: the same unordered pair, or a knockout slot filled. */
@@ -278,6 +287,16 @@ export async function recordScheduleDiff(
       if (f?.id) newRefs.push(fixtureSyncRef(tenant, String(after.id), f));
       return f;
     }
+    // A fixture with a `pos:`/`tbd:` side was never exported (ADR 0018: no team, no fixture to
+    // wait on), so medicoach has no match to update. Once Set team leaves it with no such side
+    // it needs a bundle top-up — reported like a new fixture, never pushed (a push would come
+    // back `unmapped` and vanish). Still unresolved: nothing to push either.
+    if (neverExported(old)) {
+      if (!neverExported(f) && f.id) newRefs.push(fixtureSyncRef(tenant, String(after.id), f));
+      return f;
+    }
+    // Reverted to a `pos:`/`tbd:` placeholder: the contract can't carry it, so nothing is pushed.
+    if (neverExported(f)) return f;
     if (!before || !sameMatch(old, f)) return f;
     if (scheduleKey(before, old) === scheduleKey(after, f)) return f;
     const next: ScheduleFixture = { ...f, schedule: { ...(f.schedule ?? {}), changedAt: nowIso } };
@@ -801,7 +820,10 @@ export async function applyInboundSchedule(
 /** A readable "Home v Away" for a fixture (participant names, else the raw side). */
 function matchLineOf(series: Series, f: ScheduleFixture): string {
   const name = (side: string | undefined) =>
-    series.participants?.find((p) => p.teamId === side)?.name ?? side ?? '?';
+    series.participants?.find((p) => p.teamId === side)?.name ??
+    (side ? tbdLabel(side) : null) ??
+    side ??
+    '?';
   return `${name(f.home)} v ${name(f.away)}`;
 }
 

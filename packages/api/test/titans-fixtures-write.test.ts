@@ -715,8 +715,8 @@ describe('stable ids', () => {
 });
 
 describe('CLI flag guards', () => {
-  test('T20 knockouts cannot be imported in PR A; --parse-only takes no --confirm', () => {
-    assert.throws(() => parseArgs(['--only', 's-titans-mens-t20-ko']), /PR B/);
+  test('T20 knockouts need --include-t20-ko; --parse-only takes no --confirm', () => {
+    assert.throws(() => parseArgs(['--only', 's-titans-mens-t20-ko']), /--include-t20-ko/);
     assert.throws(() => parseArgs(['--parse-only', '--confirm']));
     assert.equal(parseArgs(['--only', 's-titans-veterans-league-a-ko']).only.length, 1);
     assert.equal(parseArgs(['--append-sides']).mode, 'append-sides');

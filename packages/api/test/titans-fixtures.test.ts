@@ -10,6 +10,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import ExcelJS from 'exceljs';
+import { tbdOf } from '../../engine/src/formats.js';
 
 const {
   TITANS_FIXTURE_SHEETS,
@@ -411,9 +412,9 @@ describe('T20 sheets — groups, AM/PM sessions, knockout slots', () => {
       p.ko.map((k) => [k.fixtureId, k.tag, k.time, k.home.ref, k.away.ref]),
       [
         ['f1', 'Q1', '09:00', 'pos:s-g-a:1', 'team:IRENE VILLAGERS 1'],
-        ['f2', 'Q2', '09:00', 'pos:s-g-b:1', 'tbd:Runner-up 1'],
+        ['f2', 'Q2', '09:00', 'pos:s-g-b:1', tbdOf('Runner-up 1')],
         ['f3', 'S1', '13:30', 'win:f1', 'win:f2'],
-        ['f4', null, '09:00', 'tbd:Community Cup winner', 'pos:s-g-b:1'],
+        ['f4', null, '09:00', tbdOf('Community Cup winner'), 'pos:s-g-b:1'],
       ],
     );
   });
@@ -431,8 +432,11 @@ describe('T20 sheets — groups, AM/PM sessions, knockout slots', () => {
     };
     assert.equal(proposeSlotRef('WINNER G1', ctx)?.ref, 'pos:s-g-a:1');
     assert.equal(proposeSlotRef('RUNNER UP G3', ctx)?.ref, 'pos:s-g-c:2');
-    assert.equal(proposeSlotRef('BEST 3RD PLACE', ctx)?.ref, 'tbd:Best 3rd place');
-    assert.equal(proposeSlotRef('SECOND BEST 3RDD PLACE', ctx)?.ref, 'tbd:Second best 3rd place');
+    assert.equal(proposeSlotRef('BEST 3RD PLACE', ctx)?.ref, tbdOf('Best 3rd place'));
+    assert.equal(
+      proposeSlotRef('SECOND BEST 3RDD PLACE', ctx)?.ref,
+      tbdOf('Second best 3rd place'),
+    );
     assert.equal(proposeSlotRef('WINNER S2', ctx)?.ref, 'win:f6');
     assert.equal(proposeSlotRef('2ND PLACE', ctx)?.ref, 'pos:s-vets-a:2');
     assert.equal(proposeSlotRef('SEMI-FINAL WINNER', ctx)?.ref, 'win:f1');
@@ -601,5 +605,26 @@ describe('the real union workbook (skipped when absent)', { skip: !existsSync(WO
       ).length,
       0,
     );
+  });
+});
+
+describe('bad workbook inputs (E33)', () => {
+  test('a missing manifest sheet and an extra sheet are each fatal, by name', () => {
+    const wb = new ExcelJS.Workbook();
+    wb.addWorksheet('NOT A TITANS SHEET');
+    const { errors } = parseTitansWorkbook(wb, [TITANS_FIXTURE_SHEETS[1]]);
+    assert.ok(errors.includes('sheet "NOT A TITANS SHEET" is not in the manifest'));
+    assert.ok(errors.includes(`sheet "${TITANS_FIXTURE_SHEETS[1].sheet}" not found`));
+  });
+
+  test('an unknown team is unresolved (fatal in the gate); an unknown venue is a registry miss', () => {
+    const ws = sheetWith([
+      HEADER,
+      [dateCell(2026, 10, 24), 'NOBODY XI', 'TUKS 2', 'THE MOON OVAL'],
+    ]);
+    const p = parseTitansSheet(ws, specFor('SECOND', [1]));
+    const out = buildTitansSeries([p], [], []);
+    assert.ok(out.unresolvedNames.some((n) => n.includes('"NOBODY XI"')));
+    assert.equal(out.registryMisses.get('THE MOON OVAL'), 1);
   });
 });

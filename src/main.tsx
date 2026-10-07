@@ -695,6 +695,22 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       { rawConflict: true },
     ).then(() => invalidate(qk.series()));
   }
+  // Knockout Set team / revert (ADR 0018): one server action on one fixture side, pinned to
+  // the cached version. Resolves once the series list has refetched, so the editor's next
+  // Save already carries the new side and version; rejects (after the toast) on a 409.
+  function setFixtureSide(seriesId, fixtureId, side, teamId) {
+    const cur = allSeries.find((s) => s.id === seriesId);
+    if (!cur) return Promise.reject(new Error('That series is no longer loaded — refresh.'));
+    return withToast(
+      () =>
+        api.patchSeries(seriesId, {
+          setSide: { fixtureId, side, teamId },
+          version: cur.version,
+        }),
+      teamId ? 'Could not set the team' : 'Could not revert to the placeholder',
+      { rawConflict: true },
+    ).then(() => invalidate(qk.series()));
+  }
   function deleteSeries(seriesId) {
     withToast(() => api.deleteSeriesReq(seriesId), 'Could not delete series')
       .then(() => invalidate(qk.series()))
@@ -1078,6 +1094,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   setSupportContact,
                   saveOrgName,
                   updateSeries,
+                  setFixtureSide,
                   deleteSeries,
                   duplicateSeries,
                   setReleased,
@@ -1237,6 +1254,7 @@ function Shell({
   setSupportContact,
   saveOrgName,
   updateSeries,
+  setFixtureSide = undefined,
   deleteSeries,
   duplicateSeries,
   setReleased,
@@ -2839,6 +2857,7 @@ function Shell({
             // effect, and an inline lambda here would re-fire that request on every App
             // re-render (toast, refetch) with an unchanged draft.
             onCheckClashes={api.checkSeriesClashes}
+            onSetSide={setFixtureSide}
             toast={toastShow}
             allCalendars={allCalendars}
             allSeasonRuns={allSeasonRuns}

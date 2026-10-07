@@ -76,5 +76,6 @@ flowchart TB
 | [0015](0015-fixture-postponement-negotiation.md)           | Fixture postponement by negotiation between clubs       |
 | [0016](0016-medicoach-fixture-sync.md)                     | Medicoach fixture sync: pull, each side owns its fields |
 | [0017](0017-transfer-windows-and-auto-reject.md)           | Transfer windows; registrations outside auto-reject     |
+| [0018](0018-named-knockout-placeholders.md)                | Named knockout placeholders (`tbd:`) and Set team       |
 
 For the data layout and access patterns, see [data-model.md](data-model.md).

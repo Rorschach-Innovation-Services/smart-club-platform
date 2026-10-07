@@ -229,6 +229,7 @@ import type {
   SyncConflict,
 } from './types.js';
 import { teamIdsForClub, resolveTeam } from './teams.js';
+import { applySetSide, orphanSides, parseSetSide } from './set-side.js';
 import { orgCopy } from './branding.js';
 import { chairContactOf } from './club-contacts.js';
 import {
@@ -4602,8 +4603,8 @@ async function createSeries(
   return series;
 }
 
-/** A series PATCH may also carry the `reveal` ACTION key — not a stored field. */
-type SeriesPatch = Partial<Series> & { reveal?: unknown };
+/** A series PATCH may also carry the `reveal` / `setSide` ACTION keys — not stored fields. */
+type SeriesPatch = Partial<Series> & { reveal?: unknown; setSide?: unknown };
 
 app.patch('/series/:id', requireAdmin, async (c) => {
   const ra = c.get('requestAuth')!;
@@ -4739,6 +4740,101 @@ async function applySeriesPatch(
       // The tenant's configured ground-name aliases, merged over the code default.
       repo.getTenantConfig(tenant).then(venueAliasesFor),
     ]));
+
+  // ── Knockout "Set team" (ADR 0018) ──
+  // `setSide` is an ACTION key: put a real team into one fixture's placeholder side (or revert
+  // it), computed entirely from `current`. Sibling keys are ignored, like `reveal`. It is gated
+  // on a NEW ground clash for drafts AND released series alike (subset rule): a knockout side
+  // usually has no venue, so setting the home team moves the fixture onto that team's ground.
+  // A team already playing that day/slot (released series, the postponement check's rule) is
+  // refused with `team_busy`. On a medicoach-synced series a `win:`/`lose:` side is medicoach's
+  // to fill (409 `sync_owned_side`). The narrowed write then runs the rest of this function
+  // unchanged (approval recall on a draft, the in-season gate, the medicoach schedule diff).
+  if (patch.setSide !== undefined) {
+    const op = parseSetSide(patch.setSide);
+    if (typeof patch.version !== 'number')
+      throw new HttpError(400, 'setSide needs the series version');
+    const [allSeries, clubs, venues, aliases] = await loadClashInputs();
+    const syncMapped = await seriesMappedForSync(
+      repo,
+      tenant,
+      current,
+      await repo.getTenantConfig(tenant),
+    );
+    const next = applySetSide(current, op, clubs, { syncMapped });
+    if (op.teamId !== null) {
+      const f = (next.fixtures as Array<{ id?: string; date?: string; time?: string }>).find(
+        (x) => x?.id === op.fixtureId,
+      );
+      const busy = f?.date
+        ? findTeamBusy(
+            allSeries.filter((s) => s.released === true),
+            {
+              seriesId: id,
+              fixtureId: op.fixtureId,
+              [op.side]: op.teamId,
+            },
+            f.date,
+            f.time,
+          )[op.side]
+        : undefined;
+      if (busy) {
+        const clubsById = new Map(clubs.map((cl) => [cl.id, cl]));
+        const other = allSeries.find((s) => s.id === busy.seriesId);
+        const team = resolveTeam({ ...current, ...next } as Series, op.teamId, clubsById).name;
+        throw new HttpError(
+          409,
+          `${team} already plays on ${busy.date}${busy.time ? ' ' + busy.time : ''} (${other?.name ?? busy.seriesId}) — pick another team, or move one of the fixtures`,
+          {
+            code: 'team_busy',
+            teamBusy: [
+              {
+                side: op.side,
+                team,
+                date: busy.date,
+                with: {
+                  seriesId: busy.seriesId,
+                  seriesName: other?.name,
+                  fixtureId: busy.fixtureId,
+                },
+              },
+            ],
+          },
+        );
+      }
+    }
+    const refusal = inSeasonClashRefusal(
+      current,
+      { ...current, ...next, id } as Series,
+      allSeries,
+      clubs,
+      venues,
+      aliases,
+    );
+    if (refusal) throw refusal;
+    patch = { ...next, version: patch.version };
+  }
+
+  // Every fixture side must resolve: a series team / participant, a placeholder, or a side
+  // filled from a stored placeholder (`slots`). Only NEW orphans are refused, so a series that
+  // already carries one (old data) stays editable (risk R7).
+  if (
+    patch.fixtures !== undefined ||
+    patch.participants !== undefined ||
+    patch.teams !== undefined
+  ) {
+    // Both sides judged against the team set the write leaves, so a series that had none
+    // (nothing to judge) isn't blamed for its old sides once a write adds teams.
+    const after = { ...current, ...patch } as Series;
+    const before = new Set(orphanSides(current, after));
+    const introduced = orphanSides(after).filter((o) => !before.has(o));
+    if (introduced.length)
+      throw new HttpError(
+        400,
+        `fixture side(s) not in the series: ${introduced.slice(0, 5).join('; ')}${introduced.length > 5 ? ` … +${introduced.length - 5} more` : ''} — add the team to the series, or use Set team on a knockout placeholder`,
+        { code: 'orphan_side', orphans: introduced },
+      );
+  }
 
   // Withheld fields are chosen ONLY on the false→true release transition, and only when
   // the patch actually carries a `withheld` key. Gating on the flag value alone would
