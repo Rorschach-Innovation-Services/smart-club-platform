@@ -34,6 +34,7 @@ import { HelpLink, HelpProvider } from './help/HelpDrawer';
 import { TutorialsCard } from './platform-tutorials';
 import { RequiredDocsCard } from './platform-required-docs';
 import { FixtureRemindersCard } from './platform-fixture-reminders';
+import { PlayerSyncCard } from './platform-player-sync';
 import { TransferWindowCard } from './platform-transfer-windows';
 import { DocIntakeWizard } from './platform-intake';
 import { StructureIntakeWizard } from './platform-structure-intake';
@@ -854,6 +855,12 @@ function TenantEditPage({ toast }: { toast: Toast }) {
           toast={toast}
         />
         <TransferWindowCard key={`tw-${config.tenant}`} config={config} save={save} toast={toast} />
+        <PlayerSyncCard
+          key={`ps-${config.tenant}-${String(config.integrations?.medicoach?.playerSync ?? false)}`}
+          config={config}
+          save={save}
+          toast={toast}
+        />
         <CopyCard
           key={`cp-${config.tenant}`}
           config={config}
