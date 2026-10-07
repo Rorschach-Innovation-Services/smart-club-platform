@@ -49,6 +49,10 @@ describe('Sentry redaction', () => {
       'https://x.test/captains-report-link/[token]?x=1',
     );
     assert.equal(scrubReportTokens('/r/abc.def'), '/r/[token]');
+    assert.equal(
+      scrubReportTokens('https://web.test/r/abc.def?x=1'),
+      'https://web.test/r/[token]?x=1',
+    );
     assert.equal(scrubReportTokens('/series/abc'), '/series/abc');
   });
 

@@ -1,5 +1,5 @@
 /**
- * The chair scorecard page's text lines and rules, and the operator console's week stepping.
+ * The scorecard's text lines and the correction-feedback rule.
  */
 import { describe, it, expect } from 'vitest';
 import {
@@ -10,10 +10,6 @@ import {
   fmtRate,
   headlineScore,
   inningsHeading,
-  isWeekKey,
-  lastCompletedWeekKey,
-  ownSide,
-  shiftWeek,
 } from './scorecardConfirmHelpers';
 
 describe('scorecard lines', () => {
@@ -62,44 +58,5 @@ describe('feedbackProblem', () => {
     expect(feedbackProblem('   ')).toMatch(/what needs correcting/);
     expect(feedbackProblem('x'.repeat(FEEDBACK_MAX))).toBeNull();
     expect(feedbackProblem('x'.repeat(FEEDBACK_MAX + 1))).toMatch(/2000 characters/);
-  });
-});
-
-describe('ownSide', () => {
-  it("finds the chair's club by name, ignoring CC and team suffixes", () => {
-    expect(ownSide({ homeTeamName: 'UKZN', awayTeamName: 'Crusaders CC' }, 'UKZN CC')).toBe('home');
-    expect(
-      ownSide({ homeTeamName: 'Berea Rovers CC', awayTeamName: 'UKZN CC 2nd XI' }, 'UKZN CC'),
-    ).toBe('away');
-  });
-  it('gives up when neither or both sides match', () => {
-    expect(ownSide({ homeTeamName: 'A CC', awayTeamName: 'B CC' }, 'UKZN CC')).toBeNull();
-    expect(
-      ownSide({ homeTeamName: 'UKZN 1st XI', awayTeamName: 'UKZN 2nd XI' }, 'UKZN'),
-    ).toBeNull();
-  });
-});
-
-describe('weeks', () => {
-  it('accepts only real Sundays', () => {
-    expect(isWeekKey('2026-10-04')).toBe(true);
-    expect(isWeekKey('2026-10-05')).toBe(false);
-    expect(isWeekKey('2026-02-30')).toBe(false);
-  });
-
-  it('steps a week at a time across month ends', () => {
-    expect(shiftWeek('2026-10-04', -1)).toBe('2026-09-27');
-    expect(shiftWeek('2026-09-27', 1)).toBe('2026-10-04');
-  });
-
-  it('picks the last completed Mon–Sun week in SAST', () => {
-    // Wednesday 7 Oct → the week that ended Sunday 4 Oct.
-    expect(lastCompletedWeekKey(new Date('2026-10-07T10:00:00Z'))).toBe('2026-10-04');
-    // Monday 5 Oct 06:00 SAST (04:00 UTC) → that Sunday's week just ended.
-    expect(lastCompletedWeekKey(new Date('2026-10-05T04:00:00Z'))).toBe('2026-10-04');
-    // Sunday 4 Oct (still running) → the week before.
-    expect(lastCompletedWeekKey(new Date('2026-10-04T12:00:00Z'))).toBe('2026-09-27');
-    // Sunday 23:30 UTC is already Monday in SAST.
-    expect(lastCompletedWeekKey(new Date('2026-10-04T23:30:00Z'))).toBe('2026-10-04');
   });
 });

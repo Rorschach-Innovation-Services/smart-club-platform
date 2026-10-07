@@ -31,8 +31,6 @@ import {
   scorecardPathAndQuery,
   signRequest,
 } from '../medicoach-sync-contract.js';
-// TEMP until the chair digest is deleted (Phase C): its entries are still stale-flagged too.
-import { flagStaleScorecardEntries } from '../scorecard-confirmations.js';
 import type { StoredFixtureResult, StoredFixtureScorecard } from '../types.js';
 import type { PullerDeps } from './puller.js';
 
@@ -167,10 +165,6 @@ export async function fetchAndStoreScorecard(
       await deps.repo
         .flagStaleCaptainsReportScorecards(tenant, seriesId, fixtureId, base.fetchedAt)
         .catch(failed);
-      // TEMP (Phase C deletes it): the chair digest's entries, until the digest is removed.
-      await flagStaleScorecardEntries(deps.repo, tenant, seriesId, fixtureId, base.fetchedAt, {
-        now: now(),
-      }).catch(failed);
     }
     return card.available ? 'stored' : 'unavailable';
   } catch (err) {

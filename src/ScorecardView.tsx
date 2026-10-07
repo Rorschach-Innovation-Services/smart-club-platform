@@ -2,7 +2,7 @@
  *
  * The medicoach scorecard as the platform renders it: one card per innings (batting, extras,
  * bowling, fall of wickets), the headline result when no scorecard was stored, and the
- * controlled correction-request field. Shared by the captain's report and the chair digest.
+ * controlled correction-request field, as the captain's report shows them.
  *
  * Captains and chairs open these from WhatsApp on a phone, so every table scrolls sideways
  * inside its own focusable wrapper instead of widening the page.

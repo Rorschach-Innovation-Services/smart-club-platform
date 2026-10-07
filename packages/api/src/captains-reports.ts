@@ -1405,7 +1405,7 @@ export async function notifyOperatorsOfCorrection(
     } catch (err) {
       out.failed++;
       log(
-        `[scorecard-confirm] correction notice ${input.ref}: an operator email failed — ${
+        `[scorecard-correction] correction notice ${input.ref}: an operator email failed — ${
           err instanceof Error ? err.name : 'error'
         }`,
       );

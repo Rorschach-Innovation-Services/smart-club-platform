@@ -12,7 +12,7 @@
  *  - a window-auto-rejected clearance with NO player rows anywhere is still erasable (the gate
  *    must not 404 on "no player row") and its snapshot ID document is collected;
  *  - a pending clearance naming the person → 409, nothing touched;
- *  - a cached scorecard / digest feedback that keeps changing under its scrub (forced perpetual
+ *  - a cached scorecard that keeps changing under its scrub (forced perpetual
  *    conditional failure) → 409 with NOTHING deleted (rows, clearance, certificate, S3 docs),
  *    and a plain retry then completes the erasure;
  *  - unknown person → 404; a rep → 403.
@@ -22,7 +22,7 @@
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
-import { mkdtemp, mkdir, rm, access, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type {
@@ -32,7 +32,6 @@ import type {
   CertificateMeta,
   CaptainsReport,
   PlayerErasureCounts,
-  ScorecardConfirmation,
   StoredFixtureScorecard,
 } from '../src/types.js';
 
@@ -354,7 +353,6 @@ describe('full erasure across every category', () => {
       certificates: 1,
       captainsReportsScrubbed: 1,
       scorecardsScrubbed: 0,
-      feedbackScrubbed: 0,
       reportScorecardFeedbackScrubbed: 0,
       reportOpenMarkers: 1,
     });
@@ -534,8 +532,6 @@ describe('scorecard scrub contention', () => {
   }
   const scorecardScrubWrite = (c: { input: Record<string, unknown> }, kind: string) =>
     kind === 'PutCommand' && c.input.ConditionExpression === 'fetchedAt = :f';
-  const feedbackScrubWrite = (c: { input: Record<string, unknown> }, kind: string) =>
-    kind === 'UpdateCommand' && String(c.input.UpdateExpression).includes('.feedback = :fb');
 
   const card = (fixtureId: string, batter: string): StoredFixtureScorecard => ({
     seriesId: 's1',
@@ -622,87 +618,6 @@ describe('scorecard scrub contention', () => {
     assert.equal(scrubbed.terminal, true);
     assert.equal(await repo.getClearanceRaw(TENANT, 'alpha', approved.id), null);
     assert.equal(await exists(pdf), false);
-  });
-
-  test('digest feedback that keeps changing → 409, NOTHING deleted (clearance-only person, no PLAYER# rows); a retry then completes', async () => {
-    const objectKey = `local/${TENANT}/gamma/contended.png`;
-    const p = mkPlayer('beta', {
-      status: 'clearance-pending',
-      idDocMeta: {
-        objectKey,
-        size: 1,
-        contentType: 'image/png',
-        uploadedAt: '2026-05-01T00:00:00.000Z',
-      },
-    });
-    const fullName = `${p.firstName} ${p.lastName}`;
-    const id = 'cl-contended';
-    await repo.createAutoRejectedClearance(TENANT, p, {
-      id,
-      playerNaturalKey: p.naturalKey,
-      playerName: fullName,
-      fromClubId: 'old-directory-club',
-      fromClubName: 'Old Directory CC',
-      fromClubDirectory: true,
-      toClubId: 'beta',
-      toClubName: 'Beta CC',
-      requestedAt: '2026-09-01T00:00:00.000Z',
-      origin: 'registration',
-      feesCleared: false,
-      misconductCleared: false,
-      status: 'rejected',
-      rejectedAt: '2026-09-01T00:00:00.000Z',
-      rejectedBy: 'system:transfer-window',
-      rejectOutcome: 'not-registered',
-      version: 1,
-    } as PlayerClearance);
-    await mkdir(path.dirname(diskPath(objectKey)), { recursive: true });
-    await writeFile(diskPath(objectKey), 'x');
-    assert.ok(
-      await repo.createScorecardConfirmation(TENANT, {
-        tenant: TENANT,
-        clubId: 'beta',
-        clubName: 'Beta CC',
-        weekKey: '2026-W38',
-        ref: 'scc-1',
-        memberId: 'm-1',
-        linkExpiresAt: '2026-10-01T00:00:00.000Z',
-        createdAt: '2026-09-21T00:00:00.000Z',
-        entries: {
-          's1#fd-1': {
-            seriesId: 's1',
-            fixtureId: 'fd-1',
-            homeTeamName: 'Beta CC',
-            awayTeamName: 'Alpha CC',
-            fixtureDate: '2026-09-20',
-            status: 'correction',
-            feedback: `${fullName} was not out.`,
-          },
-        },
-      } as ScorecardConfirmation),
-    );
-
-    const res = await withContention(feedbackScrubWrite, () => erase(p.naturalKey));
-    assert.equal(res.status, 409);
-    assert.match(((await res.json()) as { error: string }).error, /try again/);
-
-    // Nothing destructive ran: the clearance (the ONLY record of the person) and its doc survive,
-    // so the retry still finds them — with the name the feedback must lose.
-    assert.ok(await repo.getClearanceRaw(TENANT, 'old-directory-club', id), 'clearance kept');
-    assert.ok(await repo.getInboundClearance(TENANT, 'beta', id), 'mirror kept');
-    assert.ok(await exists(diskPath(objectKey)), 'snapshot ID doc kept');
-    const kept = (await repo.getScorecardConfirmation(TENANT, '2026-W38', 'beta'))!;
-    assert.equal(kept.entries['s1#fd-1'].feedback, `${fullName} was not out.`);
-
-    const retry = await erase(p.naturalKey);
-    assert.equal(retry.status, 200);
-    const { counts } = (await retry.json()) as { counts: PlayerErasureCounts };
-    assert.equal(counts.feedbackScrubbed, 1);
-    assert.equal(counts.clearances, 1);
-    const scrubbed = (await repo.getScorecardConfirmation(TENANT, '2026-W38', 'beta'))!;
-    assert.equal(scrubbed.entries['s1#fd-1'].feedback, `${repo.ERASED_NAME} was not out.`);
-    assert.equal(await repo.getClearanceRaw(TENANT, 'old-directory-club', id), null);
-    assert.equal(await exists(diskPath(objectKey)), false);
   });
 
   test('a single lost race is retried transparently (no throw)', async () => {

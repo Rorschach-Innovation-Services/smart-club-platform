@@ -42,13 +42,16 @@
  * `status` is documentation, not a runtime gate — nothing here can verify Meta's
  * state, and the send path fails open (attempts the send) for every entry. The exceptions
  * are `fixtureReminder` (the FixtureReminders cron skips WhatsApp until it is
- * "registered"), `captainsReportDue` / `captainsReportOpsDigest` / `scorecardConfirmDue`
- * (their senders skip the channel as template-pending until it is "registered") and
+ * "registered"), `captainsReportDue` / `captainsReportOpsDigest` (their senders skip the
+ * channel as template-pending until it is "registered") and
  * `clearancePendingV2` (the ClearanceReminders cron's WhatsApp gate) — see those entries.
  *
  * RETIRED: `club_clearance_pending` (the 4-param, link-less v1 clearance template) has NO entry
  * here since 7 Oct 2026. `club_clearance_pending_v2` is the only clearance template; a clearance
  * notice with no link skips WhatsApp rather than sending a link-less message.
+ *
+ * RETIRED: `scorecard_confirm_due` (the Monday chair scorecard digest) has NO entry here since
+ * 7 Oct 2026 — scorecards are confirmed inside the captain's report instead. See the runbook.
  */
 
 export type WhatsAppTemplateDefinition = {
@@ -259,33 +262,6 @@ export const WHATSAPP_TEMPLATES = {
       'This is an automated service message. No action is required.',
     // Approved in Meta as UTILITY on 7 Oct 2026 (v2; v1 was approved-as-Marketing).
     status: 'registered',
-  },
-
-  /**
-   * Monday scorecard-confirmation digest to a club chair (the ScorecardConfirmations cron):
-   * one message per club per week, its link a URL BUTTON whose dynamic suffix is the signed
-   * digest token (`/sc/<token>`, tenant-independent like `/r/`, on the PLATFORM host).
-   *
-   * Approved in Meta 7 Oct 2026 (template ID 920518190917996; Utility, English, 3 body params,
-   * dynamic URL button "Confirm scorecards" → `https://platform.club.medicoach.co.za/sc/{{1}}`).
-   * `bodyText` is the exact approved copy. Like `captainsReportDue`, this status IS read at
-   * runtime: were it ever set back to pending, the sender would throw
-   * `WhatsAppTemplatePendingError` and the channel would be skipped as `template-pending`
-   * (the email still goes).
-   */
-  scorecardConfirmDue: {
-    name: 'scorecard_confirm_due',
-    lang: 'en',
-    paramCount: 3,
-    params: ['chair first name', 'club name', 'weekend label'],
-    bodyText:
-      "Hi {{1}}, please review and confirm {{2}}'s match scorecards for the weekend of {{3}}. " +
-      'Tap below to view each scorecard and confirm or request a correction.',
-    status: 'registered',
-    urlButton: {
-      urlTemplate: 'https://platform.club.medicoach.co.za/sc/{{1}}',
-      suffix: 'signed scorecard digest token',
-    },
   },
 } as const satisfies Record<string, WhatsAppTemplateDefinition>;
 

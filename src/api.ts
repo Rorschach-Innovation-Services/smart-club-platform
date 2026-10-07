@@ -69,10 +69,6 @@ import type {
   ClubSignupInfo,
   ClubSignupResult,
   PostponementRequest,
-  ScorecardConfirmView,
-  ScorecardConfirmAnswer,
-  PlatformScorecardWeek,
-  ScorecardConfirmationsRunSummary,
 } from './types';
 
 /**
@@ -1141,34 +1137,6 @@ export const forwardLinkedCaptainsReport = (token: string, candidateId: string) 
     method: 'POST',
     body: { candidateId },
     auth: false,
-  });
-
-// ── Chair scorecard confirmation ──
-// The public `/sc/<token>` digest: no auth, the token is the capability. Each match is answered
-// once (first submit wins → 409 `entry_closed`); every answer returns the whole digest again.
-// An answer carries the rendered card's `scorecardFetchedAt` so the server records the version
-// the chair actually saw.
-const scorecardLinkPath = (token: string) => `/scorecard-confirm-link/${encodeURIComponent(token)}`;
-export const getScorecardConfirmLink = (token: string) =>
-  request<ScorecardConfirmView>(scorecardLinkPath(token), { auth: false });
-export const submitScorecardConfirmEntry = (
-  token: string,
-  seriesId: string,
-  fixtureId: string,
-  body: ScorecardConfirmAnswer,
-) =>
-  request<ScorecardConfirmView>(
-    `${scorecardLinkPath(token)}/fixtures/${encodeURIComponent(seriesId)}/${encodeURIComponent(fixtureId)}`,
-    { method: 'PUT', body, auth: false },
-  );
-/** Operator console: one week (a Sunday weekKey; omitted = the latest completed week). */
-export const listPlatformScorecardConfirmations = (week?: string) =>
-  request<PlatformScorecardWeek>('/platform/scorecard-confirmations', { query: { week } });
-/** Run the Monday digest now (idempotent; tops up existing digests with late results). */
-export const runScorecardConfirmations = (week?: string) =>
-  request<ScorecardConfirmationsRunSummary>('/platform/scorecard-confirmations/run', {
-    method: 'POST',
-    body: week ? { week } : {},
   });
 
 // ── Venues (ADR 0008 phase 2) ──

@@ -376,12 +376,6 @@ export interface TenantConfig {
    */
   fixtureReminders?: FixtureRemindersConfig;
   /**
-   * The Monday chair scorecard-confirmation digest (ScorecardConfirmations cron). Absent or
-   * `enabled` not true ⇒ off. Also needs `features.medicoachSync` + a medicoach goLiveDate.
-   * Operator-only: PUT /tenant/config strips it, only PUT /platform/tenants/:slug writes it.
-   */
-  scorecardConfirmations?: ScorecardConfirmationsConfig;
-  /**
    * Transfer windows: inclusive tenant wall-clock date ranges (ADR 0008) in which a clearance may
    * be opened. Absent OR empty ⇒ no restriction (an empty list must never lock a tenant out).
    * Outside every window a rep-initiated request 409s and a public registration that would open
@@ -602,10 +596,7 @@ export interface ClubCommEvent {
     | 'clearance-inbound'
     // Pending-clearance nudge to the source chair (admin "Send reminder" or the ClearanceReminders
     // cron), keyed `clearance-<id>-reminder-<date>-<channel>`. Bypasses the daily cap.
-    | 'clearance-reminder'
-    // The Monday scorecard-confirmation digest to the chair (ScorecardConfirmations cron), one
-    // row per channel, keyed `scorecard-confirm-<weekKey>-<channel>`.
-    | 'scorecard-confirm';
+    | 'clearance-reminder';
   /** Aggregate, PII-free outcome for a broadcast send, e.g. "8 sent · 2 skipped" (sent · skipped · failed; zero parts omitted). */
   summary?: string;
 }
@@ -669,8 +660,6 @@ export interface PlayerErasureCounts {
   captainsReportsScrubbed: number;
   /** Cached medicoach scorecards (FIXSCORECARD#) that named the person: scrubbed and marked terminal. */
   scorecardsScrubbed: number;
-  /** Scorecard-digest entries whose chair feedback named the person and was scrubbed in place. */
-  feedbackScrubbed: number;
   /**
    * Captain's reports whose scorecard correction `feedback` named the person and was scrubbed
    * in place (also counted in `captainsReportsScrubbed`). Absent on audit rows written before.
@@ -1644,63 +1633,4 @@ export interface CaptainsReport {
   recipientContact?: { email?: string; cell?: string };
   createdAt: string;
   updatedAt: string;
-}
-
-/** Per-tenant chair scorecard confirmation settings (see TenantConfig.scorecardConfirmations). */
-export interface ScorecardConfirmationsConfig {
-  /** The operator's master switch for the Monday digest. Absent/false ⇒ off. */
-  enabled?: boolean;
-}
-
-/** Where one fixture of a scorecard digest stands. */
-export type ScorecardConfirmEntryStatus = 'pending' | 'confirmed' | 'correction' | 'void';
-
-/** One fixture of a club's weekly scorecard digest (keyed `<seriesId>#<fixtureId>`). */
-export interface ScorecardConfirmEntry {
-  seriesId: string;
-  fixtureId: string;
-  homeTeamName: string;
-  awayTeamName: string;
-  /** YYYY-MM-DD */
-  fixtureDate: string;
-  competition?: string;
-  venue?: string;
-  /** Which side the digest's club played (the operator console lists the home side first). */
-  side?: 'home' | 'away';
-  status: ScorecardConfirmEntryStatus;
-  /** The chair's correction request, verbatim (≤ 2,000 chars). */
-  feedback?: string;
-  submittedAt?: string;
-  submittedVia?: 'link';
-  /**
-   * The FIXSCORECARD# `fetchedAt` the chair ANSWERED against — set for a confirm AND a
-   * correction alike, despite the name (kept for storage compatibility). Absent ⇒ no
-   * scorecard was available (headline only); the stale check then uses `submittedAt`.
-   */
-  confirmedAgainstFetchedAt?: string;
-  /** A newer scorecard arrived after the chair submitted: the answer may be out of date. */
-  staleConfirmation?: boolean;
-}
-
-/**
- * A club's weekly scorecard confirmation digest (`SCORECONF#<weekKey>#<clubId>`): one per club
- * per Mon–Sun week (`weekKey` = that Sunday, SAST), one link, one `SC-YYYY-NNNN` ref, the
- * notice outcomes, and one entry per played fixture. The cron TOPS UP entries for results that
- * arrive late; each entry is answered once (first submit wins). Rotating `memberId` revokes
- * the link.
- */
-export interface ScorecardConfirmation {
-  tenant: string;
-  clubId: string;
-  clubName: string;
-  weekKey: string;
-  ref: string;
-  /** Opaque, random — bound into the link token. Server-only, never served. */
-  memberId: string;
-  linkExpiresAt: string;
-  createdAt: string;
-  updatedAt?: string;
-  deliveries?: CaptainsReportDelivery[];
-  notifiedAt?: string;
-  entries: Record<string, ScorecardConfirmEntry>;
 }
