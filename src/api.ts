@@ -1425,6 +1425,146 @@ export const platformStructureIntakeCommit = (slug: string, body: StructureIntak
     { method: 'POST', body },
   );
 
+// ── Fixture amendments (operator) ── the union's weekly "Reminder Fixtures" workbook, through
+// the reminder-fixtures CLI's parser/matcher/planner behind a preview → confirm pair. Shapes
+// mirror packages/api/src/reminder-fixtures.ts (ReminderPreview, SeriesWriteResult, …).
+export type AmendmentRowOutcome =
+  | 'matched-change'
+  | 'matched-no-change'
+  | 'unmatched'
+  | 'ambiguous'
+  | 'venue-unknown'
+  | 'blocked'
+  | 'competition-unknown';
+export interface AmendmentRowChange {
+  field: 'date' | 'time' | 'venue' | 'status';
+  before: string;
+  after: string;
+}
+export interface AmendmentPreviewRow {
+  /** `<sheet>:<row>` — the key of the per-row skip toggle. */
+  rowId: string;
+  sheetRow: number;
+  competition: string;
+  group?: string;
+  sheet: { home: string; away: string; date: string; time?: string; venue: string };
+  outcome: AmendmentRowOutcome;
+  reason?: string;
+  warnings: string[];
+  skipped: boolean;
+  seriesId?: string;
+  seriesName?: string;
+  fixtureId?: string;
+  fixture?: {
+    home: string;
+    away: string;
+    date: string;
+    time: string;
+    venue: string;
+    status: string;
+    released: boolean;
+  };
+  changes?: AmendmentRowChange[];
+}
+export interface AmendmentClash {
+  date: string;
+  time?: string;
+  ground: string;
+  fixture: string;
+  with: string;
+}
+export interface AmendmentGate {
+  ok: boolean;
+  errors: string[];
+  introduced: AmendmentClash[];
+  /** Pre-existing clashes on the sheet dates — reported, never blocking. */
+  preExisting: AmendmentClash[];
+}
+export interface AmendmentPreview {
+  planHash: string;
+  sheets: Array<{
+    sheet: string;
+    status: 'ok' | 'empty' | 'refused';
+    reason?: string;
+    fixtureRows: number;
+    unrecognisedRows: number;
+    vColumn?: number;
+    competitions: Array<{ competition: string; seriesIds: string[] }>;
+    rows: AmendmentPreviewRow[];
+    alreadyCorrect: number;
+  }>;
+  skippedRows: Array<{ sheet: string; sheetRow: number; text: string; reason: string }>;
+  counts: Record<AmendmentRowOutcome, number> & { applicable: number; applied: number };
+  moves: Array<{
+    seriesId: string;
+    seriesName: string;
+    fixtureId: string;
+    date: string;
+    home: string;
+    away: string;
+    from: string;
+    to: string;
+    takenBy: string[];
+    registryMiss: boolean;
+  }>;
+  gate: AmendmentGate;
+  touchedSeries: Array<{ id: string; name: string; version: number }>;
+  officials?: Array<{ seriesId: string; fixtureId: string; umpires: string[]; referee?: string }>;
+}
+export interface AmendmentOptions {
+  skipRowIds: string[];
+  relocateDraftClashes: boolean;
+}
+export interface AmendmentConfirmResult {
+  backupKey: string;
+  fixturesAmended: number;
+  draftMoves: number;
+  series: Array<{
+    seriesId: string;
+    seriesName: string;
+    status: 'written' | 'drifted';
+    version?: number;
+    fixtureIds: string[];
+  }>;
+  /** A written fixture sits on a slot a drifted series' fixture still holds: re-upload now. */
+  splitSlotRisks: Array<{
+    written: { seriesId: string; fixtureId: string };
+    stranded: { seriesId: string; fixtureId: string };
+    ground: string;
+    date: string;
+    time?: string;
+  }>;
+  medicoachSync: boolean;
+  clubsNotified: false;
+}
+export const platformFixtureAmendmentsPreview = async (
+  slug: string,
+  file: File,
+  opts: AmendmentOptions,
+) =>
+  request<AmendmentPreview>(
+    `/platform/tenants/${encodeURIComponent(slug)}/fixture-amendments/preview`,
+    {
+      method: 'POST',
+      body: { filename: file.name, dataBase64: await fileToBase64(file), ...opts },
+    },
+  );
+/** 409 `plan_changed` carries the fresh preview on `details.preview`; 409 `clash_gate` the
+ * gate on `details.details`; 409 `plan_errors` the list on `details.errors`. */
+export const platformFixtureAmendmentsConfirm = async (
+  slug: string,
+  file: File,
+  opts: AmendmentOptions,
+  planHash: string,
+) =>
+  request<AmendmentConfirmResult>(
+    `/platform/tenants/${encodeURIComponent(slug)}/fixture-amendments/confirm`,
+    {
+      method: 'POST',
+      body: { filename: file.name, dataBase64: await fileToBase64(file), ...opts, planHash },
+    },
+  );
+
 // Rep invites: coverage read + a tightened mirror of /admin/users pinned to role:'rep'.
 export const platformTenantReps = (slug: string) =>
   request<TenantRepsResponse>(`/platform/tenants/${encodeURIComponent(slug)}/reps`);
