@@ -651,5 +651,19 @@ export const whatsappMessageKey = (wamid: string) => ({
   sk: 'WAMSG',
 });
 
+/**
+ * One-off broadcast delivery records (send-dolphins-welcome-broadcast.ts): one partition per run
+ * (`<tenant>#BCAST#<runId>`), one `WA#<wamid>` row per WhatsApp message sent, updated by the
+ * status webhook via a `WAMSG#<wamid>` lookup of kind 'broadcast'. Tenant-prefixed, so tenant
+ * erasure removes them; they also self-expire (`expiresAt`).
+ */
+export const broadcastPartitionPk = (tenant: string, runId: string) =>
+  `${tenantPrefix(tenant)}#BCAST#${runId}`;
+
+export const broadcastDeliveryKey = (tenant: string, runId: string, wamid: string) => ({
+  pk: broadcastPartitionPk(tenant, runId),
+  sk: `WA#${wamid}`,
+});
+
 /** Prefix used to erase an entire tenant's non-user items. */
 export const tenantErasurePrefix = (tenant: string) => `${tenantPrefix(tenant)}#`;

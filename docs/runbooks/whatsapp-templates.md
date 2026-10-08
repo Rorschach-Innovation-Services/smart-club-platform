@@ -286,3 +286,121 @@ sst shell --stage <stage> -- npx tsx packages/api/scripts/cleanup-scorecard-conf
 sst shell --stage <stage> -- npx tsx packages/api/scripts/cleanup-scorecard-confirmations.ts --confirm   # delete
 # --tenant=<id> limits it to one tenant
 ```
+
+---
+
+## Dolphins welcome broadcast — three VIDEO-header templates
+
+**Status: 3 of 3 APPROVED (8 Oct 2026)** — all `'registered'` in the code registry:
+`dolphins_staff_welcome` (Utility, ID 1640089817899845), `dolphins_player_welcome` (Utility, ID 2049161739067483) and `dolphins_player_fyi` (Marketing, ID 2158879548337539). The bodies below
+are the wording Meta approved (reworded from the first drafts). The templates live in WhatsApp
+Manager under the **medicoach WABA** (the same WABA every other template here lives on — recipients see **medicoach's**
+WhatsApp display name). They are sent once, by the one-off CLI
+`packages/api/src/send-dolphins-welcome-broadcast.ts` (`npm --prefix packages/api run
+broadcast:dolphins-welcome`). Their registry entries (`dolphinsStaffWelcome`,
+`dolphinsPlayerWelcome`, `dolphinsPlayerFyi`) carry a `status` that **is read at runtime**: the senders throw and the CLI's `--confirm` refuses `--channels whatsapp` until all
+three are flipped to `'registered'` (email can go first with `--channels email`).
+
+Who gets what: a **player** gets `dolphins_player_welcome`; a **staff** member gets
+`dolphins_staff_welcome` and then `dolphins_player_fyi` (two messages because a template carries
+one video header and both bodies together exceed Meta's 1024-character limit).
+
+**Category.** These were drafted as Marketing (announcement copy), and the category is
+**immutable once approved** (see the ops digest v1 → v2 history). In review, Meta accepted
+Utility rewordings of the staff and player messages; the FYI stayed Marketing. Meta's classifier flagged an earlier "login
+details" bullet in the staff body as Authentication-like content, hence the "Setup: scoring
+system setup instructions will be sent to you separately" wording; if Meta counter-suggests
+Utility (without a rejection warning), Utility is acceptable.
+
+Common settings for all three:
+
+| Field           | Value                                                                |
+| --------------- | -------------------------------------------------------------------- |
+| Category        | as approved — see each template below                                |
+| Language        | **English** (`en`)                                                   |
+| Header          | **Media → Video**; upload the sample video named below               |
+| Body            | exactly the text below (paste as-is, emoji and line breaks included) |
+| Footer, buttons | **none**                                                             |
+
+Sample videos (the same files that are hosted for the sends): the **staff** template uses the
+live-scoring tutorial (`Dolphins Live Scoring - Full Tutorial (Chairman).mp4`, re-encoded under
+16 MB); both **player** templates use `Dolphins Scouting Pipeline (voiceover).mp4`.
+
+### 1. `dolphins_staff_welcome` — APPROVED 8 Oct 2026 · **Utility** · ID 1640089817899845 · header: staff video · `{{1}}` = recipient name (sample: `Thandi Nkosi`)
+
+The approval screenshot confirmed the opener and the Setup bullet verbatim; the lines below the
+fold were not visible in it, so the rest is the Utility rewrite as submitted. If a real send
+renders differently, correct the registry `bodyText` (and this block) to match.
+
+```
+Dear {{1}}
+
+Your club is set up on the Dolphins live scoring system, powered by Medicoach. Please watch the video above to see how match-day scoring works for your club.
+
+✅ Setup: scoring system setup instructions will be sent to you separately
+✅ Before the game: scorer login, match checks, squad confirmation
+✅ Toss and setup: squads, toss, format and innings setup in the app
+✅ During play: ball-by-ball scoring, adding registered or guest players
+✅ End of match: totals checked against the umpire, result signed off
+✅ Safeguards: switch to paper after 5 minutes stuck, with match-day support on hand
+
+Live-scored matches also feed the Dolphins scouting pipeline, where players from clubs, schools and universities are visible to teams looking for them.
+```
+
+### 2. `dolphins_player_welcome` — APPROVED 8 Oct 2026 · **Utility** · ID 2049161739067483 · header: player video · `{{1}}` = player first name (Meta sample: `Chris`)
+
+```
+Dear {{1}} 🏏
+
+You are registered on the Dolphins scouting pipeline, part of the Medicoach Athlete Management System. The video above shows how it works for you this season.
+
+📊 Every ball of your matches is scored live and builds your player profile
+⭐ Standout performances are flagged and shortlisted
+🤝 Players are matched to teams that need them: franchises, tournaments and county teams overseas
+
+Your season counts, not just one good day. Keep showing up, keep performing, and make sure your name is spelled correctly on the team sheet so your stats land on your record.
+
+Good luck this season! 💚
+```
+
+### 3. `dolphins_player_fyi` — APPROVED 8 Oct 2026 · **Marketing** · ID 2158879548337539 · header: player video · **no variables**
+
+The approved FYI is a trimmed, third-person variant of the player message (no season paragraph
+or sign-off), not the player body minus its greeting; the arity test asserts this exact text.
+
+```
+For your information, this is the message every registered player has received:
+
+Players are registered on the Dolphins scouting pipeline, part of the Medicoach Athlete Management System. The video above shows how it works for them this season.
+
+📊 Every ball of their matches is scored live and builds their player profile
+⭐ Standout performances are flagged and shortlisted
+🤝 Players are matched to teams that need them: franchises, tournaments and county teams overseas
+```
+
+**After approval:** done — all three entries in `packages/api/src/notify/whatsapp-templates.ts`
+are `status: 'registered'` with their template ids recorded. If Meta ever edits the body copy,
+update `bodyText` to match — the arity test checks the placeholders and the approved wording.
+
+**Running the broadcast.** The emails link the hosted S3 videos (`--*-video-url`); the WhatsApp
+video headers use **Meta-hosted media** — on `--confirm` the CLI uploads each local file
+(`--*-video-file`, which must exist and be ≤ 16 MB) to Meta once and every send references the
+returned media id (external links proved unreliable for inline playback; the
+`experiment:video-header` CLI is the comparison). With the whatsapp channel, both file flags are
+required for `--confirm`; an upload failure aborts before anything is claimed or sent.
+
+```bash
+# dry-run (default): full audience, skips, rendered samples, manifest
+npx sst shell --stage production -- npm --prefix packages/api run broadcast:dolphins-welcome -- \
+  --staff-video-url  https://<bucket>.s3.af-south-1.amazonaws.com/tutorials/dolphins/broadcast-live-scoring-staff.mp4 \
+  --player-video-url https://<bucket>.s3.af-south-1.amazonaws.com/tutorials/dolphins/broadcast-scouting-pipeline.mp4 \
+  --staff-video-file  <local staff mp4, ≤ 16 MB> \
+  --player-video-file <local player mp4>
+
+# smoke test to yourself first, then the full send (user-run)
+…same flags… --only <your email or cell> --confirm
+…same flags… --confirm
+
+# email only — no video files needed
+…url flags only… --channels email --confirm
+```

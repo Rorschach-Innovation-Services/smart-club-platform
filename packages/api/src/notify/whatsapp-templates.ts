@@ -43,8 +43,9 @@
  * state, and the send path fails open (attempts the send) for every entry. The exceptions
  * are `fixtureReminder` (the FixtureReminders cron skips WhatsApp until it is
  * "registered"), `captainsReportDue` / `captainsReportOpsDigest` (their senders skip the
- * channel as template-pending until it is "registered") and
- * `clearancePendingV2` (the ClearanceReminders cron's WhatsApp gate) — see those entries.
+ * channel as template-pending until it is "registered"), `clearancePendingV2` (the
+ * ClearanceReminders cron's WhatsApp gate) and the three `dolphins*` welcome-broadcast entries
+ * (their senders throw until "registered") — see those entries.
  *
  * RETIRED: `club_clearance_pending` (the 4-param, link-less v1 clearance template) has NO entry
  * here since 7 Oct 2026. `club_clearance_pending_v2` is the only clearance template; a clearance
@@ -72,6 +73,11 @@ export type WhatsAppTemplateDefinition = {
    * (button index 0). Absent ⇒ a body-only template.
    */
   urlButton?: { urlTemplate: string; suffix: string };
+  /**
+   * A media header registered on the template. `VIDEO` ⇒ the sender supplies a public video
+   * `link` (header component) on every send. Absent ⇒ no header.
+   */
+  header?: { format: 'VIDEO' };
 };
 
 export const WHATSAPP_TEMPLATES = {
@@ -262,6 +268,97 @@ export const WHATSAPP_TEMPLATES = {
       'This is an automated service message. No action is required.',
     // Approved in Meta as UTILITY on 7 Oct 2026 (v2; v1 was approved-as-Marketing).
     status: 'registered',
+  },
+
+  /**
+   * Dolphins welcome broadcast, STAFF message (one-off CLI send-dolphins-welcome-broadcast.ts):
+   * chairs, exco, coaches and portal users get the live-scoring tutorial as an inline VIDEO
+   * header plus this body. {{1}} is the recipient's actual name (never "Chairman"). Staff
+   * receive a SECOND message after this one (`dolphinsPlayerFyi`) — one template carries one
+   * video header, and both bodies together would exceed Meta's 1024-char body limit.
+   *
+   * APPROVED in Meta 8 Oct 2026 as **Utility** (template id 1640089817899845) — reworded from
+   * the original Marketing draft (club-setup anchored opener; the "login details" bullet became
+   * "Setup" after Meta flagged it as auth-like). `bodyText` is the approved wording; the lines
+   * below the bullets were not visible in the approval screenshot, so correct them here if a
+   * real send renders differently. This status IS read at runtime: the sender throws
+   * `WhatsAppTemplatePendingError` unless it is "registered".
+   */
+  dolphinsStaffWelcome: {
+    name: 'dolphins_staff_welcome',
+    lang: 'en',
+    paramCount: 1,
+    params: ['recipient name'],
+    bodyText:
+      'Dear {{1}}\n\n' +
+      'Your club is set up on the Dolphins live scoring system, powered by Medicoach. Please ' +
+      'watch the video above to see how match-day scoring works for your club.\n\n' +
+      '✅ Setup: scoring system setup instructions will be sent to you separately\n' +
+      '✅ Before the game: scorer login, match checks, squad confirmation\n' +
+      '✅ Toss and setup: squads, toss, format and innings setup in the app\n' +
+      '✅ During play: ball-by-ball scoring, adding registered or guest players\n' +
+      '✅ End of match: totals checked against the umpire, result signed off\n' +
+      '✅ Safeguards: switch to paper after 5 minutes stuck, with match-day support on hand\n\n' +
+      'Live-scored matches also feed the Dolphins scouting pipeline, where players from clubs, ' +
+      'schools and universities are visible to teams looking for them.',
+    // Approved in Meta as UTILITY on 8 Oct 2026 (id 1640089817899845).
+    status: 'registered',
+    header: { format: 'VIDEO' },
+  },
+
+  /**
+   * Dolphins welcome broadcast, PLAYER message: the scouting-pipeline video as an inline VIDEO
+   * header plus this body. {{1}} is the player's first name. Minors receive it on the
+   * registered contact (typically the guardian's). Runtime-gated on status, as
+   * `dolphinsStaffWelcome`.
+   *
+   * APPROVED in Meta 8 Oct 2026 as **Utility** (template id 2049161739067483). The registered
+   * copy was reworded for Utility (registration-anchored, "for you this season") from the
+   * original Marketing draft; `bodyText` is the approved wording.
+   */
+  dolphinsPlayerWelcome: {
+    name: 'dolphins_player_welcome',
+    lang: 'en',
+    paramCount: 1,
+    params: ['player first name'],
+    bodyText:
+      'Dear {{1}} 🏏\n\n' +
+      'You are registered on the Dolphins scouting pipeline, part of the Medicoach Athlete ' +
+      'Management System. The video above shows how it works for you this season.\n\n' +
+      '📊 Every ball of your matches is scored live and builds your player profile\n' +
+      '⭐ Standout performances are flagged and shortlisted\n' +
+      '🤝 Players are matched to teams that need them: franchises, tournaments and county teams overseas\n\n' +
+      'Your season counts, not just one good day. Keep showing up, keep performing, and make ' +
+      'sure your name is spelled correctly on the team sheet so your stats land on your record.\n\n' +
+      'Good luck this season! 💚',
+    // Approved in Meta as UTILITY on 8 Oct 2026 (id 2049161739067483).
+    status: 'registered',
+    header: { format: 'VIDEO' },
+  },
+
+  /**
+   * Dolphins welcome broadcast, staff FYI: the second staff message — the player video header
+   * plus a trimmed, third-person version of the player message, framed as what every registered
+   * player received. NO body params. Runtime-gated on status, as `dolphinsStaffWelcome`.
+   *
+   * APPROVED in Meta 8 Oct 2026 as **Marketing** (template id 2158879548337539); `bodyText` is
+   * the approved wording (it drops the player message's season paragraph and sign-off).
+   */
+  dolphinsPlayerFyi: {
+    name: 'dolphins_player_fyi',
+    lang: 'en',
+    paramCount: 0,
+    params: [],
+    bodyText:
+      'For your information, this is the message every registered player has received:\n\n' +
+      'Players are registered on the Dolphins scouting pipeline, part of the Medicoach Athlete ' +
+      'Management System. The video above shows how it works for them this season.\n\n' +
+      '📊 Every ball of their matches is scored live and builds their player profile\n' +
+      '⭐ Standout performances are flagged and shortlisted\n' +
+      '🤝 Players are matched to teams that need them: franchises, tournaments and county teams overseas',
+    // Approved in Meta as MARKETING on 8 Oct 2026 (id 2158879548337539).
+    status: 'registered',
+    header: { format: 'VIDEO' },
   },
 } as const satisfies Record<string, WhatsAppTemplateDefinition>;
 

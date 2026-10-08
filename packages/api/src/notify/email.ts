@@ -1691,3 +1691,166 @@ export async function sendScorecardCorrectionEmail(
     `scorecard correction notice (${input.ref})`,
   );
 }
+
+// ── Dolphins welcome broadcast (one-off CLI: send-dolphins-welcome-broadcast.ts) ──
+
+/** The staff live-scoring checklist, shared by the text and HTML parts. */
+const DOLPHINS_STAFF_CHECKLIST = [
+  '✅ Setup: scoring system setup instructions will be sent to you separately',
+  '✅ Before the game: scorer login, match checks, squad confirmation',
+  '✅ Toss and setup: squads, toss, format and innings setup in the app',
+  '✅ During play: ball-by-ball scoring, adding registered or guest players',
+  '✅ End of match: totals checked against the umpire, result signed off',
+  '✅ Safeguards: switch to paper after 5 minutes stuck, with match-day support on hand',
+];
+
+/**
+ * The player message's highlights — mirrors the Meta-approved `dolphins_player_welcome` body
+ * (Utility, 8 Oct 2026).
+ */
+const DOLPHINS_PLAYER_POINTS = [
+  '📊 Every ball of your matches is scored live and builds your player profile',
+  '⭐ Standout performances are flagged and shortlisted',
+  '🤝 Players are matched to teams that need them: franchises, tournaments and county teams overseas',
+];
+const DOLPHINS_PLAYER_INTRO =
+  'You are registered on the Dolphins scouting pipeline, part of the Medicoach Athlete ' +
+  'Management System. The video linked below shows how it works for you this season.';
+const DOLPHINS_PLAYER_SEASON =
+  'Your season counts, not just one good day. Keep showing up, keep performing, and make sure ' +
+  'your name is spelled correctly on the team sheet so your stats land on your record.';
+const DOLPHINS_PLAYER_SIGNOFF = 'Good luck this season! 💚';
+
+/** The staff email's FYI copy — mirrors the Meta-approved `dolphins_player_fyi` body (8 Oct 2026). */
+const DOLPHINS_FYI_INTRO =
+  'Players are registered on the Dolphins scouting pipeline, part of the Medicoach Athlete ' +
+  'Management System. The video linked below shows how it works for them this season.';
+const DOLPHINS_FYI_POINTS = [
+  '📊 Every ball of their matches is scored live and builds their player profile',
+  '⭐ Standout performances are flagged and shortlisted',
+  '🤝 Players are matched to teams that need them: franchises, tournaments and county teams overseas',
+];
+
+/** A prominent "▶ Watch the video" link (HTML). */
+function watchLinkHtml(url: string): string {
+  return `<p><a href="${escapeHtml(url)}" style="color:#1D9E75;font-weight:600">▶ Watch the video</a></p>`;
+}
+
+/** The player welcome as text + HTML (personal greeting), with the player video link. */
+function dolphinsPlayerBlock(
+  greetName: string,
+  playerVideoUrl: string,
+): { text: string; html: string } {
+  const greeting = `Dear ${greetName} 🏏`;
+  const text =
+    `${greeting}\n\n` +
+    `${DOLPHINS_PLAYER_INTRO}\n▶ Watch: ${playerVideoUrl}\n\n` +
+    `${DOLPHINS_PLAYER_POINTS.join('\n')}\n\n` +
+    `${DOLPHINS_PLAYER_SEASON}\n\n` +
+    DOLPHINS_PLAYER_SIGNOFF;
+  const html =
+    `<p>${escapeHtml(greeting)}</p>` +
+    `<p>${escapeHtml(DOLPHINS_PLAYER_INTRO)}</p>` +
+    watchLinkHtml(playerVideoUrl) +
+    `<p>${DOLPHINS_PLAYER_POINTS.map(escapeHtml).join('<br/>')}</p>` +
+    `<p>${escapeHtml(DOLPHINS_PLAYER_SEASON)}</p>` +
+    `<p>${escapeHtml(DOLPHINS_PLAYER_SIGNOFF)}</p>`;
+  return { text, html };
+}
+
+/** The staff email's FYI block (third person, no greeting), with the player video link. */
+function dolphinsFyiBlock(playerVideoUrl: string): { text: string; html: string } {
+  const text =
+    `${DOLPHINS_FYI_INTRO}\n▶ Watch: ${playerVideoUrl}\n\n` + DOLPHINS_FYI_POINTS.join('\n');
+  const html =
+    `<p>${escapeHtml(DOLPHINS_FYI_INTRO)}</p>` +
+    watchLinkHtml(playerVideoUrl) +
+    `<p>${DOLPHINS_FYI_POINTS.map(escapeHtml).join('<br/>')}</p>`;
+  return { text, html };
+}
+
+export interface StaffWelcomeEmailInput {
+  to: string;
+  /** The recipient's actual name (never a title); '' ⇒ "Club Representative". */
+  name: string;
+  /** Public URL of the live-scoring tutorial video. */
+  staffVideoUrl: string;
+  /** Public URL of the scouting-pipeline video (the FYI player block). */
+  playerVideoUrl: string;
+}
+
+/**
+ * Dolphins welcome broadcast — STAFF email: the live-scoring welcome with the staff video link,
+ * then (FYI) the message every registered player received, with the player video link. Pure —
+ * exported for tests and the CLI's dry-run sample.
+ */
+export function staffWelcomeEmailContent(input: Omit<StaffWelcomeEmailInput, 'to'>): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const subject = 'Welcome to the Dolphins Pipeline 🏏';
+  const greetName = input.name.trim() || 'Club Representative';
+  const intro =
+    'Your club is set up on the Dolphins live scoring system, powered by Medicoach. Please watch ' +
+    'the video linked below to see how match-day scoring works for your club.';
+  const pipeline =
+    'Live-scored matches also feed the Dolphins scouting pipeline, where players from clubs, ' +
+    'schools and universities are visible to teams looking for them.';
+  const fyi = 'For your information, below is the message every registered player has received:';
+  const player = dolphinsFyiBlock(input.playerVideoUrl);
+  const text =
+    `Dear ${greetName}\n\n` +
+    `${intro}\n\n` +
+    `▶ Watch: ${input.staffVideoUrl}\n\n` +
+    `${DOLPHINS_STAFF_CHECKLIST.join('\n')}\n\n` +
+    `${pipeline}\n\n` +
+    `—————\n${fyi}\n\n` +
+    player.text;
+  const html =
+    EMAIL_WRAP_OPEN +
+    `<p>Dear ${escapeHtml(greetName)}</p>` +
+    `<p>${escapeHtml(intro)}</p>` +
+    watchLinkHtml(input.staffVideoUrl) +
+    `<p>${DOLPHINS_STAFF_CHECKLIST.map(escapeHtml).join('<br/>')}</p>` +
+    `<p>${escapeHtml(pipeline)}</p>` +
+    `<hr style="border:none;border-top:1px solid #D5DCE6;margin:28px 0"/>` +
+    `<p><em>${escapeHtml(fyi)}</em></p>` +
+    player.html +
+    `</div>`;
+  return { subject, text, html };
+}
+
+export async function sendStaffWelcomeEmail(
+  input: StaffWelcomeEmailInput,
+): Promise<{ messageId: string }> {
+  return sendSesEmail(input.to, staffWelcomeEmailContent(input), 'dolphins staff welcome');
+}
+
+export interface PlayerWelcomeEmailInput {
+  to: string;
+  /** The player's first name; '' ⇒ "player". */
+  firstName: string;
+  /** Public URL of the scouting-pipeline video. */
+  playerVideoUrl: string;
+}
+
+/**
+ * Dolphins welcome broadcast — PLAYER email: the scouting-programme welcome with the player video
+ * link. Minors receive it on the registered contact. Pure — exported for tests.
+ */
+export function playerWelcomeEmailContent(input: Omit<PlayerWelcomeEmailInput, 'to'>): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const subject = 'Welcome to the Dolphins Scouting Program 🏏';
+  const block = dolphinsPlayerBlock(input.firstName.trim() || 'player', input.playerVideoUrl);
+  return { subject, text: block.text, html: EMAIL_WRAP_OPEN + block.html + `</div>` };
+}
+
+export async function sendPlayerWelcomeEmail(
+  input: PlayerWelcomeEmailInput,
+): Promise<{ messageId: string }> {
+  return sendSesEmail(input.to, playerWelcomeEmailContent(input), 'dolphins player welcome');
+}

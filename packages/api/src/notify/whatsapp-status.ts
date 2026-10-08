@@ -1,6 +1,6 @@
 /**
- * Meta WhatsApp delivery statuses for captain's-report notices (sent → delivered → read, or
- * failed), received on `POST /integrations/whatsapp/status`.
+ * Meta WhatsApp delivery statuses for captain's-report notices and one-off broadcast sends
+ * (sent → delivered → read, or failed), received on `POST /integrations/whatsapp/status`.
  *
  * Smart club sends through medicoach's Meta app and WABA (see ./whatsapp.ts). A Meta app has
  * ONE webhook callback URL per field, and it is medicoach's, so smart club never hears from
@@ -13,7 +13,8 @@
  * `entry[].changes[].value.statuses[]`, is accepted too).
  *
  * Matching is by message id (wamid) only, through the `WAMSG#<wamid>` lookup each send
- * writes. An unknown id is acknowledged and ignored (medicoach's own messages, an expired
+ * writes; the lookup's `kind` says whether it points at a captain's report or a broadcast
+ * delivery row (`<tenant>#BCAST#<runId>` / `WA#<wamid>`). An unknown id is acknowledged and ignored (medicoach's own messages, an expired
  * lookup) — never an error, so the forwarder never retries it. Statuses only move forward:
  * sent < delivered < read, and failed is final.
  */
@@ -91,14 +92,57 @@ export interface StatusApplySummary {
   stale: number;
 }
 
-/** Apply parsed statuses to the report deliveries they belong to. */
+/**
+ * The update a status makes to a delivery currently at `current` — null when it would not move
+ * it forward (sent < delivered < read; failed is final). PURE.
+ */
+export function nextProviderStatus(
+  current: ProviderStatus | undefined,
+  s: ParsedStatus,
+): { providerStatus: ProviderStatus; providerAt: string; providerError?: string } | null {
+  const currentRank = current ? RANK[current] : 0;
+  if (RANK[s.status] <= currentRank) return null;
+  return {
+    providerStatus: s.status,
+    providerAt: s.at,
+    ...(s.status === 'failed' ? { providerError: s.error ?? 'failed' } : {}),
+  };
+}
+
+/** Apply one status to a broadcast delivery row. */
+async function applyBroadcastStatus(
+  repo: RepoModule,
+  lookup: { tenant: string; runId: string },
+  s: ParsedStatus,
+): Promise<keyof StatusApplySummary> {
+  const delivery = await repo.getBroadcastDelivery(lookup.tenant, lookup.runId, s.id);
+  if (!delivery) return 'unknown';
+  const update = nextProviderStatus(delivery.providerStatus, s);
+  if (!update) return 'stale';
+  const ok = await repo.setBroadcastDeliveryStatus(
+    lookup.tenant,
+    lookup.runId,
+    s.id,
+    delivery.providerStatus,
+    update,
+  );
+  // Moved concurrently by another status: whichever got there first stands.
+  return ok ? 'matched' : 'stale';
+}
+
+/** Apply parsed statuses to the report / broadcast deliveries they belong to. */
 export async function applyWhatsAppStatuses(
   repo: RepoModule,
   statuses: ParsedStatus[],
 ): Promise<StatusApplySummary> {
   const out: StatusApplySummary = { matched: 0, unknown: 0, stale: 0 };
   for (const s of statuses) {
-    const ref = await repo.getWhatsAppMessageRef(s.id);
+    const lookup = await repo.getWhatsAppMessageLookup(s.id);
+    if (lookup?.kind === 'broadcast') {
+      out[await applyBroadcastStatus(repo, lookup, s)]++;
+      continue;
+    }
+    const ref = lookup?.kind === 'captains-report' ? lookup.ref : null;
     const report = ref
       ? await repo.getCaptainsReport(ref.tenant, ref.seriesId, ref.fixtureId, ref.clubId)
       : null;

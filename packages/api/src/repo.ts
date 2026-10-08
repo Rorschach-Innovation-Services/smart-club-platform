@@ -112,6 +112,8 @@ import {
   captainsReportNotifyKey,
   whatsappMessageKey,
   captainsReportPartitionPk,
+  broadcastPartitionPk,
+  broadcastDeliveryKey,
 } from './keys.js';
 import { PLATFORM_TENANT, TRANSFER_WINDOW_REJECTOR } from './types.js';
 import { refs as medicoachRefs } from './medicoach-bundle.js';
@@ -762,14 +764,17 @@ export async function appendClubCommEvents(
  * cron's once-per-(club, match date, send date) marker (key
  * `fixture-reminder:<targetDate>:<sendDate>`). `clearance-reminder` is the once-per-(clearance,
  * tenant day) reminder marker under the SOURCE club (key `clearance-reminder:<clearanceId>:<date>`),
- * shared by the admin "Send reminder" route and the ClearanceReminders cron.
+ * shared by the admin "Send reminder" route and the ClearanceReminders cron. `broadcast` is a
+ * one-off CLI broadcast's once-per-person marker (send-dolphins-welcome-broadcast.ts, key
+ * `welcome-broadcast-<email|cell>`).
  */
 export type InviteSendKind =
   | 'invite'
   | 'fixtures'
   | 'staff-invite'
   | 'fixture-reminder'
-  | 'clearance-reminder';
+  | 'clearance-reminder'
+  | 'broadcast';
 
 /** Outcome of a duplicate idempotency claim: prior results + whether the first attempt is still running. */
 export interface InviteSendReplay {
@@ -2654,11 +2659,147 @@ export async function putWhatsAppMessageRef(wamid: string, ref: WhatsAppMessageR
   );
 }
 
+/** The captain's-report lookup for a wamid; null for none, or for a broadcast lookup. */
 export async function getWhatsAppMessageRef(wamid: string): Promise<WhatsAppMessageRef | null> {
+  const lookup = await getWhatsAppMessageLookup(wamid);
+  return lookup?.kind === 'captains-report' ? lookup.ref : null;
+}
+
+/**
+ * What a `WAMSG#<wamid>` lookup points at, by its `kind` discriminator. Lookups written before
+ * the discriminator mattered (no `kind`, or `'captains-report'`) are captain's-report refs.
+ */
+export type WhatsAppMessageLookup =
+  | { kind: 'captains-report'; ref: WhatsAppMessageRef }
+  | { kind: 'broadcast'; tenant: string; runId: string };
+
+export async function getWhatsAppMessageLookup(
+  wamid: string,
+): Promise<WhatsAppMessageLookup | null> {
   const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: whatsappMessageKey(wamid) }));
   if (!res.Item) return null;
-  const { tenant, seriesId, fixtureId, clubId } = res.Item as Record<string, string>;
-  return { tenant, seriesId, fixtureId, clubId };
+  const item = res.Item as Record<string, string>;
+  if (item.kind === 'broadcast')
+    return { kind: 'broadcast', tenant: item.tenant, runId: item.runId };
+  const { tenant, seriesId, fixtureId, clubId } = item;
+  return { kind: 'captains-report', ref: { tenant, seriesId, fixtureId, clubId } };
+}
+
+// ── One-off broadcast delivery records (send-dolphins-welcome-broadcast.ts) ──
+
+/** Broadcast delivery rows carry recipient contact (PII): kept 180 days, then self-expire. */
+const BROADCAST_DELIVERY_TTL_SECONDS = 180 * 24 * 3600;
+
+export type BroadcastProviderStatus = 'sent' | 'delivered' | 'read' | 'failed';
+
+/** One WhatsApp message a broadcast run sent, with Meta's latest delivery status. */
+export interface BroadcastDelivery {
+  runId: string;
+  wamid: string;
+  /** E.164 recipient. */
+  to: string;
+  /** Template / message kind, e.g. 'dolphins_player_welcome'. */
+  messageKind: string;
+  recipientName: string;
+  /** The recipient's ledger contact (email, else cell). */
+  recipientContact: string;
+  providerStatus: BroadcastProviderStatus;
+  sentAt: string;
+  /** When Meta reported `providerStatus` (absent until the first webhook status). */
+  providerAt?: string;
+  providerError?: string;
+}
+
+/**
+ * Record a broadcast WhatsApp send: the delivery row plus the `WAMSG#<wamid>` lookup (kind
+ * 'broadcast') the status webhook resolves it through.
+ */
+export async function putBroadcastDelivery(tenant: string, d: BroadcastDelivery): Promise<void> {
+  const now = Math.floor(Date.now() / 1000);
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...broadcastDeliveryKey(tenant, d.runId, d.wamid),
+        ...d,
+        expiresAt: now + BROADCAST_DELIVERY_TTL_SECONDS,
+      },
+    }),
+  );
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...whatsappMessageKey(d.wamid),
+        kind: 'broadcast',
+        tenant,
+        runId: d.runId,
+        expiresAt: now + WHATSAPP_MESSAGE_TTL_SECONDS,
+      },
+    }),
+  );
+}
+
+export async function getBroadcastDelivery(
+  tenant: string,
+  runId: string,
+  wamid: string,
+): Promise<BroadcastDelivery | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: broadcastDeliveryKey(tenant, runId, wamid) }),
+  );
+  return res.Item ? (stripKeys<BroadcastDelivery>(res.Item) as BroadcastDelivery) : null;
+}
+
+/** Every delivery row of one broadcast run. */
+export async function listBroadcastDeliveries(
+  tenant: string,
+  runId: string,
+): Promise<BroadcastDelivery[]> {
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': broadcastPartitionPk(tenant, runId), ':s': 'WA#' },
+  });
+  return items.map((i) => stripKeys<BroadcastDelivery>(i) as BroadcastDelivery);
+}
+
+/**
+ * Set Meta's status on a broadcast delivery, only while it still holds `prevStatus` (a
+ * concurrent webhook that already moved it wins). False when the row is gone or moved.
+ */
+export async function setBroadcastDeliveryStatus(
+  tenant: string,
+  runId: string,
+  wamid: string,
+  prevStatus: BroadcastProviderStatus,
+  update: { providerStatus: BroadcastProviderStatus; providerAt: string; providerError?: string },
+): Promise<boolean> {
+  const sets = ['providerStatus = :s', 'providerAt = :pa'];
+  const values: Record<string, unknown> = {
+    ':s': update.providerStatus,
+    ':pa': update.providerAt,
+    ':prev': prevStatus,
+  };
+  if (update.providerError) {
+    sets.push('providerError = :pe');
+    values[':pe'] = update.providerError;
+  }
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: broadcastDeliveryKey(tenant, runId, wamid),
+        UpdateExpression: `SET ${sets.join(', ')}`,
+        ConditionExpression: 'attribute_exists(pk) AND providerStatus = :prev',
+        ExpressionAttributeValues: values,
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
 }
 
 /**

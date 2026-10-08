@@ -15,6 +15,8 @@
  * Dry-run: NOTIFY_DRY_RUN=1 or missing token/phone-id → log + synthetic id.
  */
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { basename } from 'node:path';
 import { WHATSAPP_TEMPLATES, type WhatsAppTemplateDefinition } from './whatsapp-templates.js';
 
 const TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
@@ -73,6 +75,59 @@ export function urlButtonComponent(suffix: string) {
 }
 
 /**
+ * A VIDEO header's media: either a public HTTPS `link` (Meta fetches it at send time, so it must
+ * serve byte ranges) or the `id` of media already uploaded to Meta (see uploadWhatsAppMedia) —
+ * Meta-hosted media has proved the more reliable of the two.
+ */
+export type VideoRef = { link: string } | { id: string };
+
+/**
+ * The Cloud API component for a VIDEO media header: one video parameter carrying the ref. A link
+ * is passed through whole — never `cleanParam`ed (truncating a URL would break it). Exported so
+ * the tests can assert the shape.
+ */
+export function videoHeaderComponent(ref: VideoRef) {
+  const video = 'id' in ref ? { id: ref.id } : { link: ref.link };
+  return { type: 'header', parameters: [{ type: 'video', video }] };
+}
+
+/**
+ * Upload a local media file to Meta (Graph `/{PHONE_NUMBER_ID}/media`) and return its media id,
+ * for use as a `{ id }` VideoRef. Same token / phone-number id / dry-run gate as the senders: in
+ * dry-run nothing is read or uploaded and a synthetic `dry-run-media-<uuid>` id is returned.
+ */
+export async function uploadWhatsAppMedia(
+  filePath: string,
+  mimeType = 'video/mp4',
+): Promise<{ mediaId: string }> {
+  if (WHATSAPP_DRY_RUN) {
+    console.log(`[notify:whatsapp dry-run] would upload ${filePath} (${mimeType}) to Meta`);
+    return { mediaId: `dry-run-media-${randomUUID()}` };
+  }
+  const bytes = await readFile(filePath);
+  const form = new FormData();
+  form.append('messaging_product', 'whatsapp');
+  form.append('type', mimeType);
+  form.append('file', new Blob([bytes], { type: mimeType }), basename(filePath));
+  const res = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${PHONE_NUMBER_ID}/media`, {
+    method: 'POST',
+    // Never log this header — it carries the long-lived Meta token.
+    headers: { authorization: `Bearer ${TOKEN}` },
+    body: form,
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    id?: string;
+    error?: { code?: number; message?: string };
+  };
+  if (!res.ok || !data.id) {
+    throw new WhatsAppError(
+      `WhatsApp media upload failed (${data.error?.code ?? res.status}): ${data.error?.message ?? res.statusText}`,
+    );
+  }
+  return { mediaId: data.id };
+}
+
+/**
  * POST a pre-approved template message to the Cloud API with rate-limit retry.
  * Shared by the staff-invite and fixtures senders so the auth/retry/dry-run
  * handling lives in exactly one place.
@@ -85,8 +140,13 @@ async function sendTemplate(
   dryRunLabel: string,
   /** The dynamic suffix of the template's URL button (index 0), if it has one. Never logged. */
   urlButtonSuffix?: string,
+  /** Media for a VIDEO-header template's header (see videoHeaderComponent). */
+  headerVideo?: VideoRef,
 ): Promise<{ messageId: string }> {
-  const components: Array<Record<string, unknown>> = [{ type: 'body', parameters: params }];
+  const components: Array<Record<string, unknown>> = [];
+  if (headerVideo !== undefined) components.push(videoHeaderComponent(headerVideo));
+  // A zero-param template carries no body component (Meta rejects an empty parameter list).
+  if (params.length > 0) components.push({ type: 'body', parameters: params });
   if (urlButtonSuffix !== undefined) components.push(urlButtonComponent(urlButtonSuffix));
   const payload = {
     messaging_product: 'whatsapp',
@@ -468,10 +528,123 @@ export async function sendCaptainsReportOpsDigestWhatsApp(
   );
 }
 
-/** No approved captain's-report template in Meta: the channel is skipped, not failed. */
+// ── Dolphins welcome broadcast (one-off CLI: send-dolphins-welcome-broadcast.ts) ──
+
+/** Registry status, widened: the `as const` literal would make the gate a type error while 'pending'. */
+const statusOf = (def: WhatsAppTemplateDefinition): WhatsAppTemplateDefinition['status'] =>
+  def.status;
+
+/**
+ * Options for the dolphins senders. `allowPending` skips the registry-status gate — ONLY for the
+ * video-header experiment CLI, when Meta has approved a template before its registry entry is
+ * flipped to 'registered'.
+ */
+export interface DolphinsSendOptions {
+  allowPending?: boolean;
+}
+
+/** The registry-status send gate (exported for tests). Throws unless registered or allowPending. */
+export const assertTemplateSendable = (
+  def: WhatsAppTemplateDefinition,
+  opts?: DolphinsSendOptions,
+): void => {
+  if (statusOf(def) !== 'registered' && !opts?.allowPending) {
+    throw new WhatsAppTemplatePendingError(def.name);
+  }
+};
+
+/** {{1}} for `dolphins_staff_welcome`: the recipient's name (fallback 'Club Representative'). */
+export function dolphinsStaffWelcomeParams(input: { name: string }): TemplateParam[] {
+  return [{ type: 'text', text: cleanParam(input.name || 'Club Representative') }];
+}
+
+/** {{1}} for `dolphins_player_welcome`: the player's first name (fallback 'player'). */
+export function dolphinsPlayerWelcomeParams(input: { firstName: string }): TemplateParam[] {
+  return [{ type: 'text', text: cleanParam(input.firstName || 'player') }];
+}
+
+/** `dolphins_player_fyi` has no body params. */
+export function dolphinsPlayerFyiParams(): TemplateParam[] {
+  return [];
+}
+
+/**
+ * Staff welcome (VIDEO header = the live-scoring tutorial). Throws
+ * `WhatsAppTemplatePendingError` while the registry entry is not `registered`.
+ */
+export async function sendDolphinsStaffWelcomeWhatsApp(
+  to: string,
+  name: string,
+  videoRef: VideoRef,
+  opts?: DolphinsSendOptions,
+): Promise<{ messageId: string }> {
+  const def = WHATSAPP_TEMPLATES.dolphinsStaffWelcome;
+  assertTemplateSendable(def, opts);
+  return sendTemplate(
+    to,
+    def.name,
+    def.lang,
+    dolphinsStaffWelcomeParams({ name }),
+    'dolphins staff welcome',
+    undefined,
+    videoRef,
+  );
+}
+
+/**
+ * Player welcome (VIDEO header = the scouting-pipeline video). Throws
+ * `WhatsAppTemplatePendingError` while the registry entry is not `registered`.
+ */
+export async function sendDolphinsPlayerWelcomeWhatsApp(
+  to: string,
+  firstName: string,
+  videoRef: VideoRef,
+  opts?: DolphinsSendOptions,
+): Promise<{ messageId: string }> {
+  const def = WHATSAPP_TEMPLATES.dolphinsPlayerWelcome;
+  assertTemplateSendable(def, opts);
+  return sendTemplate(
+    to,
+    def.name,
+    def.lang,
+    dolphinsPlayerWelcomeParams({ firstName }),
+    'dolphins player welcome',
+    undefined,
+    videoRef,
+  );
+}
+
+/**
+ * Staff FYI copy of the player message (VIDEO header = the scouting-pipeline video), sent after
+ * the staff welcome. Throws `WhatsAppTemplatePendingError` while not `registered`.
+ */
+export async function sendDolphinsPlayerFyiWhatsApp(
+  to: string,
+  videoRef: VideoRef,
+  opts?: DolphinsSendOptions,
+): Promise<{ messageId: string }> {
+  const def = WHATSAPP_TEMPLATES.dolphinsPlayerFyi;
+  assertTemplateSendable(def, opts);
+  return sendTemplate(
+    to,
+    def.name,
+    def.lang,
+    dolphinsPlayerFyiParams(),
+    'dolphins player FYI',
+    undefined,
+    videoRef,
+  );
+}
+
+/** No approved template in Meta for this send: the channel is skipped, not failed. */
 export class WhatsAppTemplatePendingError extends Error {
-  constructor() {
-    super("no captain's report WhatsApp template is approved yet");
+  /** `templateName` absent ⇒ the captain's-report wording (the original and default use). */
+  constructor(templateName?: string) {
+    super(
+      templateName
+        ? `WhatsApp template ${templateName} is not approved in Meta yet`
+        : "no captain's report WhatsApp template is approved yet",
+    );
     this.name = 'WhatsAppTemplatePendingError';
   }
 }

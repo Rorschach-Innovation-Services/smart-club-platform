@@ -65,6 +65,13 @@ lions-contacts-import-backup-*.json
 lions-contacts-import-manifest.json
 lions-contacts-import-manifest.*.json
 
+# send-dolphins-welcome-broadcast run manifests (dry-run + --confirm): every recipient's name,
+# email, cell and message ids — PII, never commit.
+dolphins-welcome-broadcast-*.json
+# …and its delivery reports (report-dolphins-welcome-broadcast.ts) — names, contacts, statuses.
+dolphins-welcome-broadcast-report-*.html
+dolphins-welcome-broadcast-report-*.pdf
+
 # generated cohort exports (contain PII)
 cohort-export-*.xlsx
 
