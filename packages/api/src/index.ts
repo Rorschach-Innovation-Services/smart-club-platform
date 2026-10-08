@@ -174,6 +174,9 @@ import {
   buildNameDobIndex,
   addToNameDobIndex,
   possibleExistingRegistrations,
+  addToIdIndex,
+  legacyKeyMessage,
+  type IdNumberIndex,
   type NameDobIndex,
   type ClearanceOpenedNotifier,
   type RegisterPlayerOutcome,
@@ -311,6 +314,7 @@ import {
   CertificateNotIssuableError,
 } from './certificates/issue.js';
 import { normaliseSerial } from './certificates/serial.js';
+import { purgePlayerCertificates as purgePlayerCertificatesShared } from './player-certificate-purge.js';
 import { activeVerifyKeys, certSigner, type VerifyKey } from './certificates/signer.js';
 import { validateCertTemplate, validateOrgContact } from './certificates/config.js';
 import { validateFixtureReminders } from './fixture-reminders-config.js';
@@ -1101,7 +1105,12 @@ app.post('/register/:clubId', async (c) => {
   // Deliberately ONE message for every conflict shape: an anonymous caller must not be
   // able to distinguish "registered at the destination" from "mid-clearance at the
   // source" and use this endpoint as a status oracle.
-  if (result.outcome === 'duplicate' || result.outcome === 'clearance-already-open') {
+  // The legacy-key refusal folds into the same answer — the matched club is never revealed here.
+  if (
+    result.outcome === 'duplicate' ||
+    result.outcome === 'clearance-already-open' ||
+    result.outcome === 'existing-registration-under-legacy-key'
+  ) {
     throw new HttpError(409, 'already registered or a transfer is already in progress');
   }
   if (result.outcome === 'clearance-opened') {
@@ -2555,6 +2564,9 @@ app.post('/clubs/:id/players', async (c) => {
   if (result.outcome === 'clearance-already-open') {
     throw new HttpError(409, 'a clearance for this player is already in progress');
   }
+  if (result.outcome === 'existing-registration-under-legacy-key') {
+    throw new HttpError(409, legacyKeyMessage(result.matchedClubName));
+  }
   if (result.outcome === 'clearance-auto-rejected') {
     // Unreachable: without `windowClosed` the core refuses (409) instead of auto-rejecting.
     throw new HttpError(409, 'transfers are closed');
@@ -2684,11 +2696,16 @@ async function registerChairRows(
   // cross-club index, this club's own roster read once more.
   const nameDob: NameDobIndex | undefined =
     toRegister.length && playerSyncEnabled(cfg) ? new Map() : undefined;
+  // The ID-number dedup guard rides the same reads: other clubs via the cross-club index, this
+  // club's own roster (projected to key + ID) once more.
+  const idIndex: IdNumberIndex | undefined = toRegister.length ? new Map() : undefined;
   const crossClubIndex = toRegister.length
     ? await buildCrossClubIndex(ra.tenant, await repo.listClubs(ra.tenant), club.id, {
         ...(nameDob ? { nameDob } : {}),
+        ...(idIndex ? { idIndex } : {}),
       })
     : undefined;
+  if (idIndex) addToIdIndex(idIndex, club, await repo.listPlayerIdRows(ra.tenant, club.id));
   if (nameDob)
     addToNameDobIndex(nameDob, club.name, await repo.listPlayerNameDobRows(ra.tenant, club.id));
   const warnAt = (p: PlayerRegistration) => {
@@ -2719,7 +2736,7 @@ async function registerChairRows(
         registeredBy: ra.email,
         tenantConfig: cfg,
         notifyClearanceOpened: notifyOpened,
-        prefetch: { crossClubIndex },
+        prefetch: { crossClubIndex, idIndex },
       });
       const naturalKey = r.player.naturalKey;
       if (r.outcome === 'clearance-opened') {
@@ -2734,6 +2751,13 @@ async function registerChairRows(
         results.push({ ...base, outcome: 'clearance-already-open', naturalKey });
       } else if (r.outcome === 'duplicate') {
         results.push({ ...base, outcome: 'skipped-duplicate', naturalKey });
+      } else if (r.outcome === 'existing-registration-under-legacy-key') {
+        results.push({
+          ...base,
+          outcome: 'error',
+          naturalKey,
+          error: legacyKeyMessage(r.matchedClubName),
+        });
       } else if (r.outcome === 'clearance-auto-rejected') {
         // Unreachable: without `windowClosed` the core refuses (409 → per-row error) instead.
         results.push({ ...base, outcome: 'error', naturalKey, error: 'transfers are closed' });
@@ -3265,24 +3289,14 @@ app.delete('/clubs/:id/players/:nk', async (c) => {
  * transfer certificates carry their full ID/DOB, so each resolved clearance naming them at this
  * club — inbound (they moved here) or outgoing (they left) — loses its PDF, CERT# item and
  * pointers. The row is already gone, so a purge failure is reported rather than failing the
- * request; erasure's prefix purge remains the backstop.
+ * request; erasure's prefix purge remains the backstop. Shared with resolve-duplicate-players
+ * (player-certificate-purge.ts).
  */
 async function purgePlayerCertificates(tenant: string, clubId: string, naturalKey: string) {
-  const [inbound, outgoing] = await Promise.all([
-    repo.listInboundForDest(tenant, clubId),
-    repo.listClearancesForSource(tenant, clubId),
-  ]);
-  const mine = [...inbound, ...outgoing].filter(
-    (x) => x.playerNaturalKey === naturalKey && isCertifiable(x),
-  );
-  for (const x of mine) {
-    try {
-      await repo.purgeClearanceCertificate(tenant, x);
-    } catch (err) {
-      Sentry.captureException(err);
-      console.error(`certificate purge failed for clearance ${x.id}`, err);
-    }
-  }
+  await purgePlayerCertificatesShared(repo, tenant, clubId, naturalKey, (err, id) => {
+    Sentry.captureException(err);
+    console.error(`certificate purge failed for clearance ${id}`, err);
+  });
 }
 
 /**

@@ -3176,6 +3176,37 @@ export async function listPlayerNameDobRows(
 }
 
 /**
+ * A club's roster PROJECTED to natural key + ID (number, type, nationality) + placeholder flag — the registration
+ * ID-number dedup guard (register-player.ts buildIdNumberIndex): a person re-registering whose
+ * normalised ID matches a row stored under a DIFFERENT natural key (a legacy slug key). The ID
+ * fields are all the match needs (passports are namespaced by nationality, as in the natural
+ * key); no name, contact or document metadata is read.
+ */
+export async function listPlayerIdRows(
+  tenant: string,
+  clubId: string,
+): Promise<
+  Array<
+    Pick<PlayerRegistration, 'naturalKey' | 'idNumber' | 'idType' | 'nationality' | 'placeholder'>
+  >
+> {
+  const { pk, skPrefix } = playersListKey(tenant, clubId);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    ProjectionExpression: 'sk, idNumber, idType, nationality, placeholder',
+  });
+  return items.map((i) => ({
+    naturalKey: String(i.sk).slice(skPrefix.length),
+    ...(typeof i.idNumber === 'string' ? { idNumber: i.idNumber } : {}),
+    ...(i.idType === 'passport' || i.idType === 'sa-id' ? { idType: i.idType } : {}),
+    ...(typeof i.nationality === 'string' ? { nationality: i.nationality } : {}),
+    ...(i.placeholder === true ? { placeholder: true as const } : {}),
+  }));
+}
+
+/**
  * Batch-fetch the {@link RejectSourceProbe} fields for a set of source (clubId, naturalKey)
  * pairs — the projection the admin listing uses to compute `predictedRejectCase` via
  * {@link detectRejectCase} without reading whole player rows.
@@ -3465,8 +3496,16 @@ async function setPlayerTeamIfAbsentUnsynced(
  * concurrent delete of the same player THROWS ConditionalCheckFailedException (the route
  * maps it to 409) before reaching the decrement, so the count can't be driven negative;
  * the `!removed` guard below is belt-and-suspenders for that already-impossible path.
+ *
+ * `opts.keepDocs` (resolve-duplicate-players only) skips the S3 ID-document purge: the caller
+ * has already carried the row's `idDocMeta`/`previousIdDocMeta` onto the surviving duplicate,
+ * so those objects are still referenced. Absent ⇒ the purge runs exactly as before.
  */
-async function deletePlayerUnsynced(tenant: string, player: PlayerRegistration): Promise<void> {
+async function deletePlayerUnsynced(
+  tenant: string,
+  player: PlayerRegistration,
+  opts: { keepDocs?: boolean } = {},
+): Promise<void> {
   const res = await ddb.send(
     new DeleteCommand({
       TableName: TABLE,
@@ -3487,7 +3526,7 @@ async function deletePlayerUnsynced(tenant: string, player: PlayerRegistration):
   const objectKeys = [removed.idDocMeta?.objectKey, removed.previousIdDocMeta?.objectKey].filter(
     (k): k is string => !!k,
   );
-  if (objectKeys.length) await deleteUploadObjects(objectKeys);
+  if (objectKeys.length && !opts.keepDocs) await deleteUploadObjects(objectKeys);
   // Write-on-activation invariant: the row is gone, so its VETAFFIL record (if any) must go too.
   // Best-effort — the record is a denormalised index. (deletePlayer refuses clearance-pending
   // rows, which never carry a record under write-on-activation, so this only fires for active ones.)
@@ -8697,8 +8736,12 @@ export async function setPlayerTeamIfAbsent(
 }
 
 /** {@link deletePlayerUnsynced} + the player-sync hook. */
-export async function deletePlayer(tenant: string, player: PlayerRegistration): Promise<void> {
-  await deletePlayerUnsynced(tenant, player);
+export async function deletePlayer(
+  tenant: string,
+  player: PlayerRegistration,
+  opts: { keepDocs?: boolean } = {},
+): Promise<void> {
+  await deletePlayerUnsynced(tenant, player, opts);
   await recordPlayerSyncChange(tenant, player.naturalKey);
 }
 

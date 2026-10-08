@@ -66,7 +66,104 @@ export type CrossClubIndex = Map<string, CrossClubHit[]>;
 export interface RegisterPrefetch {
   clubs?: Array<{ id: string; name: string }>;
   crossClubIndex?: CrossClubIndex;
+  /** Every club's rows (destination included) by normalised ID — see {@link IdNumberIndex}. */
+  idIndex?: IdNumberIndex;
 }
+
+/**
+ * normalised idNumber (namespaced — see {@link idIndexKey}) → every non-placeholder row carrying it, across ALL clubs (destination
+ * included). The ID-number dedup guard: a registration whose ID matches a row stored under a
+ * DIFFERENT natural key (a legacy slug key, or a differently-typed key) is refused — the
+ * clearance machinery addresses both rows by one key, so it can neither open a clearance
+ * against that row nor safely add a second row for the same person. Built once per request.
+ * Refusing (rather than opening a clearance, as the remediation plan first proposed) is a
+ * deliberate deviation for exactly that reason; the recovery path is an admin running the
+ * duplicate cleanup (resolve-duplicate-players), after which the ordinary key match applies.
+ */
+export type IdNumberIndex = Map<
+  string,
+  Array<{ naturalKey: string; clubId: string; clubName: string }>
+>;
+
+const DUMMY_ID_WORDS = new Set(['NONE', 'NA', 'N/A', 'NIL', 'NULL', 'UNKNOWN', 'TBC', 'TBA']);
+
+/** An ID value no real person carries: blank, a placeholder word, one repeated character, a
+ *  plain digit run, or too short to identify anyone. Never matched by the guard. */
+export function isDummyId(normalised: string): boolean {
+  const alnum = normalised.replace(/[^A-Z0-9]/g, '');
+  return (
+    alnum.length < 5 ||
+    DUMMY_ID_WORDS.has(normalised) ||
+    /^(.)\1*$/.test(alnum) ||
+    /^(0123456789|1234567890)/.test(alnum)
+  );
+}
+
+/**
+ * The index key: the normalised ID namespaced exactly as {@link playerNaturalKey} namespaces it
+ * (RSA IDs nationally; passports per nationality — two countries can issue the same number), or
+ * null for an ID that must never match (blank or dummy).
+ */
+export function idIndexKey(
+  p: Pick<PlayerRegistration, 'idNumber' | 'idType' | 'nationality'>,
+): string | null {
+  const id = normalizeId(p.idNumber);
+  if (isDummyId(id)) return null;
+  return (p.idType ?? 'sa-id') === 'passport'
+    ? `passport:${normalizeId(p.nationality)}:${id}`
+    : `sa-id:${id}`;
+}
+
+export function addToIdIndex(
+  index: IdNumberIndex,
+  club: { id: string; name: string },
+  roster: Array<
+    Pick<PlayerRegistration, 'naturalKey' | 'idNumber' | 'idType' | 'nationality' | 'placeholder'>
+  >,
+): void {
+  for (const p of roster) {
+    if (p.placeholder === true) continue;
+    const key = idIndexKey(p);
+    if (!key) continue;
+    const list = index.get(key) ?? [];
+    list.push({ naturalKey: p.naturalKey, clubId: club.id, clubName: club.name });
+    index.set(key, list);
+  }
+}
+
+/**
+ * Read every club's roster (bounded parallel, PROJECTED to key + ID — listPlayerIdRows) into an
+ * {@link IdNumberIndex}: ~one query per club per registration, the same cost profile as
+ * buildNameDobIndex.
+ */
+export async function buildIdNumberIndex(
+  tenant: string,
+  clubs: Array<{ id: string; name: string }>,
+): Promise<IdNumberIndex> {
+  const CONCURRENCY = 8;
+  const index: IdNumberIndex = new Map();
+  for (let i = 0; i < clubs.length; i += CONCURRENCY) {
+    const slice = clubs.slice(i, i + CONCURRENCY);
+    // eslint-disable-next-line no-await-in-loop -- sequential slices, each internally parallel
+    const rosters = await Promise.all(slice.map((c) => repo.listPlayerIdRows(tenant, c.id)));
+    slice.forEach((c, k) => addToIdIndex(index, c, rosters[k]));
+  }
+  return index;
+}
+
+/** The first row carrying this person's ID under a DIFFERENT natural key, or undefined. */
+export function legacyKeyHit(
+  index: IdNumberIndex,
+  player: Pick<PlayerRegistration, 'naturalKey' | 'idNumber' | 'idType' | 'nationality'>,
+): { naturalKey: string; clubId: string; clubName: string } | undefined {
+  const key = idIndexKey(player);
+  if (!key) return undefined;
+  return (index.get(key) ?? []).find((h) => h.naturalKey !== player.naturalKey);
+}
+
+/** The chair/admin-facing reason for an `existing-registration-under-legacy-key` refusal. */
+export const legacyKeyMessage = (clubName: string) =>
+  `an existing registration for this ID at ${clubName} is under a legacy key — run duplicate cleanup or contact support`;
 
 /**
  * The notices for a newly opened clearance (index.ts's notifyClearanceOpened: source chair,
@@ -137,7 +234,16 @@ export type RegisterPlayerOutcome =
       repeat: boolean;
     }
   | { outcome: 'duplicate'; player: PlayerRegistration }
-  | { outcome: 'clearance-already-open'; player: PlayerRegistration };
+  | { outcome: 'clearance-already-open'; player: PlayerRegistration }
+  | {
+      /** Refused, nothing written: this ID is already rostered under a different natural key
+       *  (see {@link IdNumberIndex}). INTERNAL detail — the public route must answer with its
+       *  uniform 409; only authenticated chair/admin callers may surface the club. */
+      outcome: 'existing-registration-under-legacy-key';
+      player: PlayerRegistration;
+      matchedClubId: string;
+      matchedClubName: string;
+    };
 
 export const IDENTITY_ERROR =
   'provide a valid 13-digit RSA ID, or a passport/visa number with date of birth';
@@ -177,7 +283,7 @@ export async function buildCrossClubIndex(
   tenant: string,
   clubs: Array<{ id: string; name: string }>,
   excludeClubId: string,
-  opts: { nameDob?: NameDobIndex } = {},
+  opts: { nameDob?: NameDobIndex; idIndex?: IdNumberIndex } = {},
 ): Promise<CrossClubIndex> {
   const CONCURRENCY = 8;
   const index: CrossClubIndex = new Map();
@@ -188,6 +294,7 @@ export async function buildCrossClubIndex(
     const rosters = await Promise.all(slice.map((c) => repo.listPlayers(tenant, c.id)));
     slice.forEach((c, k) => {
       if (opts.nameDob) addToNameDobIndex(opts.nameDob, c.name, rosters[k]);
+      if (opts.idIndex) addToIdIndex(opts.idIndex, c, rosters[k]);
       for (const p of rosters[k]) {
         const hit: CrossClubHit = { clubId: c.id, clubName: c.name, status: p.status };
         const list = index.get(p.naturalKey);
@@ -323,6 +430,22 @@ export async function registerPlayerForClub(
   const lastClubId = opts.lastClubId ?? '';
   const directory = opts.directory ?? [];
   const tenantConfig = opts.tenantConfig;
+
+  // ID-number dedup guard: the same ID under a DIFFERENT natural key (a legacy slug row) is
+  // refused before anything is written. Same-key matches are untouched — they take the
+  // clearance path below exactly as before.
+  const idIndex =
+    opts.prefetch?.idIndex ??
+    (await buildIdNumberIndex(tenant, opts.prefetch?.clubs ?? (await repo.listClubs(tenant))));
+  const legacy = legacyKeyHit(idIndex, player);
+  if (legacy) {
+    return {
+      outcome: 'existing-registration-under-legacy-key',
+      player,
+      matchedClubId: legacy.clubId,
+      matchedClubName: legacy.clubName,
+    };
+  }
 
   let opened: Materialized | undefined;
   try {
