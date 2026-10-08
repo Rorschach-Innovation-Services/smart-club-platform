@@ -112,11 +112,6 @@ import {
   captainsReportNotifyKey,
   whatsappMessageKey,
   captainsReportPartitionPk,
-  scorecardConfirmPartitionPk,
-  scorecardConfirmKey,
-  scorecardConfirmsListKey,
-  scorecardConfirmCounterKey,
-  scorecardConfirmNotifyKey,
 } from './keys.js';
 import { PLATFORM_TENANT, TRANSFER_WINDOW_REJECTOR } from './types.js';
 import { refs as medicoachRefs } from './medicoach-bundle.js';
@@ -162,8 +157,6 @@ import type {
   FixtureOfficialsRecord,
   CaptainsReport,
   CaptainsReportDelivery,
-  ScorecardConfirmation,
-  ScorecardConfirmEntry,
 } from './types.js';
 
 import { tableName } from './env.js';
@@ -1266,6 +1259,51 @@ export async function deleteFixtureScorecard(
   );
 }
 
+/**
+ * Which of the given fixtures have a stored scorecard row and its `available` flag — keyed
+ * `<seriesId>#<fixtureId>`. BatchGet over the exact pairs, projecting only the key fields and
+ * that flag (never the innings, which carry player names). Chunks of 100 run at most
+ * `concurrency` at a time; UnprocessedKeys are retried after a short jittered backoff, and any
+ * still unanswered after that THROW rather than read as "no card" (the operator console must
+ * not mislabel a match).
+ */
+export async function getFixtureScorecardAvailability(
+  tenant: string,
+  pairs: Array<{ seriesId: string; fixtureId: string }>,
+  concurrency = 4,
+): Promise<Map<string, { available: boolean }>> {
+  const out = new Map<string, { available: boolean }>();
+  const unique = [...new Map(pairs.map((p) => [`${p.seriesId}#${p.fixtureId}`, p])).values()];
+  const chunks: Array<typeof unique> = [];
+  for (let i = 0; i < unique.length; i += 100) chunks.push(unique.slice(i, i + 100));
+  const runChunk = async (chunk: typeof unique) => {
+    let batch = chunk.map((p) => fixtureScorecardKey(tenant, p.seriesId, p.fixtureId));
+    for (let attempt = 0; attempt < 3 && batch.length; attempt++) {
+      if (attempt > 0)
+        await new Promise((r) => setTimeout(r, (50 + Math.random() * 100) * attempt));
+      const res = await ddb.send(
+        new BatchGetCommand({
+          RequestItems: {
+            [TABLE]: {
+              Keys: batch,
+              ProjectionExpression: 'seriesId, fixtureId, #a',
+              ExpressionAttributeNames: { '#a': 'available' },
+            },
+          },
+        }),
+      );
+      for (const item of res.Responses?.[TABLE] ?? [])
+        out.set(`${item.seriesId}#${item.fixtureId}`, { available: item.available === true });
+      batch = (res.UnprocessedKeys?.[TABLE]?.Keys ?? []) as typeof batch;
+    }
+    if (batch.length)
+      throw new Error(`scorecard availability: ${batch.length} keys unprocessed after retries`);
+  };
+  for (let i = 0; i < chunks.length; i += concurrency)
+    await Promise.all(chunks.slice(i, i + concurrency).map(runChunk));
+  return out;
+}
+
 async function listFixtureScorecardKeys(
   tenant: string,
 ): Promise<Array<{ pk: string; sk: string }>> {
@@ -2264,8 +2302,33 @@ export async function createCaptainsReport(
 /** The editable fields of a report (what a draft save or a submit writes). */
 export type CaptainsReportFields = Pick<
   CaptainsReport,
-  'captainName' | 'umpires' | 'general' | 'declaration'
+  'captainName' | 'umpires' | 'general' | 'declaration' | 'scorecard'
 >;
+
+/**
+ * The scorecard answer's part of a fields write: SET it when given, REMOVE it when not — the
+ * SET list is fixed, so a cleared answer must be removed explicitly or the old one survives.
+ */
+function scorecardFieldWrite(fields: CaptainsReportFields): {
+  set: string;
+  remove: string;
+  values: Record<string, unknown>;
+} {
+  const sc = fields.scorecard;
+  if (!sc) return { set: '', remove: ' REMOVE scorecard', values: {} };
+  return {
+    set: ', scorecard = :sc',
+    remove: '',
+    values: {
+      ':sc': {
+        action: sc.action,
+        ...(sc.feedback ? { feedback: sc.feedback } : {}),
+        ...(sc.againstFetchedAt ? { againstFetchedAt: sc.againstFetchedAt } : {}),
+        ...(sc.stale ? { stale: true } : {}),
+      },
+    },
+  };
+}
 
 /**
  * Save a draft. Only a PENDING report takes it — and when `memberId` is given (the link
@@ -2277,13 +2340,16 @@ export async function saveCaptainsReportDraft(
   fields: CaptainsReportFields,
   opts: { memberId?: string } = {},
 ): Promise<CaptainsReport> {
+  const sc = scorecardFieldWrite(fields);
   try {
     const res = await ddb.send(
       new UpdateCommand({
         TableName: TABLE,
         Key: reportKeyOf(tenant, key),
         UpdateExpression:
-          'SET captainName = :c, umpires = :u, #gen = :g, declaration = :d, updatedAt = :at',
+          'SET captainName = :c, umpires = :u, #gen = :g, declaration = :d, updatedAt = :at' +
+          sc.set +
+          sc.remove,
         ConditionExpression:
           'attribute_exists(pk) AND #s = :pending' +
           (opts.memberId ? ' AND (recipient.memberId = :m OR chairMemberId = :m)' : ''),
@@ -2295,6 +2361,7 @@ export async function saveCaptainsReportDraft(
           ':d': !!fields.declaration,
           ':at': new Date().toISOString(),
           ':pending': 'pending',
+          ...sc.values,
           ...(opts.memberId ? { ':m': opts.memberId } : {}),
         },
         ReturnValues: 'ALL_NEW',
@@ -2362,6 +2429,7 @@ async function submitCaptainsReportFields(
   meta: { ref?: string; submittedBy: string; via: 'portal' | 'link'; memberId?: string },
 ): Promise<CaptainsReport> {
   const at = new Date().toISOString();
+  const sc = scorecardFieldWrite(fields);
   try {
     const res = await ddb.send(
       new UpdateCommand({
@@ -2370,7 +2438,9 @@ async function submitCaptainsReportFields(
         UpdateExpression:
           'SET captainName = :c, umpires = :u, #gen = :g, declaration = :d, #s = :submitted, ' +
           (meta.ref ? '#ref = :ref, ' : '') +
-          'submittedBy = :by, submittedVia = :via, submittedAt = :at, updatedAt = :at',
+          'submittedBy = :by, submittedVia = :via, submittedAt = :at, updatedAt = :at' +
+          sc.set +
+          sc.remove,
         ConditionExpression:
           'attribute_exists(pk) AND #s = :pending' +
           (meta.memberId ? ' AND (recipient.memberId = :m OR chairMemberId = :m)' : ''),
@@ -2390,6 +2460,7 @@ async function submitCaptainsReportFields(
           ':by': meta.submittedBy,
           ':via': meta.via,
           ':at': at,
+          ...sc.values,
           ...(meta.memberId ? { ':m': meta.memberId } : {}),
         },
         ReturnValues: 'ALL_NEW',
@@ -2400,6 +2471,49 @@ async function submitCaptainsReportFields(
     if (isCcf(err)) throw new CaptainsReportStateError("captain's report already submitted");
     throw err;
   }
+}
+
+/**
+ * A scorecard was (re)fetched at `fetchedAt`: flag the scorecard answer of every SUBMITTED
+ * report for the fixture `stale` when it was given against an older card — its
+ * `againstFetchedAt` when recorded, else its `submittedAt`. Reports without an answer (filed
+ * before the card was attached, or before answers existed) are never flagged. One keyed Query
+ * on the fixture's two reports. Returns how many were flagged.
+ */
+export async function flagStaleCaptainsReportScorecards(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+  fetchedAt: string,
+): Promise<number> {
+  let n = 0;
+  for (const r of await listCaptainsReportsForFixture(tenant, seriesId, fixtureId)) {
+    const sc = r.scorecard;
+    if (r.status !== 'submitted' || !sc?.action || sc.stale) continue;
+    const against = sc.againstFetchedAt ?? r.submittedAt;
+    if (!against || against >= fetchedAt) continue;
+    try {
+      await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: reportKeyOf(tenant, r),
+          UpdateExpression: 'SET scorecard.stale = :t, updatedAt = :at',
+          ConditionExpression:
+            '#s = :submitted AND attribute_exists(scorecard.#a) AND attribute_not_exists(scorecard.stale)',
+          ExpressionAttributeNames: { '#s': 'status', '#a': 'action' },
+          ExpressionAttributeValues: {
+            ':t': true,
+            ':submitted': 'submitted',
+            ':at': new Date().toISOString(),
+          },
+        }),
+      );
+      n++;
+    } catch (err) {
+      if (!isCcf(err)) throw err;
+    }
+  }
+  return n;
 }
 
 /**
@@ -2843,448 +2957,6 @@ async function listCaptainsReportPartitionKeys(
     TableName: TABLE,
     KeyConditionExpression: 'pk = :p',
     ExpressionAttributeValues: { ':p': captainsReportPartitionPk(tenant) },
-    ProjectionExpression: 'pk, sk',
-  });
-  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
-}
-
-// ── Chair scorecard confirmations (SCORECONF#) ──
-// One tenant partition: the weekly digests, the SC-YYYY-NNNN counters and the NOTIFY# ledger.
-
-/**
- * Why a scorecard-confirmation write was refused. `code` picks the HTTP answer:
- * `not_found` (no digest) / `unknown_entry` → 404, `entry_closed` (already answered or void)
- * → 409, `link_revoked` (the digest's memberId was rotated) → 410.
- */
-export class ScorecardConfirmStateError extends Error {
-  constructor(
-    readonly code: 'not_found' | 'unknown_entry' | 'entry_closed' | 'link_revoked',
-    message: string,
-  ) {
-    super(message);
-    this.name = 'ScorecardConfirmStateError';
-  }
-}
-
-export async function getScorecardConfirmation(
-  tenant: string,
-  weekKey: string,
-  clubId: string,
-): Promise<ScorecardConfirmation | null> {
-  const res = await ddb.send(
-    new GetCommand({ TableName: TABLE, Key: scorecardConfirmKey(tenant, weekKey, clubId) }),
-  );
-  return stripKeys<ScorecardConfirmation>(res.Item);
-}
-
-/** A tenant's digests — every week, or one week (`weekKey`). One Query on one partition. */
-export async function listScorecardConfirmations(
-  tenant: string,
-  weekKey?: string,
-): Promise<ScorecardConfirmation[]> {
-  const { pk, skPrefix } = scorecardConfirmsListKey(tenant, weekKey);
-  const items = await queryAll({
-    TableName: TABLE,
-    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
-    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
-  });
-  return items.map((i) => stripKeys<ScorecardConfirmation>(i)!);
-}
-
-/** Store a NEW digest; false when one already exists for that club + week. */
-export async function createScorecardConfirmation(
-  tenant: string,
-  record: ScorecardConfirmation,
-): Promise<boolean> {
-  try {
-    await ddb.send(
-      new PutCommand({
-        TableName: TABLE,
-        Item: { ...record, ...scorecardConfirmKey(tenant, record.weekKey, record.clubId) },
-        ConditionExpression: 'attribute_not_exists(pk)',
-      }),
-    );
-    return true;
-  } catch (err) {
-    if (isCcf(err)) return false;
-    throw err;
-  }
-}
-
-/**
- * Add fixtures to an existing digest (a result that arrived after it was created). Each entry
- * is written only when the digest lacks it — or holds it VOID (a cleared result re-recorded):
- * an open or answered entry is never overwritten. Returns the keys actually added.
- */
-export async function topUpScorecardConfirmEntries(
-  tenant: string,
-  weekKey: string,
-  clubId: string,
-  entries: Record<string, ScorecardConfirmEntry>,
-): Promise<string[]> {
-  const added: string[] = [];
-  for (const [k, entry] of Object.entries(entries)) {
-    try {
-      await ddb.send(
-        new UpdateCommand({
-          TableName: TABLE,
-          Key: scorecardConfirmKey(tenant, weekKey, clubId),
-          UpdateExpression: 'SET entries.#k = :e, updatedAt = :at',
-          ConditionExpression:
-            'attribute_exists(pk) AND (attribute_not_exists(entries.#k) OR entries.#k.#st = :void)',
-          ExpressionAttributeNames: { '#k': k, '#st': 'status' },
-          ExpressionAttributeValues: {
-            ':e': entry,
-            ':void': 'void',
-            ':at': new Date().toISOString(),
-          },
-        }),
-      );
-      added.push(k);
-    } catch (err) {
-      if (!isCcf(err)) throw err;
-    }
-  }
-  return added;
-}
-
-/**
- * Answer one entry — FIRST SUBMIT WINS. Succeeds only while the entry is `pending` and (link
- * path) the digest is still addressed to `memberId`. A refusal is re-read to say why
- * (ScorecardConfirmStateError: not_found / unknown_entry / entry_closed / link_revoked).
- */
-export async function submitScorecardConfirmEntry(
-  tenant: string,
-  weekKey: string,
-  clubId: string,
-  entryKey: string,
-  answer: {
-    status: 'confirmed' | 'correction';
-    feedback?: string;
-    confirmedAgainstFetchedAt?: string;
-    memberId: string;
-  },
-): Promise<ScorecardConfirmation> {
-  const at = new Date().toISOString();
-  const sets = [
-    'entries.#k.#st = :status',
-    'entries.#k.submittedAt = :at',
-    'entries.#k.submittedVia = :via',
-    'updatedAt = :at',
-  ];
-  const values: Record<string, unknown> = {
-    ':status': answer.status,
-    ':at': at,
-    ':via': 'link',
-    ':pending': 'pending',
-    ':m': answer.memberId,
-  };
-  if (answer.feedback) {
-    sets.push('entries.#k.feedback = :fb');
-    values[':fb'] = answer.feedback;
-  }
-  if (answer.confirmedAgainstFetchedAt) {
-    sets.push('entries.#k.confirmedAgainstFetchedAt = :cf');
-    values[':cf'] = answer.confirmedAgainstFetchedAt;
-  }
-  try {
-    const res = await ddb.send(
-      new UpdateCommand({
-        TableName: TABLE,
-        Key: scorecardConfirmKey(tenant, weekKey, clubId),
-        UpdateExpression: `SET ${sets.join(', ')}`,
-        ConditionExpression:
-          'attribute_exists(pk) AND memberId = :m AND attribute_exists(entries.#k) AND entries.#k.#st = :pending',
-        ExpressionAttributeNames: { '#k': entryKey, '#st': 'status' },
-        ExpressionAttributeValues: values,
-        ReturnValues: 'ALL_NEW',
-      }),
-    );
-    return stripKeys<ScorecardConfirmation>(res.Attributes)!;
-  } catch (err) {
-    if (!isCcf(err)) throw err;
-  }
-  const fresh = await getScorecardConfirmation(tenant, weekKey, clubId);
-  if (!fresh) throw new ScorecardConfirmStateError('not_found', 'not found');
-  if (fresh.memberId !== answer.memberId)
-    throw new ScorecardConfirmStateError('link_revoked', 'this link is no longer valid');
-  if (!fresh.entries?.[entryKey])
-    throw new ScorecardConfirmStateError('unknown_entry', 'that match is not in this digest');
-  throw new ScorecardConfirmStateError('entry_closed', 'this match has already been answered');
-}
-
-/** A cleared result: its entry becomes `void` (whatever its state). False when absent/void. */
-export async function voidScorecardConfirmEntry(
-  tenant: string,
-  weekKey: string,
-  clubId: string,
-  entryKey: string,
-): Promise<boolean> {
-  try {
-    await ddb.send(
-      new UpdateCommand({
-        TableName: TABLE,
-        Key: scorecardConfirmKey(tenant, weekKey, clubId),
-        UpdateExpression: 'SET entries.#k.#st = :void, updatedAt = :at',
-        ConditionExpression: 'attribute_exists(entries.#k) AND entries.#k.#st <> :void',
-        ExpressionAttributeNames: { '#k': entryKey, '#st': 'status' },
-        ExpressionAttributeValues: { ':void': 'void', ':at': new Date().toISOString() },
-      }),
-    );
-    return true;
-  } catch (err) {
-    if (isCcf(err)) return false;
-    throw err;
-  }
-}
-
-/**
- * A result re-recorded after a clear: a `void` entry goes back to `pending`, with any answer
- * it carried before the clear removed (the chair answers the new result afresh). Only a void
- * entry is touched. False when the entry is absent or not void.
- */
-export async function restoreScorecardConfirmEntry(
-  tenant: string,
-  weekKey: string,
-  clubId: string,
-  entryKey: string,
-): Promise<boolean> {
-  try {
-    await ddb.send(
-      new UpdateCommand({
-        TableName: TABLE,
-        Key: scorecardConfirmKey(tenant, weekKey, clubId),
-        UpdateExpression:
-          'SET entries.#k.#st = :pending, updatedAt = :at ' +
-          'REMOVE entries.#k.feedback, entries.#k.submittedAt, entries.#k.submittedVia, ' +
-          'entries.#k.confirmedAgainstFetchedAt, entries.#k.staleConfirmation',
-        ConditionExpression: 'attribute_exists(entries.#k) AND entries.#k.#st = :void',
-        ExpressionAttributeNames: { '#k': entryKey, '#st': 'status' },
-        ExpressionAttributeValues: {
-          ':pending': 'pending',
-          ':void': 'void',
-          ':at': new Date().toISOString(),
-        },
-      }),
-    );
-    return true;
-  } catch (err) {
-    if (isCcf(err)) return false;
-    throw err;
-  }
-}
-
-/**
- * A newer scorecard (fetched at `fetchedAt`) arrived for an ANSWERED entry: flag it stale so
- * the operator console shows the answer may predate the card. Only an entry answered against
- * an older card is flagged — its `confirmedAgainstFetchedAt` when recorded, else its
- * `submittedAt`. False when nothing changed.
- */
-export async function flagScorecardEntryStale(
-  tenant: string,
-  weekKey: string,
-  clubId: string,
-  entryKey: string,
-  fetchedAt: string,
-): Promise<boolean> {
-  try {
-    await ddb.send(
-      new UpdateCommand({
-        TableName: TABLE,
-        Key: scorecardConfirmKey(tenant, weekKey, clubId),
-        UpdateExpression: 'SET entries.#k.staleConfirmation = :t, updatedAt = :at',
-        ConditionExpression:
-          'attribute_exists(entries.#k) AND entries.#k.#st IN (:c, :x) AND (' +
-          '(attribute_exists(entries.#k.confirmedAgainstFetchedAt) AND entries.#k.confirmedAgainstFetchedAt < :f) OR ' +
-          '(attribute_not_exists(entries.#k.confirmedAgainstFetchedAt) AND entries.#k.submittedAt < :f))',
-        ExpressionAttributeNames: { '#k': entryKey, '#st': 'status' },
-        ExpressionAttributeValues: {
-          ':t': true,
-          ':c': 'confirmed',
-          ':x': 'correction',
-          ':f': fetchedAt,
-          ':at': new Date().toISOString(),
-        },
-      }),
-    );
-    return true;
-  } catch (err) {
-    if (isCcf(err)) return false;
-    throw err;
-  }
-}
-
-/** The next `SC-YYYY-NNNN` for a tenant/year — an atomic ADD on the counter item. */
-export async function nextScorecardConfirmRef(tenant: string, year: string): Promise<string> {
-  const res = await ddb.send(
-    new UpdateCommand({
-      TableName: TABLE,
-      Key: scorecardConfirmCounterKey(tenant, year),
-      UpdateExpression: 'ADD n :one',
-      ExpressionAttributeValues: { ':one': 1 },
-      ReturnValues: 'UPDATED_NEW',
-    }),
-  );
-  const n = Number(res.Attributes?.n ?? 0);
-  return `SC-${year}-${String(n).padStart(4, '0')}`;
-}
-
-/** Append notice outcomes to a digest; `notifiedAt` is set the first time a channel sent. */
-export async function recordScorecardConfirmDeliveries(
-  tenant: string,
-  weekKey: string,
-  clubId: string,
-  deliveries: CaptainsReportDelivery[],
-  opts: { notifiedAt?: string } = {},
-): Promise<void> {
-  const sets = [
-    'deliveries = list_append(if_not_exists(deliveries, :empty), :d)',
-    'updatedAt = :at',
-  ];
-  const values: Record<string, unknown> = {
-    ':d': deliveries,
-    ':empty': [],
-    ':at': new Date().toISOString(),
-  };
-  if (opts.notifiedAt) {
-    sets.push('notifiedAt = if_not_exists(notifiedAt, :n)');
-    values[':n'] = opts.notifiedAt;
-  }
-  try {
-    await ddb.send(
-      new UpdateCommand({
-        TableName: TABLE,
-        Key: scorecardConfirmKey(tenant, weekKey, clubId),
-        UpdateExpression: `SET ${sets.join(', ')}`,
-        ConditionExpression: 'attribute_exists(pk)',
-        ExpressionAttributeValues: values,
-      }),
-    );
-  } catch (err) {
-    if (!isCcf(err)) throw err; // erased meanwhile: nothing to record on
-  }
-}
-
-/** Revoke a digest's link: a new memberId, so every token minted for the old one 410s. */
-export async function rotateScorecardConfirmMemberId(
-  tenant: string,
-  weekKey: string,
-  clubId: string,
-): Promise<string> {
-  const memberId = randomUUID();
-  await ddb.send(
-    new UpdateCommand({
-      TableName: TABLE,
-      Key: scorecardConfirmKey(tenant, weekKey, clubId),
-      UpdateExpression: 'SET memberId = :m, updatedAt = :at',
-      ConditionExpression: 'attribute_exists(pk)',
-      ExpressionAttributeValues: { ':m': memberId, ':at': new Date().toISOString() },
-    }),
-  );
-  return memberId;
-}
-
-/** How long an `in_progress` digest-send claim holds before a later run may take it over. */
-export const SCORECARD_CLAIM_LEASE_MS = 15 * 60_000;
-
-/**
- * Claim the right to send a club's digest for a week. Returns the claim's `startedAt` ⇒ the
- * caller sends (and passes it back to {@link releaseScorecardConfirmNotify}); null ⇒ a send was
- * already claimed (a re-run, the operator "Run now") and nothing must go out again.
- *
- * Lease takeover: an `in_progress` claim older than {@link SCORECARD_CLAIM_LEASE_MS} is a run
- * that crashed between claim and complete/release — it is re-claimed, so it cannot block the
- * week's send for the ledger's whole TTL. A `completed` claim is never taken over.
- */
-export async function claimScorecardConfirmNotify(
-  tenant: string,
-  weekKey: string,
-  clubId: string,
-  opts: { now?: Date } = {},
-): Promise<string | null> {
-  const now = opts.now ?? new Date();
-  const startedAt = now.toISOString();
-  try {
-    await ddb.send(
-      new PutCommand({
-        TableName: TABLE,
-        Item: {
-          ...scorecardConfirmNotifyKey(tenant, weekKey, clubId),
-          status: 'in_progress',
-          startedAt,
-          expiresAt: Math.floor(now.getTime() / 1000) + NOTIFY_LEDGER_TTL_SECONDS,
-        },
-        ConditionExpression: 'attribute_not_exists(pk) OR (#s = :ip AND startedAt < :stale)',
-        ExpressionAttributeNames: { '#s': 'status' },
-        ExpressionAttributeValues: {
-          ':ip': 'in_progress',
-          ':stale': new Date(now.getTime() - SCORECARD_CLAIM_LEASE_MS).toISOString(),
-        },
-      }),
-    );
-    return startedAt;
-  } catch (err) {
-    if (isCcf(err)) return null;
-    throw err;
-  }
-}
-
-/** Record a claimed digest send's per-channel outcome (status only — no addresses). */
-export async function completeScorecardConfirmNotify(
-  tenant: string,
-  weekKey: string,
-  clubId: string,
-  results: Array<{ channel: string; status: string; error?: string }>,
-): Promise<void> {
-  await ddb.send(
-    new UpdateCommand({
-      TableName: TABLE,
-      Key: scorecardConfirmNotifyKey(tenant, weekKey, clubId),
-      UpdateExpression: 'SET #s = :done, #res = :r, completedAt = :at',
-      ExpressionAttributeNames: { '#s': 'status', '#res': 'results' },
-      ExpressionAttributeValues: {
-        ':done': 'completed',
-        ':r': results,
-        ':at': new Date().toISOString(),
-      },
-    }),
-  );
-}
-
-/**
- * Release a claimed digest send that reached nobody, so the next run may try again. Only the
- * caller's OWN claim is released (`claimedAt` = the `startedAt` its claim returned): a run that
- * lost its claim to a lease takeover leaves the newer holder's claim in place (a no-op).
- */
-export async function releaseScorecardConfirmNotify(
-  tenant: string,
-  weekKey: string,
-  clubId: string,
-  claimedAt: string,
-): Promise<void> {
-  try {
-    await ddb.send(
-      new DeleteCommand({
-        TableName: TABLE,
-        Key: scorecardConfirmNotifyKey(tenant, weekKey, clubId),
-        ConditionExpression: '#s = :p AND startedAt = :mine',
-        ExpressionAttributeNames: { '#s': 'status' },
-        ExpressionAttributeValues: { ':p': 'in_progress', ':mine': claimedAt },
-      }),
-    );
-  } catch (err) {
-    if (!isCcf(err)) throw err;
-  }
-}
-
-/** Every key in the scorecard-confirmation partition (digests, counters, ledger) — erasure. */
-async function listScorecardConfirmPartitionKeys(
-  tenant: string,
-): Promise<Array<{ pk: string; sk: string }>> {
-  const items = await queryAll({
-    TableName: TABLE,
-    KeyConditionExpression: 'pk = :p',
-    ExpressionAttributeValues: { ':p': scorecardConfirmPartitionPk(tenant) },
     ProjectionExpression: 'pk, sk',
   });
   return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
@@ -8129,7 +7801,7 @@ const BATCH_DELETE_RETRIES = 5;
  * club/tenant cascades rely on. Keys still unprocessed after the retries are an
  * error, not a shrug: the caller must know the erase did NOT complete.
  */
-async function batchDelete(keys: Array<{ pk: string; sk: string }>): Promise<void> {
+export async function batchDelete(keys: Array<{ pk: string; sk: string }>): Promise<void> {
   for (let i = 0; i < keys.length; i += 25) {
     let requests = keys.slice(i, i + 25).map((Key) => ({ DeleteRequest: { Key } }));
     for (let attempt = 0; requests.length > 0; attempt++) {
@@ -8252,9 +7924,6 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   // Captain's reports carry names and ratings; the partition also holds the counters and the
   // NOTIFY# ledger. No gsi1/META listing — enumerate the partition.
   for (const k of await listCaptainsReportPartitionKeys(tenant)) keys.push(k);
-  // Scorecard confirmations carry club names and chairs' free-text feedback (+ counters and
-  // the NOTIFY# ledger). No gsi1/META listing — enumerate the partition.
-  for (const k of await listScorecardConfirmPartitionKeys(tenant)) keys.push(k);
 
   const unique = uniqueKeys(keys);
   await batchDelete(unique);
@@ -8334,8 +8003,6 @@ export async function clearCohort(tenant: string): Promise<number> {
 
   // Captain's reports hang off the fixtures being cleared (reports, counters, ledger).
   for (const k of await listCaptainsReportPartitionKeys(tenant)) keys.push(k);
-  // Scorecard confirmations hang off the same fixtures (digests, counters, ledger).
-  for (const k of await listScorecardConfirmPartitionKeys(tenant)) keys.push(k);
 
   // Safety: never delete the tenant config or any user record.
   for (const k of keys) {
@@ -8497,14 +8164,6 @@ export async function eraseClubData(
     keys.push(...(await listCaptainsReportNotifyKeys(tenant, r.id)));
   }
 
-  // This club's scorecard-confirmation digests (club name + the chair's feedback) and their
-  // NOTIFY# send claims.
-  for (const r of await listScorecardConfirmations(tenant)) {
-    if (r.clubId !== club.id) continue;
-    keys.push(scorecardConfirmKey(tenant, r.weekKey, r.clubId));
-    keys.push(scorecardConfirmNotifyKey(tenant, r.weekKey, r.clubId));
-  }
-
   // Veterans affiliations WHERE THIS CLUB IS THE VETERANS CLUB (its affiliates). The pointing
   // player rows live in OTHER (primary) clubs; scrub their veteransClub/veteransClubId BEFORE
   // deleting the VETAFFIL rows, because these records are the ONLY index back to those rows —
@@ -8624,14 +8283,14 @@ export class PlayerErasureBlockedError extends Error {
   }
 }
 
-/** What a scrubbed name (captain's report, scorecard, digest feedback) reads after erasure. */
+/** What a scrubbed name (captain's report, scorecard, correction feedback) reads after erasure. */
 export const ERASED_NAME = '[removed]';
 
 /**
- * Player erasure could not scrub a cached scorecard (FIXSCORECARD#) or a digest's feedback
- * (SCORECONF#) because the row kept changing underneath it (3 contested conditional writes in a
- * row). Thrown BEFORE anything destructive has run, so the erasure is aborted with every row and
- * artifact intact and can simply be retried.
+ * Player erasure could not scrub a cached scorecard (FIXSCORECARD#) or a captain's report's
+ * scorecard correction `feedback` because the row kept changing underneath it (3 contested
+ * conditional writes in a row). Thrown BEFORE anything destructive has run, so the erasure is
+ * aborted with every row and artifact intact and can simply be retried.
  */
 export class ScorecardScrubContentionError extends Error {
   readonly code = 'SCORECARD_SCRUB_CONTENTION';
@@ -8639,11 +8298,23 @@ export class ScorecardScrubContentionError extends Error {
     super(
       target === 'scorecard'
         ? 'a match scorecard changed during erasure — try again'
-        : 'a scorecard confirmation changed during erasure — try again',
+        : "a captain's report changed during erasure — try again",
     );
     this.name = 'ScorecardScrubContentionError';
   }
 }
+
+/**
+ * A nested SET whose parent map is gone (e.g. `scorecard.feedback` after a concurrent draft save
+ * REMOVEd `scorecard`): DynamoDB refuses it with a ValidationException rather than a CCF.
+ */
+const isMissingDocumentPath = (err: unknown): boolean => {
+  const e = err as { name?: string; message?: string };
+  return (
+    e.name === 'ValidationException' &&
+    /document path provided in the update expression is invalid/i.test(e.message ?? '')
+  );
+};
 
 const normName = (s: string | undefined | null) =>
   (s ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
@@ -8700,19 +8371,20 @@ function scrubScorecardNames(
  *  - cached medicoach scorecards (FIXSCORECARD#): batter / bowler / fall-of-wicket names that
  *    match the person are SCRUBBED in place, and a scrubbed card is marked `terminal` so the
  *    sweep never re-fetches the name from medicoach;
- *  - scorecard digests (SCORECONF#): the person's name inside a chair's correction `feedback`
- *    is replaced (case-insensitive, whole words) — the digest itself is the club's record.
+ *  - a captain's report's scorecard correction `feedback`: the person's name is replaced
+ *    (case-insensitive, whole words), conditional on the text being unchanged
+ *    (`reportScorecardFeedbackScrubbed`).
  *
  * Gate: a pending clearance naming the person, or any `clearance-pending` row, throws
  * {@link PlayerErasureBlockedError} BEFORE anything is touched. Returns null when nothing in any
  * category exists (a clean 404 — and the re-run of a completed erasure).
  *
- * Ordering is the re-runnable invariant: the scorecard + digest-feedback scrubs run FIRST, while
- * every row naming the person (and so every spelling of their name) is still intact; then S3
- * (object keys are only derivable while the rows naming them exist), then the clearance/review/
- * request rows, then the captain's-report scrub, and the PLAYER# rows LAST — while any of them
- * survives, a re-run finds the person again and finishes the job. A scorecard or digest that
- * keeps changing underneath its scrub (3 contested writes) throws
+ * Ordering is the re-runnable invariant: the scorecard + correction-feedback scrubs run FIRST,
+ * while every row naming the person (and so every spelling of their name) is still intact; then
+ * S3 (object keys are only derivable while the rows naming them exist), then the clearance/
+ * review/request rows, then the captain's-report name/contact scrub, and the PLAYER# rows LAST —
+ * while any of them survives, a re-run finds the person again and finishes the job. A scorecard
+ * or report feedback that keeps changing underneath its scrub (3 contested writes) throws
  * {@link ScorecardScrubContentionError} — never a silent skip that the audit counts would hide —
  * and because nothing destructive has run yet, the erasure aborts intact and a retry has full
  * name fidelity (including a person with no PLAYER# rows). The PII-free audit row (actor +
@@ -8842,7 +8514,7 @@ export async function erasePlayerData(
     }
   }
 
-  // ── Scorecard digest feedback: the chair's free text may name the person ──
+  // Whole-word name matcher for free text (a captain's scorecard correction feedback).
   const namePatterns = [...names].map(
     (n) =>
       new RegExp(
@@ -8854,63 +8526,47 @@ export async function erasePlayerData(
       ),
   );
   const scrubText = (s: string) => namePatterns.reduce((t, re) => t.replace(re, ERASED_NAME), s);
-  let feedbackScrubbed = 0;
-  for (const listed of await listScorecardConfirmations(tenant)) {
-    // Conditional on each scrubbed feedback being unchanged; a digest changed meanwhile (an
-    // entry re-answered after a clear) is re-read and scrubbed afresh.
-    let d: ScorecardConfirmation | null = listed;
+  const feedbackNamesPerson = (r: CaptainsReport | null) => {
+    const fb = r?.scorecard?.feedback;
+    return !!fb && scrubText(fb) !== fb;
+  };
+
+  // ── Captain's report scorecard correction feedback: the captain's free text may name them ──
+  // Still before anything destructive (it can throw). Conditional on the feedback being
+  // unchanged: a concurrent draft save that REPLACES it fails the condition, one that REMOVES
+  // `scorecard` makes the nested SET a missing-path ValidationException — either way the report
+  // is re-read and judged afresh (feedback gone, or now clean, is settled).
+  const feedbackScrubbedReports = new Set<string>();
+  for (const listed of await listCaptainsReports(tenant)) {
+    let r: CaptainsReport | null = listed;
     let settled = false;
     for (let attempt = 0; attempt < 3; attempt++) {
-      if (!d) {
-        settled = true; // deleted meanwhile
+      if (!r || !feedbackNamesPerson(r)) {
+        settled = true; // deleted meanwhile, or nothing (left) to scrub
         break;
       }
-      const sets: string[] = [];
-      const conds: string[] = [];
-      const attrNames: Record<string, string> = {};
-      const values: Record<string, unknown> = {};
-      for (const [k, e] of Object.entries(d.entries ?? {})) {
-        if (!e.feedback) continue;
-        const next = scrubText(e.feedback);
-        if (next === e.feedback) continue;
-        const i = sets.length;
-        attrNames[`#k${i}`] = k;
-        values[`:fb${i}`] = next;
-        values[`:old${i}`] = e.feedback;
-        sets.push(`entries.#k${i}.feedback = :fb${i}`);
-        conds.push(`entries.#k${i}.feedback = :old${i}`);
-      }
-      if (!sets.length) {
-        settled = true; // nothing (left) to scrub
-        break;
-      }
+      const old = r.scorecard!.feedback!;
       try {
         await ddb.send(
           new UpdateCommand({
             TableName: TABLE,
-            Key: scorecardConfirmKey(tenant, d.weekKey, d.clubId),
-            UpdateExpression: `SET ${sets.join(', ')}, updatedAt = :now`,
-            ConditionExpression: conds.join(' AND '),
-            ExpressionAttributeNames: attrNames,
-            ExpressionAttributeValues: { ...values, ':now': at },
+            Key: reportKeyOf(tenant, r),
+            UpdateExpression: 'SET scorecard.feedback = :fb, updatedAt = :now',
+            ConditionExpression:
+              'attribute_exists(scorecard.feedback) AND scorecard.feedback = :old',
+            ExpressionAttributeValues: { ':fb': scrubText(old), ':old': old, ':now': at },
           }),
         );
-        feedbackScrubbed += sets.length;
+        feedbackScrubbedReports.add(r.id);
         settled = true;
         break;
       } catch (err: unknown) {
-        if (!isCcf(err)) throw err;
-        d = await getScorecardConfirmation(tenant, d.weekKey, d.clubId);
+        if (!isCcf(err) && !isMissingDocumentPath(err)) throw err;
+        r = await getCaptainsReport(tenant, r.seriesId, r.fixtureId, r.clubId);
       }
     }
-    // Out of retries: only a digest whose feedback STILL names the person is a failure.
-    if (
-      !settled &&
-      d &&
-      Object.values(d.entries ?? {}).some(
-        (e) => !!e.feedback && scrubText(e.feedback) !== e.feedback,
-      )
-    ) {
+    // Out of retries: only a report whose feedback STILL names the person is a failure.
+    if (!settled && feedbackNamesPerson(r)) {
       throw new ScorecardScrubContentionError('feedback');
     }
   }
@@ -8929,8 +8585,8 @@ export async function erasePlayerData(
   const unique = uniqueKeys(keys);
   if (unique.length) await batchDelete(unique);
 
-  // ── Captain's reports: scrub mentions in place ──
-  let captainsReportsScrubbed = 0;
+  // ── Captain's reports: scrub name / contact mentions in place (feedback was scrubbed above) ──
+  const nameScrubbedReports = new Set<string>();
   for (const r of await listCaptainsReports(tenant)) {
     const contact = r.recipientContact;
     const contactHit =
@@ -8952,7 +8608,7 @@ export async function erasePlayerData(
     // recipient IS this person by name.
     if (contact && (contactHit || nameHit(r.recipient?.name))) removes.push('recipientContact');
     if (!sets.length && !removes.length) continue;
-    if (sets.length) values[':erased'] = ERASED_NAME;
+    if (sets.some((x) => x.includes(':erased'))) values[':erased'] = ERASED_NAME;
     values[':now'] = at;
     sets.push('updatedAt = :now');
     const usesRn = sets.some((s) => s.includes('#rn'));
@@ -8967,11 +8623,15 @@ export async function erasePlayerData(
           ExpressionAttributeValues: values,
         }),
       );
-      captainsReportsScrubbed++;
+      nameScrubbedReports.add(r.id);
     } catch (err: unknown) {
       if (!isCcf(err)) throw err; // deleted concurrently — nothing left to scrub
     }
   }
+  // A report scrubbed by both passes counts once.
+  const captainsReportsScrubbed = new Set([...feedbackScrubbedReports, ...nameScrubbedReports])
+    .size;
+  const reportScorecardFeedbackScrubbed = feedbackScrubbedReports.size;
 
   // ── Pending report-open markers addressed to this person's player ref ──
   // Scrub the ref, never delete the marker: it is the retry queue that opens BOTH clubs' reports
@@ -8999,7 +8659,7 @@ export async function erasePlayerData(
     certificates,
     captainsReportsScrubbed,
     scorecardsScrubbed,
-    feedbackScrubbed,
+    reportScorecardFeedbackScrubbed,
     reportOpenMarkers,
   };
   await putPlayerEraseLog(tenant, {

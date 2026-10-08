@@ -35,7 +35,10 @@ import type {
   FixtureOfficials,
   CaptainsReport,
   CaptainsReportFields,
+  ClubCaptainsReportDetail,
   LinkedCaptainsReport,
+  ScorecardConsoleFilter,
+  ScorecardConsolePayload,
   SendResult,
   PlayerErasureCounts,
   LogoUploadPost,
@@ -68,10 +71,6 @@ import type {
   ClubSignupInfo,
   ClubSignupResult,
   PostponementRequest,
-  ScorecardConfirmView,
-  ScorecardConfirmAnswer,
-  PlatformScorecardWeek,
-  ScorecardConfirmationsRunSummary,
 } from './types';
 
 /**
@@ -1152,6 +1151,9 @@ export const retryMedicoachPlayers = (scope: 'parked' | 'stuck' | 'all') =>
 const reportPath = (id: string) => `/club/captains-reports/${encodeURIComponent(id)}`;
 export const getClubCaptainsReports = (clubId: string) =>
   request<CaptainsReport[]>('/club/captains-reports', { query: { clubId } });
+/** One report for the form: the view plus its match scorecard context (detail only). */
+export const getClubCaptainsReport = (id: string) =>
+  request<ClubCaptainsReportDetail>(reportPath(id));
 export const putClubCaptainsReport = (
   id: string,
   body: CaptainsReportFields & { submit?: boolean },
@@ -1222,32 +1224,14 @@ export const forwardLinkedCaptainsReport = (token: string, candidateId: string) 
     auth: false,
   });
 
-// ── Chair scorecard confirmation ──
-// The public `/sc/<token>` digest: no auth, the token is the capability. Each match is answered
-// once (first submit wins → 409 `entry_closed`); every answer returns the whole digest again.
-// An answer carries the rendered card's `scorecardFetchedAt` so the server records the version
-// the chair actually saw.
-const scorecardLinkPath = (token: string) => `/scorecard-confirm-link/${encodeURIComponent(token)}`;
-export const getScorecardConfirmLink = (token: string) =>
-  request<ScorecardConfirmView>(scorecardLinkPath(token), { auth: false });
-export const submitScorecardConfirmEntry = (
-  token: string,
-  seriesId: string,
-  fixtureId: string,
-  body: ScorecardConfirmAnswer,
+/** Operator console: scorecard answers in captains reports across every tenant. */
+export const listPlatformCaptainsReportScorecards = (
+  days: number,
+  status: ScorecardConsoleFilter,
+  tenant?: string,
 ) =>
-  request<ScorecardConfirmView>(
-    `${scorecardLinkPath(token)}/fixtures/${encodeURIComponent(seriesId)}/${encodeURIComponent(fixtureId)}`,
-    { method: 'PUT', body, auth: false },
-  );
-/** Operator console: one week (a Sunday weekKey; omitted = the latest completed week). */
-export const listPlatformScorecardConfirmations = (week?: string) =>
-  request<PlatformScorecardWeek>('/platform/scorecard-confirmations', { query: { week } });
-/** Run the Monday digest now (idempotent; tops up existing digests with late results). */
-export const runScorecardConfirmations = (week?: string) =>
-  request<ScorecardConfirmationsRunSummary>('/platform/scorecard-confirmations/run', {
-    method: 'POST',
-    body: week ? { week } : {},
+  request<ScorecardConsolePayload>('/platform/captains-report-scorecards', {
+    query: { days, status, tenant: tenant || undefined },
   });
 
 // ── Venues (ADR 0008 phase 2) ──

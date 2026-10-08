@@ -165,14 +165,28 @@ export function pickSubstitute(
   });
 }
 
+/** The captain's answer on the match scorecard (only asked when a scorecard is attached). */
+export interface ReportScorecardAnswer {
+  action: 'confirmed' | 'correction';
+  /** What needs correcting — required (non-blank) for a correction. */
+  feedback?: string;
+}
+
+export const SCORECARD_ANSWER_PROBLEM = 'Confirm the scorecard or request a correction.';
+export const SCORECARD_FEEDBACK_PROBLEM = 'Tell us what needs correcting.';
+
 /**
  * Problems with a report as submitted, as user-facing sentences (empty ⇒ valid). The same
  * rule set runs in the browser (to enable Submit) and on the server (to accept it).
+ * `scorecardRequired`: an available scorecard is attached, so the scorecard must be answered.
+ * A correction always needs its text, required or not.
  */
 export function submissionProblems(input: {
   captainName?: string;
   umpires?: ReportUmpireEntry[];
   declaration?: boolean;
+  scorecard?: ReportScorecardAnswer | null;
+  scorecardRequired?: boolean;
 }): string[] {
   const problems: string[] = [];
   if (!input.captainName?.trim()) problems.push("Enter the captain's name.");
@@ -189,6 +203,10 @@ export function submissionProblems(input: {
   });
   const ids = umpires.map((u) => u.umpireId).filter(Boolean);
   if (new Set(ids).size !== ids.length) problems.push('The same umpire is rated twice.');
+  const sc = input.scorecard;
+  if (input.scorecardRequired && !sc) problems.push(SCORECARD_ANSWER_PROBLEM);
+  if (sc?.action === 'correction' && !sc.feedback?.trim())
+    problems.push(SCORECARD_FEEDBACK_PROBLEM);
   if (!input.declaration) problems.push('Confirm the declaration.');
   return problems;
 }

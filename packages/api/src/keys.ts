@@ -642,36 +642,6 @@ export const captainsReportNotifyKey = (tenant: string, reportId: string, audien
 });
 
 /**
- * Chair scorecard confirmations: one partition per tenant holding every weekly digest
- * (`SCORECONF#<weekKey>#<clubId>`), the `SC-YYYY-NNNN` counters and the NOTIFY# send ledger.
- * No gsi1/META listing — tenant erasure and cohort clear enumerate the whole partition.
- */
-export const scorecardConfirmPartitionPk = (tenant: string) => `${tenantPrefix(tenant)}#SCORECONF`;
-
-export const scorecardConfirmKey = (tenant: string, weekKey: string, clubId: string) => ({
-  pk: scorecardConfirmPartitionPk(tenant),
-  sk: `SCORECONF#${weekKey}#${clubId}`,
-});
-
-/** pk + sk-prefix to query a tenant's digests (all weeks, or one week with `weekKey`). */
-export const scorecardConfirmsListKey = (tenant: string, weekKey?: string) => ({
-  pk: scorecardConfirmPartitionPk(tenant),
-  skPrefix: weekKey ? `SCORECONF#${weekKey}#` : 'SCORECONF#',
-});
-
-/** The atomic per-tenant, per-year `SC-YYYY-NNNN` counter. */
-export const scorecardConfirmCounterKey = (tenant: string, year: string) => ({
-  pk: scorecardConfirmPartitionPk(tenant),
-  sk: `COUNTER#SC#${year}`,
-});
-
-/** The digest's send claim (one per club per week): `NOTIFY#SCORECONF#<weekKey>#<clubId>`. */
-export const scorecardConfirmNotifyKey = (tenant: string, weekKey: string, clubId: string) => ({
-  pk: scorecardConfirmPartitionPk(tenant),
-  sk: `NOTIFY#SCORECONF#${weekKey}#${clubId}`,
-});
-
-/**
  * The WhatsApp status webhook's lookup: Meta posts statuses by message id (wamid) with no
  * tenant, so each captain's-report WhatsApp send writes `WAMSG#<wamid>` → its report. Global
  * (not tenant-prefixed) and self-expiring (`expiresAt`); it holds ids only, no PII.

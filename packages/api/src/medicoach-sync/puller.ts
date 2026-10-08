@@ -24,9 +24,7 @@
  *                   scorecard (FIXSCORECARD#, scorecard-fetch.ts) — at most
  *                   SCORECARD_INLINE_MAX_PER_PAGE per page, none after
  *                   SCORECARD_SWEEP_MAX_CONSECUTIVE_FAILURES failures in a row (the rest fall
- *                   to the run's sweep) — and restores the fixture's VOID chair
- *                   scorecard-confirmation entries to pending; a stored clear deletes the card
- *                   and voids those entries.
+ *                   to the run's sweep); a stored clear deletes the card.
  *
  * A newly stored result is first marked `REPORTOPEN#<ref>`; the marker is deleted once the
  * hook succeeded, so a report/notify failure is retried by the next run
@@ -74,10 +72,6 @@ import {
   fetchAndStoreScorecard,
   SCORECARD_SWEEP_MAX_CONSECUTIVE_FAILURES,
 } from './scorecard-fetch.js';
-import {
-  restoreScorecardEntriesForFixture,
-  voidScorecardEntriesForFixture,
-} from '../scorecard-confirmations.js';
 import {
   applyInboundSchedule,
   wallClock,
@@ -507,19 +501,6 @@ export async function runMedicoachSync(
               );
             }
             if (change.result.source !== 'import') {
-              // A result re-recorded after a clear: its void chair scorecard-confirmation
-              // entries are open again (best-effort: a failure is a log line).
-              if (prior?.cleared)
-                await restoreScorecardEntriesForFixture(repo, tenant, seriesId, fixtureId, {
-                  now: now(),
-                  ...(target.fixture.date ? { fixtureDate: target.fixture.date } : {}),
-                }).catch((err: unknown) =>
-                  log(
-                    `[medicoach-sync] ${tenant}: could not restore scorecard confirmations for ${seriesId}/${fixtureId} — ${
-                      err instanceof Error ? err.name : 'error'
-                    }`,
-                  ),
-                );
               // The scorecard behind it (never for migrations/backfills), within the page's
               // inline budget. Never throws: a failed or deferred fetch is the sweep's.
               if (
@@ -558,18 +539,6 @@ export async function runMedicoachSync(
             await clearedHook({ tenant, seriesId, fixtureId, ref: change.ref });
             // A cleared result has no scorecard to confirm.
             await repo.deleteFixtureScorecard(tenant, seriesId, fixtureId);
-            // …and its chair scorecard-confirmation entries are void (best-effort: a
-            // failure is a log line, never the sync run's).
-            await voidScorecardEntriesForFixture(repo, tenant, seriesId, fixtureId, {
-              now: now(),
-              ...(target.fixture.date ? { fixtureDate: target.fixture.date } : {}),
-            }).catch((err: unknown) =>
-              log(
-                `[medicoach-sync] ${tenant}: could not void scorecard confirmations for ${seriesId}/${fixtureId} — ${
-                  err instanceof Error ? err.name : 'error'
-                }`,
-              ),
-            );
           } else counts.resultsStale++;
         }
 

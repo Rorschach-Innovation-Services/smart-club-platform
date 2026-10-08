@@ -355,6 +355,20 @@ describe("captainsReportDueEmailContent · the captain's report link", () => {
     const { text } = captainsReportDueEmailContent({ ...input, forwardedBy: 'Uma Chair' });
     assert.match(text, /Uma Chair asked you to complete/);
   });
+
+  test('every variant asks for the match scorecard as well as the umpires', async () => {
+    const { captainsReportDueEmailContent } = await import('../src/notify/email.js');
+    for (const v of [
+      input,
+      { ...input, recipientKind: 'chair' as const },
+      { ...input, forwardedBy: 'Uma Chair' },
+      { ...input, reminder: true },
+    ]) {
+      const { text, html } = captainsReportDueEmailContent(v);
+      assert.match(text, /match scorecard/);
+      assert.match(html, /match scorecard/);
+    }
+  });
 });
 
 describe('clearance notice deep links', () => {

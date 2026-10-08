@@ -6,7 +6,8 @@
  *
  * Covers: a pulled result fetches + stores its scorecard (signed, tournamentId + tenant in the query —
  * the stub rejects a missing or foreign tenant like medicoach does);
- * the ids persist on the result; 404 → terminal stub; available:false stored (terminal);
+ * the ids persist on the result; 404 → terminal stub; available:false stored as a stub the
+ * sweep re-checks (hourly, for 3 days — see captains-reports-scorecard.int.test.ts);
  * a network/5xx failure is swallowed and the sweep retries it; the sweep skips terminal
  * rows, import results, cleared results, results missing an id, and old results; it
  * refetches when the result is newer than the card; a cleared result deletes the card;
@@ -332,7 +333,7 @@ describe('medicoach scorecard fetch', () => {
     assert.deepEqual(await sweep(), { candidates: 0, fetched: 0, failed: 0 });
   });
 
-  test('404 stores a terminal stub; available:false is stored terminal too', async () => {
+  test('404 stores a terminal stub; available:false a stub the sweep re-checks later', async () => {
     cards = { 'pma-2': [200, { available: false, matchId: 'pma-2', matchState: 'Manual result' }] };
     pages = [
       page('c1', [
@@ -347,13 +348,21 @@ describe('medicoach scorecard fetch', () => {
     assert.equal(gone?.innings, undefined);
     const manual = await repo.getFixtureScorecard(T, SERIES, 'f2');
     assert.equal(manual?.available, false);
-    assert.equal(manual?.terminal, true);
+    assert.equal(manual?.terminal, undefined, 'medicoach may still publish a card');
     assert.equal(manual?.matchState, 'Manual result');
 
-    // Terminal rows are never re-asked by the sweep.
+    // Neither is re-asked straight away; the terminal 404 never is.
     requests.length = 0;
     assert.equal((await sweep()).candidates, 0);
     assert.equal(scorecardRequests().length, 0);
+    // An hour on, the sweep asks again for the available:false one only.
+    const later = new Date(NOW.getTime() + scorecards.SCORECARD_UNAVAILABLE_RECHECK_MS);
+    const summary = await scorecards.sweepScorecards(deps({ now: () => later }), T);
+    assert.deepEqual(summary, { candidates: 1, fetched: 1, failed: 0 });
+    assert.deepEqual(
+      scorecardRequests().map((r) => r.pathAndQuery),
+      ['/integrations/smartclub/matches/pma-2/scorecard?tournamentId=tour-9&tenant=dolphins'],
+    );
   });
 
   test('a later 404 or available:false never destroys an available card (kept; lastCheckedAt moves)', async () => {

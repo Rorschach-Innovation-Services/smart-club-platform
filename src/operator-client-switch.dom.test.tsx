@@ -170,7 +170,11 @@ describe('Admin shell — ClientSwitcher', () => {
     const user = userEvent.setup();
     renderSwitcher();
     await user.click(screen.getByRole('button', { name: 'Switch client' }));
-    expect(await screen.findByText(/could not load clients/i)).toBeInTheDocument();
+    // The shared queryClient retries once with ~1s backoff before settling into
+    // isError, so the default 1s findByText timeout races it. Wait past the retry.
+    expect(
+      await screen.findByText(/could not load clients/i, {}, { timeout: 4000 }),
+    ).toBeInTheDocument();
   });
 
   it('does not fetch the registry when disabled', async () => {

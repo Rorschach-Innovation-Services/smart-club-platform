@@ -35,10 +35,7 @@ import { TutorialsCard } from './platform-tutorials';
 import { RequiredDocsCard } from './platform-required-docs';
 import { FixtureRemindersCard } from './platform-fixture-reminders';
 import { PlayerSyncCard } from './platform-player-sync';
-import {
-  ScorecardConfirmationsCard,
-  ScorecardConfirmationsPage,
-} from './platform-scorecard-confirmations';
+import { CaptainsReportScorecardsPage } from './platform-captains-report-scorecards';
 import { TransferWindowCard } from './platform-transfer-windows';
 import { DocIntakeWizard } from './platform-intake';
 import { FixtureAmendmentsPage } from './platform-fixture-amendments';
@@ -469,13 +466,13 @@ export function PlatformPortal({
               <span className="ni-label">New client</span>
             </button>
             <button
-              className={`nav-item ${path === '/platform/scorecard-confirmations' ? 'active' : ''}`}
-              onClick={() => navigate('/platform/scorecard-confirmations')}
+              className={`nav-item ${path === '/platform/captains-report-scorecards' ? 'active' : ''}`}
+              onClick={() => navigate('/platform/captains-report-scorecards')}
             >
               <span className="ni-icon">
                 <Icon.Check />
               </span>
-              <span className="ni-label">Scorecard confirmations</span>
+              <span className="ni-label">Scorecard answers</span>
             </button>
 
             {hasTenantConsole && (
@@ -508,8 +505,8 @@ export function PlatformPortal({
               <Route path="/platform" element={<TenantListPage />} />
               <Route path="/platform/new" element={<CreateTenantWizard toast={toastShow} />} />
               <Route
-                path="/platform/scorecard-confirmations"
-                element={<ScorecardConfirmationsPage toast={toastShow} />}
+                path="/platform/captains-report-scorecards"
+                element={<CaptainsReportScorecardsPage />}
               />
               <Route
                 path="/platform/tenants/:slug"
@@ -872,12 +869,6 @@ function TenantEditPage({ toast }: { toast: Toast }) {
         />
         <FixtureRemindersCard
           key={`fr-${config.tenant}`}
-          config={config}
-          save={save}
-          toast={toast}
-        />
-        <ScorecardConfirmationsCard
-          key={`scc-${config.tenant}`}
           config={config}
           save={save}
           toast={toast}
