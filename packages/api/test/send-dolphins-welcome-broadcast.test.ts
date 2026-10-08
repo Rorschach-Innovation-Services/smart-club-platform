@@ -14,11 +14,14 @@ import {
   videoFileBlockers,
   WHATSAPP_VIDEO_MAX_BYTES,
   pendingBroadcastTemplates,
+  isRetryableSendError,
+  claimActionFor,
   type AudienceClub,
   type AudienceInput,
   type AudiencePlayer,
 } from '../src/send-dolphins-welcome-broadcast.js';
 import { staffWelcomeEmailContent, playerWelcomeEmailContent } from '../src/notify/email.js';
+import { WhatsAppError } from '../src/notify/whatsapp.js';
 
 const club = (id: string, extra: Partial<AudienceClub> = {}): AudienceClub => ({
   id,
@@ -321,8 +324,32 @@ describe('planMessages', () => {
   });
 
   test('ledger keys are per person, with a distinct resend key', () => {
-    assert.equal(idempotencyKeyFor('t@example.com'), 'welcome-broadcast-t@example.com');
-    assert.equal(resendIdempotencyKeyFor('27821112222'), 'welcome-broadcast-27821112222#resend');
+    assert.equal(
+      idempotencyKeyFor('t@example.com', ['whatsapp', 'email']),
+      'welcome-broadcast-t@example.com#email+whatsapp',
+    );
+    assert.equal(
+      idempotencyKeyFor('t@example.com', ['email']),
+      'welcome-broadcast-t@example.com#email',
+    );
+    assert.equal(
+      idempotencyKeyFor('27821112222', ['whatsapp']),
+      'welcome-broadcast-27821112222#whatsapp',
+    );
+    assert.equal(
+      resendIdempotencyKeyFor('27821112222', ['email', 'whatsapp']),
+      'welcome-broadcast-27821112222#email+whatsapp#resend',
+    );
+  });
+
+  test('email-only, WhatsApp-only and mixed runs claim different keys for one person', () => {
+    const keys = new Set([
+      idempotencyKeyFor('t@example.com', ['email']),
+      idempotencyKeyFor('t@example.com', ['whatsapp']),
+      idempotencyKeyFor('t@example.com', ['email', 'whatsapp']),
+      idempotencyKeyFor('t@example.com', ['whatsapp', 'email']),
+    ]);
+    assert.equal(keys.size, 3);
   });
 
   test('--confirm refuses a dry-run channel only when something would actually send', () => {
@@ -403,6 +430,73 @@ describe('pendingBroadcastTemplates (the --confirm WhatsApp blocker)', () => {
       dolphinsPlayerFyi: { ...WHATSAPP_TEMPLATES.dolphinsPlayerFyi, status: 'pending' as const },
     };
     assert.deepEqual(pendingBroadcastTemplates(fake), ['dolphins_player_fyi']);
+  });
+});
+
+describe('retryable vs permanent send failures', () => {
+
+  test('Meta rate/limit codes and transport errors are retryable', () => {
+    for (const code of [130429, 131048, 131056, 80007]) {
+      assert.ok(
+        isRetryableSendError(new WhatsAppError(`WhatsApp send failed (${code})`, { code })),
+        String(code),
+      );
+    }
+    assert.ok(isRetryableSendError(new TypeError('fetch failed')));
+    assert.ok(
+      isRetryableSendError(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })),
+    );
+    assert.ok(
+      isRetryableSendError(
+        Object.assign(new TypeError('terminated'), { cause: { code: 'UND_ERR_SOCKET' } }),
+      ),
+    );
+  });
+
+  test('undeliverable numbers, template errors, codeless and SES failures are permanent', () => {
+    assert.ok(
+      !isRetryableSendError(new WhatsAppError('WhatsApp send failed (131026)', { code: 131026 })),
+    );
+    assert.ok(
+      !isRetryableSendError(new WhatsAppError('WhatsApp send failed (132001)', { code: 132001 })),
+    );
+    assert.ok(
+      !isRetryableSendError(new WhatsAppError('WhatsApp send failed (500)', { httpStatus: 500 })),
+    );
+    assert.ok(
+      !isRetryableSendError(
+        Object.assign(new Error('Email address is not verified'), { name: 'MessageRejected' }),
+      ),
+    );
+    assert.ok(!isRetryableSendError('boom'));
+  });
+
+  test('the sender carries Meta’s code on its error', () => {
+    const e = new WhatsAppError('x', { code: 130429, httpStatus: 429 });
+    assert.equal(e.code, 130429);
+    assert.equal(e.httpStatus, 429);
+    assert.equal(new WhatsAppError('y').code, undefined);
+  });
+});
+
+describe('claimActionFor (completion rule)', () => {
+  const sent = { status: 'sent' as const };
+  const retryFail = { status: 'failed' as const, retryable: true };
+  const permFail = { status: 'failed' as const, retryable: false };
+  const skipped = { status: 'skipped' as const };
+
+  test('sent + retryable failure → release for retry', () => {
+    assert.equal(claimActionFor([sent, retryFail]), 'release-retryable');
+  });
+  test('sent + permanent failure → complete', () => {
+    assert.equal(claimActionFor([sent, permFail, skipped]), 'complete');
+  });
+  test('all failed → release (retryable wins the label when present)', () => {
+    assert.equal(claimActionFor([permFail, permFail]), 'release-none-sent');
+    assert.equal(claimActionFor([permFail, retryFail]), 'release-retryable');
+  });
+  test('all sent → complete', () => {
+    assert.equal(claimActionFor([sent, sent, sent]), 'complete');
   });
 });
 

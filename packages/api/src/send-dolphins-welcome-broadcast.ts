@@ -24,6 +24,18 @@
  *   - Platform OPERATORS (repo.listOperators — auto-granted admin on every tenant) are excluded
  *     by default and reported as `operator` skips; `--include-operators` keeps them.
  *
+ * Multi-day completion (Meta's 2,000-per-24h messaging tier). The claim key includes the run's
+ * channel set, so a MIXED run (`--channels email,whatsapp`) and a SPLIT run (`--channels email`,
+ * then `--channels whatsapp`) use DIFFERENT keys and never see each other's markers — pick ONE
+ * strategy per broadcast and never mix them, or people get duplicates. Recommended split run:
+ *   1. `--channels email --confirm`     — every email, no tier limit, done in one run;
+ *   2. `--channels whatsapp --confirm`  — WhatsApp until the tier cap halts the run;
+ *   3. after ~24h, the SAME step-2 command — the remainder (completed people replay).
+ * A retryable failure (rate/limit codes 130429, 131048, 131056, 80007, or a network error)
+ * RELEASES that person's claim and HALTS the run, so the next run retries them and everyone
+ * after them; a permanent failure (e.g. 131026 undeliverable) is final. In a mixed run the
+ * boundary person's already-sent messages repeat on the retry; a split run avoids that.
+ *
  * Videos: the EMAILS link the hosted S3 URLs (--*-video-url). The WHATSAPP video headers use
  * Meta-hosted media — on --confirm each local file (--*-video-file, ≤ 16 MB) is uploaded to Meta
  * once (uploadWhatsAppMedia) and every send references the returned media id, which renders
@@ -33,7 +45,8 @@
  * notify module loads (they freeze their dry-run flags from process.env at import time), and
  * --confirm refuses while a requested channel would silently dry-run (the 29 Sep 2026 incident).
  * Each person's sends are guarded by an INVITE# marker (kind 'broadcast', key
- * `welcome-broadcast-<email|cell>`) so a re-run never double-sends; the marker's 72 h TTL means
+ * `welcome-broadcast-<email|cell>#<sorted channel set>`, e.g. `#email`, `#whatsapp`,
+ * `#email+whatsapp`; `--resend` appends `#resend`) so a re-run never double-sends; the marker's 72 h TTL means
  * the timestamped JSON manifest (`dolphins-welcome-broadcast-<ts>.json`) is the durable record.
  * Only real provider message ids (never `dry-run-*`) count as delivered.
  * Each real WhatsApp message also gets a delivery row (`<tenant>#BCAST#<runId>` / `WA#<wamid>`)
@@ -72,9 +85,70 @@ const EXCO_ROLES: Array<[string, string]> = [
 ];
 const STAFF_FALLBACK_NAME = 'Club Representative';
 
-export const idempotencyKeyFor = (contact: string): string => `welcome-broadcast-${contact}`;
-export const resendIdempotencyKeyFor = (contact: string): string =>
-  `${idempotencyKeyFor(contact)}#resend`;
+/**
+ * The per-person INVITE# claim key, scoped to the run's SORTED channel set
+ * (`welcome-broadcast-<contact>#email` / `#whatsapp` / `#email+whatsapp`), so an email-only run
+ * and a WhatsApp-only run claim independently. PURE.
+ */
+export const idempotencyKeyFor = (contact: string, channels: Channel[]): string =>
+  `welcome-broadcast-${contact}#${[...new Set(channels)].sort().join('+')}`;
+/** The key a `--resend` run claims instead. PURE. */
+export const resendIdempotencyKeyFor = (contact: string, channels: Channel[]): string =>
+  `${idempotencyKeyFor(contact, channels)}#resend`;
+
+/** Meta error codes that mean "throttled / over a messaging limit — try again later". */
+export const RETRYABLE_WHATSAPP_CODES: ReadonlySet<number> = new Set([
+  130429, // Cloud API throughput rate limit
+  131048, // spam rate limit hit
+  131056, // pair rate limit (too many messages to one recipient)
+  80007, // WABA rate limit / messaging-tier limit
+]);
+
+const TRANSPORT_ERROR_CODES = new Set([
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EPIPE',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_SOCKET',
+  'UND_ERR_HEADERS_TIMEOUT',
+]);
+
+/**
+ * Is a send failure worth retrying on a later run? True for a WhatsAppError carrying a
+ * rate/limit code (RETRYABLE_WHATSAPP_CODES) and for network/fetch transport errors (undici's
+ * `TypeError: fetch failed`, or a socket error code). Everything else — an undeliverable or
+ * invalid number (131026), a template/parameter error, SES rejections — is PERMANENT. PURE.
+ */
+export function isRetryableSendError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.name === 'WhatsAppError') {
+    const code = (err as Error & { code?: unknown }).code;
+    return typeof code === 'number' && RETRYABLE_WHATSAPP_CODES.has(code);
+  }
+  if (err instanceof TypeError && /fetch failed/i.test(err.message)) return true;
+  const sysCode =
+    (err as Error & { code?: unknown }).code ??
+    ((err as Error & { cause?: { code?: unknown } }).cause?.code as unknown);
+  return typeof sysCode === 'string' && TRANSPORT_ERROR_CODES.has(sysCode);
+}
+
+/**
+ * What to do with a person's claim after their bundle ran. PURE.
+ *   - any RETRYABLE failure → `release` (retried on the next run; messages that did send may
+ *     repeat then);
+ *   - otherwise ≥1 sent → `complete` (permanent failures are final);
+ *   - nothing sent → `release` (as before).
+ */
+export function claimActionFor(
+  outcomes: Array<Pick<MessageOutcome, 'status' | 'retryable'>>,
+): 'complete' | 'release-retryable' | 'release-none-sent' {
+  if (outcomes.some((o) => o.status === 'failed' && o.retryable)) return 'release-retryable';
+  if (outcomes.some((o) => o.status === 'sent')) return 'complete';
+  return 'release-none-sent';
+}
 
 // ───────────────────────── Audience assembly (pure) ─────────────────────────
 
@@ -647,6 +721,8 @@ export interface MessageOutcome {
   at?: string;
   /** Set when the WhatsApp delivery record / WAMSG lookup could not be written. */
   deliveryRecordError?: string;
+  /** On a failed message: whether the failure is retryable (rate cap / transport). */
+  retryable?: boolean;
 }
 
 export interface ManifestRecipient {
@@ -661,7 +737,7 @@ export interface ManifestRecipient {
   planned: PlannedMessage[];
   idempotencyKey?: string;
   markerClubId?: string;
-  outcome?: 'sent' | 'all-failed' | 'replay' | 'nothing-to-send' | 'error';
+  outcome?: 'sent' | 'all-failed' | 'retry-later' | 'replay' | 'nothing-to-send' | 'error';
   messages?: MessageOutcome[];
   error?: string;
 }
@@ -941,9 +1017,13 @@ async function main(): Promise<void> {
 
   let delivered = 0;
   let replays = 0;
+  let releasedForRetry = 0;
+  /** Set on the first retryable failure: the rest of the run is left for the next run. */
+  let halted = false;
   const failures: string[] = [];
   try {
     for (const [i, r] of recipients.entries()) {
+      if (halted) break;
       const entry = manifest.recipients[i]!;
       const plan = plans.get(r) ?? [];
       const who = `${r.name || '(no name)'} <${r.email || `+${r.cell}`}>`;
@@ -954,7 +1034,9 @@ async function main(): Promise<void> {
         continue;
       }
       const contact = r.email || r.cell;
-      const key = args.resend ? resendIdempotencyKeyFor(contact) : idempotencyKeyFor(contact);
+      const key = args.resend
+        ? resendIdempotencyKeyFor(contact, args.channels)
+        : idempotencyKeyFor(contact, args.channels);
       const markerClubId = [...r.clubIds].sort()[0] ?? anchorClubId;
       entry.idempotencyKey = key;
       entry.markerClubId = markerClubId;
@@ -1024,6 +1106,7 @@ async function main(): Promise<void> {
               delivered: false,
               error: message,
               at,
+              ...(pendingTemplate ? {} : { retryable: isRetryableSendError(err) }),
             });
           }
         }
@@ -1041,7 +1124,22 @@ async function main(): Promise<void> {
               `${o.kind}:${o.status}${o.delivered ? '' : o.status === 'sent' ? '(dry-run)' : ''}`,
           )
           .join(', ');
-        if (outcomes.some((o) => o.status === 'sent')) {
+        const action = claimActionFor(outcomes);
+        if (action === 'release-retryable') {
+          // Rate cap / transport failure: release so the next run retries this person. Messages
+          // in the bundle that DID send will repeat then — with sequential sends and the halt
+          // below, only this boundary person is affected.
+          await repo.releaseInviteClaim(TENANT, markerClubId, key);
+          entry.outcome = 'retry-later';
+          delivered += outcomes.filter((o) => o.delivered).length;
+          releasedForRetry++;
+          const sentKinds = outcomes.filter((o) => o.status === 'sent').map((o) => o.kind);
+          console.warn(
+            `  ↻ ${who}: ${line} — retryable failure (rate cap / transport); claim released for ` +
+              `the next run${sentKinds.length ? ` (${sentKinds.join(', ')} already sent — will repeat on retry)` : ''}`,
+          );
+          halted = true;
+        } else if (action === 'complete') {
           await repo.completeInviteSend(TENANT, markerClubId, key, results);
           entry.outcome = 'sent';
           delivered += outcomes.filter((o) => o.delivered).length;
@@ -1089,6 +1187,16 @@ async function main(): Promise<void> {
   if (failures.length) {
     console.error(`\n✗ ${failures.length} per-recipient failure(s):`);
     for (const f of failures) console.error(`   ${f}`);
+    process.exitCode = 1;
+  }
+  if (halted) {
+    const notAttempted = manifest.recipients.filter((e) => e.outcome === undefined).length;
+    console.warn(
+      `\n↻ RATE CAP / TRANSPORT FAILURE — run halted. ${releasedForRetry} person(s) released for ` +
+        `retry, ${notAttempted} not attempted yet (no claim made).\n` +
+        '  Re-run the SAME command (same --channels, no --resend) after ~24h, once the Meta ' +
+        'messaging tier resets. Completed people replay as already-sent; only the remainder sends.',
+    );
     process.exitCode = 1;
   }
 }

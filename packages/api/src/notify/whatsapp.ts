@@ -33,11 +33,19 @@ const RATE_LIMIT_CODE = 130429;
 const MAX_RETRIES = 3;
 const BACKOFF_MS = 1000;
 
-/** Typed failure so the orchestrator can record the provider's reason. */
+/**
+ * Typed failure so the orchestrator can record the provider's reason. `code` is Meta's error
+ * code when the Graph API returned one (e.g. 130429 rate limit, 131026 undeliverable);
+ * `httpStatus` is the HTTP status of the failed call.
+ */
 export class WhatsAppError extends Error {
-  constructor(message: string) {
+  readonly code?: number;
+  readonly httpStatus?: number;
+  constructor(message: string, details: { code?: number; httpStatus?: number } = {}) {
     super(message);
     this.name = 'WhatsAppError';
+    if (details.code !== undefined) this.code = details.code;
+    if (details.httpStatus !== undefined) this.httpStatus = details.httpStatus;
   }
 }
 
@@ -122,6 +130,10 @@ export async function uploadWhatsAppMedia(
   if (!res.ok || !data.id) {
     throw new WhatsAppError(
       `WhatsApp media upload failed (${data.error?.code ?? res.status}): ${data.error?.message ?? res.statusText}`,
+      {
+        ...(data.error?.code !== undefined ? { code: data.error.code } : {}),
+        httpStatus: res.status,
+      },
     );
   }
   return { mediaId: data.id };
@@ -189,6 +201,7 @@ async function sendTemplate(
     }
     throw new WhatsAppError(
       `WhatsApp send failed (${code ?? res.status}): ${data.error?.message ?? res.statusText}`,
+      { ...(code !== undefined ? { code } : {}), httpStatus: res.status },
     );
   }
 }
