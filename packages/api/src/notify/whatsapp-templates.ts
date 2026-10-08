@@ -247,8 +247,8 @@ export const WHATSAPP_TEMPLATES = {
    * one free-text variable, nothing transactional for the classifier to anchor on. Category
    * is immutable once approved, so this v2 was created fresh as UTILITY with
    * transaction-anchored copy ("account status notification", "no action is required") and
-   * approved Active on 7 Oct 2026 (template id 29115540798081571). Delete the Marketing v1
-   * in Business Manager once this is deployed.
+   * approved Active on 7 Oct 2026 (template id 29115540798081571). The Marketing v1 was
+   * deleted from the WABA after the v2 registry change deployed (verified gone 8 Oct 2026).
    */
   captainsReportOpsDigest: {
     name: 'captains_report_ops_digest_v2',
