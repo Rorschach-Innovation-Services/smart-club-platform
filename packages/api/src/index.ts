@@ -176,6 +176,8 @@ import {
   possibleExistingRegistrations,
   addToIdIndex,
   legacyKeyMessage,
+  legacyKeyShortMessage,
+  legacyKeyHit,
   type IdNumberIndex,
   type NameDobIndex,
   type ClearanceOpenedNotifier,
@@ -1207,6 +1209,13 @@ app.post('/register/:clubId/id-doc/upload-url', async (c) => {
     .catch(() => ({ contentType: undefined }));
   const ct = contentType && ID_DOC_TYPES.has(contentType) ? contentType : 'application/pdf';
   const ext = ct === 'image/jpeg' ? 'jpg' : ct === 'image/png' ? 'png' : 'pdf';
+  // Local mode has no S3 bucket: mint a `local/` key (trusted by assertOwnObjectKey on submit)
+  // and point the "presigned" PUT at this server's own /local-uploads sink.
+  if (isLocalUploadsMode()) {
+    const localKey = `local/${resolved.tenant}/${clubId}/reg-${randomUUID()}-id.${ext}`;
+    const uploadUrl = `${new URL(c.req.url).origin}/local-uploads/${localKey}`;
+    return c.json({ uploadUrl, objectKey: localKey, contentType: ct });
+  }
   const objectKey = `${resolved.tenant}/${clubId}/reg-${randomUUID()}-id.${ext}`;
   const url = await getSignedUrl(
     s3,
@@ -2658,6 +2667,8 @@ interface ChairBulkResult {
   /** Clubs where the same name + dob is registered under another identity (soft warning). */
   possibleExistingAt?: string[];
   error?: string;
+  /** A grid-cell-sized form of `error`, when one exists (the full text stays in `error`). */
+  errorShort?: string;
 }
 
 /** A bulk row ready for the core (`fields`) or already rejected by validation (`error`). */
@@ -2757,6 +2768,7 @@ async function registerChairRows(
           outcome: 'error',
           naturalKey,
           error: legacyKeyMessage(r.matchedClubName),
+          errorShort: legacyKeyShortMessage(r.matchedClubName),
         });
       } else if (r.outcome === 'clearance-auto-rejected') {
         // Unreachable: without `windowClosed` the core refuses (409 → per-row error) instead.
@@ -2966,6 +2978,16 @@ type ChairRosterConflict =
       /** 'active' → committing opens a clearance from this club; 'clearance-pending' → a
        *  transfer is already in flight (commit reports clearance-already-open). */
       status: PlayerRegistration['status'];
+    }
+  | {
+      /** The same ID number is already rostered under a DIFFERENT natural key (a legacy row):
+       *  committing is refused (existing-registration-under-legacy-key), so the review shows it
+       *  as a refusal up front instead of "new registration". */
+      type: 'legacy-id';
+      clubId: string;
+      clubName: string;
+      message: string;
+      messageShort: string;
     };
 
 /**
@@ -3021,14 +3043,30 @@ app.post('/clubs/:id/roster/parse', async (c) => {
   // Conflict annotation: this club's own roster (one query) + every other club's roster
   // indexed once (buildCrossClubIndex) — never a per-row × per-club read.
   const anyRows = parsed.some((p) => p.result && p.result.rows.length > 0);
-  const ownKeys = anyRows
-    ? new Set((await repo.listPlayers(ra.tenant, id)).map((p) => p.naturalKey))
-    : new Set<string>();
+  // The ID-number index mirrors the registration core's legacy-key guard (legacyKeyHit), so a
+  // row the commit would refuse is flagged here rather than shown as a new registration.
+  const ownRoster = anyRows ? await repo.listPlayers(ra.tenant, id) : [];
+  const ownKeys = new Set(ownRoster.map((p) => p.naturalKey));
+  const idIndex: IdNumberIndex = new Map();
   const crossClubIndex = anyRows
-    ? await buildCrossClubIndex(ra.tenant, await repo.listClubs(ra.tenant), id)
+    ? await buildCrossClubIndex(ra.tenant, await repo.listClubs(ra.tenant), id, { idIndex })
     : new Map();
-  const conflictFor = (naturalKey: string): ChairRosterConflict | undefined => {
+  if (anyRows) addToIdIndex(idIndex, club, ownRoster);
+  const conflictFor = (
+    player: Pick<PlayerRegistration, 'naturalKey' | 'idNumber' | 'idType' | 'nationality'>,
+  ): ChairRosterConflict | undefined => {
+    const { naturalKey } = player;
     if (ownKeys.has(naturalKey)) return { type: 'in-club-duplicate' };
+    const legacy = legacyKeyHit(idIndex, player);
+    if (legacy) {
+      return {
+        type: 'legacy-id',
+        clubId: legacy.clubId,
+        clubName: legacy.clubName,
+        message: legacyKeyMessage(legacy.clubName),
+        messageShort: legacyKeyShortMessage(legacy.clubName),
+      };
+    }
     const hits = (crossClubIndex.get(naturalKey) ?? []) as Array<{
       clubId: string;
       clubName: string;
@@ -3067,7 +3105,7 @@ app.post('/clubs/:id/roster/parse', async (c) => {
       hasIdColumn: result.hasIdColumn,
       totalDataRows: result.totalDataRows,
       rows: result.rows.map((r) => {
-        const conflict = conflictFor(r.player.naturalKey);
+        const conflict = conflictFor(r.player);
         return {
           rowNumber: r.rowNumber,
           firstName: r.player.firstName,

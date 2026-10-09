@@ -791,10 +791,19 @@ function OutcomePill({ result }: { result: ChairBulkResult }) {
     case 'skipped-duplicate':
       return <Pill tone="muted">Already on your roster</Pill>;
     default:
+      // A long reason has a cell-sized form (errorShort) in the pill; the full text is shown
+      // under it as a note (not a hover title — unreachable on touch and keyboard).
       return (
-        <Pill tone="coral" dot>
-          {result.error || 'Error'}
-        </Pill>
+        <>
+          <Pill tone="coral" dot>
+            {result.errorShort || result.error || 'Error'}
+          </Pill>
+          {result.errorShort && result.error ? (
+            <div className="rost-sub" role="note">
+              {result.error}
+            </div>
+          ) : null}
+        </>
       );
   }
 }
@@ -1130,6 +1139,17 @@ export function conflictLabel(row: ChairRosterParseRow): ReactNode {
   const c = row.conflict;
   if (!c) return <Pill tone="teal">New registration</Pill>;
   if (c.type === 'in-club-duplicate') return <Pill tone="muted">Already on your roster</Pill>;
+  if (c.type === 'legacy-id')
+    return (
+      <span data-testid="legacy-id-conflict">
+        <Pill tone="coral" dot>
+          {c.messageShort}
+        </Pill>
+        <div className="rost-sub" role="note">
+          {c.message}
+        </div>
+      </span>
+    );
   if (c.status === 'clearance-pending')
     return (
       <Pill tone="gold" dot>
@@ -1185,6 +1205,12 @@ export function ClubRosterUpload({
   );
   const keyOf = (r: { sheet: string; rowNumber: number }) =>
     rosterRowKey(club.id, r.sheet, r.rowNumber);
+  // The upload summary names each row's player (the chair already saw them in the review), so a
+  // refusal is readable without going back to the spreadsheet.
+  const nameForResult = (r: ChairBulkResult): string => {
+    const row = rows.find((x) => x.sheet === r.sheet && x.rowNumber === r.rowNumber);
+    return row ? `${row.firstName} ${row.lastName}`.trim() : '';
+  };
   const summary = parse
     ? buildClubSummaries([
         { clubId: club.id, clubName: club.name, parse: parse as never, allowMissingId: false },
@@ -1207,11 +1233,12 @@ export function ClubRosterUpload({
     try {
       const res = await parseClubRoster(club.id, file, map);
       // Rows already on this roster are excluded by default — committing them would only
-      // come back as "skipped", so the count on the button stays honest.
+      // come back as "skipped", so the count on the button stays honest. A row whose ID sits
+      // under an older record elsewhere would be refused at commit, so it starts excluded too.
       const initial: RosterDecisions = {};
       for (const s of res.sheets)
         for (const r of s.rows)
-          if (r.conflict?.type === 'in-club-duplicate')
+          if (r.conflict?.type === 'in-club-duplicate' || r.conflict?.type === 'legacy-id')
             initial[rosterRowKey(club.id, s.name, r.rowNumber)] = 'exclude';
       setDecisions(initial);
       setParse(res);
@@ -1363,6 +1390,7 @@ export function ClubRosterUpload({
                 {[...errors, ...clearances, ...warned].map((r) => (
                   <tr key={`${r.sheet}:${r.rowNumber}:${r.index}`}>
                     <td>
+                      {nameForResult(r) && <div>{nameForResult(r)}</div>}
                       <span className="rost-sub">
                         {r.sheet || '—'} · row {r.rowNumber ?? '—'}
                       </span>

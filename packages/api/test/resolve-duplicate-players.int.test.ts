@@ -12,7 +12,15 @@ import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Club, PlayerRegistration, TenantConfig } from '../src/types.js';
@@ -209,7 +217,20 @@ describe('resolve-duplicate-players args', () => {
     );
     assert.throws(() => cli.parseArgs(['--tenant', 't', '--out', 'o', '--confirm']), /--decisions/);
     assert.throws(() => cli.parseArgs(['--tenant', 't']), /--out is required/);
-    assert.throws(() => cli.parseArgs(['--tenant', 't', '--out', 'o', '--force']), /unknown/);
+    assert.throws(() => cli.parseArgs(['--tenant', 't', '--out', 'o', '--bogus']), /unknown/);
+    assert.equal(cli.parseArgs(['--tenant', 't', '--out', 'o', '--force']).force, true);
+    assert.throws(
+      () =>
+        cli.parseArgs(['--tenant', 't', '--out', 'o', '--confirm', '--decisions', 'd', '--force']),
+      /--force only applies to --plan/,
+    );
+    assert.throws(
+      () => cli.parseArgs(['--help']),
+      (e: Error) => e.name === 'HelpRequested',
+    );
+    assert.equal(cli.exitCodeFor(new cli.HelpRequested()), 0);
+    assert.equal(cli.exitCodeFor(new cli.ValidationError('x')), 2);
+    assert.equal(cli.exitCodeFor(new Error('x')), 1);
   });
 });
 
@@ -323,10 +344,12 @@ describe('resolve-duplicate-players', () => {
   test('confirm is idempotent: a re-run deletes nothing more', async () => {
     const file = structuredClone(edited);
     const report = await cli.applyDecisions(repo, T, file, outDir, () => {});
+    // B13: the distinct pair is already marked, so it is not re-applied either.
     assert.deepEqual(
       report.alreadyDone.sort(),
-      [entryFor(file, S1).id, entryFor(file, S2).id].sort(),
+      [entryFor(file, S1).id, entryFor(file, S2).id, entryFor(file, S5).id].sort(),
     );
+    assert.equal(report.backupPath, null, 'nothing to apply → no new backup');
     assert.equal(report.deleted.length, 0);
     const deleted = JSON.parse(readFileSync(path.join(outDir, 'deleted-nks.json'), 'utf8'));
     assert.equal(deleted.length, 2);
@@ -421,6 +444,267 @@ describe('resolve-duplicate-players', () => {
   });
 });
 
+describe('resolve-duplicate-players — safety fixes (E2E-FINDINGS B1–B5, B8–B11)', () => {
+  type File = import('../src/resolve-duplicate-players.js').DecisionsFile;
+  type Row = Partial<PlayerRegistration> & { naturalKey: string };
+
+  /** Seed one name + dob group (rows given) and plan; returns that group's entry as a file. */
+  async function seedGroup(tag: string, dob: string, rows: Row[]) {
+    const who = { firstName: 'Group', lastName: tag, dob };
+    for (const r of rows) await repo.createPlayer(T, player({ ...who, ...r }));
+    const dir = mkdtempSync(path.join(tmpdir(), `resolve-dups-${tag}-`));
+    const full = await cli.runPlan(repo, T, dir);
+    const entry = full.entries.find(
+      (e) => e.kind === 'name-dob-group' && e.naturalKeys.includes(rows[0].naturalKey),
+    )!;
+    const file: File = { ...full, entries: [entry] };
+    return { dir, entry, file, who };
+  }
+  const withAction = (file: File, action: string): File => ({
+    ...file,
+    entries: [{ ...file.entries[0], action }],
+  });
+  const alive = async (clubId: string, nk: string) => !!(await repo.getPlayer(T, clubId, nk));
+
+  test('B1: a partly-distinct group is NEEDS-CHOICE and a merge across the pair is refused', async () => {
+    const nk = sha('sa-id-b1');
+    const [s1, s2] = ['b1-slug-one-1980-01-01', 'b1-slug-two-1980-01-01'];
+    await repo.putPlayerDistinct(T, nk, s1);
+    const { dir, entry, file } = await seedGroup('Bone', '1980-01-01', [
+      { naturalKey: nk },
+      { naturalKey: s1, idNumber: undefined },
+      { naturalKey: s2, idNumber: undefined },
+    ]);
+    assert.equal(entry.status, 'NEEDS-CHOICE');
+    assert.equal(entry.action, 'skip');
+    assert.deepEqual(entry.distinctPairs, [[nk, s1].sort()]);
+    const r = await cli.applyDecisions(
+      repo,
+      T,
+      withAction(file, `merge-into:${nk}`),
+      dir,
+      () => {},
+    );
+    assert.equal(r.refused.length, 1);
+    assert.match(r.refused[0].why, /PLAYERDISTINCT/);
+    assert.ok(await alive('a', s1), 'the confirmed-distinct row is never deleted');
+    assert.ok(await alive('a', s2));
+    assert.equal(r.backupPath, null, 'refused before any write');
+  });
+
+  test('B1: a marker added AFTER the plan still refuses the merge (live check)', async () => {
+    const nk = sha('sa-id-b1late');
+    const slug = 'b1late-slug-1980-02-02';
+    const { dir, entry, file } = await seedGroup('Blate', '1980-02-02', [
+      { naturalKey: nk },
+      { naturalKey: slug, idNumber: undefined },
+    ]);
+    assert.equal(entry.status, 'PROPOSED');
+    await repo.putPlayerDistinct(T, nk, slug);
+    const r = await cli.applyDecisions(repo, T, file, dir, () => {});
+    assert.match(r.refused[0]?.why ?? '', /PLAYERDISTINCT/);
+    assert.ok(await alive('a', slug));
+  });
+
+  test('B2: each key is recorded (fsynced) BEFORE its row is deleted', async () => {
+    const nk = sha('sa-id-b2wal');
+    const slug = 'b2wal-slug-1981-01-01';
+    const { dir, file } = await seedGroup('Bwal', '1981-01-01', [
+      { naturalKey: nk },
+      { naturalKey: slug, idNumber: undefined },
+    ]);
+    const seenAtDelete: string[][] = [];
+    const spy = {
+      ...repo,
+      deletePlayer: async (...a: Parameters<typeof repo.deletePlayer>) => {
+        seenAtDelete.push(
+          JSON.parse(readFileSync(path.join(dir, 'deleted-nks.json'), 'utf8')).map(
+            (d: { naturalKey: string }) => d.naturalKey,
+          ),
+        );
+        return repo.deletePlayer(...a);
+      },
+    } as typeof repo;
+    const r = await cli.applyDecisions(spy, T, file, dir, () => {});
+    assert.equal(r.merged.length, 1);
+    assert.deepEqual(seenAtDelete, [[slug]], 'the record was on disk when the delete ran');
+  });
+
+  test('B2: an unwritable deleted-nks.json refuses the run before any write', async () => {
+    const nk = sha('sa-id-b2ro');
+    const slug = 'b2ro-slug-1981-02-02';
+    const { dir, file } = await seedGroup('Bro', '1981-02-02', [
+      { naturalKey: nk },
+      { naturalKey: slug, idNumber: undefined },
+    ]);
+    const del = path.join(dir, 'deleted-nks.json');
+    writeFileSync(del, '[]', { mode: 0o400 });
+    await assert.rejects(
+      cli.applyDecisions(repo, T, file, dir, () => {}),
+      (e: Error) => e.name === 'ValidationError' && /cannot write/.test(e.message),
+    );
+    assert.ok(await alive('a', slug), 'nothing deleted');
+    assert.ok(!readdirSync(dir).some((n) => n.startsWith('backup-')), 'no backup written');
+  });
+
+  test('B2: an "already merged" re-run backfills a missing record', async () => {
+    const nk = sha('sa-id-b2bf');
+    const slug = 'b2bf-slug-1981-03-03';
+    const { dir, file } = await seedGroup('Bbf', '1981-03-03', [
+      { naturalKey: nk },
+      { naturalKey: slug, idNumber: undefined },
+    ]);
+    await cli.applyDecisions(repo, T, file, dir, () => {});
+    const del = path.join(dir, 'deleted-nks.json');
+    writeFileSync(del, '[]'); // the record lost (crash between delete and record, pre-fix)
+    const r = await cli.applyDecisions(repo, T, file, dir, () => {});
+    assert.deepEqual(r.backfilled, [slug]);
+    assert.deepEqual(
+      JSON.parse(readFileSync(del, 'utf8')).map((d: { naturalKey: string }) => d.naturalKey),
+      [slug],
+    );
+  });
+
+  test('B3: merge-into a legacy slug while the group holds a sha key is refused', async () => {
+    const nk = sha('sa-id-b3');
+    const slug = 'b3-slug-1982-01-01';
+    const { dir, file } = await seedGroup('Bthree', '1982-01-01', [
+      { naturalKey: nk },
+      { naturalKey: slug, idNumber: undefined },
+    ]);
+    const r = await cli.applyDecisions(
+      repo,
+      T,
+      withAction(file, `merge-into:${slug}`),
+      dir,
+      () => {},
+    );
+    assert.match(r.refused[0]?.why ?? '', /legacy slug key/);
+    assert.ok(await alive('a', nk), 'the sha row survives');
+    assert.ok(await alive('a', slug));
+  });
+
+  test('B4/B16: one malformed entry aborts the whole run before any write', async () => {
+    const nk = sha('sa-id-b4');
+    const slug = 'b4-slug-1983-01-01';
+    const { dir, file } = await seedGroup('Bfour', '1983-01-01', [
+      { naturalKey: nk },
+      { naturalKey: slug, idNumber: undefined },
+    ]);
+    const bad: File = {
+      ...file,
+      entries: [file.entries[0], { ...file.entries[0], id: 'G-typo', action: 'merge' }],
+    };
+    await assert.rejects(
+      cli.applyDecisions(repo, T, bad, dir, () => {}),
+      (e: Error) => e.name === 'ValidationError' && /unknown action "merge"/.test(e.message),
+    );
+    assert.ok(await alive('a', slug), 'the valid merge did not run either');
+    for (const shape of [
+      [],
+      { tenant: T },
+      { tenant: T, entries: [{ ...file.entries[0], purgeCertificates: 'yes' }] },
+    ])
+      await assert.rejects(
+        cli.applyDecisions(repo, T, shape, dir, () => {}),
+        (e: Error) => e.name === 'ValidationError',
+      );
+  });
+
+  test('U4: merge-into accepts the 8-char ref the review md prints', async () => {
+    const nk = sha('sa-id-u4');
+    const slug = 'u4-slug-1983-02-02';
+    const { dir, file } = await seedGroup('Ufour', '1983-02-02', [
+      { naturalKey: nk },
+      { naturalKey: slug, idNumber: undefined },
+    ]);
+    const r = await cli.applyDecisions(
+      repo,
+      T,
+      withAction(file, `merge-into:${nk.slice(0, 8)}…`),
+      dir,
+      () => {},
+    );
+    assert.equal(r.merged.length, 1);
+    assert.ok(!(await alive('a', slug)));
+  });
+
+  test('B5: a new identity after the plan refuses the group', async () => {
+    const nk = sha('sa-id-b5a');
+    const slug = 'b5a-slug-1984-01-01';
+    const { dir, file, who } = await seedGroup('Bfivea', '1984-01-01', [
+      { naturalKey: nk },
+      { naturalKey: slug, idNumber: undefined },
+    ]);
+    await repo.createPlayer(
+      T,
+      player({ ...who, naturalKey: 'b5a-third-1984-01-01', idNumber: undefined }),
+    );
+    const r = await cli.applyDecisions(repo, T, file, dir, () => {});
+    assert.match(r.refused[0]?.why ?? '', /appeared since the plan/);
+    assert.ok(await alive('a', slug));
+  });
+
+  test('B5: a stale key registered at another club after the plan refuses the group', async () => {
+    const nk = sha('sa-id-b5b');
+    const slug = 'b5b-slug-1984-02-02';
+    const { dir, file, who } = await seedGroup('Bfiveb', '1984-02-02', [
+      { naturalKey: nk },
+      { naturalKey: slug, idNumber: undefined },
+    ]);
+    await repo.createPlayer(
+      T,
+      player({ ...who, naturalKey: slug, clubId: 'b', idNumber: undefined }),
+    );
+    const r = await cli.applyDecisions(repo, T, file, dir, () => {});
+    assert.match(r.refused[0]?.why ?? '', /rows appeared since the plan/);
+    assert.ok(await alive('a', slug));
+    assert.ok(!existsSync(path.join(dir, 'deleted-nks.json')), 'a live key is never recorded');
+  });
+
+  test('B9: a survivor placeholder elsewhere blocks neither the plan nor the merge', async () => {
+    const nk = sha('sa-id-b9');
+    const slug = 'b9-slug-1985-01-01';
+    const { dir, entry, file } = await seedGroup('Bnine', '1985-01-01', [
+      { naturalKey: nk },
+      { naturalKey: nk, clubId: 'b', placeholder: true },
+      { naturalKey: slug, idNumber: undefined },
+    ]);
+    assert.equal(entry.status, 'PROPOSED');
+    assert.equal(entry.survivor, nk);
+    const r = await cli.applyDecisions(repo, T, file, dir, () => {});
+    assert.equal(r.merged.length, 1, JSON.stringify(r.refused));
+    assert.ok(!(await alive('a', slug)));
+    assert.ok(await alive('b', nk), 'the placeholder is left untouched');
+  });
+
+  test('B8: a conflicting stale value is reported, not silently dropped', async () => {
+    const nk = sha('sa-id-b8');
+    const slug = 'b8-slug-1985-02-02';
+    const { dir, file } = await seedGroup('Beight', '1985-02-02', [
+      { naturalKey: nk, battingHand: 'Right' },
+      { naturalKey: slug, idNumber: undefined, battingHand: 'Left' },
+    ]);
+    const r = await cli.applyDecisions(repo, T, file, dir, () => {});
+    assert.deepEqual(
+      r.conflicts.map((c) => [c.field, c.kept]),
+      [['battingHand', '"Right"']],
+    );
+  });
+
+  test('B10/B11: unknown tenant refused; a re-plan never overwrites decisions.json', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'resolve-dups-b11-'));
+    await assert.rejects(cli.runPlan(repo, 'dolphinz', dir), /unknown tenant/);
+    await cli.runPlan(repo, T, dir);
+    const json = path.join(dir, 'decisions.json');
+    writeFileSync(json, '{"edited":true}');
+    await assert.rejects(cli.runPlan(repo, T, dir), /already exists/);
+    assert.equal(readFileSync(json, 'utf8'), '{"edited":true}');
+    await cli.runPlan(repo, T, dir, undefined, { force: true });
+    assert.notEqual(readFileSync(json, 'utf8'), '{"edited":true}');
+  });
+});
+
 describe('tombstone-deleted-players', () => {
   const entries = () => [
     { tenant: T, naturalKey: SLUG1, clubIds: ['a'] },
@@ -438,11 +722,63 @@ describe('tombstone-deleted-players', () => {
     assert.throws(() => tomb.parseArgs(['--tenant', 't']), /--deleted is required/);
   });
 
-  test('refuses while the player sync is off', async () => {
+  test('refuses --confirm while the player sync is off; the dry run still works', async () => {
     await assert.rejects(
       tomb.tombstoneDeleted(repo, T, entries(), { confirm: true, log: () => {} }),
-      (err: Error) => err.name === 'SyncOffError',
+      (err: Error) => err.name === 'SyncOffError' && /playerSync/.test(err.message),
     );
+    const dry = await tomb.tombstoneDeleted(repo, T, entries(), { confirm: false, log: () => {} });
+    assert.equal(dry.syncOn, false);
+    assert.deepEqual(dry.refusedLive, [S3]);
+  });
+
+  test('B7: a malformed file is refused whole, before any read or write', async () => {
+    const before = await countItems();
+    for (const junk of [
+      [{ tenant: T }],
+      [{ tenant: T, naturalKey: '', clubIds: [] }],
+      [1, 2],
+      { tenant: T },
+      [{ tenant: T, naturalKey: 'k', clubIds: 'a' }],
+    ])
+      await assert.rejects(
+        tomb.tombstoneDeleted(repo, T, junk, { confirm: true, log: () => {} }),
+        (err: Error) => err.name === 'ValidationError',
+      );
+    assert.equal(await countItems(), before, 'no tombstone written');
+    await assert.rejects(
+      tomb.tombstoneDeleted(repo, 'dolphinz', [], { confirm: false, log: () => {} }),
+      /unknown tenant/,
+    );
+  });
+
+  test('deleted-nks dedupe: an unstamped duplicate wins (a re-delete must be erased again)', () => {
+    const merged = cli.validateDeletedEntries(
+      [
+        { tenant: T, naturalKey: 'k1', clubIds: ['a'], tombstonedAt: '2026-10-01T00:00:00.000Z' },
+        { tenant: T, naturalKey: 'k1', clubIds: ['b'] },
+        { tenant: T, naturalKey: 'k2', clubIds: ['a'] },
+        { tenant: T, naturalKey: 'k2', clubIds: ['a'], tombstonedAt: '2026-10-02T00:00:00.000Z' },
+        { tenant: T, naturalKey: 'k3', clubIds: ['a'], tombstonedAt: '2026-10-01T00:00:00.000Z' },
+        { tenant: T, naturalKey: 'k3', clubIds: ['a'], tombstonedAt: '2026-10-05T00:00:00.000Z' },
+      ],
+      'hand-merged.json',
+    );
+    assert.deepEqual(merged, [
+      { tenant: T, naturalKey: 'k1', clubIds: ['a', 'b'] },
+      { tenant: T, naturalKey: 'k2', clubIds: ['a'] },
+      { tenant: T, naturalKey: 'k3', clubIds: ['a'], tombstonedAt: '2026-10-05T00:00:00.000Z' },
+    ]);
+  });
+
+  test('B6: output masks legacy slugs the same way resolve does', async () => {
+    const lines: string[] = [];
+    await tomb.tombstoneDeleted(repo, T, entries(), { confirm: false, log: (l) => lines.push(l) });
+    const out = lines.join('\n');
+    for (const slug of [SLUG1, SLUG2]) {
+      assert.ok(!out.includes(slug.slice(0, 8)), 'no slug fragment');
+      assert.ok(out.includes(cli.maskKey(slug)), 'the same ref as the resolve CLI');
+    }
   });
 
   test('dry run writes nothing; confirm queues erase tombstones; live keys refused', async () => {

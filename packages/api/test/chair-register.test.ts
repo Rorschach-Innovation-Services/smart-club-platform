@@ -572,7 +572,10 @@ describe('ID-number dedup guard — a legacy-key row with the same ID refuses th
     assert.equal(res.status, 409);
     const text = await res.text();
     assert.match(text, /Source CC/);
-    assert.match(text, /legacy key — run duplicate cleanup or contact support/);
+    assert.match(
+      text,
+      /This ID is already registered at Source CC under an older record\. Ask the union office to resolve the duplicate before registering this player\./,
+    );
     assert.ok(!text.includes(legacy.naturalKey), 'the matched key is never returned');
     assert.equal((await rowsWithId('home', idNumber)).length, 0);
     assert.equal((await rowsWithId('src', idNumber))[0].status, 'active', 'legacy row untouched');
@@ -613,9 +616,18 @@ describe('ID-number dedup guard — a legacy-key row with the same ID refuses th
       }),
     });
     assert.equal(res.status, 200);
-    const body = (await res.json()) as { results: Array<{ outcome: string; error?: string }> };
+    const body = (await res.json()) as {
+      results: Array<{ outcome: string; error?: string; errorShort?: string }>;
+    };
     assert.equal(body.results[0].outcome, 'error');
-    assert.match(body.results[0].error ?? '', /Source CC.*legacy key/);
+    assert.match(
+      body.results[0].error ?? '',
+      /already registered at Source CC under an older record/,
+    );
+    assert.equal(
+      body.results[0].errorShort,
+      'Already at Source CC under an older record — union office must resolve',
+    );
     // Same name + dob, different ID: a different person — unaffected.
     assert.equal(body.results[1].outcome, 'created');
     assert.equal((await rowsWithId('home', idNumber)).length, 0);

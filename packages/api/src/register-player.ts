@@ -161,9 +161,16 @@ export function legacyKeyHit(
   return (index.get(key) ?? []).find((h) => h.naturalKey !== player.naturalKey);
 }
 
-/** The chair/admin-facing reason for an `existing-registration-under-legacy-key` refusal. */
+/**
+ * The chair/admin-facing reason for an `existing-registration-under-legacy-key` refusal. Written
+ * for a chair: the fix (merging the records) is a union-office step, so it says who to ask.
+ */
 export const legacyKeyMessage = (clubName: string) =>
-  `an existing registration for this ID at ${clubName} is under a legacy key — run duplicate cleanup or contact support`;
+  `This ID is already registered at ${clubName} under an older record. Ask the union office to resolve the duplicate before registering this player.`;
+
+/** The same refusal sized for a grid cell (quick-add Result); the full text rides as a tooltip. */
+export const legacyKeyShortMessage = (clubName: string) =>
+  `Already at ${clubName} under an older record — union office must resolve`;
 
 /**
  * The notices for a newly opened clearance (index.ts's notifyClearanceOpened: source chair,

@@ -203,7 +203,14 @@ type ParsedRow = {
   gender?: string;
   race?: string;
   team?: string;
-  conflict?: { type: string; clubId?: string; clubName?: string; status?: string };
+  conflict?: {
+    type: string;
+    clubId?: string;
+    clubName?: string;
+    status?: string;
+    message?: string;
+    messageShort?: string;
+  };
 };
 type ParseResponse = {
   parseable: boolean;
@@ -262,6 +269,41 @@ describe('POST /clubs/:id/roster/parse', () => {
 
     // Parse writes nothing.
     assert.equal((await repo.listPlayers(TENANT, 'home')).length, 1);
+  });
+
+  test('a row whose ID sits under an older (legacy-key) record is flagged, not "new"', async () => {
+    // The same ID as row 2, rostered at Source CC under a legacy slug key: the commit would
+    // refuse it (existing-registration-under-legacy-key), so the review must say so up front.
+    const legacyKey = 'nandi-new-1996-01-01';
+    await repo.createPlayer(TENANT, {
+      naturalKey: legacyKey,
+      clubId: 'src',
+      firstName: 'Nandi',
+      lastName: 'New',
+      dob: '1996-01-01',
+      idType: 'sa-id',
+      idNumber: ID_NEW,
+      isMinor: false,
+      status: 'active',
+      version: 0,
+      consentAt: '2026-01-01T00:00:00.000Z',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    } as PlayerRegistration);
+    try {
+      const body = (await (await parseMultipart()).json()) as ParseResponse;
+      const row2 = body.sheets[0].rows.find((r) => r.rowNumber === 2);
+      assert.deepEqual(row2?.conflict, {
+        type: 'legacy-id',
+        clubId: 'src',
+        clubName: 'Source CC',
+        message:
+          'This ID is already registered at Source CC under an older record. Ask the union office to resolve the duplicate before registering this player.',
+        messageShort: 'Already at Source CC under an older record — union office must resolve',
+      });
+      assert.ok(!JSON.stringify(body).includes(legacyKey), 'the legacy key is never returned');
+    } finally {
+      await repo.deletePlayer(TENANT, (await repo.getPlayer(TENANT, 'src', legacyKey))!);
+    }
   });
 
   test('the base64-JSON transport is accepted too', async () => {
