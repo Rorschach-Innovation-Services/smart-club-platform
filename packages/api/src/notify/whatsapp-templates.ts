@@ -403,26 +403,39 @@ export const WHATSAPP_TEMPLATES = {
 
   /**
    * EMCU live scoring, PLAYER notice (same CLI, `--audience players`): EMCU clubs' players learn
-   * their matches are scored on MediCoach by the club's appointed scorers. Reworded so players
-   * are NOT told to request logins; promotional wording dropped (Meta still approved it as Marketing). VIDEO header =
-   * the staff live-scoring video. Same two STATIC app buttons as `emcuScorerAccountsNotice`.
+   * their matches are scored live on MediCoach and scouted into the provincial pipeline, and are
+   * told to get scorer logins from their club chairperson. {{1}} = first name (no club param since
+   * the 10 Oct edit). VIDEO header = the staff live-scoring video. Same two STATIC app buttons as
+   * `emcuScorerAccountsNotice`.
    *
    * APPROVED in Meta 10 Oct 2026 as **Marketing** (template id 1785078815861322), VIDEO header +
    * the two static buttons. Subject to the 131049 marketing cap, as above. Runtime-gated on status.
+   *
+   * EDITED 10 Oct 2026 (same name and id): new user-supplied body with ONE variable (was 2:
+   * first name + club). Re-review in Meta is in progress; it stays 'registered' because the name is
+   * unchanged and approval is expected before the send. Until the edit clears review, Meta keeps
+   * serving the previously approved 2-param body and a 1-param send fails with error 132000, so
+   * confirm the edit is approved before running the player WhatsApp leg.
    */
   emcuPlayerScoring: {
     name: 'emcu_player_scoring',
     lang: 'en',
-    paramCount: 2,
-    params: ['player first name', 'club name'],
+    paramCount: 1,
+    params: ['player first name'],
     bodyText:
       'Dear {{1}} 🏏\n\n' +
-      "{{2}}'s EMCU matches are scored live on the MediCoach app this season by your club's " +
-      "appointed scorers. Speak to your club chairperson if you'd like to help score.\n\n" +
-      'Watch the video above to see how live scoring works, and download the app using the ' +
-      'buttons below or visit https://www.medicoach.co.za/\n\n' +
+      "We're proud to be professionalising the KZN cricket ecosystem — and you're part of it.\n\n" +
+      'Your matches are now being scored live on the MediCoach app, which means your performances ' +
+      'are actively being scouted into the provincial pipeline. Every run, wicket and catch ' +
+      'counts. 📊\n\n' +
+      '✅ To get started, watch the how-to video above, request your scorer login details from ' +
+      'your club chairperson, and score your games on the app.\n\n' +
+      'So bring your best today — the system is watching, and this is your chance to put your ' +
+      'name forward.\n\n' +
+      'Best of luck out there. 💚🏆\n\n' +
+      'Dolphins × MediCoach\n\n' +
       'Questions? Email info@medicoach.co.za',
-    // Approved in Meta as MARKETING on 10 Oct 2026 (id 1785078815861322).
+    // Approved in Meta as MARKETING on 10 Oct 2026 (id 1785078815861322); body edited 10 Oct 2026.
     status: 'registered',
     header: { format: 'VIDEO' },
   },

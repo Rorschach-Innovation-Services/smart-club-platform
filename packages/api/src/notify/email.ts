@@ -1969,38 +1969,53 @@ export interface EmcuPlayerScoringEmailInput {
   to: string;
   /** The player's first name; '' ⇒ "player". */
   firstName: string;
-  clubName: string;
-  /** Public URL of the staff live-scoring video. */
+  /** Public URL of the staff live-scoring (how-to) video. */
   staffVideoUrl: string;
 }
 
 /**
- * EMCU scorer broadcast — PLAYER email: matches are scored live on MediCoach by the club's
- * appointed scorers (no logins, no request to ask for one). Pure — exported for tests.
+ * EMCU scorer broadcast — PLAYER email (10 Oct 2026 copy): mirrors the edited
+ * `emcu_player_scoring` WhatsApp body — live scoring + provincial scouting, get scorer logins
+ * from the club chairperson — with the how-to video LINK (the WhatsApp has it as a header) and
+ * the app links before the sign-off. Pure — exported for tests.
  */
 export function emcuPlayerScoringEmailContent(input: Omit<EmcuPlayerScoringEmailInput, 'to'>): {
   subject: string;
   text: string;
   html: string;
 } {
-  const subject = 'Your EMCU matches are scored on MediCoach 🏏';
-  const greetName = input.firstName.trim() || 'player';
-  const body =
-    `${input.clubName}'s EMCU matches are scored live on the MediCoach app this season by your ` +
-    "club's appointed scorers. Speak to your club chairperson if you'd like to help score.";
+  const subject = 'Your matches are being scouted live on MediCoach 🏏';
+  const greeting = `Dear ${input.firstName.trim() || 'player'} 🏏`;
+  const proud =
+    "We're proud to be professionalising the KZN cricket ecosystem — and you're part of it.";
+  const scouted =
+    'Your matches are now being scored live on the MediCoach app, which means your performances ' +
+    'are actively being scouted into the provincial pipeline. Every run, wicket and catch ' +
+    'counts. 📊';
+  const start =
+    '✅ To get started, watch the how-to video, request your scorer login details from your club ' +
+    'chairperson, and score your games on the app.';
+  const watch = `▶ Watch the how-to video: ${input.staffVideoUrl}`;
+  const best =
+    'So bring your best today — the system is watching, and this is your chance to put your ' +
+    'name forward.';
+  const luck = 'Best of luck out there. 💚🏆';
+  const signoff = 'Dolphins × MediCoach';
   const questions = `Questions? Email ${MEDICOACH_SUPPORT_EMAIL}`;
   const text =
-    `Dear ${greetName} 🏏,\n\n` +
-    `${body}\n\n` +
-    `${watchScoringText(input.staffVideoUrl)}\n\n` +
-    `${appLinksText()}\n\n` +
-    questions;
+    `${greeting}\n\n${proud}\n\n${scouted}\n\n${start}\n${watch}\n\n${best}\n\n` +
+    `${appLinksText()}\n\n${luck}\n\n${signoff}\n\n${questions}`;
   const html =
     EMAIL_WRAP_OPEN +
-    `<p>Dear ${escapeHtml(greetName)} 🏏,</p>` +
-    `<p>${escapeHtml(body)}</p>` +
-    watchScoringHtml(input.staffVideoUrl) +
+    `<p>${escapeHtml(greeting)}</p>` +
+    `<p>${escapeHtml(proud)}</p>` +
+    `<p>${escapeHtml(scouted)}</p>` +
+    `<p>${escapeHtml(start)}</p>` +
+    `<p><a href="${escapeHtml(input.staffVideoUrl)}" style="color:#1D9E75;font-weight:600">▶ Watch the how-to video</a></p>` +
+    `<p>${escapeHtml(best)}</p>` +
     appLinksHtml() +
+    `<p>${escapeHtml(luck)}</p>` +
+    `<p><strong>${escapeHtml(signoff)}</strong></p>` +
     `<p>${escapeHtml(questions)}</p>` +
     `</div>`;
   return { subject, text, html };

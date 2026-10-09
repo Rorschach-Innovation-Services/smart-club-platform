@@ -123,7 +123,7 @@ const BUILDERS = [
   },
   {
     key: 'emcuPlayerScoring' as const,
-    params: emcuPlayerScoringParams({ firstName: 'Sipho', clubName: 'Umhlali Cricket Club' }),
+    params: emcuPlayerScoringParams({ firstName: 'Sipho' }),
   },
 ];
 
@@ -455,7 +455,7 @@ describe('Dolphins welcome broadcast templates (VIDEO header; all three approved
 describe('EMCU scorer broadcast templates (VIDEO header, static app buttons; approved as Marketing 10 Oct 2026)', () => {
   const entries = [
     ['emcuScorerAccountsNotice', 'emcu_scorer_accounts_notice', 3],
-    ['emcuPlayerScoring', 'emcu_player_scoring', 2],
+    ['emcuPlayerScoring', 'emcu_player_scoring', 1],
   ] as const;
 
   for (const [key, name, arity] of entries) {
@@ -486,12 +486,16 @@ describe('EMCU scorer broadcast templates (VIDEO header, static app buttons; app
     );
   });
 
-  test('the player body is exactly the Meta-approved copy (10 Oct 2026)', () => {
+  test('the player body is exactly the edited copy (10 Oct 2026, one variable)', () => {
     assert.equal(
       WHATSAPP_TEMPLATES.emcuPlayerScoring.bodyText,
       'Dear {{1}} 🏏\n\n' +
-        "{{2}}'s EMCU matches are scored live on the MediCoach app this season by your club's appointed scorers. Speak to your club chairperson if you'd like to help score.\n\n" +
-        'Watch the video above to see how live scoring works, and download the app using the buttons below or visit https://www.medicoach.co.za/\n\n' +
+        "We're proud to be professionalising the KZN cricket ecosystem — and you're part of it.\n\n" +
+        'Your matches are now being scored live on the MediCoach app, which means your performances are actively being scouted into the provincial pipeline. Every run, wicket and catch counts. 📊\n\n' +
+        '✅ To get started, watch the how-to video above, request your scorer login details from your club chairperson, and score your games on the app.\n\n' +
+        'So bring your best today — the system is watching, and this is your chance to put your name forward.\n\n' +
+        'Best of luck out there. 💚🏆\n\n' +
+        'Dolphins × MediCoach\n\n' +
         'Questions? Email info@medicoach.co.za',
     );
   });
@@ -506,10 +510,8 @@ describe('EMCU scorer broadcast templates (VIDEO header, static app buttons; app
       ['Chairperson', 'Umhlali Cricket Club', 'chairperson@umhlalicc.co.za'],
     );
     assert.deepEqual(
-      emcuPlayerScoringParams({ firstName: '', clubName: 'Umhlali Cricket Club' }).map(
-        (p) => p.text,
-      ),
-      ['player', 'Umhlali Cricket Club'],
+      emcuPlayerScoringParams({ firstName: '' }).map((p) => p.text),
+      ['player'],
     );
   });
 
@@ -522,7 +524,7 @@ describe('EMCU scorer broadcast templates (VIDEO header, static app buttons; app
     assert.match(sent.messageId, /^dry-run-/);
     const player = await sendEmcuPlayerScoringWhatsApp(
       '27820000000',
-      { firstName: 'A', clubName: 'B' },
+      { firstName: 'A' },
       { id: 'media-1' },
     );
     assert.match(player.messageId, /^dry-run-/);

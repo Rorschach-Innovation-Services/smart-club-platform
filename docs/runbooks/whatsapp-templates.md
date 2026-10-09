@@ -464,23 +464,35 @@ Need help? Email info@medicoach.co.za
 `created` accounts has its WhatsApp leg skipped (`accounts≠4`, reported as a warning); its email
 states the real count.
 
-### 2. `emcu_player_scoring` — APPROVED 10 Oct 2026 · **Marketing** · ID 1785078815861322 · header: staff video · 2 variables
+### 2. `emcu_player_scoring` — APPROVED 10 Oct 2026 · **Marketing** · ID 1785078815861322 · header: staff video · 1 variable
 
-Samples: `{{1}}` = `Sipho` (first name), `{{2}}` = `Umhlali Cricket Club`.
+**Edited 10 Oct 2026** (same name and ID) to the user-supplied copy below. It has 1 variable; the
+originally approved body had 2 (first name, club). The registry stays `'registered'`. Until Meta
+approves the edit it keeps serving the old 2-variable body, and a 1-variable send fails with 132000. So **confirm the edit shows Approved in WhatsApp Manager before the player WhatsApp leg.**
+
+Sample: `{{1}}` = `Sipho` (first name).
 
 ```
 Dear {{1}} 🏏
 
-{{2}}'s EMCU matches are scored live on the MediCoach app this season by your club's appointed scorers. Speak to your club chairperson if you'd like to help score.
+We're proud to be professionalising the KZN cricket ecosystem — and you're part of it.
 
-Watch the video above to see how live scoring works, and download the app using the buttons below or visit https://www.medicoach.co.za/
+Your matches are now being scored live on the MediCoach app, which means your performances are actively being scouted into the provincial pipeline. Every run, wicket and catch counts. 📊
+
+✅ To get started, watch the how-to video above, request your scorer login details from your club chairperson, and score your games on the app.
+
+So bring your best today — the system is watching, and this is your chance to put your name forward.
+
+Best of luck out there. 💚🏆
+
+Dolphins × MediCoach
 
 Questions? Email info@medicoach.co.za
 ```
 
 **Emails.** Chair: "Your club's MediCoach scorer accounts" — Scorer 1..n table (sign-in email +
 password), staff video link, app links, "email info@medicoach.co.za" for a reset or a change of
-chair. Player: "Your EMCU matches are scored on MediCoach 🏏". Both set **Reply-To:
+chair. Player: "Your matches are being scouted live on MediCoach 🏏" — the same copy as the WhatsApp, with a "▶ Watch the how-to video: <url>" line after the ✅ line and the app links before the sign-off. Both set **Reply-To:
 info@medicoach.co.za**.
 
 **Run sequence** (user-run on production; dry-run first every time; never pass a credentials file

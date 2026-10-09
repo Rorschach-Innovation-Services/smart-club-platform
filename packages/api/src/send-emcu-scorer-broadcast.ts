@@ -7,8 +7,8 @@
  *      a WhatsApp notice (`emcu_scorer_accounts_notice`) saying the logins were emailed to them.
  *      No credentials ever ride on WhatsApp.
  *   2. PLAYERS (`--audience players`), only after chair delivery is confirmed: every EMCU club's
- *      players get an email + WhatsApp (`emcu_player_scoring`) saying their matches are scored on
- *      MediCoach by the club's appointed scorers.
+ *      players get an email + WhatsApp (`emcu_player_scoring`, 10 Oct 2026 copy) saying their
+ *      matches are scored live on MediCoach and scouted, and to get scorer logins from their chair.
  *
  *   npx sst shell --stage <stage> -- npm --prefix packages/api run broadcast:emcu-scorers -- \
  *     --audience chairs --credentials ~/secure/emcu-scorer-credentials.json \
@@ -449,7 +449,7 @@ export interface PlayerRecipient {
   cell: string;
   roles: string[];
   clubIds: string[];
-  /** The {{2}} club: the recipient's first EMCU club. */
+  /** The recipient's first EMCU club (console listing; not in the 10 Oct 2026 copy). */
   clubName: string;
   minor: boolean;
 }
@@ -785,13 +785,13 @@ export function playerSampleText(
   staffVideoUrl: string,
   waVideo: string,
 ): string {
-  const e = content({ firstName: r.name, clubName: r.clubName, staffVideoUrl });
+  const e = content({ firstName: r.name, staffVideoUrl });
   const def = WHATSAPP_TEMPLATES.emcuPlayerScoring;
   return (
     `══ Sample PLAYER email (to ${r.email || '—'}) — subject: ${e.subject}\n\n` +
     `${e.text}\n\n` +
     `══ Sample PLAYER WhatsApp (${def.name}, video: ${waVideo})\n\n` +
-    fill(def.bodyText, [r.name || 'player', r.clubName])
+    fill(def.bodyText, [r.name || 'player'])
   );
 }
 
@@ -1089,14 +1089,9 @@ async function main(): Promise<void> {
           ? email.sendEmcuPlayerScoringEmail({
               to: m.to!,
               firstName: r.name,
-              clubName: r.clubName,
               staffVideoUrl: args.staffVideoUrl!,
             })
-          : whatsapp.sendEmcuPlayerScoringWhatsApp(
-              m.to!,
-              { firstName: r.name, clubName: r.clubName },
-              videoRef(),
-            );
+          : whatsapp.sendEmcuPlayerScoringWhatsApp(m.to!, { firstName: r.name }, videoRef());
     };
   }
 

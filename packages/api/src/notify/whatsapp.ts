@@ -671,15 +671,9 @@ export function emcuScorerAccountsNoticeParams(input: {
   ];
 }
 
-/** The two body params for `emcu_player_scoring`: {{1}} first name (fallback 'player'), {{2}} club. */
-export function emcuPlayerScoringParams(input: {
-  firstName: string;
-  clubName: string;
-}): TemplateParam[] {
-  return [
-    { type: 'text', text: cleanParam(input.firstName || 'player') },
-    { type: 'text', text: cleanParam(input.clubName) },
-  ];
+/** The one body param for `emcu_player_scoring` (10 Oct 2026 edit): {{1}} first name (fallback 'player'). */
+export function emcuPlayerScoringParams(input: { firstName: string }): TemplateParam[] {
+  return [{ type: 'text', text: cleanParam(input.firstName || 'player') }];
 }
 
 /**
@@ -711,7 +705,7 @@ export async function sendEmcuScorerAccountsNoticeWhatsApp(
  */
 export async function sendEmcuPlayerScoringWhatsApp(
   to: string,
-  input: { firstName: string; clubName: string },
+  input: { firstName: string },
   videoRef: VideoRef,
   opts?: DolphinsSendOptions,
 ): Promise<{ messageId: string }> {

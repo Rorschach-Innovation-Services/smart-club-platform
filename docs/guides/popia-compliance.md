@@ -69,8 +69,8 @@ Basis and controls:
   (`scorer<n>.<code>@medicoach.co.za` + password — credentials, not personal information of the
   chair, but sensitive), the WhatsApp only says they were emailed (**no credentials on
   WhatsApp**). EMCU players' (including minors', on the registered — usually guardian — contact)
-  email and cell leave the region for a notice that their matches are scored on MediCoach (first
-  name + club only). Basis: operational communication necessary to deliver live scoring of the
+  email and cell leave the region for a notice that their matches are scored live and scouted on MediCoach (first
+  name only). Basis: operational communication necessary to deliver live scoring of the
   fixtures the union runs; confirm with counsel alongside the invite flow. Controls: passwords
   are never logged or written to the run manifest / delivery rows (tests assert it), the
   credentials file stays outside both repos (mode 0600), and replies go to

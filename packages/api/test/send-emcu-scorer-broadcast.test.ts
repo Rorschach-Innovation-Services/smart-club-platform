@@ -385,25 +385,35 @@ describe('emails', () => {
     assert.ok(e.html.includes('A &amp; B &lt;CC&gt;'));
   });
 
-  test('player email: copy, video, app links, questions line', () => {
-    const e = emcuPlayerScoringEmailContent({
-      firstName: 'Sipho',
-      clubName: 'Umhlali Cricket Club',
-      staffVideoUrl: VIDEO,
-    });
-    assert.equal(e.subject, 'Your EMCU matches are scored on MediCoach 🏏');
-    assert.ok(e.text.startsWith('Dear Sipho 🏏,\n\n'));
-    assert.ok(
-      e.text.includes(
-        "Umhlali Cricket Club's EMCU matches are scored live on the MediCoach app this season by your club's appointed scorers. Speak to your club chairperson if you'd like to help score.",
-      ),
+  test('player email: the 10 Oct copy with the how-to video link and app links before the sign-off', () => {
+    const e = emcuPlayerScoringEmailContent({ firstName: 'Sipho', staffVideoUrl: VIDEO });
+    assert.equal(e.subject, 'Your matches are being scouted live on MediCoach 🏏');
+    assert.equal(
+      e.text,
+      'Dear Sipho 🏏\n\n' +
+        "We're proud to be professionalising the KZN cricket ecosystem — and you're part of it.\n\n" +
+        'Your matches are now being scored live on the MediCoach app, which means your performances are actively being scouted into the provincial pipeline. Every run, wicket and catch counts. 📊\n\n' +
+        '✅ To get started, watch the how-to video, request your scorer login details from your club chairperson, and score your games on the app.\n' +
+        `▶ Watch the how-to video: ${VIDEO}\n\n` +
+        'So bring your best today — the system is watching, and this is your chance to put your name forward.\n\n' +
+        'Get the app:\n' +
+        '  iPhone (App Store): https://apps.apple.com/us/app/medicoach-ams/id6760149086\n' +
+        '  Android (Google Play): https://play.google.com/store/apps/details?id=co.za.medicoach.app\n' +
+        '  Website: https://www.medicoach.co.za/\n\n' +
+        'Best of luck out there. 💚🏆\n\n' +
+        'Dolphins × MediCoach\n\n' +
+        'Questions? Email info@medicoach.co.za',
     );
-    assert.ok(e.text.includes(`▶ Watch how live scoring works: ${VIDEO}`));
-    assert.ok(e.text.endsWith('Questions? Email info@medicoach.co.za'));
-    assert.doesNotMatch(e.text, /password|sign-in/i);
+    assert.doesNotMatch(e.text, /video above|password/i);
+    assert.ok(e.html.includes(`href="${VIDEO}"`));
+    assert.ok(e.html.indexOf('Get the app') < e.html.indexOf('Best of luck'));
+    assert.equal(
+      emcuPlayerScoringEmailContent({ firstName: ' ', staffVideoUrl: VIDEO }).text.split('\n')[0],
+      'Dear player 🏏',
+    );
   });
 
-  test('player sample fills both params', () => {
+  test('player sample fills the one param', () => {
     const s = playerSampleText(
       {
         name: 'Sipho',
@@ -418,7 +428,8 @@ describe('emails', () => {
       VIDEO,
       'Meta upload',
     );
-    assert.match(s, /Dear Sipho 🏏\n\nUmhlali Cricket Club's EMCU matches/);
+    assert.match(s, /Dear Sipho 🏏\n\nWe're proud to be professionalising/);
+    assert.doesNotMatch(s, /\{\{\d\}\}/);
   });
 });
 
