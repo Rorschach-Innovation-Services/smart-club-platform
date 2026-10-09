@@ -142,7 +142,11 @@ Every applied change is audited in medicoach under the `smartclub-sync` principa
   `"<param> is invalid"` when either is present but malformed; 400 `"matchId is invalid"` when `matchId`
   is malformed.
 - 404 when no SYNCED fixture of that tournament (one with a smart club `ref`) OWNED BY THAT TENANT is
-  linked to that match, or the match was deleted. Another tenant's match is the same constant 404 as a
+  linked to that match, or the match was deleted. Also 404 when the fixture's result was set by a
+  medicoach administrator over its live match (a result override): that result is a manual one — §1
+  sends it with `source: "manual"` and no `medicoachMatchId` — so its ball-by-ball is not served.
+  Clearing the override restores the live result (re-recorded after the clear) and the scorecard.
+  Another tenant's match is the same constant 404 as a
   match that does not exist: nothing about it is revealed.
 - Scorecards are computed from the ball-by-ball record on every call (never stored); Time Cricket reads
   its paged ball log. Cricket only.
