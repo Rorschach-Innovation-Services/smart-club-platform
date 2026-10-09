@@ -107,3 +107,22 @@ their side (merge, or release the claim). Once fixed, the player's next change (
 `DELETE /admin/players/:nk` (POPIA) queues an `erase`: medicoach anonymises the player and drops
 the ref; match statistics stay on the anonymised record (ADR 0019, lawful basis). Club deletion
 never erases: people are re-sent with fewer teams, or removed from their teams.
+
+## 7. A player deleted their Match Centre account
+
+Medicoach records "Account deleted by user request" against the player. That is a data-subject
+request the sync must not undo: their next queued change would push them again, and an admin
+"create" on a review would recreate them. Opt them out of the sync. Their club registration in
+smart club is untouched; only an `erase` still goes to medicoach (it only removes data).
+
+```bash
+# dry run: shows the masked name, birth year and clubs the key prefix matches
+npx sst shell --stage prod -- npm --prefix packages/api run player-sync-opt-out -- \
+  --tenant dolphins --player <first 8+ chars of their natural key>
+# then the same with: --note "<why, no personal data>" --confirm
+```
+
+`--confirm` writes `PLAYERSYNCOPTOUT#<nk>`, drops their queued change and any held review; every
+later change is dropped unsent by the flush. The admin page's Players panel shows the count.
+`--remove --confirm` opts them back in and re-queues them (only if they ask to rejoin the Match
+Centre). Erasing the player (§6) deletes the opt-out marker with the rest of their sync state.

@@ -5205,7 +5205,7 @@ app.get('/integrations/medicoach/status', async (c) => {
   const enabled = hasFeature(config, 'medicoachSync');
   if (!enabled) return c.json({ enabled: false });
   const playersOn = playerSyncEnabled(config);
-  const [cursor, logs, pending, conflicts, markers, health, playerRows, playerReviews] =
+  const [cursor, logs, pending, conflicts, markers, health, playerRows, playerReviews, optedOut] =
     await Promise.all([
       repo.getSyncCursorRow(tenant),
       repo.listSyncLogs(tenant, 20),
@@ -5215,6 +5215,7 @@ app.get('/integrations/medicoach/status', async (c) => {
       repo.getSyncHealth(tenant),
       playersOn ? repo.listPendingPlayerSync(tenant) : Promise.resolve([]),
       playersOn ? repo.listPlayerReviews(tenant) : Promise.resolve([]),
+      playersOn ? repo.listPlayerSyncOptOuts(tenant) : Promise.resolve(new Set<string>()),
     ]);
   return c.json({
     enabled: true,
@@ -5267,7 +5268,9 @@ app.get('/integrations/medicoach/status', async (c) => {
       .sort((a, b) => b.detectedAt.localeCompare(a.detectedAt))
       .map((x) => conflictView(x)),
     // The player sync (ADR 0019): counts only — outbox rows hold natural keys, never shown.
-    players: playersOn ? playerSyncStatus(playerRows, playerReviews.length) : { enabled: false },
+    players: playersOn
+      ? playerSyncStatus(playerRows, playerReviews.length, optedOut.size)
+      : { enabled: false },
     // What needs an admin, at a glance (the nav badge + the page header read this).
     attention: {
       conflicts: conflicts.length,
@@ -5466,7 +5469,7 @@ app.post('/integrations/medicoach/outbox/drop', async (c) => {
  * team — the refs it named, which carry no personal data, tell the operator what to top up),
  * stuck (STUCK_ATTEMPTS+ failed pushes, still retried) and reviews waiting on an admin.
  */
-function playerSyncStatus(rows: PendingPlayerSync[], reviews: number) {
+function playerSyncStatus(rows: PendingPlayerSync[], reviews: number, optedOut: number) {
   const parked = rows.filter((r) => r.parked);
   const live = rows.filter((r) => !r.parked);
   const stuck = live.filter((r) => r.attempts >= STUCK_ATTEMPTS);
@@ -5482,6 +5485,8 @@ function playerSyncStatus(rows: PendingPlayerSync[], reviews: number) {
     parked: parked.length,
     stuck: stuck.length,
     reviews,
+    // People never sent to medicoach (e.g. deleted their Match Centre account) — a count only.
+    optedOut,
     missingTeamRefs: [...new Set(parked.flatMap((r) => r.missingTeamRefs ?? []))].sort(),
     ...(lastError ? { lastError, lastErrorText: explainSyncError(lastError) } : {}),
   };

@@ -12,6 +12,7 @@
     "export-cohort": "tsx src/export-cohort.ts",
     "export-medicoach": "tsx src/export-medicoach.ts",
     "enqueue-players": "tsx src/medicoach-sync/enqueue-players.ts",
+    "player-sync-opt-out": "tsx src/medicoach-sync/player-sync-opt-out.ts",
     "audit-player-duplicates": "tsx src/medicoach-sync/audit-player-duplicates.ts",
     "audit-dolphins-players": "tsx src/medicoach-sync/audit-dolphins-players.ts",
     "resolve-duplicate-players": "tsx src/resolve-duplicate-players.ts",
