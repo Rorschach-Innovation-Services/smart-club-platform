@@ -14,6 +14,8 @@
     "enqueue-players": "tsx src/medicoach-sync/enqueue-players.ts",
     "audit-player-duplicates": "tsx src/medicoach-sync/audit-player-duplicates.ts",
     "audit-dolphins-players": "tsx src/medicoach-sync/audit-dolphins-players.ts",
+    "resolve-duplicate-players": "tsx src/resolve-duplicate-players.ts",
+    "tombstone-deleted-players": "tsx src/tombstone-deleted-players.ts",
     "import-planb": "tsx src/import-planb-fixtures.ts",
     "create-recipe-knockouts": "tsx src/create-recipe-knockouts.ts",
     "import-umpire-appointments": "tsx src/import-umpire-appointments.ts",

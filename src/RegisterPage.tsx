@@ -39,6 +39,25 @@ import {
 import { formatDayYear } from './dates';
 import type { TransferWindow } from './types';
 
+/**
+ * The player-facing message for a failed submit. A 409 keeps the server's deliberately
+ * collapsed wording (dedup vs mid-transfer are indistinguishable by design) plus a next step;
+ * other 4xx answers are specific and shown as sent (bad link, rate limit, a field the server
+ * refused). Anything else — a 5xx, a network drop, a failed upload PUT — gets a human sentence
+ * that says which step failed instead of a bare "internal error".
+ */
+export function registrationErrorMessage(err: unknown, phase: 'upload' | 'submit'): string {
+  if (err instanceof ApiError && err.status === 409) {
+    return 'This person is already registered, or a transfer is already in progress. Contact your club or the union office if you think this is wrong.';
+  }
+  // uploadToPresigned's own failure ('upload failed') is a storage answer, not an API one.
+  const fromApi = err instanceof ApiError && err.message !== 'upload failed';
+  if (fromApi && err.status >= 400 && err.status < 500 && err.message) return err.message;
+  return phase === 'upload'
+    ? "We couldn't upload your ID document — please try again."
+    : 'Something went wrong submitting your registration — please try again.';
+}
+
 const EMPTY = {
   surname: '',
   firstNames: '',
@@ -270,6 +289,9 @@ export function RegisterPage() {
     }
     setError('');
     setBusy(true);
+    // Which step failed decides the message: a failed ID-document upload and a failed
+    // registration POST read differently to the player.
+    let phase: 'upload' | 'submit' = 'upload';
     try {
       // Presign + upload the ID document first so its meta rides on the registration POST
       // (one atomic create, mirroring the portal's create-then-record but without auth).
@@ -280,6 +302,7 @@ export function RegisterPage() {
         ct,
       );
       await uploadToPresigned(uploadUrl, idFile, contentType);
+      phase = 'submit';
       const res = await submitRegistration(clubId, token, {
         firstName: d.firstNames.trim(),
         lastName: d.surname.trim(),
@@ -338,13 +361,7 @@ export function RegisterPage() {
       else if (res?.clearance?.fromClubName) setClearanceFrom(res.clearance.fromClubName);
       setState('done');
     } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
-        // Matches the server's deliberately-collapsed conflict wording (dedup vs
-        // mid-transfer are indistinguishable by design).
-        setError('This person is already registered, or a transfer is already in progress.');
-      } else {
-        setError(err?.message || 'Could not submit. Please try again.');
-      }
+      setError(registrationErrorMessage(err, phase));
     } finally {
       setBusy(false);
     }

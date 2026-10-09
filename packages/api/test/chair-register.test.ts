@@ -520,3 +520,174 @@ describe('POST /clubs/:id/players/batch — quick-add grid', () => {
     assert.equal((await repo.listPlayers(TENANT, 'home')).length, before);
   });
 });
+
+describe('ID-number dedup guard — a legacy-key row with the same ID refuses the registration', () => {
+  /** A row stored under a LEGACY slug key (pre-hash), carrying the ID only as an attribute. */
+  async function seedLegacy(
+    clubId: string,
+    idNumber: string,
+    dob: string,
+    extra: Partial<PlayerRegistration> = {},
+  ) {
+    const p: PlayerRegistration = {
+      naturalKey: `legacy-${idNumber}-${clubId}`.toLowerCase(),
+      clubId,
+      firstName: 'Legacy',
+      lastName: 'Person',
+      dob,
+      idType: 'sa-id',
+      idNumber,
+      isMinor: false,
+      status: 'active',
+      version: 0,
+      consentAt: '2026-01-01T00:00:00.000Z',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      ...extra,
+    };
+    await repo.createPlayer(TENANT, p);
+    return p;
+  }
+  const rowsWithId = async (clubId: string, idNumber: string) =>
+    (await repo.listPlayers(TENANT, clubId)).filter((p) => p.idNumber === idNumber);
+  const clearancesFor = async (idNumber: string) =>
+    (await repo.listAllClearances(TENANT)).filter((x) => x.idNumber === idNumber);
+  const publicRegister = (clubId: string, body: Record<string, unknown>) =>
+    app.request(`/register/${clubId}?t=chairreg-tok`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ...body,
+        idDocMeta: {
+          objectKey: `${TENANT}/${clubId}/reg-x.png`,
+          size: 100,
+          contentType: 'image/png',
+        },
+      }),
+    });
+
+  test('chair single form: refused with the club named; no second row, no clearance', async () => {
+    const idNumber = validSaId('1990-07-07', 40);
+    const legacy = await seedLegacy('src', idNumber, '1990-07-07');
+    const res = await registerSingle(fullBody({ idNumber }));
+    assert.equal(res.status, 409);
+    const text = await res.text();
+    assert.match(text, /Source CC/);
+    assert.match(
+      text,
+      /This ID is already registered at Source CC under an older record\. Ask the union office to resolve the duplicate before registering this player\./,
+    );
+    assert.ok(!text.includes(legacy.naturalKey), 'the matched key is never returned');
+    assert.equal((await rowsWithId('home', idNumber)).length, 0);
+    assert.equal((await rowsWithId('src', idNumber))[0].status, 'active', 'legacy row untouched');
+    assert.equal((await clearancesFor(idNumber)).length, 0);
+  });
+
+  test('public link: refused with the uniform 409, byte-identical to a plain duplicate', async () => {
+    await repo.putToken('chairreg-tok', TENANT, 'other', '2026-06-01T00:00:00.000Z');
+    const legacyId = validSaId('1991-08-08', 41);
+    await seedLegacy('src', legacyId, '1991-08-08');
+    const legacyRes = await publicRegister('other', fullBody({ idNumber: legacyId }));
+
+    // A genuine same-key duplicate at the destination, for the reference answer.
+    const dupId = validSaId('1992-09-09', 42);
+    await seedActive(TENANT, 'other', dupId, '1992-09-09');
+    const dupRes = await publicRegister('other', fullBody({ idNumber: dupId }));
+
+    assert.equal(legacyRes.status, 409);
+    assert.equal(dupRes.status, 409);
+    assert.equal(await legacyRes.text(), await dupRes.text());
+    assert.equal(legacyRes.headers.get('content-type'), dupRes.headers.get('content-type'));
+    assert.equal((await rowsWithId('other', legacyId)).length, 0);
+    assert.equal((await clearancesFor(legacyId)).length, 0);
+  });
+
+  test('chair quick-add: the row is an error naming the club; the rest of the batch proceeds', async () => {
+    const idNumber = validSaId('1993-10-10', 43);
+    await seedLegacy('src', idNumber, '1993-10-10');
+    const fresh = validSaId('1993-10-10', 44);
+    const res = await app.request(`/clubs/home/players/batch`, {
+      method: 'POST',
+      headers: headers(REP_HOME),
+      body: JSON.stringify({
+        rows: [
+          { firstName: 'Legacy', lastName: 'Person', idNumber },
+          { firstName: 'Legacy', lastName: 'Person', idNumber: fresh },
+        ],
+      }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      results: Array<{ outcome: string; error?: string; errorShort?: string }>;
+    };
+    assert.equal(body.results[0].outcome, 'error');
+    assert.match(
+      body.results[0].error ?? '',
+      /already registered at Source CC under an older record/,
+    );
+    assert.equal(
+      body.results[0].errorShort,
+      'Already at Source CC under an older record — union office must resolve',
+    );
+    // Same name + dob, different ID: a different person — unaffected.
+    assert.equal(body.results[1].outcome, 'created');
+    assert.equal((await rowsWithId('home', idNumber)).length, 0);
+  });
+
+  test('a legacy row at the destination itself also refuses (no second row for one person)', async () => {
+    const idNumber = validSaId('1989-11-11', 45);
+    await seedLegacy('home', idNumber, '1989-11-11');
+    const res = await registerSingle(fullBody({ idNumber }));
+    assert.equal(res.status, 409);
+    assert.match(await res.text(), /Home CC/);
+    assert.equal((await rowsWithId('home', idNumber)).length, 1);
+  });
+
+  test('a placeholder row carrying the ID is ignored (normal registration proceeds)', async () => {
+    const idNumber = validSaId('1988-12-12', 46);
+    await seedLegacy('other', idNumber, '1988-12-12', { placeholder: true, status: 'inactive' });
+    const res = await registerSingle(fullBody({ idNumber }));
+    assert.equal(res.status, 201);
+    assert.equal(((await res.json()) as SingleResponse).outcome, 'created');
+  });
+
+  test('a dummy ID on a legacy row and the registration is never matched', async () => {
+    await seedLegacy('src', '000000', '1987-01-01', {
+      idType: 'passport',
+      nationality: 'Zimbabwean',
+    });
+    const res = await registerSingle(
+      fullBody({
+        idType: 'passport',
+        idNumber: '000000',
+        nationality: 'Zimbabwean',
+        dob: '1987-01-01',
+      }),
+    );
+    assert.equal(res.status, 201);
+    assert.equal(((await res.json()) as SingleResponse).outcome, 'created');
+  });
+
+  test('a same-key hit at another club still opens a clearance (path unchanged)', async () => {
+    const idNumber = validSaId('1986-02-02', 47);
+    await seedActive(TENANT, 'src', idNumber, '1986-02-02');
+    const res = await registerSingle(fullBody({ idNumber }));
+    assert.equal(res.status, 201);
+    const body = (await res.json()) as SingleResponse;
+    assert.equal(body.outcome, 'clearance-opened');
+    assert.equal(body.clearance?.fromClubId, 'src');
+  });
+
+  test('dummy detection + namespaced keys (pure)', async () => {
+    const { isDummyId, idIndexKey } = await import('../src/register-player.js');
+    for (const d of ['', 'NONE', 'N/A', '0000000000000', '1111111', '1234567890123', 'AB1'])
+      assert.equal(isDummyId(d), true, d);
+    assert.equal(isDummyId(validSaId('1990-01-01', 1)), false);
+    assert.equal(isDummyId('ZW123456'), false);
+    // Same passport number, different countries: different people.
+    assert.notEqual(
+      idIndexKey({ idType: 'passport', idNumber: 'ZW123456', nationality: 'Zimbabwean' }),
+      idIndexKey({ idType: 'passport', idNumber: 'ZW123456', nationality: 'Zambian' }),
+    );
+    assert.equal(idIndexKey({ idNumber: ' 9001015000081 ' }), 'sa-id:9001015000081');
+  });
+});

@@ -406,6 +406,8 @@ export interface ChairBulkResult {
   /** Clubs where the same name + date of birth is registered under another ID (a soft warning). */
   possibleExistingAt?: string[];
   error?: string;
+  /** A grid-cell-sized form of `error`, when the server has one (full text stays in `error`). */
+  errorShort?: string;
 }
 export interface ChairBulkResponse {
   results: ChairBulkResult[];
@@ -441,6 +443,15 @@ export type ChairRosterConflict =
       clubName: string;
       /** 'active' → commit opens a clearance; 'clearance-pending' → a transfer is in flight. */
       status: string;
+    }
+  | {
+      /** The same ID is rostered under an older record (a different key): commit would refuse. */
+      type: 'legacy-id';
+      clubId: string;
+      clubName: string;
+      /** Full chair-facing reason (tooltip); `messageShort` fits the review column. */
+      message: string;
+      messageShort: string;
     };
 export type ChairRosterParseRow = RosterDraftRow & { conflict?: ChairRosterConflict };
 /** The operator parse's shape (RosterIntakeParseResponse, parseable branch) plus `conflict`. */

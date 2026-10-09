@@ -1777,6 +1777,25 @@ describe('public registration ID-doc upload-url', () => {
     assert.equal(body.contentType, 'application/pdf');
     assert.match(body.objectKey, /-id\.pdf$/);
   });
+
+  test('local uploads mode: a local/ key and a PUT to this server’s /local-uploads sink', async () => {
+    // dev:local has no S3 bucket — without this branch the public flow 500s at the presign.
+    const prev = process.env.LOCAL_UPLOADS_DIR;
+    process.env.LOCAL_UPLOADS_DIR = '/tmp/never-written-by-this-test';
+    try {
+      const res = await app.request(
+        'http://localhost/register/regclub/id-doc/upload-url?t=reg-upload-token',
+        { method: 'POST', body: JSON.stringify({ contentType: 'image/png' }) },
+      );
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { uploadUrl: string; objectKey: string };
+      assert.match(body.objectKey, /^local\/dolphins\/regclub\/reg-[0-9a-f-]+-id\.png$/);
+      assert.equal(body.uploadUrl, `http://localhost/local-uploads/${body.objectKey}`);
+    } finally {
+      if (prev === undefined) delete process.env.LOCAL_UPLOADS_DIR;
+      else process.env.LOCAL_UPLOADS_DIR = prev;
+    }
+  });
 });
 
 describe('POST /register/:clubId (public self-registration body)', () => {

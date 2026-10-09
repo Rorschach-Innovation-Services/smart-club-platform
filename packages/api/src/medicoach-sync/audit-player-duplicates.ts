@@ -50,9 +50,14 @@ export interface DuplicateGroup {
   allConfirmedDistinct: boolean;
 }
 
-/** Same name + dob, different natural key. Deterministic order (largest groups first). */
-export function duplicateGroups(snap: PlayerSyncSnapshot): DuplicateGroup[] {
-  const groups: DuplicateGroup[] = [];
+/**
+ * The grouping itself, with the natural keys (sorted) — for the operator CLIs that act on the
+ * groups (resolve-duplicate-players). Never print these keys. Snapshot order.
+ */
+export function duplicateKeyGroups(
+  snap: PlayerSyncSnapshot,
+): Array<{ keys: string[]; allConfirmedDistinct: boolean }> {
+  const groups: Array<{ keys: string[]; allConfirmedDistinct: boolean }> = [];
   for (const nks of snap.byNameDob.values()) {
     if (nks.size < 2) continue;
     const keys = [...nks].sort();
@@ -60,6 +65,15 @@ export function duplicateGroups(snap: PlayerSyncSnapshot): DuplicateGroup[] {
     for (let i = 0; i < keys.length; i++)
       for (let j = i + 1; j < keys.length; j++)
         if (!snap.distinct.has(distinctPair(keys[i], keys[j]).join('#'))) allDistinct = false;
+    groups.push({ keys, allConfirmedDistinct: allDistinct });
+  }
+  return groups;
+}
+
+/** Same name + dob, different natural key. Deterministic order (largest groups first). */
+export function duplicateGroups(snap: PlayerSyncSnapshot): DuplicateGroup[] {
+  const groups: DuplicateGroup[] = [];
+  for (const { keys, allConfirmedDistinct: allDistinct } of duplicateKeyGroups(snap)) {
     groups.push({
       allConfirmedDistinct: allDistinct,
       persons: keys.map((nk) => {
