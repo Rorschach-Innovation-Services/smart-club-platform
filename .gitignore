@@ -71,6 +71,13 @@ dolphins-welcome-broadcast-*.json
 # …and its delivery reports (report-dolphins-welcome-broadcast.ts) — names, contacts, statuses.
 dolphins-welcome-broadcast-report-*.html
 dolphins-welcome-broadcast-report-*.pdf
+# send-emcu-scorer-broadcast run manifests + reports (names, contacts, statuses — never
+# credentials, but still PII).
+emcu-scorer-broadcast-*.json
+emcu-scorer-broadcast-report-*.html
+emcu-scorer-broadcast-report-*.pdf
+# MediCoach scorer credentials (passwords) — belongs outside both repos; belt and braces.
+emcu-scorer-credentials*.json
 
 # generated cohort exports (contain PII)
 cohort-export-*.xlsx

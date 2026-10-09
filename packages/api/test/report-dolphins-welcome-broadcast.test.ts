@@ -9,6 +9,9 @@ import {
   buildReport,
   renderReportHtml,
   formatSast,
+  reportStyleFor,
+  EMCU_SCORER_REPORT_STYLE,
+  WELCOME_REPORT_STYLE,
 } from '../src/report-dolphins-welcome-broadcast.js';
 import { broadcastDeliveryFor, broadcastRunId } from '../src/send-dolphins-welcome-broadcast.js';
 import { nextProviderStatus } from '../src/notify/whatsapp-status.js';
@@ -202,6 +205,7 @@ describe('buildReport', () => {
       sendErrors: 1,
       skipped: 0,
       untracked: 0,
+      marketingCap: 0,
     });
     assert.deepEqual(report.summary.skipsByReason, { inactive: 2, deduped: 1 });
   });
@@ -318,5 +322,84 @@ describe('nextProviderStatus (webhook, broadcast rows)', () => {
       providerError: 'failed',
     });
     assert.equal(nextProviderStatus('failed', s('read')), null);
+  });
+});
+
+describe('EMCU scorer broadcast manifests render through the same report', () => {
+  const emcu = {
+    broadcast: 'emcu-scorers',
+    audience: 'chairs',
+    tenant: 'dolphins',
+    mode: 'confirm' as const,
+    runId: RUN,
+    stage: 'prod',
+    startedAt: AT,
+    args: {
+      channels: ['email' as const, 'whatsapp' as const],
+      staffVideoUrl: 'https://example.com/staff.mp4',
+      mediaId: 'media-9',
+      excludeClubs: ['umlazi-cc-mut'],
+    },
+    recipients: [
+      {
+        cohort: 'staff' as const,
+        name: 'Thandi Nkosi',
+        email: 'chair@example.com',
+        cell: '27820000001',
+        roles: ['Chairperson @ Umhlali CC'],
+        clubs: ['Umhlali CC'],
+        outcome: 'sent',
+        scorerAccounts: 4,
+        messages: [mail('emcu-chair-email'), wa('emcu_scorer_accounts_notice', 'wamid.E1')],
+      },
+    ],
+    skips: [{ reason: 'no-chair-email', detail: 'Dolphins Deaf (dolphins-deaf-cricket-team)' }],
+  };
+
+  test('the manifest picks the EMCU style; a welcome manifest keeps the welcome style', () => {
+    assert.equal(reportStyleFor(emcu), EMCU_SCORER_REPORT_STYLE);
+    assert.equal(reportStyleFor({}), WELCOME_REPORT_STYLE);
+  });
+
+  test('chairs are labelled as chairs, with EMCU kind labels and run args', () => {
+    const model = buildReport(emcu, [delivery('wamid.E1', { providerStatus: 'read' })]);
+    assert.equal(model.staff.length, 1);
+    assert.equal(model.summary.whatsapp.read, 1);
+    const html = renderReportHtml(model, AT, EMCU_SCORER_REPORT_STYLE);
+    assert.match(html, /<title>EMCU scorer broadcast report<\/title>/);
+    assert.match(html, /<h2>Chairs \(1\)<\/h2>/);
+    assert.match(html, /Scorer accounts notice/);
+    assert.match(html, /WhatsApp video \(Meta media id\)<\/dt><dd>media-9/);
+    assert.match(html, /Clubs excluded<\/dt><dd>umlazi-cc-mut/);
+    assert.doesNotMatch(html, /Dolphins welcome/);
+  });
+
+  test('a marketing-capped WhatsApp shows as its own status, not a send error', () => {
+    const capped = {
+      ...emcu,
+      recipients: [
+        {
+          ...emcu.recipients[0]!,
+          messages: [
+            mail('emcu-chair-email'),
+            {
+              ...wa('emcu_scorer_accounts_notice', ''),
+              status: 'skipped' as const,
+              delivered: false,
+              error: 'marketing-cap (131049): healthy ecosystem',
+              marketingCap: true,
+            },
+          ],
+        },
+      ],
+    };
+    const model = buildReport(capped, []);
+    assert.equal(model.summary.whatsapp.marketingCap, 1);
+    assert.equal(model.summary.whatsapp.sendErrors, 0);
+    assert.equal(model.summary.whatsapp.skipped, 0);
+    assert.equal(model.staff[0]!.whatsapp[0]!.status, 'marketing-cap');
+    const html = renderReportHtml(model, AT, EMCU_SCORER_REPORT_STYLE);
+    assert.match(html, /Not sent — Meta marketing cap/);
+    assert.match(html, /1 refused by Meta&#39;s marketing cap|1 refused by Meta's marketing cap/);
   });
 });

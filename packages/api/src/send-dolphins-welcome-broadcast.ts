@@ -225,11 +225,13 @@ interface Contact {
   minor: boolean;
 }
 
-const normEmail = (raw: unknown): string => {
+/** Contact normalisers — also used by send-emcu-scorer-broadcast.ts. PURE. */
+export const normEmail = (raw: unknown): string => {
   const e = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
   return EMAIL_RE.test(e) ? e : '';
 };
-const normCell = (raw: unknown): string => (typeof raw === 'string' ? toE164(raw) : null) ?? '';
+export const normCell = (raw: unknown): string =>
+  (typeof raw === 'string' ? toE164(raw) : null) ?? '';
 const str = (raw: unknown): string => (typeof raw === 'string' ? raw.trim() : '');
 
 /**
@@ -430,8 +432,8 @@ export type MessageKind =
   | 'dolphins_player_fyi'
   | 'dolphins_player_welcome';
 
-export interface PlannedMessage {
-  kind: MessageKind;
+export interface PlannedMessage<K extends string = MessageKind> {
+  kind: K;
   channel: Channel;
   status: 'send' | 'skip';
   to?: string;
@@ -529,7 +531,7 @@ export function videoFileBlockers(
 }
 
 /** File size in bytes, or null when the path is missing / not a regular file. */
-function fileSize(path: string): number | null {
+export function fileSize(path: string): number | null {
   try {
     const st = statSync(path);
     return st.isFile() ? st.size : null;
@@ -538,7 +540,7 @@ function fileSize(path: string): number | null {
   }
 }
 
-function parseChannels(raw: string): Channel[] {
+export function parseChannels(raw: string): Channel[] {
   const out: Channel[] = [];
   for (const part of raw
     .split(',')
@@ -600,7 +602,7 @@ function dryRunReason(channel: Channel, env: NodeJS.ProcessEnv = process.env): s
 
 /** The --confirm dry-run send guard (as import-lions-contacts.ts). Empty ⇒ proceed. PURE. */
 export function dryRunSendRefusals(
-  plans: PlannedMessage[][],
+  plans: Array<Array<Pick<PlannedMessage<string>, 'status'>>>,
   channels: Channel[],
   dryRun: Record<Channel, boolean>,
   env: NodeJS.ProcessEnv = process.env,
@@ -708,8 +710,8 @@ function printSamples(
 
 // ───────────────────────── Manifest ─────────────────────────
 
-export interface MessageOutcome {
-  kind: MessageKind;
+export interface MessageOutcome<K extends string = MessageKind> {
+  kind: K;
   channel: Channel;
   to?: string;
   status: 'sent' | 'failed' | 'skipped';
@@ -775,7 +777,7 @@ export const broadcastRunId = (startedAt: string): string => startedAt.replace(/
 const manifestPath = (runId: string): string => `./dolphins-welcome-broadcast-${runId}.json`;
 
 /** SST_STAGE, else SST_RESOURCE_App's stage, else null (as import-lions-contacts.ts). */
-function stageFromEnv(env: NodeJS.ProcessEnv = process.env): string | null {
+export function stageFromEnv(env: NodeJS.ProcessEnv = process.env): string | null {
   if (env.SST_STAGE?.trim()) return env.SST_STAGE.trim();
   try {
     const app = JSON.parse(env.SST_RESOURCE_App ?? '{}') as { stage?: unknown };
@@ -793,7 +795,7 @@ function stageFromEnv(env: NodeJS.ProcessEnv = process.env): string | null {
 export function broadcastDeliveryFor(
   runId: string,
   recipient: Pick<Recipient, 'name' | 'email' | 'cell'>,
-  outcome: MessageOutcome,
+  outcome: MessageOutcome<string>,
 ): import('./repo.js').BroadcastDelivery | null {
   if (outcome.channel !== 'whatsapp' || outcome.status !== 'sent' || !outcome.delivered)
     return null;

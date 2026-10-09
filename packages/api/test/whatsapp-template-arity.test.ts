@@ -30,6 +30,10 @@ const {
   sendDolphinsPlayerFyiWhatsApp,
   WhatsAppTemplatePendingError,
   assertTemplateSendable,
+  emcuScorerAccountsNoticeParams,
+  emcuPlayerScoringParams,
+  sendEmcuScorerAccountsNoticeWhatsApp,
+  sendEmcuPlayerScoringWhatsApp,
 } = await import('../src/notify/whatsapp.js');
 const { WHATSAPP_TEMPLATES } = await import('../src/notify/whatsapp-templates.js');
 
@@ -108,6 +112,18 @@ const BUILDERS = [
   {
     key: 'dolphinsPlayerFyi' as const,
     params: dolphinsPlayerFyiParams(),
+  },
+  {
+    key: 'emcuScorerAccountsNotice' as const,
+    params: emcuScorerAccountsNoticeParams({
+      chairName: 'Thandi Nkosi',
+      clubName: 'Umhlali Cricket Club',
+      chairEmail: 'chairperson@umhlalicc.co.za',
+    }),
+  },
+  {
+    key: 'emcuPlayerScoring' as const,
+    params: emcuPlayerScoringParams({ firstName: 'Sipho', clubName: 'Umhlali Cricket Club' }),
   },
 ];
 
@@ -331,6 +347,8 @@ describe('Dolphins welcome broadcast templates (VIDEO header; all three approved
       'dolphins_staff_welcome',
       'dolphins_player_welcome',
       'dolphins_player_fyi',
+      'emcu_scorer_accounts_notice',
+      'emcu_player_scoring',
     ]);
   });
 
@@ -431,5 +449,85 @@ describe('Dolphins welcome broadcast templates (VIDEO header; all three approved
       ),
     );
     assert.doesNotMatch(staff, /login details/i);
+  });
+});
+
+describe('EMCU scorer broadcast templates (VIDEO header, static app buttons; approved as Marketing 10 Oct 2026)', () => {
+  const entries = [
+    ['emcuScorerAccountsNotice', 'emcu_scorer_accounts_notice', 3],
+    ['emcuPlayerScoring', 'emcu_player_scoring', 2],
+  ] as const;
+
+  for (const [key, name, arity] of entries) {
+    test(`${name}: en, ${arity} body params, VIDEO header, no dynamic URL button, registered`, () => {
+      const def = WHATSAPP_TEMPLATES[key];
+      assert.equal(def.name, name);
+      assert.equal(def.lang, 'en');
+      assert.equal(def.paramCount, arity);
+      assert.deepEqual(def.header, { format: 'VIDEO' });
+      // The two app buttons are STATIC in Meta: no urlButton (no send-time button component).
+      assert.ok(!('urlButton' in def));
+      assert.equal(def.status, 'registered');
+      assert.ok(def.bodyText.length <= 1024, 'Meta caps a template body at 1024 chars');
+      assert.doesNotMatch(def.bodyText, /^\{\{|\{\{\d+\}\}\s*$/);
+      assert.match(def.bodyText, /video above/);
+      assert.match(def.bodyText, /info@medicoach\.co\.za/);
+      assert.doesNotMatch(def.bodyText, /password/i, 'no credentials on WhatsApp');
+    });
+  }
+
+  test('the chair notice body is exactly the Meta-approved copy (10 Oct 2026)', () => {
+    assert.equal(
+      WHATSAPP_TEMPLATES.emcuScorerAccountsNotice.bodyText,
+      'Dear {{1}}\n\n' +
+        "EMCU matches for {{2}} are scored live on the MediCoach app this season. Your club's 4 scorer accounts have been emailed to {{3}}. Please check your spam folder if you can't see it.\n\n" +
+        'Give each scorer their own account, one account per match. Watch the video above to see how scoring works, and download the app using the buttons below or sign in at https://www.medicoach.co.za/\n\n' +
+        'Need help? Email info@medicoach.co.za',
+    );
+  });
+
+  test('the player body is exactly the Meta-approved copy (10 Oct 2026)', () => {
+    assert.equal(
+      WHATSAPP_TEMPLATES.emcuPlayerScoring.bodyText,
+      'Dear {{1}} 🏏\n\n' +
+        "{{2}}'s EMCU matches are scored live on the MediCoach app this season by your club's appointed scorers. Speak to your club chairperson if you'd like to help score.\n\n" +
+        'Watch the video above to see how live scoring works, and download the app using the buttons below or visit https://www.medicoach.co.za/\n\n' +
+        'Questions? Email info@medicoach.co.za',
+    );
+  });
+
+  test('params are cleaned with neutral fallbacks; the chair email passes cleanParam unchanged', () => {
+    assert.deepEqual(
+      emcuScorerAccountsNoticeParams({
+        chairName: '',
+        clubName: ' Umhlali\n Cricket  Club ',
+        chairEmail: 'chairperson@umhlalicc.co.za',
+      }).map((p) => p.text),
+      ['Chairperson', 'Umhlali Cricket Club', 'chairperson@umhlalicc.co.za'],
+    );
+    assert.deepEqual(
+      emcuPlayerScoringParams({ firstName: '', clubName: 'Umhlali Cricket Club' }).map(
+        (p) => p.text,
+      ),
+      ['player', 'Umhlali Cricket Club'],
+    );
+  });
+
+  test('both are approved (registered) and their senders pass the gate (dry-run)', async () => {
+    const sent = await sendEmcuScorerAccountsNoticeWhatsApp(
+      '27820000000',
+      { chairName: 'A', clubName: 'B', chairEmail: 'a@b.co' },
+      { id: 'media-1' },
+    );
+    assert.match(sent.messageId, /^dry-run-/);
+    const player = await sendEmcuPlayerScoringWhatsApp(
+      '27820000000',
+      { firstName: 'A', clubName: 'B' },
+      { id: 'media-1' },
+    );
+    assert.match(player.messageId, /^dry-run-/);
+    // The gate still refuses them if ever flipped back to pending.
+    const pending = { ...WHATSAPP_TEMPLATES.emcuPlayerScoring, status: 'pending' as const };
+    assert.throws(() => assertTemplateSendable(pending), WhatsAppTemplatePendingError);
   });
 });

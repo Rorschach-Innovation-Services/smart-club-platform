@@ -63,6 +63,19 @@ Basis and controls:
   counsel alongside the invite flow. Controls: no ID number, contact detail, or other player
   field is included (name only); sends are capped per club per day (anti-abuse of the public
   registration route); and the same dry-run gate applies.
+- **EMCU scorer broadcast (Oct 2026, one-off CLI `send-emcu-scorer-broadcast.ts`).** Purpose:
+  **scorer access for EMCU fixtures** on MediCoach. Each EMCU club chair's email and cell leave
+  the region via the same processors: the email carries the club's MediCoach scorer logins
+  (`scorer<n>.<code>@medicoach.co.za` + password — credentials, not personal information of the
+  chair, but sensitive), the WhatsApp only says they were emailed (**no credentials on
+  WhatsApp**). EMCU players' (including minors', on the registered — usually guardian — contact)
+  email and cell leave the region for a notice that their matches are scored on MediCoach (first
+  name + club only). Basis: operational communication necessary to deliver live scoring of the
+  fixtures the union runs; confirm with counsel alongside the invite flow. Controls: passwords
+  are never logged or written to the run manifest / delivery rows (tests assert it), the
+  credentials file stays outside both repos (mode 0600), and replies go to
+  info@medicoach.co.za. **End-of-season step:** disable every `scorer*@medicoach.co.za` account
+  in MediCoach.
 - **Auditability:** sends are recorded (channel, recipient, status, timestamp, actor) so
   transfers are traceable. The per-send idempotency markers (`INVITE#<key>` items, still used
   by the fixtures broadcast) hold the recipient; both the `commLog` and the markers are

@@ -618,6 +618,8 @@ async function sendSesEmail(
   to: string,
   content: { subject: string; text: string; html: string },
   dryRunLabel: string,
+  /** `replyTo` sets the SES ReplyToAddresses (absent ⇒ replies go to the From address). */
+  opts: { replyTo?: string } = {},
 ): Promise<{ messageId: string }> {
   if (EMAIL_DRY_RUN) {
     console.log(`[notify:email dry-run] would send ${dryRunLabel} to ${to}`);
@@ -627,6 +629,7 @@ async function sendSesEmail(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
       Destination: { ToAddresses: [to] },
+      ...(opts.replyTo ? { ReplyToAddresses: [opts.replyTo] } : {}),
       Message: {
         Subject: { Data: content.subject, Charset: 'UTF-8' },
         Body: {
@@ -1853,4 +1856,160 @@ export async function sendPlayerWelcomeEmail(
   input: PlayerWelcomeEmailInput,
 ): Promise<{ messageId: string }> {
   return sendSesEmail(input.to, playerWelcomeEmailContent(input), 'dolphins player welcome');
+}
+
+// ── EMCU scorer broadcast (one-off CLI: send-emcu-scorer-broadcast.ts) ──
+
+/** MediCoach support: in both emails and both WhatsApp bodies, and the emails' SES reply-to. */
+export const MEDICOACH_SUPPORT_EMAIL = 'info@medicoach.co.za';
+export const MEDICOACH_APP_LINKS = {
+  ios: 'https://apps.apple.com/us/app/medicoach-ams/id6760149086',
+  android: 'https://play.google.com/store/apps/details?id=co.za.medicoach.app',
+  web: 'https://www.medicoach.co.za/',
+} as const;
+
+/** One MediCoach scorer login. The password is a SECRET: never logged, never in a manifest. */
+export interface ScorerAccount {
+  email: string;
+  password: string;
+}
+
+const appLinksText = (): string =>
+  'Get the app:\n' +
+  `  iPhone (App Store): ${MEDICOACH_APP_LINKS.ios}\n` +
+  `  Android (Google Play): ${MEDICOACH_APP_LINKS.android}\n` +
+  `  Website: ${MEDICOACH_APP_LINKS.web}`;
+
+const appLinksHtml = (): string =>
+  `<p><strong>Get the app:</strong> ` +
+  `<a href="${MEDICOACH_APP_LINKS.ios}" style="color:#1D9E75">iPhone (App Store)</a> · ` +
+  `<a href="${MEDICOACH_APP_LINKS.android}" style="color:#1D9E75">Android (Google Play)</a> · ` +
+  `<a href="${MEDICOACH_APP_LINKS.web}" style="color:#1D9E75">www.medicoach.co.za</a></p>`;
+
+const watchScoringText = (url: string): string => `▶ Watch how live scoring works: ${url}`;
+const watchScoringHtml = (url: string): string =>
+  `<p><a href="${escapeHtml(url)}" style="color:#1D9E75;font-weight:600">▶ Watch how live scoring works</a></p>`;
+
+export interface EmcuChairScorerEmailInput {
+  to: string;
+  /** The chair's name; '' ⇒ "Chairperson". */
+  name: string;
+  clubName: string;
+  /** The club's scorer logins, in scorer order (Scorer 1 first). */
+  accounts: ScorerAccount[];
+  /** Public URL of the staff live-scoring video. */
+  staffVideoUrl: string;
+}
+
+/**
+ * EMCU scorer broadcast — CHAIR email: the club's MediCoach scorer logins (Scorer 1..n table:
+ * sign-in email + password), the staff video link and the app links. The ONLY channel that
+ * carries credentials. Pure — exported for tests and the CLI's (redacted) dry-run sample.
+ */
+export function emcuChairScorerEmailContent(input: Omit<EmcuChairScorerEmailInput, 'to'>): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const subject = "Your club's MediCoach scorer accounts";
+  const greetName = input.name.trim() || 'Chairperson';
+  const n = input.accounts.length;
+  const intro =
+    `EMCU matches for ${input.clubName} are scored live on the MediCoach app this season. ` +
+    `Your club has ${n} scorer account${n === 1 ? '' : 's'}` +
+    (n > 1 ? `, so up to ${n} people can score ${n} different matches at the same time` : '') +
+    ". Give each scorer their own account — don't use one account for two matches at once.";
+  const closing =
+    "Please keep these details within your club's scorers. If you are no longer the " +
+    `chairperson, or an account needs a reset, email ${MEDICOACH_SUPPORT_EMAIL}.`;
+  const rowsText = input.accounts
+    .map((a, i) => `Scorer ${i + 1}\n  Sign-in email: ${a.email}\n  Password: ${a.password}`)
+    .join('\n\n');
+  const text =
+    `Dear ${greetName},\n\n` +
+    `${intro}\n\n` +
+    `${watchScoringText(input.staffVideoUrl)}\n\n` +
+    `${rowsText}\n\n` +
+    `${appLinksText()}\n\n` +
+    closing;
+  const cell = 'padding:6px 10px;border:1px solid #D5DCE6;text-align:left';
+  const table =
+    `<table style="border-collapse:collapse;margin:12px 0">` +
+    `<thead><tr><th style="${cell}">Scorer</th><th style="${cell}">Sign-in email</th><th style="${cell}">Password</th></tr></thead><tbody>` +
+    input.accounts
+      .map(
+        (a, i) =>
+          `<tr><td style="${cell}">Scorer ${i + 1}</td>` +
+          `<td style="${cell}">${escapeHtml(a.email)}</td>` +
+          `<td style="${cell};font-family:Menlo,Consolas,monospace">${escapeHtml(a.password)}</td></tr>`,
+      )
+      .join('') +
+    `</tbody></table>`;
+  const html =
+    EMAIL_WRAP_OPEN +
+    `<p>Dear ${escapeHtml(greetName)},</p>` +
+    `<p>${escapeHtml(intro)}</p>` +
+    watchScoringHtml(input.staffVideoUrl) +
+    table +
+    appLinksHtml() +
+    `<p>${escapeHtml(closing)}</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+export async function sendEmcuChairScorerEmail(
+  input: EmcuChairScorerEmailInput,
+): Promise<{ messageId: string }> {
+  return sendSesEmail(input.to, emcuChairScorerEmailContent(input), 'EMCU scorer accounts', {
+    replyTo: MEDICOACH_SUPPORT_EMAIL,
+  });
+}
+
+export interface EmcuPlayerScoringEmailInput {
+  to: string;
+  /** The player's first name; '' ⇒ "player". */
+  firstName: string;
+  clubName: string;
+  /** Public URL of the staff live-scoring video. */
+  staffVideoUrl: string;
+}
+
+/**
+ * EMCU scorer broadcast — PLAYER email: matches are scored live on MediCoach by the club's
+ * appointed scorers (no logins, no request to ask for one). Pure — exported for tests.
+ */
+export function emcuPlayerScoringEmailContent(input: Omit<EmcuPlayerScoringEmailInput, 'to'>): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const subject = 'Your EMCU matches are scored on MediCoach 🏏';
+  const greetName = input.firstName.trim() || 'player';
+  const body =
+    `${input.clubName}'s EMCU matches are scored live on the MediCoach app this season by your ` +
+    "club's appointed scorers. Speak to your club chairperson if you'd like to help score.";
+  const questions = `Questions? Email ${MEDICOACH_SUPPORT_EMAIL}`;
+  const text =
+    `Dear ${greetName} 🏏,\n\n` +
+    `${body}\n\n` +
+    `${watchScoringText(input.staffVideoUrl)}\n\n` +
+    `${appLinksText()}\n\n` +
+    questions;
+  const html =
+    EMAIL_WRAP_OPEN +
+    `<p>Dear ${escapeHtml(greetName)} 🏏,</p>` +
+    `<p>${escapeHtml(body)}</p>` +
+    watchScoringHtml(input.staffVideoUrl) +
+    appLinksHtml() +
+    `<p>${escapeHtml(questions)}</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+export async function sendEmcuPlayerScoringEmail(
+  input: EmcuPlayerScoringEmailInput,
+): Promise<{ messageId: string }> {
+  return sendSesEmail(input.to, emcuPlayerScoringEmailContent(input), 'EMCU player scoring', {
+    replyTo: MEDICOACH_SUPPORT_EMAIL,
+  });
 }

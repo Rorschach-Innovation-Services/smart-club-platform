@@ -649,6 +649,85 @@ export async function sendDolphinsPlayerFyiWhatsApp(
   );
 }
 
+// ── EMCU scorer broadcast (one-off CLI: send-emcu-scorer-broadcast.ts) ──
+// Both templates carry a VIDEO header and two STATIC URL buttons (App Store / Google Play):
+// static buttons need no send-time component, so these senders pass no button suffix.
+
+/**
+ * The three body params for `emcu_scorer_accounts_notice`, in order: {{1}} chair name (fallback
+ * 'Chairperson'), {{2}} club name, {{3}} the chair email the logins were sent to. Every param
+ * rides through cleanParam (an email address has no whitespace, so it passes unchanged).
+ * NEVER a password — logins go by email only.
+ */
+export function emcuScorerAccountsNoticeParams(input: {
+  chairName: string;
+  clubName: string;
+  chairEmail: string;
+}): TemplateParam[] {
+  return [
+    { type: 'text', text: cleanParam(input.chairName || 'Chairperson') },
+    { type: 'text', text: cleanParam(input.clubName) },
+    { type: 'text', text: cleanParam(input.chairEmail) },
+  ];
+}
+
+/** The two body params for `emcu_player_scoring`: {{1}} first name (fallback 'player'), {{2}} club. */
+export function emcuPlayerScoringParams(input: {
+  firstName: string;
+  clubName: string;
+}): TemplateParam[] {
+  return [
+    { type: 'text', text: cleanParam(input.firstName || 'player') },
+    { type: 'text', text: cleanParam(input.clubName) },
+  ];
+}
+
+/**
+ * EMCU chair notice (VIDEO header = the staff live-scoring video): "your club's scorer accounts
+ * have been emailed to {{3}}". Throws `WhatsAppTemplatePendingError` while not `registered`.
+ */
+export async function sendEmcuScorerAccountsNoticeWhatsApp(
+  to: string,
+  input: { chairName: string; clubName: string; chairEmail: string },
+  videoRef: VideoRef,
+  opts?: DolphinsSendOptions,
+): Promise<{ messageId: string }> {
+  const def = WHATSAPP_TEMPLATES.emcuScorerAccountsNotice;
+  assertTemplateSendable(def, opts);
+  return sendTemplate(
+    to,
+    def.name,
+    def.lang,
+    emcuScorerAccountsNoticeParams(input),
+    'EMCU scorer accounts notice',
+    undefined,
+    videoRef,
+  );
+}
+
+/**
+ * EMCU player notice (VIDEO header = the staff live-scoring video). Throws
+ * `WhatsAppTemplatePendingError` while not `registered`.
+ */
+export async function sendEmcuPlayerScoringWhatsApp(
+  to: string,
+  input: { firstName: string; clubName: string },
+  videoRef: VideoRef,
+  opts?: DolphinsSendOptions,
+): Promise<{ messageId: string }> {
+  const def = WHATSAPP_TEMPLATES.emcuPlayerScoring;
+  assertTemplateSendable(def, opts);
+  return sendTemplate(
+    to,
+    def.name,
+    def.lang,
+    emcuPlayerScoringParams(input),
+    'EMCU player scoring notice',
+    undefined,
+    videoRef,
+  );
+}
+
 /** No approved template in Meta for this send: the channel is skipped, not failed. */
 export class WhatsAppTemplatePendingError extends Error {
   /** `templateName` absent ⇒ the captain's-report wording (the original and default use). */

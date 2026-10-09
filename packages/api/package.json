@@ -34,6 +34,8 @@
     "import-lions-contacts": "tsx src/import-lions-contacts.ts",
     "broadcast:dolphins-welcome": "tsx src/send-dolphins-welcome-broadcast.ts",
     "report:dolphins-welcome": "tsx src/report-dolphins-welcome-broadcast.ts",
+    "broadcast:emcu-scorers": "tsx src/send-emcu-scorer-broadcast.ts",
+    "report:emcu-scorers": "tsx src/report-dolphins-welcome-broadcast.ts",
     "experiment:video-header": "tsx src/send-video-header-experiment.ts",
     "bootstrap-fixture-prereqs": "tsx src/bootstrap-fixture-prereqs.ts",
     "sync-club-leagues": "tsx src/sync-club-leagues-from-series.ts",

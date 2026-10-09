@@ -404,3 +404,121 @@ npx sst shell --stage production -- npm --prefix packages/api run broadcast:dolp
 # email only — no video files needed
 …url flags only… --channels email --confirm
 ```
+
+---
+
+## EMCU scorer broadcast — two VIDEO-header templates (approved 10 Oct 2026)
+
+**Status: 2 of 2 APPROVED (10 Oct 2026) as Marketing** — submitted as Utility, approved by Meta
+as **Marketing**: `emcu_scorer_accounts_notice` (ID 1622017422982612) and `emcu_player_scoring`
+(ID 1785078815861322), each with the VIDEO header and both static buttons, bodies as below. Both
+registry entries (`emcuScorerAccountsNotice`, `emcuPlayerScoring`) are `status: 'registered'`;
+the status **is read at runtime** (the senders throw and `--confirm` refuses `--channels
+whatsapp` for a template that is not `'registered'`).
+
+**Marketing cap (error 131049).** Marketing templates are subject to Meta's per-user marketing
+frequency cap. A refused send is recorded as `marketing-cap` — not a failure and not retried; the
+person's claim completes, so they are simply **email-only**. The CLI's end-of-run line, the
+manifest (`marketingCap: { capped, emailOnly }`) and the report ("Not sent — Meta marketing cap")
+show how many were affected.
+
+**No credentials on WhatsApp.** A 10-variable `emcu_scorer_accounts` template carrying the logins
+was dropped on 9 Oct 2026: Meta's classifier pushed it toward **Authentication**, a fixed OTP
+format (one ≤ 15-character code, no links or media). Scorer logins go **by email only**; the
+chair's WhatsApp says they were emailed. Sent by the one-off CLI
+`packages/api/src/send-emcu-scorer-broadcast.ts` (`npm --prefix packages/api run
+broadcast:emcu-scorers`).
+
+Common settings for both:
+
+| Field    | Value                                                                             |
+| -------- | --------------------------------------------------------------------------------- |
+| Category | **Marketing** (as approved; submitted as Utility)                                 |
+| Language | **English** (`en`)                                                                |
+| Header   | **Media → Video**; sample = the staff live-scoring video (re-encoded under 16 MB) |
+| Body     | exactly the text below (paste as-is, emoji and line breaks included)              |
+| Footer   | none                                                                              |
+| Buttons  | 2 × **Visit website**, **static** URL (no variable): see below                    |
+
+Buttons (static — the sends add no button component):
+
+1. `Download for iPhone` → `https://apps.apple.com/us/app/medicoach-ams/id6760149086`
+2. `Download for Android` → `https://play.google.com/store/apps/details?id=co.za.medicoach.app`
+
+### 1. `emcu_scorer_accounts_notice` — APPROVED 10 Oct 2026 · **Marketing** · ID 1622017422982612 · header: staff video · 3 variables
+
+Samples: `{{1}}` = `Thandi Nkosi` (chair name), `{{2}}` = `Umhlali Cricket Club`, `{{3}}` =
+`chairperson@umhlalicc.co.za` (the chair email the logins went to).
+
+```
+Dear {{1}}
+
+EMCU matches for {{2}} are scored live on the MediCoach app this season. Your club's 4 scorer accounts have been emailed to {{3}}. Please check your spam folder if you can't see it.
+
+Give each scorer their own account, one account per match. Watch the video above to see how scoring works, and download the app using the buttons below or sign in at https://www.medicoach.co.za/
+
+Need help? Email info@medicoach.co.za
+```
+
+"4 scorer accounts" is fixed copy: a club whose credentials file holds a different number of
+`created` accounts has its WhatsApp leg skipped (`accounts≠4`, reported as a warning); its email
+states the real count.
+
+### 2. `emcu_player_scoring` — APPROVED 10 Oct 2026 · **Marketing** · ID 1785078815861322 · header: staff video · 2 variables
+
+Samples: `{{1}}` = `Sipho` (first name), `{{2}}` = `Umhlali Cricket Club`.
+
+```
+Dear {{1}} 🏏
+
+{{2}}'s EMCU matches are scored live on the MediCoach app this season by your club's appointed scorers. Speak to your club chairperson if you'd like to help score.
+
+Watch the video above to see how live scoring works, and download the app using the buttons below or visit https://www.medicoach.co.za/
+
+Questions? Email info@medicoach.co.za
+```
+
+**Emails.** Chair: "Your club's MediCoach scorer accounts" — Scorer 1..n table (sign-in email +
+password), staff video link, app links, "email info@medicoach.co.za" for a reset or a change of
+chair. Player: "Your EMCU matches are scored on MediCoach 🏏". Both set **Reply-To:
+info@medicoach.co.za**.
+
+**Run sequence** (user-run on production; dry-run first every time; never pass a credentials file
+path that lives inside a repo):
+
+```bash
+CREDS=~/secure/emcu-scorer-credentials.json      # from MediCoach create-emcu-scorers (mode 0600)
+VIDEO_URL=https://<bucket>.s3.af-south-1.amazonaws.com/tutorials/dolphins/broadcast-live-scoring-staff.mp4
+VIDEO_FILE="<local staff mp4, ≤ 16 MB>"
+RUN="npx sst shell --stage production -- npm --prefix packages/api run broadcast:emcu-scorers --"
+
+# 0. dry-run: EMCU clubs + district cross-check, per-club skips (no chair email / no credentials /
+#    excluded), accounts≠4 warnings, redacted sample, manifest. Add the 8 Oct welcome manifest to
+#    flag chairs whose welcome failed or was skipped — confirm those by hand first.
+$RUN --audience chairs --credentials $CREDS --staff-video-url $VIDEO_URL --video-file "$VIDEO_FILE" \
+  --welcome-manifest ./dolphins-welcome-broadcast-<runId>.json
+
+# 1. chairs — EMAIL (the logins). Smoke to yourself first.
+$RUN --audience chairs --credentials $CREDS --staff-video-url $VIDEO_URL --channels email --only <you> --confirm
+$RUN --audience chairs --credentials $CREDS --staff-video-url $VIDEO_URL --channels email --confirm
+
+# 2. chairs — WhatsApp notice (template approved + registered 10 Oct)
+$RUN --audience chairs --credentials $CREDS --video-file "$VIDEO_FILE" --channels whatsapp --confirm
+
+# 3. players — only after chair delivery is confirmed
+$RUN --audience players --staff-video-url $VIDEO_URL --channels email --confirm
+$RUN --audience players --video-file "$VIDEO_FILE" --channels whatsapp --confirm
+
+# report (re-run any time; WhatsApp statuses keep arriving)
+npx sst shell --stage production -- npm --prefix packages/api run report:emcu-scorers -- \
+  --manifest ./emcu-scorer-broadcast-<audience>-<runId>.json
+```
+
+Keep to the split run (email, then WhatsApp) — the claim key includes the channel set, so mixing
+a split run with a combined run double-sends. A rate-cap halt is re-run with the SAME command.
+`--exclude-club <id>` (repeatable) leaves a club out; clubs with no chair email (e.g.
+`dolphins-deaf-cricket-team`, `umlazi-cc-mut`) are skipped and reported automatically.
+Passwords never appear in the console, dry-run samples (•••), the manifest or delivery rows.
+
+**End of season:** disable every `scorer*@medicoach.co.za` account in MediCoach (POPIA note in
+`docs/guides/popia-compliance.md`).

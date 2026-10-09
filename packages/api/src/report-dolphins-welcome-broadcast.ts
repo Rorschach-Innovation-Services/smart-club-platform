@@ -10,6 +10,11 @@
  * Outputs `dolphins-welcome-broadcast-report-<runId>.{html,pdf}` (PII — gitignored). Re-run it
  * any time: WhatsApp statuses keep arriving for days after the send.
  *
+ * Also renders the EMCU scorer broadcast (send-emcu-scorer-broadcast.ts): a manifest carrying
+ * `broadcast: 'emcu-scorers'` picks EMCU_SCORER_REPORT_STYLE (chairs/players labels, its run
+ * args) and writes `emcu-scorer-broadcast-report-<runId>.{html,pdf}`. `npm run
+ * report:emcu-scorers` is the same CLI.
+ *
  * Honest wording: an email outcome is "accepted by SES" — no SES delivery/bounce events are
  * wired, so acceptance is all we know. WhatsApp statuses (delivered / read / failed) come from
  * Meta via the status webhook; a message still at "sent" has had no status back yet.
@@ -21,13 +26,42 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type {
-  AudienceSkip,
-  Manifest,
-  ManifestRecipient,
-  MessageOutcome,
-} from './send-dolphins-welcome-broadcast.js';
+import type { Manifest, MessageOutcome } from './send-dolphins-welcome-broadcast.js';
+
+// Compile-time check: a welcome manifest is a ReportableManifest.
+const _welcomeIsReportable = (m: Manifest): ReportableManifest => m;
+void _welcomeIsReportable;
 import type { BroadcastDelivery } from './repo.js';
+import type { Channel } from './types.js';
+
+/**
+ * The manifest fields the report reads — satisfied by the welcome broadcast's manifest and by
+ * send-emcu-scorer-broadcast.ts's (`broadcast: 'emcu-scorers'`, chairs as cohort 'staff').
+ */
+export interface ReportableManifest {
+  /** Absent on welcome manifests. */
+  broadcast?: string;
+  tenant: string;
+  mode: 'dry-run' | 'confirm';
+  runId: string;
+  stage: string | null;
+  startedAt: string;
+  finishedAt?: string;
+  args: { channels: Channel[]; only?: string } & Record<string, unknown>;
+  recipients: Array<{
+    cohort: 'staff' | 'player';
+    name: string;
+    email: string;
+    cell: string;
+    roles: string[];
+    clubs: string[];
+    outcome?: string;
+    /** `marketingCap`: Meta 131049 refusal (EMCU scorer broadcast — Marketing templates). */
+    messages?: Array<MessageOutcome<string> & { marketingCap?: boolean }>;
+    error?: string;
+  }>;
+  skips: Array<{ reason: string; detail: string }>;
+}
 
 // ───────────────────────── Model (pure) ─────────────────────────
 
@@ -43,7 +77,9 @@ export type WhatsAppCellStatus =
   | 'send-error'
   | 'skipped'
   | 'dry-run'
-  | 'untracked';
+  | 'untracked'
+  /** Refused by Meta's per-user marketing cap (131049) — not sent, not a failure. */
+  | 'marketing-cap';
 
 export interface WhatsAppCell {
   kind: string;
@@ -81,22 +117,23 @@ export interface ReportSummary {
     sendErrors: number;
     skipped: number;
     untracked: number;
+    marketingCap: number;
   };
   skipsByReason: Record<string, number>;
 }
 
 export interface ReportModel {
   manifest: Pick<
-    Manifest,
+    ReportableManifest,
     'tenant' | 'runId' | 'stage' | 'startedAt' | 'finishedAt' | 'mode' | 'args'
   >;
   summary: ReportSummary;
   staff: ReportRow[];
   player: ReportRow[];
-  skips: AudienceSkip[];
+  skips: Array<{ reason: string; detail: string }>;
 }
 
-function emailCell(o: MessageOutcome): EmailCell {
+function emailCell(o: MessageOutcome<string>): EmailCell {
   if (o.status === 'sent') {
     return o.delivered
       ? { status: 'accepted', ...(o.at ? { at: o.at } : {}) }
@@ -109,8 +146,13 @@ function emailCell(o: MessageOutcome): EmailCell {
   };
 }
 
-function whatsappCell(o: MessageOutcome, byWamid: Map<string, BroadcastDelivery>): WhatsAppCell {
+function whatsappCell(
+  o: MessageOutcome<string>,
+  byWamid: Map<string, BroadcastDelivery>,
+): WhatsAppCell {
   const base = { kind: o.kind };
+  if ((o as { marketingCap?: boolean }).marketingCap)
+    return { ...base, status: 'marketing-cap', ...(o.at ? { at: o.at } : {}), detail: o.error };
   if (o.status === 'skipped') return { ...base, status: 'skipped', detail: o.error };
   if (o.status === 'failed') {
     return { ...base, status: 'send-error', ...(o.at ? { at: o.at } : {}), detail: o.error };
@@ -144,7 +186,10 @@ const byClubThenName = (a: ReportRow, b: ReportRow) => {
  * Join a run's manifest with its WhatsApp delivery rows. PURE. Rows are sorted by first club
  * (people with no club last), then name.
  */
-export function buildReport(manifest: Manifest, deliveries: BroadcastDelivery[]): ReportModel {
+export function buildReport(
+  manifest: ReportableManifest,
+  deliveries: BroadcastDelivery[],
+): ReportModel {
   const byWamid = new Map(deliveries.map((d) => [d.wamid, d]));
   const emailRequested = manifest.args.channels.includes('email');
   const summary: ReportSummary = {
@@ -160,13 +205,14 @@ export function buildReport(manifest: Manifest, deliveries: BroadcastDelivery[])
       sendErrors: 0,
       skipped: 0,
       untracked: 0,
+      marketingCap: 0,
     },
     skipsByReason: {},
   };
   const staff: ReportRow[] = [];
   const player: ReportRow[] = [];
 
-  for (const r of manifest.recipients as ManifestRecipient[]) {
+  for (const r of manifest.recipients) {
     summary.recipients[r.cohort]++;
     const outcome = r.outcome ?? 'not attempted';
     summary.outcomes[outcome] = (summary.outcomes[outcome] ?? 0) + 1;
@@ -184,7 +230,8 @@ export function buildReport(manifest: Manifest, deliveries: BroadcastDelivery[])
       .map((m) => whatsappCell(m, byWamid));
     for (const w of whatsapp) {
       const f = summary.whatsapp;
-      if (w.status === 'skipped') f.skipped++;
+      if (w.status === 'marketing-cap') f.marketingCap++;
+      else if (w.status === 'skipped') f.skipped++;
       else if (w.status === 'send-error') f.sendErrors++;
       else if (w.status === 'untracked') {
         f.sent++;
@@ -260,11 +307,74 @@ export function formatSast(iso: string | undefined): string {
   return Number.isNaN(d.getTime()) ? '' : SAST.format(d);
 }
 
-const KIND_LABEL: Record<string, string> = {
-  dolphins_staff_welcome: 'Staff welcome',
-  dolphins_player_fyi: 'Player FYI',
-  dolphins_player_welcome: 'Player welcome',
+/** What differs between the broadcasts this report renders (title, labels, run-args rows). */
+export interface ReportStyle {
+  title: string;
+  subtitle: string;
+  /** PDF footer label. */
+  footer: string;
+  /** Output file base name, before `-<runId>.{html,pdf}`. */
+  fileBase: string;
+  cohortLabels: { staff: string; player: string };
+  /** WhatsApp message kind → column label. */
+  kindLabels: Record<string, string>;
+  /** Broadcast-specific "Run" rows (videos, media ids, …). */
+  argRows: (args: ReportableManifest['args']) => Array<[string, string]>;
+}
+
+const argStr = (v: unknown): string => (typeof v === 'string' ? v : '—');
+
+export const WELCOME_REPORT_STYLE: ReportStyle = {
+  title: 'Dolphins welcome broadcast',
+  subtitle:
+    'Who received the Dolphins Pipeline / Scouting Program welcome, with delivery status and time.',
+  footer: 'Dolphins welcome broadcast',
+  fileBase: 'dolphins-welcome-broadcast-report',
+  cohortLabels: { staff: 'Staff', player: 'Players' },
+  kindLabels: {
+    dolphins_staff_welcome: 'Staff welcome',
+    dolphins_player_fyi: 'Player FYI',
+    dolphins_player_welcome: 'Player welcome',
+  },
+  argRows: (a) => [
+    ['Staff video (email link)', argStr(a.staffVideoUrl)],
+    ['Player video (email link)', argStr(a.playerVideoUrl)],
+    ...(a.staffMediaId
+      ? ([
+          [
+            'WhatsApp videos (Meta media ids)',
+            `staff ${argStr(a.staffMediaId)}, player ${a.playerMediaId ? argStr(a.playerMediaId) : '—'}`,
+          ],
+        ] as Array<[string, string]>)
+      : []),
+  ],
 };
+
+export const EMCU_SCORER_REPORT_STYLE: ReportStyle = {
+  title: 'EMCU scorer broadcast',
+  subtitle:
+    'Who received the EMCU MediCoach live-scoring messages (chairs: scorer logins by email + WhatsApp notice; players: scoring notice), with delivery status and time.',
+  footer: 'EMCU scorer broadcast',
+  fileBase: 'emcu-scorer-broadcast-report',
+  cohortLabels: { staff: 'Chairs', player: 'Players' },
+  kindLabels: {
+    emcu_scorer_accounts_notice: 'Scorer accounts notice',
+    emcu_player_scoring: 'Player scoring notice',
+  },
+  argRows: (a) => [
+    ['Staff video (email link)', argStr(a.staffVideoUrl)],
+    ...(a.mediaId
+      ? ([['WhatsApp video (Meta media id)', argStr(a.mediaId)]] as Array<[string, string]>)
+      : []),
+    ...(Array.isArray(a.excludeClubs) && a.excludeClubs.length
+      ? ([['Clubs excluded', (a.excludeClubs as string[]).join(', ')]] as Array<[string, string]>)
+      : []),
+  ],
+};
+
+/** The style for a manifest: EMCU scorer manifests carry `broadcast: 'emcu-scorers'`. PURE. */
+export const reportStyleFor = (m: Pick<ReportableManifest, 'broadcast'>): ReportStyle =>
+  m.broadcast === 'emcu-scorers' ? EMCU_SCORER_REPORT_STYLE : WELCOME_REPORT_STYLE;
 
 const STATUS_LABEL: Record<string, string> = {
   accepted: 'Accepted by SES',
@@ -276,6 +386,7 @@ const STATUS_LABEL: Record<string, string> = {
   skipped: 'Skipped',
   'dry-run': 'Dry run (not sent)',
   untracked: 'Sent (untracked)',
+  'marketing-cap': 'Not sent — Meta marketing cap',
 };
 
 const pill = (status: string, at?: string, detail?: string): string =>
@@ -283,7 +394,11 @@ const pill = (status: string, at?: string, detail?: string): string =>
   (at ? ` <span class="at">${esc(formatSast(at))}</span>` : '') +
   (detail ? `<div class="detail">${esc(detail)}</div>` : '');
 
-function rowsHtml(rows: ReportRow[], showEmail: boolean): string {
+function rowsHtml(
+  rows: ReportRow[],
+  showEmail: boolean,
+  kindLabels: Record<string, string>,
+): string {
   if (!rows.length) return '<p class="muted">None.</p>';
   const body = rows
     .map((r) => {
@@ -298,7 +413,7 @@ function rowsHtml(rows: ReportRow[], showEmail: boolean): string {
             ? r.whatsapp
                 .map(
                   (w) =>
-                    `<div class="wa"><span class="kind">${esc(KIND_LABEL[w.kind] ?? w.kind)}</span> ${pill(w.status, w.at, w.detail)}</div>`,
+                    `<div class="wa"><span class="kind">${esc(kindLabels[w.kind] ?? w.kind)}</span> ${pill(w.status, w.at, w.detail)}</div>`,
                 )
                 .join('')
             : `<span class="muted">${r.outcome === 'sent' ? '—' : esc(r.outcome)}</span>`;
@@ -323,7 +438,11 @@ function rowEmail(r: ReportRow): string {
 }
 
 /** Render the report as one self-contained, print-friendly (A4) HTML document. PURE. */
-export function renderReportHtml(model: ReportModel, generatedAt: string): string {
+export function renderReportHtml(
+  model: ReportModel,
+  generatedAt: string,
+  style: ReportStyle = WELCOME_REPORT_STYLE,
+): string {
   const { manifest: m, summary: s } = model;
   const showEmail = m.args.channels.includes('email');
   const pct = (n: number, of: number) => (of ? ` (${Math.round((n / of) * 100)}%)` : '');
@@ -336,16 +455,7 @@ export function renderReportHtml(model: ReportModel, generatedAt: string): strin
       `${formatSast(m.startedAt)}${m.finishedAt ? ` – ${formatSast(m.finishedAt)}` : ''} (SAST)`,
     ],
     ['Channels', m.args.channels.join(', ')],
-    ['Staff video (email link)', m.args.staffVideoUrl],
-    ['Player video (email link)', m.args.playerVideoUrl],
-    ...(m.args.staffMediaId
-      ? ([
-          [
-            'WhatsApp videos (Meta media ids)',
-            `staff ${m.args.staffMediaId}, player ${m.args.playerMediaId ?? '—'}`,
-          ],
-        ] as Array<[string, string]>)
-      : []),
+    ...style.argRows(m.args),
     ...(m.args.only ? ([['Audience restricted to', m.args.only]] as Array<[string, string]>) : []),
     ['Report generated', `${formatSast(generatedAt)} (SAST)`],
   ];
@@ -365,7 +475,7 @@ export function renderReportHtml(model: ReportModel, generatedAt: string): strin
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Dolphins welcome broadcast report</title>
+<title>${esc(style.title)} report</title>
 <style>
   @page { size: A4; margin: 14mm 12mm 16mm; }
   :root { --ink:#1B2A4A; --green:#1D9E75; --muted:#6B7A90; --line:#D5DCE6; --soft:#F3F6F9; }
@@ -404,13 +514,13 @@ export function renderReportHtml(model: ReportModel, generatedAt: string): strin
   .s-read { background: var(--green); color: #fff; }
   .s-sent, .s-untracked { background: #E6ECF5; color: var(--ink); }
   .s-failed, .s-send-error { background: #FBE3E1; color: #A3271B; }
-  .s-skipped, .s-dry-run { background: #F1F1F1; color: var(--muted); }
+  .s-skipped, .s-dry-run, .s-marketing-cap { background: #F1F1F1; color: var(--muted); }
   @media print { body { padding: 0; } h2 { page-break-after: avoid; } }
 </style></head>
 <body>
 <div class="bar"></div>
-<h1>Dolphins welcome broadcast</h1>
-<p class="sub">Who received the Dolphins Pipeline / Scouting Program welcome, with delivery status and time.</p>
+<h1>${esc(style.title)}</h1>
+<p class="sub">${esc(style.subtitle)}</p>
 
 <h2>Run</h2>
 <dl class="meta">${metaRows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>
@@ -418,7 +528,7 @@ export function renderReportHtml(model: ReportModel, generatedAt: string): strin
 <h2>Summary</h2>
 <div class="cards">
   <div class="card"><h3>Recipients</h3><div class="big">${s.recipients.staff + s.recipients.player}</div>
-    <ul><li>Staff: <strong>${s.recipients.staff}</strong></li><li>Players: <strong>${s.recipients.player}</strong></li></ul>
+    <ul><li>${esc(style.cohortLabels.staff)}: <strong>${s.recipients.staff}</strong></li><li>${esc(style.cohortLabels.player)}: <strong>${s.recipients.player}</strong></li></ul>
     <ul>${outcomeLines}</ul></div>
   <div class="card"><h3>Emails</h3><div class="big">${s.emails.accepted}</div>
     <ul><li>Accepted by SES: <strong>${s.emails.accepted}</strong></li><li>Failed: <strong>${s.emails.failed}</strong></li>
@@ -433,16 +543,16 @@ export function renderReportHtml(model: ReportModel, generatedAt: string): strin
   <div><strong>${w.failed}</strong>Failed</div>
   <div><strong>${w.awaitingStatus}</strong>No status yet</div>
 </div>
-<p class="note">Also: ${w.sendErrors} rejected at send time, ${w.skipped} skipped (no usable cell)${w.untracked ? `, ${w.untracked} sent without status tracking` : ''}.
+<p class="note">Also: ${w.sendErrors} rejected at send time, ${w.skipped} skipped (no usable cell)${w.marketingCap ? `, ${w.marketingCap} refused by Meta's marketing cap (131049; email only)` : ''}${w.untracked ? `, ${w.untracked} sent without status tracking` : ''}.
 Email outcomes mean <em>accepted by SES</em> — no delivery or bounce events are wired for these emails.
 WhatsApp statuses are Meta's delivery receipts (delivered / read / failed), received via the status webhook; "read" depends on the recipient's read receipts setting.
 Times are SAST.</p>
 
-<h2>Staff (${model.staff.length})</h2>
-${rowsHtml(model.staff, showEmail)}
+<h2>${esc(style.cohortLabels.staff)} (${model.staff.length})</h2>
+${rowsHtml(model.staff, showEmail, style.kindLabels)}
 
-<h2>Players (${model.player.length})</h2>
-${rowsHtml(model.player, showEmail)}
+<h2>${esc(style.cohortLabels.player)} (${model.player.length})</h2>
+${rowsHtml(model.player, showEmail, style.kindLabels)}
 
 <h2>Appendix — skipped rows (${model.skips.length})</h2>
 ${skipsTable}
@@ -468,6 +578,7 @@ interface PlaywrightLike {
 export async function writePdf(
   html: string,
   path: string,
+  footerLabel: string = WELCOME_REPORT_STYLE.footer,
 ): Promise<{ ok: true } | { ok: false; why: string }> {
   // A variable specifier: playwright is the repo-root e2e dependency, resolved at runtime only.
   const specifier = 'playwright';
@@ -493,7 +604,7 @@ export async function writePdf(
       headerTemplate: '<span></span>',
       footerTemplate:
         '<div style="font-size:8px;color:#6B7A90;width:100%;text-align:center">' +
-        'Dolphins welcome broadcast · page <span class="pageNumber"></span> of <span class="totalPages"></span></div>',
+        `${esc(footerLabel)} · page <span class="pageNumber"></span> of <span class="totalPages"></span></div>`,
     });
     return { ok: true };
   } finally {
@@ -518,7 +629,9 @@ function parseArgs(argv: string[]): { manifest: string; outDir?: string } {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const manifest = JSON.parse(await readFile(args.manifest, 'utf8')) as Manifest;
+  // A welcome manifest (Manifest) or an EMCU scorer one — both satisfy ReportableManifest.
+  const manifest = JSON.parse(await readFile(args.manifest, 'utf8')) as ReportableManifest;
+  const style = reportStyleFor(manifest);
   if (manifest.mode !== 'confirm') {
     throw new Error(
       `${args.manifest} is a ${manifest.mode} manifest — only a --confirm run sent anything`,
@@ -533,13 +646,13 @@ async function main(): Promise<void> {
   console.log(`· ${deliveries.length} WhatsApp delivery record(s) for run ${manifest.runId}`);
 
   const model = buildReport(manifest, deliveries);
-  const html = renderReportHtml(model, new Date().toISOString());
+  const html = renderReportHtml(model, new Date().toISOString(), style);
   const outDir = args.outDir ?? dirname(args.manifest);
-  const base = join(outDir, `dolphins-welcome-broadcast-report-${manifest.runId}`);
+  const base = join(outDir, `${style.fileBase}-${manifest.runId}`);
   await writeFile(`${base}.html`, html);
   console.log(`· HTML: ${base}.html`);
 
-  const pdf = await writePdf(html, `${base}.pdf`);
+  const pdf = await writePdf(html, `${base}.pdf`, style.footer);
   if (pdf.ok) console.log(`· PDF:  ${base}.pdf`);
   else {
     console.warn(
@@ -550,7 +663,8 @@ async function main(): Promise<void> {
 
   const w = model.summary.whatsapp;
   console.log(
-    `\n  recipients ${model.staff.length} staff + ${model.player.length} players; emails accepted ` +
+    `\n  recipients ${model.staff.length} ${style.cohortLabels.staff.toLowerCase()} + ` +
+      `${model.player.length} ${style.cohortLabels.player.toLowerCase()}; emails accepted ` +
       `${model.summary.emails.accepted}; WhatsApp sent ${w.sent}, delivered ${w.delivered}, ` +
       `read ${w.read}, failed ${w.failed}, no status yet ${w.awaitingStatus}`,
   );

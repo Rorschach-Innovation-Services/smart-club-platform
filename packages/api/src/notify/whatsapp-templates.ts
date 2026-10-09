@@ -44,8 +44,9 @@
  * are `fixtureReminder` (the FixtureReminders cron skips WhatsApp until it is
  * "registered"), `captainsReportDue` / `captainsReportOpsDigest` (their senders skip the
  * channel as template-pending until it is "registered"), `clearancePendingV2` (the
- * ClearanceReminders cron's WhatsApp gate) and the three `dolphins*` welcome-broadcast entries
- * (their senders throw until "registered") — see those entries.
+ * ClearanceReminders cron's WhatsApp gate), the three `dolphins*` welcome-broadcast entries and
+ * the two `emcu*` scorer-broadcast entries (their senders throw until "registered") — see those
+ * entries.
  *
  * RETIRED: `club_clearance_pending` (the 4-param, link-less v1 clearance template) has NO entry
  * here since 7 Oct 2026. `club_clearance_pending_v2` is the only clearance template; a clearance
@@ -357,6 +358,71 @@ export const WHATSAPP_TEMPLATES = {
       '⭐ Standout performances are flagged and shortlisted\n' +
       '🤝 Players are matched to teams that need them: franchises, tournaments and county teams overseas',
     // Approved in Meta as MARKETING on 8 Oct 2026 (id 2158879548337539).
+    status: 'registered',
+    header: { format: 'VIDEO' },
+  },
+
+  /**
+   * EMCU scorer accounts, CHAIR notice (one-off CLI send-emcu-scorer-broadcast.ts): tells an EMCU
+   * club chair their club's MediCoach scorer logins were EMAILED to {{3}}. NO credentials ride on
+   * WhatsApp — a credentials template was forced toward Meta's Authentication category (fixed OTP
+   * format) and dropped on 9 Oct 2026; logins go by email only. VIDEO header = the staff
+   * live-scoring video (Meta-hosted media id, as the welcome broadcast).
+   *
+   * "4 scorer accounts" is FIXED copy: a club whose credentials file holds a different count has
+   * its WhatsApp leg blocked by the CLI (its email states the real count).
+   *
+   * Buttons (registered in Meta, STATIC — no send-time component; sendTemplate adds a button
+   * component only when a dynamic suffix is passed):
+   *   0. URL "Download for iPhone"  → https://apps.apple.com/us/app/medicoach-ams/id6760149086
+   *   1. URL "Download for Android" → https://play.google.com/store/apps/details?id=co.za.medicoach.app
+   *
+   * APPROVED in Meta 10 Oct 2026 as **Marketing** (not Utility; template id 1622017422982612),
+   * VIDEO header + the two static buttons, body as below. Marketing ⇒ Meta's per-user marketing
+   * frequency cap can refuse a send (error 131049); the CLI records that as `marketing-cap`
+   * (email-only), not a failure. Runtime-gated on status like the dolphins* entries.
+   */
+  emcuScorerAccountsNotice: {
+    name: 'emcu_scorer_accounts_notice',
+    lang: 'en',
+    paramCount: 3,
+    params: ['chair name', 'club name', 'chair email the logins went to'],
+    bodyText:
+      'Dear {{1}}\n\n' +
+      "EMCU matches for {{2}} are scored live on the MediCoach app this season. Your club's 4 " +
+      'scorer accounts have been emailed to {{3}}. Please check your spam folder if you ' +
+      "can't see it.\n\n" +
+      'Give each scorer their own account, one account per match. Watch the video above to see ' +
+      'how scoring works, and download the app using the buttons below or sign in at ' +
+      'https://www.medicoach.co.za/\n\n' +
+      'Need help? Email info@medicoach.co.za',
+    // Approved in Meta as MARKETING on 10 Oct 2026 (id 1622017422982612).
+    status: 'registered',
+    header: { format: 'VIDEO' },
+  },
+
+  /**
+   * EMCU live scoring, PLAYER notice (same CLI, `--audience players`): EMCU clubs' players learn
+   * their matches are scored on MediCoach by the club's appointed scorers. Reworded so players
+   * are NOT told to request logins; promotional wording dropped (Meta still approved it as Marketing). VIDEO header =
+   * the staff live-scoring video. Same two STATIC app buttons as `emcuScorerAccountsNotice`.
+   *
+   * APPROVED in Meta 10 Oct 2026 as **Marketing** (template id 1785078815861322), VIDEO header +
+   * the two static buttons. Subject to the 131049 marketing cap, as above. Runtime-gated on status.
+   */
+  emcuPlayerScoring: {
+    name: 'emcu_player_scoring',
+    lang: 'en',
+    paramCount: 2,
+    params: ['player first name', 'club name'],
+    bodyText:
+      'Dear {{1}} 🏏\n\n' +
+      "{{2}}'s EMCU matches are scored live on the MediCoach app this season by your club's " +
+      "appointed scorers. Speak to your club chairperson if you'd like to help score.\n\n" +
+      'Watch the video above to see how live scoring works, and download the app using the ' +
+      'buttons below or visit https://www.medicoach.co.za/\n\n' +
+      'Questions? Email info@medicoach.co.za',
+    // Approved in Meta as MARKETING on 10 Oct 2026 (id 1785078815861322).
     status: 'registered',
     header: { format: 'VIDEO' },
   },
