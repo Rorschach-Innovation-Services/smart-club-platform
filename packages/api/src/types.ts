@@ -1410,6 +1410,44 @@ export interface SyncHealth {
   lastError?: string;
 }
 
+/**
+ * MCAWAIT#<seriesId> — fixtures of one series medicoach does not have yet (they need a bundle
+ * carry/top-up). Fixture refs carry no PII.
+ */
+export interface McAwaitRow {
+  seriesId: string;
+  seriesName?: string;
+  leagueKey?: string;
+  /** One list attribute: the ~400 KB item cap ≈ 3,500+ fixtures per series, far above any real series. */
+  refs: string[];
+  count: number;
+  /** When the series first had a fixture awaiting carry (kept across updates). */
+  firstSeen: string;
+  lastSeen: string;
+}
+
+/** MCRECON# — the tenant's last awaiting-carry reconciliation against medicoach. */
+export interface McReconcileStamp {
+  lastReconcileAt: string;
+  mcReachable: boolean;
+  /** Refs checked against medicoach (reachable runs only). */
+  checkedRefs?: number;
+  /** Refs medicoach answered `unmapped` (reachable runs only). */
+  unmappedTotal?: number;
+  /** Why medicoach could not be asked (unreachable runs only). */
+  reason?: string;
+}
+
+/** MCRECONLOCK# — the lease a running reconciliation holds (one per tenant at a time). */
+export interface McReconcileLease {
+  /** Random per-acquire id (crypto.randomUUID); renew and release are conditioned on this. */
+  token: string;
+  /** ISO time the holder took the lease (observability only). */
+  acquiredAt: string;
+  /** Epoch seconds after which another run may take the lease (also the table TTL). */
+  expiresAt: number;
+}
+
 /** What one outbox flush did (Slice 4). */
 export interface SchedulePushCounts {
   sent: number;

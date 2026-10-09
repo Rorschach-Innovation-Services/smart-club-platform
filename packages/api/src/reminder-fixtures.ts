@@ -1159,7 +1159,12 @@ export function reminderPreview(
 type RepoModule = typeof import('./repo.js');
 export type ReminderWriteRepo = Pick<
   RepoModule,
-  'getTenantConfig' | 'putPendingSync' | 'getSeasonRun' | 'putSyncLog' | 'putSeriesIfVersion'
+  | 'getTenantConfig'
+  | 'putPendingSync'
+  | 'getSeasonRun'
+  | 'putSyncLog'
+  | 'upsertMcAwait'
+  | 'putSeriesIfVersion'
 >;
 
 export interface SeriesWriteResult {

@@ -35,6 +35,8 @@ import { TutorialsCard } from './platform-tutorials';
 import { RequiredDocsCard } from './platform-required-docs';
 import { FixtureRemindersCard } from './platform-fixture-reminders';
 import { PlayerSyncCard } from './platform-player-sync';
+import { MedicoachConnectionCard } from './platform-medicoach';
+import { MedicoachConsolePage } from './platform-medicoach-console';
 import { CaptainsReportScorecardsPage } from './platform-captains-report-scorecards';
 import { TransferWindowCard } from './platform-transfer-windows';
 import { DocIntakeWizard } from './platform-intake';
@@ -46,6 +48,7 @@ import { OnboardingPage, buildOnboardingSteps } from './platform-onboarding';
 import type {
   TenantConfig,
   TenantSummary,
+  MedicoachOverviewRow,
   BrandingCopy,
   DirectoryClub,
   League,
@@ -307,6 +310,38 @@ function SetupChip({ complete }: { complete: boolean }) {
   );
 }
 
+/**
+ * Client-list Match Centre flags (ADR 0020 phase 1) — the daily-visibility fix: an amber
+ * "N awaiting carry" when released fixtures are missing from the Match Centre, and a quiet
+ * "Dry-run" when the sync secrets are unset. Renders nothing for a healthy client.
+ *
+ * Both pills are shown only while the client's sync is switched on: a client with the sync
+ * off is not expected to be in the Match Centre, so neither its (still truthful) count nor the
+ * stage-wide dry-run state is an alert here. The per-client console page keeps listing those
+ * rows, with the sync-off context.
+ */
+function MatchCentreFlags({ row }: { row?: MedicoachOverviewRow }) {
+  const showAwaiting = !!row && row.syncEnabled && row.awaitingTotal > 0;
+  const showDryRun = !!row && row.syncEnabled && row.dryRun;
+  if (!row || (!showAwaiting && !showDryRun)) return null;
+  return (
+    <span style={{ display: 'inline-flex', gap: 6, marginLeft: 6, flexWrap: 'wrap' }}>
+      {showAwaiting && (
+        <span title="Fixtures in Smart Club that the Match Centre has no record of">
+          <Pill tone="gold" dot>
+            {row.awaitingTotal} awaiting carry
+          </Pill>
+        </span>
+      )}
+      {showDryRun && (
+        <span title="Sync secrets not configured — sync runs are silent dry-runs">
+          <Pill tone="muted">Dry-run</Pill>
+        </span>
+      )}
+    </span>
+  );
+}
+
 /** Card — same surface as atoms.Card but with its own save footer wiring. */
 function Panel({
   title,
@@ -533,6 +568,10 @@ export function PlatformPortal({
                 path="/platform/tenants/:slug/onboarding"
                 element={<OnboardingPage toast={toastShow} />}
               />
+              <Route
+                path="/platform/tenants/:slug/medicoach"
+                element={<MedicoachConsolePage toast={toastShow} />}
+              />
               <Route path="/platform/tenants/:slug/overview" element={<TenantOverviewPage />} />
               <Route
                 path="/platform/tenants/:slug/overview/leagues/:leagueKey"
@@ -611,6 +650,13 @@ function TenantListPage() {
   const navigate = useNavigate();
   const q = useQuery({ queryKey: qk.platformTenants(), queryFn: api.platformListTenants });
   const tenants = q.data ?? [];
+  // Supplementary: if the Match Centre overview fails the list still renders, just unflagged.
+  const mcQ = useQuery({
+    queryKey: qk.platformMedicoachOverview(),
+    queryFn: api.platformMedicoachOverview,
+    retry: 0,
+  });
+  const mcByTenant = new Map((mcQ.data?.tenants ?? []).map((r) => [r.tenant, r]));
 
   return (
     <div>
@@ -712,6 +758,7 @@ function TenantListPage() {
                     </td>
                     <td>
                       <SetupChip complete={!!t.setupCompletedAt} />
+                      <MatchCentreFlags row={mcByTenant.get(t.tenant)} />
                     </td>
                     <td style={{ textAlign: 'right', paddingRight: 18, whiteSpace: 'nowrap' }}>
                       {/* Row click opens settings; this drills into the breakdown. */}
@@ -880,6 +927,7 @@ function TenantEditPage({ toast }: { toast: Toast }) {
           save={save}
           toast={toast}
         />
+        <MedicoachConnectionCard key={`mc-${config.tenant}`} slug={slug} />
         <CopyCard
           key={`cp-${config.tenant}`}
           config={config}

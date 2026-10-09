@@ -20,6 +20,13 @@ import { z } from 'zod';
 
 export const MEDICOACH_SYNC_VERSION = 1;
 
+/**
+ * The import/carry endpoints (Match Centre Connection Console, ADR 0020): read-only checks of
+ * what medicoach has mapped, signed exactly like sync v1 (see `signRequest`). An addition next
+ * to sync v1, versioned on its own.
+ */
+export const MEDICOACH_IMPORT_VERSION = 1;
+
 /** Reject a request whose timestamp is further than this from the receiver's clock. */
 export const MAX_CLOCK_SKEW_MS = 300_000;
 
@@ -31,6 +38,13 @@ export const SCHEDULE_PATH = '/integrations/smartclub/schedule';
 export const PLAYERS_PATH = '/integrations/smartclub/players';
 /** `GET ${MATCHES_PATH}/:matchId/scorecard?tournamentId=&tenant=` — see `scorecardPathAndQuery`. */
 export const MATCHES_PATH = '/integrations/smartclub/matches';
+
+/** Import/carry v1: which fixture refs medicoach has mapped (POST `{tenant, refs}`). */
+export const IMPORT_CHECK_REFS_PATH = '/integrations/smartclub/import/check-refs';
+/** Import/carry v1: medicoach's mapped competitions + fixture counts (`GET ?tenant=`). */
+export const IMPORT_CONNECTION_SUMMARY_PATH = '/integrations/smartclub/import/connection-summary';
+/** Max refs per check-refs request. */
+export const CHECK_REFS_MAX = 500;
 
 /** Page size bounds for the changes endpoint. */
 export const CHANGES_LIMIT_DEFAULT = 200;
@@ -234,6 +248,19 @@ export const SchedulePushResponseSchema = z.object({
       message: z.string().optional(),
     }),
   ),
+});
+
+/* ─────────────── Import/carry v1 (POST /integrations/smartclub/import/check-refs) ─────────────── */
+
+export const CheckRefsRequestSchema = z.object({
+  tenant: z.string().min(1),
+  refs: z.array(ref).max(CHECK_REFS_MAX),
+});
+
+/** Every requested ref lands in exactly one of the two lists. */
+export const CheckRefsResponseSchema = z.object({
+  mapped: z.array(ref),
+  unmapped: z.array(ref),
 });
 
 /* ─────────────── Player push (contract §4, POST /integrations/smartclub/players) ─────────────── */

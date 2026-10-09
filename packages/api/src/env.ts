@@ -86,6 +86,11 @@ export function medicoachSyncSecret(): string {
   return process.env.MEDICOACH_SYNC_SECRET ?? fromSstResource('MedicoachSyncSecret', 'value') ?? '';
 }
 
+/** True while the sync URL or secret is empty: every medicoach call is a logged no-op. */
+export function medicoachSyncDryRun(): boolean {
+  return !medicoachSyncUrl() || !medicoachSyncSecret();
+}
+
 /**
  * The union-admin cell that receives the captain's-report ops digest after a sync run with
  * report activity. Lambda: OPS_DIGEST_CELL from the `OpsDigestCell` secret; CLI under

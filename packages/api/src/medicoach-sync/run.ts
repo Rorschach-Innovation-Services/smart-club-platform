@@ -13,7 +13,9 @@
  *   4. send the one reminder for pending reports whose link expires within 2 days.
  *
  * Last, after a pull that did not throw, `sweepScorecards` fetches the medicoach scorecards
- * recent results still lack (best-effort: a failure is a log line + Sentry, never the run's).
+ * recent results still lack (best-effort: a failure is a log line + Sentry, never the run's),
+ * then — cron runs only — `reconcileIfDue` re-derives the awaiting-carry rows (MCAWAIT#) from
+ * medicoach's check-refs at most once a day (ADR 0020; best-effort, never the run's failure).
  *
  * After step 3, a run with captain's-report activity (reports opened, notices sent or failed)
  * sends ONE ops-digest WhatsApp to the union-admin cell (`OpsDigestCell`); a quiet run sends
@@ -43,6 +45,7 @@ import {
 } from './puller.js';
 import { flushPlayerOutbox, playerFlushCap, type PlayerFlushSummary } from './players.js';
 import { playerSyncEnabled } from './player-placement.js';
+import { reconcileIfDue } from './reconcile.js';
 import { flushScheduleOutbox, type FlushSummary } from './schedule.js';
 import { sweepScorecards, type ScorecardSweepSummary } from './scorecard-fetch.js';
 
@@ -277,6 +280,29 @@ export async function runTenantSync(
     await import('../instrument.js')
       .then(({ Sentry }) =>
         Sentry.captureException(err, { tags: { job: 'scorecard-sweep', tenant } }),
+      )
+      .catch(() => {});
+  }
+  try {
+    // Awaiting-carry ground truth (ADR 0020): at most once a day per tenant, cron only —
+    // "Sync now" runs behind the 30 s gateway limit and has its own operator button.
+    if (trigger === 'cron')
+      await reconcileIfDue(tenant, {
+        repo,
+        url: deps.url,
+        secret: deps.secret,
+        ...(deps.fetch ? { fetch: deps.fetch } : {}),
+        ...(deps.now ? { now: deps.now } : {}),
+        ...(deps.log ? { log: deps.log } : {}),
+      });
+  } catch (err) {
+    // A repo failure reading series/rows: never fails the sync run; the next run tries again.
+    console.warn(
+      `[medicoach-sync] ${tenant}: awaiting-carry reconciliation failed — ${err instanceof Error ? err.message : 'error'}`,
+    );
+    await import('../instrument.js')
+      .then(({ Sentry }) =>
+        Sentry.captureException(err, { tags: { job: 'mc-reconcile', tenant } }),
       )
       .catch(() => {});
   }
