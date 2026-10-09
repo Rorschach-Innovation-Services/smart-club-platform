@@ -83,6 +83,8 @@ export const qk = {
   platformTenant: (slug: string) => ['platform-tenant', slug],
   platformTenantOverview: (slug: string) => ['platform-tenant-overview', slug],
   platformTenantReps: (slug: string) => ['platform-tenant-reps', slug],
+  platformMedicoachConnection: (slug: string) => ['platform-medicoach-connection', slug],
+  platformMedicoachOverview: () => ['platform-medicoach-overview'],
   // Cross-tenant.
   platformCaptainsReportScorecards: (days: number, status: string, tenant: string) => [
     'platform-captains-report-scorecards',

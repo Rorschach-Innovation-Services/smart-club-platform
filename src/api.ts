@@ -17,6 +17,8 @@ import type {
   TransferWindow,
   TenantBranding,
   TenantSummary,
+  MedicoachConnection,
+  MedicoachOverviewRow,
   TutorialVideo,
   UserProfile,
   Club,
@@ -1454,6 +1456,21 @@ export const platformReopenSetup = (slug: string) =>
 // sanitized InsightsClub projection — never the full Club records.
 export const platformTenantOverview = (slug: string) =>
   request<TenantOverview>(`/platform/tenants/${encodeURIComponent(slug)}/overview`);
+// Match Centre connection console (ADR 0020 phase 1) — read-only visibility. The stage is
+// inferred from config; awaiting-carry rows come from the reconciliation against the
+// Match Centre, never from the absence of write events. `reconcile` ("Check now") runs a
+// reconciliation for this client and answers the refreshed connection.
+export const platformMedicoachConnection = (slug: string) =>
+  request<MedicoachConnection>(
+    `/platform/tenants/${encodeURIComponent(slug)}/medicoach/connection`,
+  );
+export const platformMedicoachOverview = () =>
+  request<{ tenants: MedicoachOverviewRow[] }>('/platform/medicoach/overview');
+export const platformMedicoachReconcile = (slug: string) =>
+  request<MedicoachConnection>(
+    `/platform/tenants/${encodeURIComponent(slug)}/medicoach/reconcile`,
+    { method: 'POST' },
+  );
 // Bulk document-intake (operator uploads compliance docs for many clubs at once).
 // Mint presigned PUTs for a batch (max 100 rows); `items` is POSITIONAL — index i
 // of the response corresponds to index i of the request, and a bad row fails only

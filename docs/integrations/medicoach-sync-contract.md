@@ -275,6 +275,67 @@ Medicoach rules:
 - A `changedAt` more than 5 minutes ahead of medicoach's clock is refused with `error`.
 - Every write is audited under the `smartclub-sync` principal.
 
+## Import/carry endpoints (v1)
+
+Read-only ground truth for smart club's "released in smart club but never carried to medicoach"
+check (Match Centre Connection Console, ADR 0020): fixtures awaiting a carry come from these
+answers, never from the absence of write events. Versioned separately from sync v1 as import
+contract v1 (`MEDICOACH_IMPORT_VERSION` in smart club, `SMARTCLUB_IMPORT_VERSION` in medicoach);
+the payloads carry no `version` field. Both endpoints are signed exactly like §1/§2 (same headers,
+same shared secret, same 401/503 rules) and write nothing. A medicoach that has not deployed them
+answers 404; smart club treats that (and any other failure) as "medicoach not reachable for
+reconciliation" and changes nothing.
+
+### 5. GET /integrations/smartclub/import/connection-summary?tenant=<t>
+- `pathAndQuery` is exactly `/integrations/smartclub/import/connection-summary?tenant=<tenant>`.
+
+Response 200:
+```ts
+{
+  tenant: string,
+  generatedAt: string,           // ISO-8601 UTC
+  competitions: Array<{
+    ref: string,                 // competition ref medicoach has mapped (sorted by ref)
+    fixtureCount: number         // mapped fixture refs in that competition's medicoach tournament
+  }>,
+  totals: {
+    competitions: number,
+    fixtures: number             // every mapped fixture ref of the tenant
+  }
+}
+```
+- Built from the external-ref table's tenant index (competition refs + fixture refs); never a scan.
+- A fixture is attributed to a competition by the medicoach tournament both refs point at.
+  `totals.fixtures` counts every mapped fixture ref, so it can exceed the sum of `fixtureCount`
+  when a fixture's tournament has no mapped competition ref.
+- An unknown tenant is not an error: `competitions: []`, zero totals. A malformed `tenant` is 400.
+
+### 6. POST /integrations/smartclub/import/check-refs
+Body:
+```ts
+{
+  tenant: string,
+  refs: string[]                 // 0..500; every ref must start with `smartclub:<tenant>:`
+}
+```
+Response 200:
+```ts
+{
+  mapped: string[],              // refs medicoach holds a live mapping for
+  unmapped: string[]             // everything else (request order, duplicates collapsed)
+}
+```
+- Every requested ref lands in exactly one list. An empty `refs` list is a reachability probe.
+- 400 when the body is not the shape above (including more than 500 refs) or when ANY ref belongs
+  to a different tenant than the body's `tenant` (a signed caller cannot probe another tenant).
+- "Mapped" = a live external-ref row: not deleted, not an erase tombstone, not a pending player
+  reservation. A ref of a kind medicoach doesn't map is `unmapped` (the fixture needs a bundle
+  carry/top-up).
+- Any ref kind may be checked. Player refs are PERSONAL DATA: medicoach never logs them.
+- Smart club sends every fixture ref of its released, sync-mapped series (fixtures with a
+  `pos:`/`tbd:` side are never exported and never sent), in chunks of ≤500, at most once a day per
+  tenant from the sync cron, and on demand from the operator console.
+
 ## WhatsApp status forwarding (medicoach → smart club)
 
 Smart club sends its WhatsApp notices through medicoach's Meta app/WABA, and a Meta app
