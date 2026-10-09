@@ -403,6 +403,7 @@ export async function flushPlayerOutbox(
     await repo.markPendingPlayerSyncFailed(tenant, row.naturalKey, row.changedAt, error, at());
   };
   const snap = await loadPlayerSyncSnapshot(repo, tenant, { config });
+  const optedOut = await repo.listPlayerSyncOptOuts(tenant);
 
   // Build every entry; hold possible duplicates; drop what cannot fit the contract.
   const sendable: Array<{
@@ -412,6 +413,14 @@ export async function flushPlayerOutbox(
   }> = [];
   for (const row of rows) {
     const erasing = row.op === 'erase' || row.eraseFirst === true;
+    // An opted-out person (e.g. deleted their Match Centre account) is never sent anything but
+    // an erase. Their review goes too: it would only invite an admin to push them again.
+    if (!erasing && optedOut.has(row.naturalKey)) {
+      if (await repo.deletePendingPlayerSyncIfUnchanged(tenant, row.naturalKey, row.changedAt))
+        await repo.deletePlayerReview(tenant, row.naturalKey);
+      counts.optedOut = (counts.optedOut ?? 0) + 1;
+      continue;
+    }
     const intent = erasing ? null : intentOf(snap, row.naturalKey);
     // An admin's link/create resolution already decided who this is: the guard never discards it.
     if (intent?.op === 'upsert' && !row.resolution) {
@@ -511,7 +520,13 @@ export async function flushPlayerOutbox(
     }
   }
 
-  if (counts.sent || counts.errors || counts.unreached || counts.possibleDuplicates)
+  if (
+    counts.sent ||
+    counts.errors ||
+    counts.unreached ||
+    counts.possibleDuplicates ||
+    counts.optedOut
+  )
     await repo.putSyncLog(tenant, {
       id: randomUUID(),
       at: at(),

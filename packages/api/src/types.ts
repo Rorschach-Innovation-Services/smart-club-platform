@@ -1562,6 +1562,20 @@ export interface PlayerSyncReview {
   candidates: PlayerReviewCandidate[];
 }
 
+/**
+ * PLAYERSYNCOPTOUT#<naturalKey> — a person the player sync never sends to medicoach, except an
+ * erase (which only removes data). Deleted by erasePlayerData.
+ */
+export interface PlayerSyncOptOut {
+  naturalKey: string;
+  /** `medicoach-account-deleted`: the person deleted their Match Centre account themselves. */
+  reason: 'medicoach-account-deleted' | 'other';
+  /** Operator's note (plain text, never personal data). */
+  note?: string;
+  by: string;
+  at: string;
+}
+
 /** What one player-outbox flush did (ADR 0019). Counts only. */
 export interface PlayerPushCounts {
   sent: number;
@@ -1578,6 +1592,8 @@ export interface PlayerPushCounts {
   errors: number;
   /** Players whose request never reached medicoach (still queued). Absent on older rows. */
   unreached?: number;
+  /** Queued changes dropped unsent because the person opted out. Absent on older rows. */
+  optedOut?: number;
 }
 
 /** Who changed a fixture's schedule. `medicoach` = the Slice 3 inbound apply (never echoed). */

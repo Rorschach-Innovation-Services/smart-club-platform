@@ -1070,6 +1070,8 @@ export type MedicoachPlayerSyncStatus =
       stuck: number;
       /** Held for an admin decision. */
       reviews: number;
+      /** Never sent to medicoach at their request (e.g. deleted their Match Centre account). */
+      optedOut?: number;
       /** The medicoach team refs parked players need (no personal data). */
       missingTeamRefs: string[];
       lastError?: string;

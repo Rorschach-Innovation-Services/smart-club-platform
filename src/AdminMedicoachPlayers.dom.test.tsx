@@ -178,6 +178,20 @@ describe('Players panel', () => {
     expect(within(screen.getByTestId('mcs-players')).getByText(/2 queued by you/)).toBeVisible();
   });
 
+  it('says how many players are not sent at their request — a count, nothing to act on', async () => {
+    renderPage(status(on({ optedOut: 1 })));
+    const note = await screen.findByTestId('mcs-players-opted-out');
+    expect(note).toHaveTextContent('1 player(s) are not sent to the Match Centre at their request');
+    expect(note).toHaveTextContent('Their registration here is unchanged');
+    expect(within(note).queryByRole('button')).toBeNull();
+  });
+
+  it('shows no opted-out note when nobody opted out', async () => {
+    renderPage(status(on({})));
+    await screen.findByTestId('mcs-players');
+    expect(screen.queryByTestId('mcs-players-opted-out')).toBeNull();
+  });
+
   it('the page header counts player reviews with the schedule changes', async () => {
     renderPage({
       ...status(on({ reviews: 2, parked: 1 })),

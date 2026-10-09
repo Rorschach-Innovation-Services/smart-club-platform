@@ -567,6 +567,12 @@ function PlayersPanel({
           sync and leave this list once medicoach accepts them.
         </div>
       )}
+      {(players.optedOut ?? 0) > 0 && (
+        <div className="mcs-note" data-testid="mcs-players-opted-out">
+          {players.optedOut} player(s) are not sent to the Match Centre at their request — for
+          example, they deleted their Match Centre account. Their registration here is unchanged.
+        </div>
+      )}
       {players.parked > 0 && (
         <div className="insights-callout warn" role="note" style={{ marginBottom: 12 }}>
           <div>

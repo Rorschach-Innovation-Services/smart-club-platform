@@ -619,6 +619,22 @@ export const playerDistinctListKey = (tenant: string) => ({
 });
 
 /**
+ * A person the player sync must never send to medicoach (ADR 0019) — e.g. they deleted their
+ * Match Centre account, a data-subject request the sync must not undo. Per natural key, so it
+ * covers every club registration; their club registration in smart club is untouched. Erasure
+ * deletes it (it names the person).
+ */
+export const playerSyncOptOutKey = (tenant: string, naturalKey: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `PLAYERSYNCOPTOUT#${naturalKey}`,
+});
+
+export const playerSyncOptOutListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  skPrefix: 'PLAYERSYNCOPTOUT#',
+});
+
+/**
  * A stored result whose captain's reports still have to be opened + notified. Written in the
  * same step as the result and deleted once that succeeded, so a failure is retried by the
  * next run instead of being lost (the puller never re-fires the hook for a replay).

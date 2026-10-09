@@ -103,6 +103,8 @@ import {
   playerReviewsListKey,
   playerDistinctKey,
   playerDistinctListKey,
+  playerSyncOptOutKey,
+  playerSyncOptOutListKey,
   reportOpenKey,
   reportOpenListKey,
   umpireKey,
@@ -159,6 +161,7 @@ import type {
   PendingScheduleSync,
   PendingPlayerSync,
   PlayerSyncResolution,
+  PlayerSyncOptOut,
   PlayerSyncReview,
   ReportOpenMarker,
   Umpire,
@@ -2060,6 +2063,43 @@ export async function listPlayerDistinctPairs(tenant: string): Promise<Set<strin
   return new Set(items.map((i) => String(i.sk).slice(skPrefix.length)));
 }
 
+export async function putPlayerSyncOptOut(tenant: string, optOut: PlayerSyncOptOut): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...optOut, ...playerSyncOptOutKey(tenant, optOut.naturalKey) },
+    }),
+  );
+}
+
+export async function getPlayerSyncOptOut(
+  tenant: string,
+  naturalKey: string,
+): Promise<PlayerSyncOptOut | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: playerSyncOptOutKey(tenant, naturalKey) }),
+  );
+  return stripKeys<PlayerSyncOptOut>(res.Item);
+}
+
+export async function deletePlayerSyncOptOut(tenant: string, naturalKey: string): Promise<void> {
+  await ddb.send(
+    new DeleteCommand({ TableName: TABLE, Key: playerSyncOptOutKey(tenant, naturalKey) }),
+  );
+}
+
+/** The natural keys of every person opted out of the player sync. */
+export async function listPlayerSyncOptOuts(tenant: string): Promise<Set<string>> {
+  const { pk, skPrefix } = playerSyncOptOutListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    ProjectionExpression: 'sk',
+  });
+  return new Set(items.map((i) => String(i.sk).slice(skPrefix.length)));
+}
+
 /**
  * Note that this person changed, for the medicoach player sync (ADR 0019). Called from every
  * repo write that changes a player row, so routes AND import CLIs are covered. A no-op unless
@@ -2119,8 +2159,8 @@ export async function recordPlayerSyncChange(
 
 /**
  * The erasure counterpart (erasePlayerData only): an `erase` tombstone when the sync is on,
- * and the person's review + distinct-pair markers deleted ALWAYS (they name the person).
- * Unlike the change hook this throws — an erasure must not report success with PII left.
+ * and the person's review, distinct-pair and opt-out markers deleted ALWAYS (they name the
+ * person). Unlike the change hook this throws — an erasure must not report success with PII left.
  */
 export async function recordPlayerSyncErase(
   tenant: string,
@@ -2128,6 +2168,7 @@ export async function recordPlayerSyncErase(
   at: string,
 ): Promise<void> {
   await deletePlayerReview(tenant, naturalKey);
+  await deletePlayerSyncOptOut(tenant, naturalKey);
   // Another person's possible-duplicate review that lists THIS person as a candidate names
   // them too: drop it, and re-queue that person so the guard re-evaluates without them.
   const requeue: string[] = [];
