@@ -232,7 +232,7 @@ export interface ScheduleDiffHandle {
   /**
    * Refs of fixtures this write ADDS to a mapped series. Medicoach has no such match and the
    * v1 contract cannot create one, so they are never pushed — `enqueue()` reports them (log +
-   * SYNCLOG) as needing a bundle top-up instead of ignoring them silently.
+   * SYNCLOG + MCAWAIT#) as needing a bundle top-up instead of ignoring them silently.
    */
   newRefs: string[];
   /** Write the PENDINGSYNC# rows — call only AFTER the series write succeeded. */
@@ -247,6 +247,40 @@ export function newFixturesNotice(tenant: string, seriesId: string, refs: string
     `[medicoach-sync] ${tenant}: ${refs.length} new fixture(s) in ${seriesId} not in medicoach ` +
     `(needs bundle top-up): ${refs.join(', ')}`
   );
+}
+
+/**
+ * Persist refs medicoach does not have as MCAWAIT#<seriesId> (Connection Console, ADR 0020):
+ * unioned with the refs already recorded for the series. Best-effort — the series write
+ * already landed, and the daily reconciliation against medicoach re-derives the rows — so a
+ * failure is logged, never thrown.
+ */
+export async function recordAwaitingCarry(
+  repo: Pick<RepoModule, 'upsertMcAwait'>,
+  tenant: string,
+  series: Pick<Series, 'id' | 'name'> & { leagueKey?: unknown },
+  refs: string[],
+  nowIso: string,
+): Promise<void> {
+  if (!refs.length) return;
+  try {
+    await repo.upsertMcAwait(
+      tenant,
+      {
+        seriesId: String(series.id),
+        ...(series.name ? { seriesName: String(series.name) } : {}),
+        ...(typeof series.leagueKey === 'string' && series.leagueKey
+          ? { leagueKey: series.leagueKey }
+          : {}),
+        refs,
+      },
+      { now: nowIso },
+    );
+  } catch (err) {
+    console.error(
+      `[medicoach-sync] ${tenant}: awaiting-carry record failed for ${String(series.id)} — ${err instanceof Error ? err.message : 'error'}`,
+    );
+  }
 }
 
 /**
@@ -265,7 +299,10 @@ export function newFixturesNotice(tenant: string, seriesId: string, refs: string
  * (its ref no longer means what medicoach has).
  */
 export async function recordScheduleDiff(
-  repo: Pick<RepoModule, 'getTenantConfig' | 'putPendingSync' | 'getSeasonRun' | 'putSyncLog'>,
+  repo: Pick<
+    RepoModule,
+    'getTenantConfig' | 'putPendingSync' | 'getSeasonRun' | 'putSyncLog' | 'upsertMcAwait'
+  >,
   tenant: string,
   before: Series | null | undefined,
   after: Series,
@@ -341,6 +378,7 @@ export async function recordScheduleDiff(
           },
           newFixtureRefs: newRefs,
         });
+        await recordAwaitingCarry(repo, tenant, after, newRefs, nowIso);
       }
       return rows.length;
     },
@@ -511,6 +549,8 @@ export async function flushScheduleOutbox(
 
   /** The first whole-request failure of this flush (unreachable, HTTP, contract), if any. */
   let requestError: string | undefined;
+  /** Refs medicoach answered `unmapped`, by series (recorded as MCAWAIT# after the batches). */
+  const unmappedBySeries = new Map<string, string[]>();
   for (let i = 0; i < sendable.length; i += SCHEDULE_PUSH_MAX) {
     const batch = sendable.slice(i, i + SCHEDULE_PUSH_MAX);
     const body = JSON.stringify({
@@ -571,8 +611,18 @@ export async function flushScheduleOutbox(
       else {
         counts[r.status as 'applied' | 'stale' | 'unchanged' | 'unmapped']++;
         await repo.deletePendingSyncIfUnchanged(tenant, row.ref, row.schedule.changedAt);
+        if (r.status === 'unmapped') {
+          const refs = unmappedBySeries.get(row.seriesId) ?? [];
+          refs.push(row.ref);
+          unmappedBySeries.set(row.seriesId, refs);
+        }
       }
     }
+  }
+  // An `unmapped` answer: medicoach has no such fixture — it awaits a carry (ADR 0020).
+  for (const [seriesId, refs] of unmappedBySeries) {
+    const series = live.get(seriesId);
+    if (series) await recordAwaitingCarry(repo, tenant, series, refs, now().toISOString());
   }
 
   if (counts.sent || counts.errors)

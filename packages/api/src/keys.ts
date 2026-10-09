@@ -510,6 +510,37 @@ export const syncLogsListKey = (tenant: string) => ({
   skPrefix: 'SYNCLOG#',
 });
 
+/**
+ * Fixtures awaiting a medicoach carry (Connection Console, ADR 0020): one row per series
+ * holding the fixture refs medicoach does not have. Written by the write path (new fixtures,
+ * `unmapped` push answers) and replaced by the reconciliation against medicoach's check-refs.
+ */
+export const mcAwaitKey = (tenant: string, seriesId: string) => ({
+  pk: tenantPrefix(tenant),
+  sk: `MCAWAIT#${seriesId}`,
+});
+
+export const mcAwaitListKey = (tenant: string) => ({
+  pk: tenantPrefix(tenant),
+  skPrefix: 'MCAWAIT#',
+});
+
+/** The tenant's last awaiting-carry reconciliation against medicoach (when, reachable, totals). */
+export const mcReconKey = (tenant: string) => ({
+  pk: tenantPrefix(tenant),
+  sk: 'MCRECON#',
+});
+
+/**
+ * The per-tenant lease that serialises reconciliations (cron vs the console's "Check now"):
+ * `{token, acquiredAt, expiresAt}`, taken by conditional put, released by a delete conditioned
+ * on the holder's random `token`. `expiresAt` (epoch seconds) is also the table TTL attribute.
+ */
+export const mcReconLockKey = (tenant: string) => ({
+  pk: tenantPrefix(tenant),
+  sk: 'MCRECONLOCK#',
+});
+
 /** pk of the whole SYNC partition (cursor, logs, conflicts, outbox, report markers), for
  * erasure and cohort clearing. */
 export const syncPartitionPk = (tenant: string) => `${tenantPrefix(tenant)}#SYNC`;

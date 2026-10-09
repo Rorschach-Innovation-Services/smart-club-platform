@@ -86,6 +86,10 @@ import {
   fixtureScorecardsListKey,
   syncCursorKey,
   syncHealthKey,
+  mcAwaitKey,
+  mcAwaitListKey,
+  mcReconKey,
+  mcReconLockKey,
   syncLogKey,
   syncLogsListKey,
   syncPartitionPk,
@@ -145,6 +149,9 @@ import type {
   StoredFixtureResult,
   StoredFixtureScorecard,
   SyncHealth,
+  McAwaitRow,
+  McReconcileStamp,
+  McReconcileLease,
   SyncLogEntry,
   SyncConflict,
   PendingScheduleSync,
@@ -1363,6 +1370,156 @@ export async function putSyncHealth(tenant: string, patch: SyncHealth): Promise<
       ExpressionAttributeValues: Object.fromEntries(entries.map(([k, v]) => [`:${k}`, v])),
     }),
   );
+}
+
+// ── Medicoach connection console: awaiting carry + reconciliation (ADR 0020) ──
+
+/** A tenant's MCAWAIT# rows (series with fixtures medicoach does not have). */
+export async function listMcAwait(tenant: string): Promise<McAwaitRow[]> {
+  const { pk, skPrefix } = mcAwaitListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<McAwaitRow>(i)!);
+}
+
+/**
+ * Record fixtures of one series as awaiting a medicoach carry. `refs` are UNIONED with the
+ * row's existing refs (the write path only ever adds), or REPLACE them with `replace` (the
+ * reconciliation, whose answer is the whole truth for the series). `firstSeen` is kept,
+ * `lastSeen` is `now`. Read-merge-write: the reconciliation re-derives the set daily, so a
+ * union lost to a concurrent write heals.
+ */
+export async function upsertMcAwait(
+  tenant: string,
+  entry: { seriesId: string; seriesName?: string; leagueKey?: string; refs: string[] },
+  opts: { now: string; replace?: boolean },
+): Promise<McAwaitRow> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: mcAwaitKey(tenant, entry.seriesId) }),
+  );
+  const existing = stripKeys<McAwaitRow>(res.Item);
+  const refs = [...new Set([...(opts.replace ? [] : (existing?.refs ?? [])), ...entry.refs])];
+  const seriesName = entry.seriesName || existing?.seriesName;
+  const leagueKey = entry.leagueKey || existing?.leagueKey;
+  const row: McAwaitRow = {
+    seriesId: entry.seriesId,
+    ...(seriesName ? { seriesName } : {}),
+    ...(leagueKey ? { leagueKey } : {}),
+    refs,
+    count: refs.length,
+    firstSeen: existing?.firstSeen ?? opts.now,
+    lastSeen: opts.now,
+  };
+  await ddb.send(
+    new PutCommand({ TableName: TABLE, Item: { ...row, ...mcAwaitKey(tenant, entry.seriesId) } }),
+  );
+  return row;
+}
+
+export async function deleteMcAwait(tenant: string, seriesId: string): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: TABLE, Key: mcAwaitKey(tenant, seriesId) }));
+}
+
+/** The tenant's last reconciliation stamp, or null before the first one. */
+export async function getMcReconcile(tenant: string): Promise<McReconcileStamp | null> {
+  const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: mcReconKey(tenant) }));
+  return stripKeys<McReconcileStamp>(res.Item);
+}
+
+/** Replace the tenant's reconciliation stamp (each run's stamp stands alone). */
+export async function putMcReconcile(tenant: string, stamp: McReconcileStamp): Promise<void> {
+  await ddb.send(new PutCommand({ TableName: TABLE, Item: { ...stamp, ...mcReconKey(tenant) } }));
+}
+
+/**
+ * Take the tenant's reconciliation lease (MCRECONLOCK#) for `leaseMs` from `now`: a conditional
+ * put that succeeds only when no lease exists or the existing one has expired. Returns the
+ * lease taken, or null while another run holds an unexpired one. Throws any other failure.
+ */
+export async function acquireMcReconcileLease(
+  tenant: string,
+  opts: { now: Date; leaseMs: number },
+): Promise<McReconcileLease | null> {
+  const nowMs = opts.now.getTime();
+  const lease: McReconcileLease = {
+    token: randomUUID(),
+    acquiredAt: opts.now.toISOString(),
+    expiresAt: Math.ceil((nowMs + opts.leaseMs) / 1000),
+  };
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { ...lease, ...mcReconLockKey(tenant) },
+        ConditionExpression: 'attribute_not_exists(pk) OR expiresAt < :now',
+        ExpressionAttributeValues: { ':now': Math.floor(nowMs / 1000) },
+      }),
+    );
+  } catch (err) {
+    if (isCcf(err)) return null;
+    throw err;
+  }
+  return lease;
+}
+
+/**
+ * Extend a held lease to `leaseMs` from `now`: an update of `expiresAt` conditioned on the
+ * holder's own `token`. Returns false when the lease is no longer this holder's (it expired
+ * and another run took it, or it is gone) — nothing is written then. Throws any other failure.
+ */
+export async function renewMcReconcileLease(
+  tenant: string,
+  lease: McReconcileLease,
+  opts: { now: Date; leaseMs: number },
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: mcReconLockKey(tenant),
+        UpdateExpression: 'SET expiresAt = :e',
+        ConditionExpression: '#token = :t',
+        ExpressionAttributeNames: { '#token': 'token' },
+        ExpressionAttributeValues: {
+          ':e': Math.ceil((opts.now.getTime() + opts.leaseMs) / 1000),
+          ':t': lease.token,
+        },
+      }),
+    );
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+  return true;
+}
+
+/**
+ * Release a lease taken by `acquireMcReconcileLease`: a delete conditioned on the holder's own
+ * `token`, so a holder whose lease expired and was taken over never deletes the new
+ * holder's. Returns false when the lease was no longer this holder's (nothing deleted).
+ */
+export async function releaseMcReconcileLease(
+  tenant: string,
+  lease: McReconcileLease,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new DeleteCommand({
+        TableName: TABLE,
+        Key: mcReconLockKey(tenant),
+        ConditionExpression: '#token = :t',
+        ExpressionAttributeNames: { '#token': 'token' },
+        ExpressionAttributeValues: { ':t': lease.token },
+      }),
+    );
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+  return true;
 }
 
 /** SYNCLOG# rows self-expire after this long (DynamoDB TTL on `expiresAt`). */

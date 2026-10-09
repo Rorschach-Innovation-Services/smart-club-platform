@@ -25,7 +25,12 @@ export type CliWriteOutcome = 'written' | 'drifted';
 export async function writeSeriesFromSnapshot(
   repo: Pick<
     RepoModule,
-    'getTenantConfig' | 'putPendingSync' | 'getSeasonRun' | 'putSyncLog' | 'putSeriesIfVersion'
+    | 'getTenantConfig'
+    | 'putPendingSync'
+    | 'getSeasonRun'
+    | 'putSyncLog'
+    | 'upsertMcAwait'
+    | 'putSeriesIfVersion'
   >,
   tenant: string,
   original: Series | null | undefined,

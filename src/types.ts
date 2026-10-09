@@ -576,6 +576,55 @@ export interface TenantSummary {
   playerCount?: number;
 }
 
+/**
+ * One series with released fixtures Smart Club holds but the Match Centre (medicoach) has
+ * no mapping for — they need a one-off carry (bundle top-up); the automatic sync cannot
+ * create fixtures. `count` is fixtures; `firstSeen`/`lastSeen` are ISO timestamps.
+ */
+export interface MedicoachAwaitingSeries {
+  seriesId: string;
+  seriesName: string;
+  leagueKey: string;
+  count: number;
+  firstSeen: string;
+  lastSeen: string;
+}
+
+/**
+ * GET /platform/tenants/:slug/medicoach/connection (ADR 0020 phase 1, read-only). `stage`
+ * is INFERRED from config until the Match Centre connection summary exists — `inferred` is
+ * always true today and the UI must label it so. `mcReachable` is null when never probed.
+ */
+export interface MedicoachConnection {
+  stage: 'not_connected' | 'live';
+  inferred: true;
+  syncEnabled: boolean;
+  playerSync: boolean;
+  goLiveDate: string | null;
+  /** Sync secrets missing ⇒ every sync run is a silent dry-run. */
+  dryRun: boolean;
+  mcReachable: boolean | null;
+  lastReconcileAt: string | null;
+  health: {
+    status: 'ok' | 'failing' | 'dry-run' | 'never';
+    lastSuccessAt: string | null;
+    lastError: string | null;
+  };
+  awaitingTotal: number;
+  awaiting: MedicoachAwaitingSeries[];
+}
+
+/** One row of GET /platform/medicoach/overview — the client list's per-tenant badge. */
+export interface MedicoachOverviewRow {
+  tenant: string;
+  name: string;
+  syncEnabled: boolean;
+  dryRun: boolean;
+  healthStatus: MedicoachConnection['health']['status'];
+  awaitingTotal: number;
+  lastReconcileAt: string | null;
+}
+
 /** Chair contact fields the league drill-down renders. All optional (legacy clubs). */
 export interface ChairContact {
   name?: string;

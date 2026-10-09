@@ -63,6 +63,8 @@ import {
 } from './medicoach-sync/series-results.js';
 import { MedicoachSyncError } from './medicoach-sync/puller.js';
 import { runTenantSync } from './medicoach-sync/run.js';
+import { isReconcileBusy, reconcileAwaitingCarry } from './medicoach-sync/reconcile.js';
+import { buildConnectionView, buildOverviewRow } from './medicoach-sync/connection.js';
 import {
   INTERACTIVE_PUSH_TIMEOUT_MS,
   flushPlayerOutbox,
@@ -90,6 +92,7 @@ import {
   captainsReportLinkBase,
   captainsReportLinkSecret,
   medicoachResolveTimeoutMs,
+  medicoachSyncDryRun,
   medicoachSyncSecret,
   medicoachSyncUrl,
 } from './env.js';
@@ -5163,7 +5166,7 @@ app.get('/integrations/medicoach/status', async (c) => {
     ]);
   return c.json({
     enabled: true,
-    dryRun: !medicoachSyncUrl() || !medicoachSyncSecret(),
+    dryRun: medicoachSyncDryRun(),
     cursor,
     // When the sync last worked / last failed; `lastErrorText` is the failure in plain
     // language (the technical `lastError` stays for the page's "Details").
@@ -9458,6 +9461,60 @@ app.get('/platform/tenants/:slug', async (c) => {
   const config = await repo.getTenantConfig(slug);
   if (!config) throw new HttpError(404, 'tenant not found');
   return c.json({ ...config, liveUrl: canonicalWebOrigin(slug) });
+});
+
+/**
+ * GET /platform/tenants/:slug/medicoach/connection — the Match Centre connection console
+ * (ADR 0020, Phase 1): intent (sync on, player sync, go-live), sync health, the last
+ * awaiting-carry reconciliation and the series whose fixtures medicoach does not have yet.
+ * Counts and fixture refs only (`buildConnectionView`).
+ */
+app.get('/platform/tenants/:slug/medicoach/connection', async (c) => {
+  const slug = c.req.param('slug');
+  const config = await repo.getTenantConfig(slug);
+  if (!config) throw new HttpError(404, 'tenant not found');
+  return c.json(await buildConnectionView(repo, slug, config, medicoachSyncDryRun()));
+});
+
+/**
+ * POST /platform/tenants/:slug/medicoach/reconcile — reconcile the tenant's awaiting-carry
+ * rows against medicoach's check-refs now (the cron does it daily), then answer the refreshed
+ * connection view. A medicoach that can't be asked (dry run, endpoint not deployed, down) is
+ * not an error here: the view carries `mcReachable: false` and the rows stay as they were.
+ * 409 `reconcile_busy` while another reconciliation for the tenant holds its lease.
+ */
+app.post('/platform/tenants/:slug/medicoach/reconcile', async (c) => {
+  const slug = c.req.param('slug');
+  const config = await repo.getTenantConfig(slug);
+  if (!config) throw new HttpError(404, 'tenant not found');
+  // API Gateway cuts the request at 30 s, but a multi-chunk reconcile against a slow medicoach
+  // can run longer: the operator may see a 504 while the Lambda run still completes (the lease
+  // stops a retry from starting a second run). Acceptable for Phase 1.
+  const result = await reconcileAwaitingCarry(slug, {
+    repo,
+    url: medicoachSyncUrl(),
+    secret: medicoachSyncSecret(),
+  });
+  // Another run (the cron, or a second click) holds the tenant's lease: nothing was touched.
+  if (isReconcileBusy(result))
+    throw new HttpError(
+      409,
+      'A reconciliation is already running for this client — try again in a moment.',
+      { code: 'reconcile_busy' },
+    );
+  return c.json(await buildConnectionView(repo, slug, config, medicoachSyncDryRun()));
+});
+
+/**
+ * GET /platform/medicoach/overview — one connection row per tenant in the registry (sync on
+ * or not), for the operator portal's badges.
+ */
+app.get('/platform/medicoach/overview', async (c) => {
+  const tenants = await repo.listTenants();
+  const dryRun = medicoachSyncDryRun();
+  return c.json({
+    tenants: await Promise.all(tenants.map((t) => buildOverviewRow(repo, t, dryRun))),
+  });
 });
 
 /**
