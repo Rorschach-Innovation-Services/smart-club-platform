@@ -46,6 +46,14 @@ So Medicoach must hold a league's teams **before** Smart Club classifies that le
    - a fan-out membership count far above the club pools (a mis-classified league).
 8. **Confirm**: `enqueue-players -- --tenant <t> --confirm`. The cron drains ~500 per 15 minutes
    (about an hour for a full tenant).
+   - **Start the first drain with a small batch.** A first-placement push (new memberships on
+     every fan-out side) measured ~3 s per player, and each POST must finish under Medicoach's
+     API Gateway limit (29 s). Before confirming, set `MEDICOACH_SYNC_BATCH_SIZE=10` in the
+     sync cron function's `environment` (`sst.config.ts`, beside `MEDICOACH_SYNC_URL`; it is
+     not passed through by default) and deploy (integer, clamped to 1..50; unset = 50, the
+     contract cap). Watch the first runs'
+     per-batch latency and timeouts, then raise it (or unset it) once batches finish well inside
+     the limit — steady-state pushes are mostly `unchanged` and fast.
 9. **Roster health**: Medicoach `/league-roster-health` (and its 06:00 SAST check) shows only real
    club-registration gaps. A short **managed** side is fixed in Smart Club (register the player),
    never by hand-adding in Medicoach.

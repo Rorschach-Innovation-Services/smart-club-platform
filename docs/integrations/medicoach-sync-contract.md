@@ -340,11 +340,19 @@ add-only:
   `smartClubDesiredTeamIds`). A fan-out id is NEVER in an upsert's removal licence, whatever
   either set says on a later push — a recipe change, a classifier flip or a club rep unticking a
   league can never remove anyone.
+- **The stored fan-out set is cumulative while placements stand.** Every upsert stores
+  `pushed fan-out ∪ (previously stored fan-out ∩ sides the player is still LIVE on)`, so a side
+  dropped from a later push (or a `[]`, or an absent field) stays in the set — and therefore in
+  the `remove` licence — for as long as the player is on it. A side the player has left (removed
+  by hand in medicoach, or by a licensed sync removal) drops out of the set on the next upsert. An
+  absent field and `[]` mean the same thing. A fan-out side held by the floor guard on `remove` is
+  recorded into the set and survives later upserts the same way.
 - **`remove` / `erase`: everywhere.** The licence widens to stored-desired ∪ stored-fan-out, so a
   player who leaves the club comes off every side (`remove` still behind the floor + batch guards;
   `erase` stays exempt). The entry itself carries no team sets (detail fields are upsert-only).
-- **Old senders / old tenants**: no `fanOutTeamRefs` ⇒ behaviour byte-identical to before. When a
-  tenant has fan-out on, every upsert carries the field (possibly `[]`).
+- **Old senders / old tenants**: no `fanOutTeamRefs` on a ref that has never stored a fan-out set
+  ⇒ behaviour byte-identical to before (no fan-out attribute is written). When a tenant has
+  fan-out on, every upsert carries the field (possibly `[]`).
 - **The bundle** (`people.players[].fanOutTeamRefs`) carries the same split, so a bundle import
   and the sync cannot drift.
 - **Report squad cap**: whole-pool sides can exceed medicoach's `REPORT_SQUAD_CAP` (100); league-

@@ -76,6 +76,18 @@ export function playerFlushCap(trigger: 'cron' | 'manual' | 'cli'): number {
 }
 
 /**
+ * Rows per player-push POST: `MEDICOACH_SYNC_BATCH_SIZE` (an integer), clamped to
+ * 1..PLAYER_PUSH_MAX; unset or not a number ⇒ PLAYER_PUSH_MAX (the contract cap, unchanged).
+ * A first-placement push measured ~3 s/player, so a tenant's first drain may need small batches
+ * to stay under API Gateway's 29 s; raise it once latency is observed.
+ */
+export function playerPushBatchSize(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.MEDICOACH_SYNC_BATCH_SIZE?.trim();
+  if (!raw || !/^-?\d+$/.test(raw)) return PLAYER_PUSH_MAX;
+  return Math.min(PLAYER_PUSH_MAX, Math.max(1, Number(raw)));
+}
+
+/**
  * Per player-push request. A worst-case batch of 50 NEW players (matcher + creates) measured
  * ~3–5 s with 3× spikes, so the fixture push's 10 s would cut real work short.
  */
@@ -456,8 +468,9 @@ export async function flushPlayerOutbox(
   }
 
   let requestError: string | undefined;
-  for (let i = 0; i < sendable.length; i += PLAYER_PUSH_MAX) {
-    const batch = sendable.slice(i, i + PLAYER_PUSH_MAX);
+  const batchSize = playerPushBatchSize();
+  for (let i = 0; i < sendable.length; i += batchSize) {
+    const batch = sendable.slice(i, i + batchSize);
     counts.sent += batch.length;
     let results: Map<string, PlayerPushResponse['results'][number]>;
     try {
