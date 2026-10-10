@@ -48,6 +48,7 @@ import type {
 import { explainSyncError } from './explain.js';
 import {
   buildPlacementContext,
+  civilDateAt,
   distinctPair,
   nameDobKey,
   playerSyncEnabled,
@@ -117,7 +118,7 @@ export async function loadPlayerSyncSnapshot(
     | 'listPlayerDistinctPairs'
   >,
   tenant: string,
-  opts: { config?: TenantConfig | null } = {},
+  opts: { config?: TenantConfig | null; now?: Date } = {},
 ): Promise<PlayerSyncSnapshot> {
   const [config, clubs, series, seasonRuns, clearances, distinct] = await Promise.all([
     opts.config !== undefined ? Promise.resolve(opts.config) : repo.getTenantConfig(tenant),
@@ -127,13 +128,16 @@ export async function loadPlayerSyncSnapshot(
     repo.listAllClearances(tenant),
     repo.listPlayerDistinctPairs(tenant),
   ]);
+  const recipes = recipesForTenant(tenant);
   const ctx = buildPlacementContext({
     tenant,
     config,
     clubs,
     series,
     seasonRuns,
-    recipes: recipesForTenant(tenant),
+    recipes,
+    // Fan-out ages are taken once per run, on the tenant's civil date.
+    evalDate: civilDateAt(opts.now ?? new Date(), recipes.utcOffset || '+02:00'),
   });
   const rowsByNk = new Map<string, PlayerRegistration[]>();
   const byNameDob = new Map<string, Set<string>>();
@@ -240,6 +244,8 @@ export function buildPlayerEntry(
     isMinor: p.isMinor === true,
     ...(optStr(p.guardianName) ? { guardianName: optStr(p.guardianName) } : {}),
     teamRefs: intent.teamRefs,
+    // Fan-out tenants only (absent otherwise, so the entry is byte-identical): ADD-ONLY sides.
+    ...(intent.fanOutTeamRefs ? { fanOutTeamRefs: intent.fanOutTeamRefs } : {}),
     ...(intent.veteransClubId
       ? { veteransInstitutionRef: refs.institution(tenant, intent.veteransClubId) }
       : {}),
@@ -402,7 +408,7 @@ export async function flushPlayerOutbox(
     else counts.errors++;
     await repo.markPendingPlayerSyncFailed(tenant, row.naturalKey, row.changedAt, error, at());
   };
-  const snap = await loadPlayerSyncSnapshot(repo, tenant, { config });
+  const snap = await loadPlayerSyncSnapshot(repo, tenant, { config, now: now() });
   const optedOut = await repo.listPlayerSyncOptOuts(tenant);
 
   // Build every entry; hold possible duplicates; drop what cannot fit the contract.

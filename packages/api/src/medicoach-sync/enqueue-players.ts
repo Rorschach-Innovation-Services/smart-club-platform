@@ -17,11 +17,18 @@
  * the bundle already carried resolve by ref and come back `unchanged`/`updated`. Re-run it
  * after any import CLI that wrote players outside the API.
  *
- * Output is counts only: no names, natural keys or refs (PERSONAL DATA).
+ * Fan-out tenants (recipe `placement.fanOut`) also get the local fan-out prediction: players
+ * with fan-out sides, the add-only memberships, rows missing gender/dob, and the unclassified
+ * leagues (never fan out). In the medicoach prediction, any `unmapped-team` lists the missing
+ * TEAM refs and any held removal is counted: both are stop-and-investigate before --confirm
+ * (docs/runbooks/medicoach-client-onboarding.md).
+ *
+ * Output is counts only: no names, natural keys or PLAYER refs (PERSONAL DATA). Team refs are
+ * printed for `unmapped-team` (they name a club side, not a person).
  */
 import { pathToFileURL } from 'node:url';
 import { medicoachSyncSecret, medicoachSyncUrl } from '../env.js';
-import { playerSyncEnabled } from './player-placement.js';
+import { playerSyncEnabled, unclassifiedLeagueKeys } from './player-placement.js';
 import {
   PLAYER_PUSH_MAX,
   PlayerPushEntrySchema,
@@ -67,12 +74,27 @@ export interface BackfillPlan {
   /** Natural keys to queue (upsert intent, no unresolved possible duplicate). */
   eligible: string[];
   counts: { persons: number; upsert: number; notEligible: number; possibleDuplicates: number };
+  /** Fan-out tenants only: the local prediction of the add-only sides. */
+  fanOut?: {
+    players: number;
+    memberships: number;
+    placementDataGaps: number;
+    unclassifiedLeagues: string[];
+  };
 }
 
 /** Who the backfill queues, from one snapshot of the tenant. */
 export function planBackfill(snap: PlayerSyncSnapshot): BackfillPlan {
   const eligible: string[] = [];
   const counts = { persons: 0, upsert: 0, notEligible: 0, possibleDuplicates: 0 };
+  const fanOut = snap.ctx.fanOut
+    ? {
+        players: 0,
+        memberships: 0,
+        placementDataGaps: 0,
+        unclassifiedLeagues: unclassifiedLeagueKeys(snap.ctx),
+      }
+    : undefined;
   for (const nk of [...snap.rowsByNk.keys()].sort()) {
     counts.persons++;
     const intent = intentOf(snap, nk);
@@ -81,11 +103,17 @@ export function planBackfill(snap: PlayerSyncSnapshot): BackfillPlan {
       continue;
     }
     counts.upsert++;
+    if (fanOut) {
+      const n = intent.fanOutTeamRefs?.length ?? 0;
+      if (n) fanOut.players++;
+      fanOut.memberships += n;
+      fanOut.placementDataGaps += intent.placementDataGaps ?? 0;
+    }
     // Still queued: the flush holds it as a review, which is where an admin decides.
     if (possibleDuplicates(snap, nk, intent.primary).length) counts.possibleDuplicates++;
     eligible.push(nk);
   }
-  return { eligible, counts };
+  return { eligible, counts, ...(fanOut ? { fanOut } : {}) };
 }
 
 /**
@@ -136,6 +164,15 @@ async function main(): Promise<void> {
   line('upsert (eligible)', plan.counts.upsert);
   line('… possible duplicates (held for review)', plan.counts.possibleDuplicates);
   line('not eligible (inactive / pending / none)', plan.counts.notEligible);
+  if (plan.fanOut) {
+    line('fan-out: players gaining sides', plan.fanOut.players);
+    line('fan-out: memberships (add-only)', plan.fanOut.memberships);
+    line('fan-out: rows missing gender/dob', plan.fanOut.placementDataGaps);
+    line(
+      'fan-out: unclassified leagues',
+      plan.fanOut.unclassifiedLeagues.length ? plan.fanOut.unclassifiedLeagues.join(', ') : 0,
+    );
+  }
 
   if (!confirm) {
     const url = medicoachSyncUrl();
@@ -153,6 +190,8 @@ async function main(): Promise<void> {
     }
     const statuses: Record<string, number> = {};
     const fields: Record<string, number> = {};
+    const missingTeams = new Map<string, number>();
+    let heldRemovals = 0;
     let failedBatches = 0;
     for (let i = 0; i < entries.length; i += PLAYER_PUSH_MAX) {
       try {
@@ -169,6 +208,9 @@ async function main(): Promise<void> {
         for (const r of res.results) {
           statuses[r.status] = (statuses[r.status] ?? 0) + 1;
           for (const d of r.fieldDiffs ?? []) fields[d.field] = (fields[d.field] ?? 0) + 1;
+          for (const t of r.missingTeamRefs ?? [])
+            missingTeams.set(t, (missingTeams.get(t) ?? 0) + 1);
+          heldRemovals += r.heldRemovals?.length ?? 0;
         }
       } catch (err) {
         failedBatches++;
@@ -180,6 +222,11 @@ async function main(): Promise<void> {
     if (Object.keys(fields).length) {
       console.log('\n`updated` would change (field: players)');
       for (const [k, v] of Object.entries(fields).sort()) line(k, v);
+    }
+    if (heldRemovals) line('held removals (STOP: investigate)', heldRemovals);
+    if (missingTeams.size) {
+      console.log('\n`unmapped-team` (STOP: medicoach lacks these teams; team ref: players)');
+      for (const [t, n] of [...missingTeams].sort()) line(t, n);
     }
     if (failedBatches) line('failed batches', failedBatches);
     console.log('\n  dry run: nothing queued. Pass --confirm to queue the eligible players.');

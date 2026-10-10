@@ -156,6 +156,15 @@ function printSummary(summary: ExportSummary, counts: Record<string, number>): v
   line('… league not exported', p.clubSquadReasons.leagueNotExported);
   line('… club has no side in league', p.clubSquadReasons.noSideInLeague);
   line('club squad teams', p.squadTeams);
+  if (p.fanOut) {
+    line('fan-out: players placed', p.fanOut.playersFannedOut);
+    line('fan-out: memberships (add-only)', p.fanOut.memberships);
+    line('fan-out: rows missing gender/dob', p.fanOut.placementDataGaps);
+    line(
+      'fan-out: unclassified leagues (never fan out)',
+      p.fanOut.unclassifiedLeagues.length ? p.fanOut.unclassifiedLeagues.join(', ') : 0,
+    );
+  }
 
   const v = summary.veterans;
   console.log('\nVeterans roster coverage');

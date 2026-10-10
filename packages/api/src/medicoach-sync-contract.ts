@@ -289,6 +289,7 @@ const PLAYER_DETAIL_FIELDS = [
   'isMinor',
   'guardianName',
   'teamRefs',
+  'fanOutTeamRefs',
   'veteransInstitutionRef',
   'resolution',
 ] as const;
@@ -313,6 +314,12 @@ export const PlayerPushEntrySchema = z
     isMinor: z.boolean().optional(),
     guardianName: z.string().optional(),
     teamRefs: z.array(ref).optional(),
+    /**
+     * Additive (fan-out placement): sides the player is placed on ADD-ONLY — disjoint from
+     * `teamRefs`, never removed by an upsert, removed only by `remove`/`erase` (contract §4).
+     * Upsert only; absent from a tenant without fan-out.
+     */
+    fanOutTeamRefs: z.array(ref).optional(),
     veteransInstitutionRef: ref.optional(),
     resolution: PlayerResolutionSchema.optional(),
   })
@@ -369,6 +376,8 @@ export const PlayerPushResponseSchema = z.object({
       message: z.string().optional(),
       candidates: z.array(PlayerCandidateSchema).optional(),
       missingTeamRefs: z.array(ref).optional(),
+      /** Additive (2026-10-09): team refs whose removal medicoach HELD (contract §4). */
+      heldRemovals: z.array(ref).optional(),
       fieldDiffs: z
         .array(
           z.object({ field: z.string(), from: z.string().nullable(), to: z.string().nullable() }),
