@@ -71,8 +71,14 @@ export const PLAYER_FLUSH_MAX_PER_RUN = 500;
 export const PLAYER_FLUSH_MAX_MANUAL = 50;
 
 /** The per-run row cap for a trigger: manual runs send a first slice, the cron drains. */
-export function playerFlushCap(trigger: 'cron' | 'manual' | 'cli'): number {
-  return trigger === 'manual' ? PLAYER_FLUSH_MAX_MANUAL : PLAYER_FLUSH_MAX_PER_RUN;
+export function playerFlushCap(
+  trigger: 'cron' | 'manual' | 'cli',
+  env: NodeJS.ProcessEnv = process.env
+): number {
+  // Manual stays ONE POST: a small batch size must not turn it into several under the 30 s limit.
+  return trigger === 'manual'
+    ? Math.min(PLAYER_FLUSH_MAX_MANUAL, playerPushBatchSize(env))
+    : PLAYER_FLUSH_MAX_PER_RUN;
 }
 
 /**

@@ -48,10 +48,10 @@ So Medicoach must hold a league's teams **before** Smart Club classifies that le
    (about an hour for a full tenant).
    - **Start the first drain with a small batch.** A first-placement push (new memberships on
      every fan-out side) measured ~3 s per player, and each POST must finish under Medicoach's
-     API Gateway limit (29 s). Before confirming, set `MEDICOACH_SYNC_BATCH_SIZE=10` in the
-     sync cron function's `environment` (`sst.config.ts`, beside `MEDICOACH_SYNC_URL`; it is
-     not passed through by default) and deploy (integer, clamped to 1..50; unset = 50, the
-     contract cap). Watch the first runs'
+     API Gateway limit (29 s). Before confirming, deploy with `MEDICOACH_SYNC_BATCH_SIZE=10` in the
+     deploy environment (`sst.config.ts` forwards it to the API and the sync cron; integer,
+     clamped to 1..50; unset = 50, the contract cap). A manual "Sync now" sends at most one
+     batch of that size. Watch the first runs'
      per-batch latency and timeouts, then raise it (or unset it) once batches finish well inside
      the limit — steady-state pushes are mostly `unchanged` and fast.
 9. **Roster health**: Medicoach `/league-roster-health` (and its 06:00 SAST check) shows only real
