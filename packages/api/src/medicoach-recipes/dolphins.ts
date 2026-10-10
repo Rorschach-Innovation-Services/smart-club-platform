@@ -52,6 +52,7 @@ export const DOLPHINS_RECIPES: TenantRecipes = {
   utcOffset: '+02:00',
   leagues: {
     premier: {
+      category: 'senior-open',
       competitions: {
         t20: {
           name: 'T20',
@@ -83,6 +84,7 @@ export const DOLPHINS_RECIPES: TenantRecipes = {
       },
     },
     promotion: {
+      category: 'senior-open',
       competitions: {
         t20: {
           name: 'T20',
@@ -117,6 +119,7 @@ export const DOLPHINS_RECIPES: TenantRecipes = {
       },
     },
     premierWomen: {
+      category: 'womens',
       competitions: {
         t20: crossPoolTopTwo('T20', [4, 4]),
         '30-over': {
@@ -139,6 +142,7 @@ export const DOLPHINS_RECIPES: TenantRecipes = {
       label: 'Veterans Premier',
       group: 'Overarching Leagues',
       district: 'All districts',
+      category: 'veterans',
       competitions: {
         t20: crossPoolTopTwo('T20', [6, 6]),
         '30-over': {
@@ -153,6 +157,7 @@ export const DOLPHINS_RECIPES: TenantRecipes = {
       label: 'Veterans Promotion',
       group: 'Overarching Leagues',
       district: 'All districts',
+      category: 'veterans',
       competitions: {
         t20: {
           name: 'T20',
@@ -180,7 +185,27 @@ export const DOLPHINS_RECIPES: TenantRecipes = {
         },
       },
     },
+    // ── Fan-out classification only (no format recipe: these map from setup / fixtures). ──
+    // The EMCU 2026-27 divisions + streams medicoach imported (league-map.prod.json). Senior
+    // open: every man 15+ of a club with a side there is placed on all of its sides.
+    emcuD1: { category: 'senior-open', competitions: {} },
+    emcuD2: { category: 'senior-open', competitions: {} },
+    emcuD3_s1: { category: 'senior-open', competitions: {} },
+    emcuD3_s2: { category: 'senior-open', competitions: {} },
+    emcuD4_s1: { category: 'senior-open', competitions: {} },
+    emcuD4_s2: { category: 'senior-open', competitions: {} },
+    emcuD5_s1: { category: 'senior-open', competitions: {} },
+    emcuD5_s2: { category: 'senior-open', competitions: {} },
+    // EMCU juniors: classified so they are visibly decided — `junior` never fans out.
+    emcuU11: { category: 'junior', competitions: {} },
+    emcuU13: { category: 'junior', competitions: {} },
+    // Deliberately UNCLASSIFIED (never fan out): `veterans` (the registration league, not a
+    // competition side medicoach plays) and every sub-union league (kcSat, kcD1, kcWebber,
+    // snT20, sn30, snAutumn100, umz*, ugu*, ilembe*) — medicoach never imported them, so a fan-out
+    // ref would park the player as `unmapped-team`. Classify a new league only AFTER medicoach
+    // has imported it (runbook: docs/runbooks/medicoach-client-onboarding.md).
   },
+  placement: { fanOut: true },
   // The smart-club catalogue still carries this key, but the league does not exist yet.
   excludeLeagues: {
     'promotion-women-s-league': 'not yet created by the union',
