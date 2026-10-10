@@ -238,6 +238,12 @@ emcuD1,emcuD2,emcuD3_s1,emcuD3_s2,emcuD4_s1,emcuD4_s2,emcuD5_s1,emcuD5_s2`,
    competitions, 620 fixtures, 2 new institutions. The step-by-step lives in the medicoach
    runbook section for the EMCU cleanup and carry (`scripts/league-migration/` in the
    medicoach repo), maintained there.
+5. **Player placement fills the new sides by itself** once the carry has run: the EMCU leagues
+   are classified `senior-open` in the Dolphins recipe, and creating the series enqueued every
+   participating club's players. Order matters — Medicoach import BEFORE the Smart Club
+   structure import, a new league key classified only after Medicoach holds it. See
+   [medicoach-client-onboarding.md](medicoach-client-onboarding.md) (carry order + stop
+   conditions).
 
 ### Smart Club fixture-edit freeze
 

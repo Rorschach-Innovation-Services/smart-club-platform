@@ -82,6 +82,12 @@ remain — the cron continues with the rest automatically.
 compliance imports, the clearance backfills): the repo functions enqueue automatically, but a
 CLI writing raw DynamoDB items does not.
 
+**Fan-out tenants** (recipe `placement.fanOut`): the dry run also prints the fan-out
+prediction and lists any `unmapped-team` team refs. The full onboarding order and the stop
+conditions are in [medicoach-client-onboarding.md](medicoach-client-onboarding.md). Club, series
+and season-run structure writes enqueue the affected clubs' players automatically; a recipe change
+(a new category, a threshold) is deploy-time and needs an `enqueue-players` run.
+
 ## 5. Resolving held players (admin page → Medicoach sync → Players)
 
 - **medicoach found a possible match** — "Link to this player" binds the registration to that
