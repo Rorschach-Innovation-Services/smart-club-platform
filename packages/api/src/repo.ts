@@ -625,6 +625,8 @@ export async function createClub(tenant: string, club: Club): Promise<Club> {
 
 /** Upsert a club (used by seed; overwrites, no version guard). */
 export async function putClub(tenant: string, club: Club): Promise<void> {
+  // The structure hook needs the prior state; read it only when the player sync is on.
+  const before = (await playerSyncOnSafe(tenant)) ? await getClub(tenant, club.id) : undefined;
   await ddb.send(
     new PutCommand({
       TableName: TABLE,
@@ -636,6 +638,9 @@ export async function putClub(tenant: string, club: Club): Promise<void> {
       },
     }),
   );
+  // A brand-new club has no players yet; an overwrite that moved its structure re-places them.
+  if (before && clubStructureKey(before) !== clubStructureKey(club))
+    await recordClubStructureSyncChange(tenant, [club.id]);
 }
 
 /**
@@ -690,6 +695,8 @@ export async function updateClub(
     }
     throw err;
   }
+  if (clubStructureKey(current) !== clubStructureKey(next))
+    await recordClubStructureSyncChange(tenant, [clubId]);
   return next;
 }
 
@@ -1014,6 +1021,8 @@ export async function getSeries(tenant: string, seriesId: string): Promise<Serie
 }
 
 export async function putSeries(tenant: string, series: Series): Promise<Series> {
+  const on = await playerSyncOnSafe(tenant);
+  const before = on ? await getSeries(tenant, series.id) : null;
   await ddb.send(
     new PutCommand({
       TableName: TABLE,
@@ -1025,6 +1034,7 @@ export async function putSeries(tenant: string, series: Series): Promise<Series>
       },
     }),
   );
+  if (on) await recordSeriesStructureChange(tenant, before, series);
   return series;
 }
 
@@ -1040,6 +1050,9 @@ export async function putSeriesIfVersion(
   series: Series,
   expectedVersion: number | null | undefined,
 ): Promise<Series> {
+  const on = await playerSyncOnSafe(tenant);
+  // `null` ⇒ a create: there is no prior state to read.
+  const before = on && expectedVersion !== null ? await getSeries(tenant, series.id) : null;
   try {
     await ddb.send(
       new PutCommand({
@@ -1065,6 +1078,7 @@ export async function putSeriesIfVersion(
       throw new VersionConflictError();
     throw err;
   }
+  if (on) await recordSeriesStructureChange(tenant, before, series);
   return series;
 }
 
@@ -1102,6 +1116,9 @@ export async function updateSeries(
     }
     throw err;
   }
+  // Fixture-only edits (the common case) move no placement and skip the hook entirely.
+  if (seriesStructureClubIds(current, next).length)
+    await recordSeriesStructureChange(tenant, current, next);
   return next;
 }
 
@@ -2154,6 +2171,149 @@ export async function recordPlayerSyncChange(
         `${err instanceof Error ? err.name : 'error'}; re-run enqueue-players to recover`,
     );
     return 0;
+  }
+}
+
+/* ── Structure hook: the club / series / season-run writes that move placement ── */
+// Placement (incl. fan-out, medicoach-sync/player-placement.ts) reads a club's `leagues`,
+// `leagueTeams`, `teamRosters` and the series it plays in (leagueKey via the series or its
+// season run). A change there changes the desired teams of the club's players with no player
+// write, so these hooks enqueue them. A season carry that mints new series under existing league
+// keys therefore fills the new sides without anyone running enqueue-players.
+
+type ClubStructure = Pick<Club, 'leagues' | 'leagueTeams' | 'teamRosters'>;
+
+/** The placement-relevant shape of a club (roster names/venues do not move a ref; ids do). */
+function clubStructureKey(c: ClubStructure | null | undefined): string {
+  if (!c) return '';
+  const rosters: Record<string, string[]> = {};
+  for (const [k, list] of Object.entries(c.teamRosters ?? {}))
+    rosters[k] = (Array.isArray(list) ? list : []).map((t) => String(t?.id ?? ''));
+  const sorted = <T>(o: Record<string, T>) =>
+    Object.fromEntries(Object.entries(o).sort(([a], [b]) => a.localeCompare(b)));
+  return JSON.stringify([
+    Array.isArray(c.leagues) ? [...c.leagues].sort() : [],
+    sorted(c.leagueTeams ?? {}),
+    sorted(rosters),
+  ]);
+}
+
+/** `leagueKey` is read the way placement reads it (an untyped legacy field on Series). */
+type SeriesStructure = Pick<Series, 'seasonRunId' | 'participants' | 'teams'> & {
+  id?: string;
+  leagueKey?: unknown;
+};
+
+/** `teamId|clubId` per participant (legacy `teams` lists use the id for both). */
+function seriesParticipantKeys(s: SeriesStructure | null | undefined): Set<string> {
+  if (!s) return new Set();
+  const list = Array.isArray(s.participants)
+    ? s.participants
+    : (s.teams ?? []).map((id) => ({ teamId: id, clubId: id }));
+  return new Set(list.filter((p) => p?.teamId && p.clubId).map((p) => `${p.teamId}|${p.clubId}`));
+}
+
+/**
+ * The clubs whose placement a series write moves: every participant's club on a create or a
+ * league move (leagueKey / seasonRunId), else the clubs of the participants added or dropped.
+ */
+export function seriesStructureClubIds(
+  before: SeriesStructure | null | undefined,
+  after: SeriesStructure | null | undefined,
+): string[] {
+  const a = seriesParticipantKeys(before);
+  const b = seriesParticipantKeys(after);
+  const moved =
+    !before ||
+    !after ||
+    before.leagueKey !== after.leagueKey ||
+    before.seasonRunId !== after.seasonRunId;
+  const keys = moved
+    ? [...a, ...b]
+    : [...[...a].filter((k) => !b.has(k)), ...[...b].filter((k) => !a.has(k))];
+  return [...new Set(keys.map((k) => k.slice(k.indexOf('|') + 1)))].sort();
+}
+
+/**
+ * Queue the players a structure change can move: every ACTIVE, non-placeholder player row of
+ * these clubs, plus their veterans affiliates (whose veterans side lives on the club). Never more
+ * than `enqueue-players` would queue (an active row always means an upsert intent). Same outbox
+ * and dedupe as {@link recordPlayerSyncChange} (one row per person), a no-op unless the player
+ * sync is on, and best-effort: it never fails the structure write that already landed.
+ */
+export async function recordClubStructureSyncChange(
+  tenant: string,
+  clubIds: string[],
+  opts: { config?: TenantConfig | null; at?: string } = {},
+): Promise<number> {
+  const ids = [...new Set(clubIds)].filter(Boolean);
+  if (!ids.length) return 0;
+  try {
+    const on =
+      opts.config !== undefined ? playerSyncEnabled(opts.config) : await playerSyncOn(tenant);
+    if (!on) return 0;
+    const keys = new Set<string>();
+    for (const clubId of ids) {
+      // eslint-disable-next-line no-await-in-loop -- a handful of clubs per structure write
+      const [rows, affs] = await Promise.all([
+        listPlayers(tenant, clubId),
+        listVeteransAffiliations(tenant, clubId),
+      ]);
+      for (const r of rows)
+        if (r.placeholder !== true && (r.status ?? 'active') === 'active') keys.add(r.naturalKey);
+      for (const a of affs) if (a.naturalKey) keys.add(a.naturalKey);
+    }
+    return await recordPlayerSyncChange(tenant, [...keys], { config: opts.config, at: opts.at });
+  } catch (err) {
+    console.warn(
+      `[medicoach-sync] ${tenant}: structure-change enqueue failed for ${ids.length} club(s) — ` +
+        `${err instanceof Error ? err.name : 'error'}; re-run enqueue-players to recover`,
+    );
+    return 0;
+  }
+}
+
+/** The player-sync flag, never throwing (a structure write must not fail on it). */
+async function playerSyncOnSafe(tenant: string): Promise<boolean> {
+  try {
+    return await playerSyncOn(tenant);
+  } catch {
+    return false;
+  }
+}
+
+/** Hook for a series write: `before` is null for a create. */
+async function recordSeriesStructureChange(
+  tenant: string,
+  before: SeriesStructure | null,
+  after: SeriesStructure,
+): Promise<void> {
+  // Recipe knockouts add no teams (placement skips them too).
+  if (String(after.id ?? '').startsWith('s-mc-ko-')) return;
+  const clubIds = seriesStructureClubIds(before, after);
+  if (clubIds.length) await recordClubStructureSyncChange(tenant, clubIds);
+}
+
+/**
+ * Hook for a season-run write: a create or a league move re-places the clubs of every series
+ * already on the run (series created later fire their own hook).
+ */
+async function recordSeasonRunStructureChange(
+  tenant: string,
+  before: Pick<SeasonRun, 'leagueKey'> | null,
+  after: SeasonRun,
+): Promise<void> {
+  if (before && before.leagueKey === after.leagueKey) return;
+  if (!(await playerSyncOnSafe(tenant))) return;
+  try {
+    const onRun = (await listSeries(tenant)).filter((s) => s.seasonRunId === after.id);
+    const clubIds = onRun.flatMap((s) => seriesStructureClubIds(null, s));
+    if (clubIds.length) await recordClubStructureSyncChange(tenant, clubIds);
+  } catch (err) {
+    console.warn(
+      `[medicoach-sync] ${tenant}: season-run structure enqueue failed — ` +
+        `${err instanceof Error ? err.name : 'error'}; re-run enqueue-players to recover`,
+    );
   }
 }
 
@@ -3340,6 +3500,7 @@ export async function getSeasonRun(tenant: string, runId: string): Promise<Seaso
 }
 
 export async function putSeasonRun(tenant: string, run: SeasonRun): Promise<SeasonRun> {
+  const before = (await playerSyncOnSafe(tenant)) ? await getSeasonRun(tenant, run.id) : null;
   await ddb.send(
     new PutCommand({
       TableName: TABLE,
@@ -3351,6 +3512,7 @@ export async function putSeasonRun(tenant: string, run: SeasonRun): Promise<Seas
       },
     }),
   );
+  await recordSeasonRunStructureChange(tenant, before, run);
   return run;
 }
 
@@ -3393,6 +3555,7 @@ export async function updateSeasonRun(
     }
     throw err;
   }
+  await recordSeasonRunStructureChange(tenant, current, next);
   return next;
 }
 
