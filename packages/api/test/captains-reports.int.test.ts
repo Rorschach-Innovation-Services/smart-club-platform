@@ -547,6 +547,35 @@ describe('the submit-once link', () => {
     assert.equal(again.status, 410);
   });
 
+  test('one umpire rated against a two-umpire appointment is accepted (averages count it once)', async () => {
+    await seedCaptain();
+    page = liveResultPage('live');
+    await runPull();
+    const own = (await reportsOf()).find((r) => r.clubId === 'umzinto')!;
+    assert.equal(own.umpiresSnapshot.length, 2);
+    const token = tokenOf(notices.find((n) => n.reportId === own.id)!);
+    const submit = await app.request(`/captains-report-link/${token}`, {
+      method: 'PUT',
+      headers: headers(),
+      body: JSON.stringify({
+        ...completeBody,
+        umpires: [fullUmpire('u-dlamini', 'S.Dlamini')],
+        submit: true,
+      }),
+    });
+    assert.equal(submit.status, 200);
+    const stored = (await reportsOf()).find((r) => r.id === own.id)!;
+    assert.equal(stored.status, 'submitted');
+    assert.deepEqual(
+      stored.umpires!.map((u) => u.umpireId),
+      ['u-dlamini'],
+    );
+    const { umpireRatingAverages } = await import('../../engine/src/captainsReport.js');
+    const avgs = umpireRatingAverages([stored]);
+    assert.equal(avgs.get('u-dlamini')!.reports, 1);
+    assert.equal(avgs.has('u-ngubane'), false);
+  });
+
   test('a forged or tampered token is 404', async () => {
     await seedCaptain();
     page = liveResultPage('live');

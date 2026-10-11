@@ -22,7 +22,8 @@ import {
  * Captain's reports end to end (ADR 0016, Slice 2): a result pulled from a STUB medicoach
  * opens one report per side; the home club files its report in the portal, the away side's
  * chair files through the public submit-once link, and the union office sees both — with the
- * umpire rating averages on the Umpires page.
+ * umpire rating averages on the Umpires page. The away chair removes the second appointed
+ * umpire (only one stood) and files a single rating.
  *
  * The stub listens on :4799 and checks every request's HMAC with the shared contract helper.
  * playwright.config.ts boots the stack with MEDICOACH_SYNC_URL/SECRET pointing at it; a reused
@@ -376,10 +377,19 @@ test('the away chair files through the submit-once link, which then closes', asy
   await p.goto(`/r/${token}`);
   await expect(p.getByText("Crusaders / Captain's Report")).toBeVisible();
   await expect(p.locator('meta[name="referrer"]')).toHaveAttribute('content', 'no-referrer');
-  for (const card of [1, 2]) {
-    const groups = p.getByTestId(`umpire-card-${card}`).getByRole('radiogroup');
-    for (let i = 0; i < 5; i++) await groups.nth(i).getByRole('radio', { name: '5' }).click();
-  }
+  // Only one umpire stood: the chair removes appointed card 2, which asks first.
+  await expect(p.getByText(`On-field umpire 2 (optional)`)).toBeVisible();
+  await p
+    .getByTestId('umpire-card-2')
+    .getByRole('button', { name: 'Remove — only one umpire stood' })
+    .click();
+  const ask = p.getByRole('alertdialog', { name: 'Remove umpire 2' });
+  await expect(ask).toContainText(`Did ${UMP_B} stand in this match?`);
+  await ask.getByRole('button', { name: 'No — remove' }).click();
+  await expect(p.getByTestId('umpire-card-2')).toHaveCount(0);
+  await expect(p.getByRole('combobox', { name: 'Umpire 1' })).toHaveValue(/.+/);
+  const groups = p.getByTestId('umpire-card-1').getByRole('radiogroup');
+  for (let i = 0; i < 5; i++) await groups.nth(i).getByRole('radio', { name: '5' }).click();
   await p.getByRole('combobox', { name: "Captain's name" }).fill(`Away captain ${RUN}`);
   await p.getByRole('checkbox').check();
   await p.getByRole('button', { name: 'Submit report' }).first().click();
@@ -444,4 +454,9 @@ test('the union office sees both reports and the umpire averages', async ({ page
   const row = browser.getByRole('row', { name: new RegExp(UMP_A.replace('.', '\\.')) });
   await expect(row.getByText('3.9')).toBeVisible();
   await expect(row.getByText(/3 reports/)).toBeVisible();
+  // UMP_B was removed from the away report (one umpire stood): 4.0 from UKZN and 3.0 from
+  // the unlisted friendly → 3.5 over 2 reports.
+  const rowB = browser.getByRole('row', { name: new RegExp(UMP_B.replace('.', '\\.')) });
+  await expect(rowB.getByText('3.5')).toBeVisible();
+  await expect(rowB.getByText(/2 reports/)).toBeVisible();
 });
