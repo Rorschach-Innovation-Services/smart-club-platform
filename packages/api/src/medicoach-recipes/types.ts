@@ -58,12 +58,32 @@ export interface CompetitionRecipe {
   confirm?: string;
 }
 
+/**
+ * What kind of competition a league is, for the sync's fan-out placement. EXPLICIT on purpose:
+ * a league without a category never fans out (classification by elimination fails open — it
+ * would fan players onto sub-union leagues medicoach never imported, parking them as
+ * `unmapped-team`, or adult men onto a junior league spelt differently). The label matchers
+ * (`isWomensLeague` / `isVeteransLeague`) only LINT a category (a test flags disagreement); they
+ * never decide one.
+ *
+ *   senior-open  men 15+ fan out onto every club side
+ *   womens       women 15+ fan out onto every club side
+ *   veterans     men 40+ fan out onto every club side (beside the `veteransClubId` rule)
+ *   junior       never fans out (recorded so it is visibly classified, not forgotten)
+ */
+export type LeagueCategory = 'womens' | 'veterans' | 'junior' | 'senior-open';
+
 export interface LeagueRecipe {
   /** Label/group/district for a league that exists only as series leagueKeys. */
   label?: string;
   group?: string;
   district?: string;
-  /** Keyed by stream key (`t20`, `50-over`, `30-over`). */
+  /** Fan-out classification (see {@link LeagueCategory}); absent ⇒ never fans out. */
+  category?: LeagueCategory;
+  /**
+   * Keyed by stream key (`t20`, `50-over`, `30-over`). Empty for a league declared only to
+   * carry a fan-out `category` (its format comes from setup or fixtures as before).
+   */
   competitions: Record<string, CompetitionRecipe>;
   confirm?: string;
 }
@@ -83,4 +103,22 @@ export interface TenantRecipes {
    * meets: `league <key> excluded by recipe: <reason>`.
    */
   excludeLeagues?: Record<string, string>;
+  /**
+   * The player sync's fan-out placement (medicoach-sync/player-placement.ts). Absent or
+   * `fanOut: false` ⇒ off: placement is byte-identical to the pre-fan-out rules. Fan-out is
+   * ADD-ONLY on the medicoach side (`fanOutTeamRefs`, see the sync contract §4).
+   */
+  placement?: TenantPlacementRecipe;
 }
+
+export interface TenantPlacementRecipe {
+  fanOut: boolean;
+  /** Men this age or older (at the run's evalDate) fan onto `senior-open` sides. Default 15. */
+  seniorMinAge?: number;
+  /** Women this age or older fan onto `womens` sides. Default 15. */
+  womensMinAge?: number;
+  /** Men this age or older fan onto `veterans` sides. Default 40. */
+  veteransMinAge?: number;
+}
+
+export const PLACEMENT_DEFAULTS = { seniorMinAge: 15, womensMinAge: 15, veteransMinAge: 40 };

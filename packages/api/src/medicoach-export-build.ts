@@ -67,7 +67,13 @@ import type {
   VeteransAffiliation,
 } from './types.js';
 import { resolveVertical } from './vertical.js';
-import { desiredTeamRefs, isExcludedLeagueKey } from './medicoach-sync/player-placement.js';
+import {
+  civilDateAt,
+  desiredTeamRefs,
+  fanOutContext,
+  isExcludedLeagueKey,
+  unclassifiedLeagueKeys,
+} from './medicoach-sync/player-placement.js';
 
 /* ─────────────────────────── Inputs / outputs ─────────────────────────── */
 
@@ -157,6 +163,17 @@ export interface ExportSummary {
     };
     /** Club squad teams created (one per club that needed one). */
     squadTeams: number;
+    /**
+     * Fan-out placement (present only for a tenant with `placement.fanOut`): players given
+     * fan-out sides, the memberships added, rows lacking gender/dob (legacy placement only),
+     * and in-scope leagues the recipe leaves unclassified (they never fan out).
+     */
+    fanOut?: {
+      playersFannedOut: number;
+      memberships: number;
+      placementDataGaps: number;
+      unclassifiedLeagues: string[];
+    };
   };
   veterans: {
     playersWithVeteransClub: number;
@@ -1549,13 +1566,30 @@ function buildPlayers(
   };
   const includeInactive = input.options?.includeInactivePlayers === true;
   // Shared with the player sync (ADR 0019) so the two paths can never place a player apart.
+  // Fan-out ages are taken at the bundle's generatedAt, on the tenant's civil date — the same
+  // rule the sync applies to its run instant.
+  // (Computed only for a fan-out tenant: the legacy path never reads a date.)
+  let fanOut: ReturnType<typeof fanOutContext>;
+  if (input.recipes.placement?.fanOut) {
+    const at = new Date(input.options?.generatedAt ?? Date.now());
+    const evalAt = Number.isNaN(at.getTime()) ? new Date() : at;
+    fanOut = fanOutContext(input.recipes, civilDateAt(evalAt, input.recipes.utcOffset || '+02:00'));
+  }
   const placementCtx = {
     leagues,
     clubsById,
     sidesOf: (clubId: string, leagueKey: string) =>
       sidesOf(clubId, leagueKey).map((t) => t.externalRef),
     squadRef: (clubId: string) => squadOf(clubId).externalRef,
+    ...(fanOut ? { fanOut } : {}),
   };
+  if (fanOut)
+    summary.players.fanOut = {
+      playersFannedOut: 0,
+      memberships: 0,
+      placementDataGaps: 0,
+      unclassifiedLeagues: unclassifiedLeagueKeys(placementCtx),
+    };
 
   // Pick one row per naturalKey: active beats non-active, then the newest registration.
   const chosen = new Map<string, PlayerRegistration>();
@@ -1611,6 +1645,12 @@ function buildPlayers(
 
     if (teamRefs.length) summary.players.withTeam++;
     else summary.players.noTeam++;
+    const fanSummary = summary.players.fanOut;
+    if (fanSummary) {
+      if (placed.fanOutTeamRefs.length) fanSummary.playersFannedOut++;
+      fanSummary.memberships += placed.fanOutTeamRefs.length;
+      if (placed.placementDataGap) fanSummary.placementDataGaps++;
+    }
 
     const player: BundlePlayer = {
       externalRef: refs.player(tenant, p.naturalKey),
@@ -1632,6 +1672,8 @@ function buildPlayers(
       ...(typeof p.isWk === 'boolean' ? { isWk: p.isWk } : {}),
       ...(optStr(p.position) ? { position: optStr(p.position) } : {}),
       teamRefs,
+      // Fan-out tenants only (same split the sync pushes): ADD-ONLY sides, disjoint from teamRefs.
+      ...(fanOut ? { fanOutTeamRefs: placed.fanOutTeamRefs } : {}),
       ...(veteransInstitutionRef ? { veteransInstitutionRef } : {}),
     };
     out.push(player);

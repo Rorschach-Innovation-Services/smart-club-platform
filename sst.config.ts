@@ -572,6 +572,8 @@ export default $config({
         // Medicoach sync (ADR 0016) — empty ⇒ the "Sync now" route dry-runs.
         MEDICOACH_SYNC_URL: medicoachSyncUrl.value,
         MEDICOACH_SYNC_SECRET: medicoachSyncSecret.value,
+        // Player push rows per POST (deploy env; '' ⇒ the contract cap, 50). Clamped 1..50.
+        MEDICOACH_SYNC_BATCH_SIZE: process.env.MEDICOACH_SYNC_BATCH_SIZE ?? '',
         // Template names/languages come from the code registry (whatsapp-templates.ts),
         // not the Lambda env — see the note by the secrets above.
         // Force dry-run regardless of secrets (set NOTIFY_DRY_RUN=1 in the deploy env)
@@ -690,6 +692,8 @@ export default $config({
           SENTRY_RELEASE: sentryRelease,
           MEDICOACH_SYNC_URL: medicoachSyncUrl.value,
           MEDICOACH_SYNC_SECRET: medicoachSyncSecret.value,
+          // Player push rows per POST (deploy env; '' ⇒ the contract cap, 50). Clamped 1..50.
+          MEDICOACH_SYNC_BATCH_SIZE: process.env.MEDICOACH_SYNC_BATCH_SIZE ?? '',
           // Captain's-report notices (same dry-run rules as the API: empty secrets ⇒ log only).
           SES_REGION: 'eu-west-1',
           FROM_EMAIL: fromEmail.value,

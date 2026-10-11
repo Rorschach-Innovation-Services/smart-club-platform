@@ -48,6 +48,7 @@ import type {
 import { explainSyncError } from './explain.js';
 import {
   buildPlacementContext,
+  civilDateAt,
   distinctPair,
   nameDobKey,
   playerSyncEnabled,
@@ -70,8 +71,26 @@ export const PLAYER_FLUSH_MAX_PER_RUN = 500;
 export const PLAYER_FLUSH_MAX_MANUAL = 50;
 
 /** The per-run row cap for a trigger: manual runs send a first slice, the cron drains. */
-export function playerFlushCap(trigger: 'cron' | 'manual' | 'cli'): number {
-  return trigger === 'manual' ? PLAYER_FLUSH_MAX_MANUAL : PLAYER_FLUSH_MAX_PER_RUN;
+export function playerFlushCap(
+  trigger: 'cron' | 'manual' | 'cli',
+  env: NodeJS.ProcessEnv = process.env
+): number {
+  // Manual stays ONE POST: a small batch size must not turn it into several under the 30 s limit.
+  return trigger === 'manual'
+    ? Math.min(PLAYER_FLUSH_MAX_MANUAL, playerPushBatchSize(env))
+    : PLAYER_FLUSH_MAX_PER_RUN;
+}
+
+/**
+ * Rows per player-push POST: `MEDICOACH_SYNC_BATCH_SIZE` (an integer), clamped to
+ * 1..PLAYER_PUSH_MAX; unset or not a number ⇒ PLAYER_PUSH_MAX (the contract cap, unchanged).
+ * A first-placement push measured ~3 s/player, so a tenant's first drain may need small batches
+ * to stay under API Gateway's 29 s; raise it once latency is observed.
+ */
+export function playerPushBatchSize(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.MEDICOACH_SYNC_BATCH_SIZE?.trim();
+  if (!raw || !/^-?\d+$/.test(raw)) return PLAYER_PUSH_MAX;
+  return Math.min(PLAYER_PUSH_MAX, Math.max(1, Number(raw)));
 }
 
 /**
@@ -117,7 +136,7 @@ export async function loadPlayerSyncSnapshot(
     | 'listPlayerDistinctPairs'
   >,
   tenant: string,
-  opts: { config?: TenantConfig | null } = {},
+  opts: { config?: TenantConfig | null; now?: Date } = {},
 ): Promise<PlayerSyncSnapshot> {
   const [config, clubs, series, seasonRuns, clearances, distinct] = await Promise.all([
     opts.config !== undefined ? Promise.resolve(opts.config) : repo.getTenantConfig(tenant),
@@ -127,13 +146,16 @@ export async function loadPlayerSyncSnapshot(
     repo.listAllClearances(tenant),
     repo.listPlayerDistinctPairs(tenant),
   ]);
+  const recipes = recipesForTenant(tenant);
   const ctx = buildPlacementContext({
     tenant,
     config,
     clubs,
     series,
     seasonRuns,
-    recipes: recipesForTenant(tenant),
+    recipes,
+    // Fan-out ages are taken once per run, on the tenant's civil date.
+    evalDate: civilDateAt(opts.now ?? new Date(), recipes.utcOffset || '+02:00'),
   });
   const rowsByNk = new Map<string, PlayerRegistration[]>();
   const byNameDob = new Map<string, Set<string>>();
@@ -240,6 +262,8 @@ export function buildPlayerEntry(
     isMinor: p.isMinor === true,
     ...(optStr(p.guardianName) ? { guardianName: optStr(p.guardianName) } : {}),
     teamRefs: intent.teamRefs,
+    // Fan-out tenants only (absent otherwise, so the entry is byte-identical): ADD-ONLY sides.
+    ...(intent.fanOutTeamRefs ? { fanOutTeamRefs: intent.fanOutTeamRefs } : {}),
     ...(intent.veteransClubId
       ? { veteransInstitutionRef: refs.institution(tenant, intent.veteransClubId) }
       : {}),
@@ -402,7 +426,7 @@ export async function flushPlayerOutbox(
     else counts.errors++;
     await repo.markPendingPlayerSyncFailed(tenant, row.naturalKey, row.changedAt, error, at());
   };
-  const snap = await loadPlayerSyncSnapshot(repo, tenant, { config });
+  const snap = await loadPlayerSyncSnapshot(repo, tenant, { config, now: now() });
   const optedOut = await repo.listPlayerSyncOptOuts(tenant);
 
   // Build every entry; hold possible duplicates; drop what cannot fit the contract.
@@ -450,8 +474,9 @@ export async function flushPlayerOutbox(
   }
 
   let requestError: string | undefined;
-  for (let i = 0; i < sendable.length; i += PLAYER_PUSH_MAX) {
-    const batch = sendable.slice(i, i + PLAYER_PUSH_MAX);
+  const batchSize = playerPushBatchSize();
+  for (let i = 0; i < sendable.length; i += batchSize) {
+    const batch = sendable.slice(i, i + batchSize);
     counts.sent += batch.length;
     let results: Map<string, PlayerPushResponse['results'][number]>;
     try {

@@ -142,7 +142,11 @@ Every applied change is audited in medicoach under the `smartclub-sync` principa
   `"<param> is invalid"` when either is present but malformed; 400 `"matchId is invalid"` when `matchId`
   is malformed.
 - 404 when no SYNCED fixture of that tournament (one with a smart club `ref`) OWNED BY THAT TENANT is
-  linked to that match, or the match was deleted. Another tenant's match is the same constant 404 as a
+  linked to that match, or the match was deleted. Also 404 when the fixture's result was set by a
+  medicoach administrator over its live match (a result override): that result is a manual one — §1
+  sends it with `source: "manual"` and no `medicoachMatchId` — so its ball-by-ball is not served.
+  Clearing the override restores the live result (re-recorded after the clear) and the scorecard.
+  Another tenant's match is the same constant 404 as a
   match that does not exist: nothing about it is revealed.
 - Scorecards are computed from the ball-by-ball record on every call (never stored); Time Cricket reads
   its paged ball log. Cricket only.
@@ -212,6 +216,8 @@ Body:
     isMinor?: boolean,
     guardianName?: string,
     teamRefs?: string[],         // the COMPLETE set of smart-club-mapped teams the player belongs on
+    fanOutTeamRefs?: string[],   // additive (2026-10-10): ADD-ONLY fan-out sides, disjoint from
+                                 //   teamRefs; absent from a tenant without fan-out (see "Fan-out")
     veteransInstitutionRef?: string,
     resolution?:                 // admin's answer to an earlier needs-review, rides on the re-push
       | { action: "link", playerId: string }
@@ -235,6 +241,9 @@ Response 200:
     fieldDiffs?: Array<{ field: string, from: string | null, to: string | null }>
                                  // dryRun+updated only: what a real push would change (values redacted
                                  //   to "<set>"/"<cleared>" for email/cell/guardianName)
+    heldRemovals?: string[]      // additive (2026-10-09), absent when empty: team refs whose removal
+                                 //   medicoach HELD (see "Removal guards"). The status is unaffected;
+                                 //   dry-run reports holds too. Senders may ignore it.
   }>
 }
 ```
@@ -258,14 +267,19 @@ Medicoach rules:
 - Teams: resolve every `teamRefs` entry via the external-ref table; ANY miss ⇒ `unmapped-team`
   with `missingTeamRefs` and NO writes for that player. Otherwise add the player to each desired
   team (idempotent; reactivates soft-deleted memberships) and soft-remove memberships ONLY on
-  smart-club-mapped teams no longer desired. Teams without a smart club ref are NEVER touched.
+  smart-club-mapped teams no longer desired AND licensed for removal (see "Removal guards").
+  Teams without a smart club ref are NEVER touched.
 - Where a linked league/competition team keeps a projection player list, append/remove the player
   there too (new entries unticked), preserving existing squad ticks.
 - Details: update only name, dob, contact and guardian fields. Name/email changes go through the
   identity-claim rekey in the same transaction. Email is asymmetric: fill a placeholder, never
   replace a real email (and never once the player's account is active). Names compare normalised
   (single `name` vs "firstName lastName"; case/space/middle-name tolerant).
-- `remove`: soft-remove all smart-club-mapped memberships; the player row is untouched.
+- `remove`: soft-remove the ref's licensed memberships (its stored set minus what the athlete's
+  other live refs want); a legacy ref with no stored set drops every smart-club-mapped membership
+  (the player left the club; ops hand-fills included — a deliberate choice, recorded 2026-10-09,
+  open for the product owner to revisit). Removals pass the roster floor. The player row is
+  untouched.
 - `erase`: soft-remove mapped memberships; anonymise the player (name → "Erased player"; clear
   dob/gender/race/nationality/contact/guardian/idNumber/email); release identity claims; delete BOTH ref rows. Stats stay
   on the anonymised id. An erase whose ref is already gone is `erased` (idempotent no-op), never
@@ -274,6 +288,77 @@ Medicoach rules:
   `needs-review` drops to the caller's review queue; `unmapped-team` parks; `error` = retry later.
 - A `changedAt` more than 5 minutes ahead of medicoach's clock is refused with `error`.
 - Every write is audited under the `smartclub-sync` principal.
+
+### Removal guards (2026-10-09)
+Medicoach ops also place players on smart-club-mapped sides (competition sides Smart Club does
+not place: women's, senior-men EMCU, 40+ veterans). Those memberships are indistinguishable from
+the sync's own, so a removal needs a LICENCE, and a side is protected by a FLOOR:
+- **Licence = the ref's stored set.** Each player ref's forward row stores
+  `smartClubDesiredTeamIds`: the teams that ref last asked for (written atomically with the
+  ordering stamp). An upsert may remove only a team in that stored set (prior ∪ newly stored).
+  A ref with **no stored set** (written by the importer before sets existed, or freshly linked by
+  the matcher or a `resolution.link`) removes **nothing**: the push applies its adds and stores
+  its set as the baseline. Sentry: `smartclub-sync-legacy-baseline` (info, one per batch, counts
+  only: `refs`, `sparedRemovals`). A hand-added membership is therefore in no set and no number of
+  pushes removes it. The baseline for imported refs is backfilled from the import bundle by
+  `scripts/backfill-smartclub-desired-sets.ts`.
+- **Roster floor.** No upsert/remove removal may leave a mapped side with fewer than **11** live
+  player memberships. Such a removal is **held**: not written, the team stays in the ref's stored
+  set (stored ∪ held, a CAS write on the ref row) so the next push re-evaluates it, and the
+  result keeps its normal status (`updated` / `unchanged` / `removed`) with `heldRemovals`. Never
+  `needs-review`: that parks the person in Smart Club's identity review queue.
+- **Batch threshold.** Before anything applies, the batch's removals are planned; if they exceed
+  **25** memberships, or **20%** of the touched sides' live rosters, EVERY removal in the batch is
+  held (adds still apply).
+- Sentry: `smartclub-sync-removal-held` (warning, one per held side per batch; tags `teamId`,
+  `reason` = `roster-floor` | `batch-threshold`; extras carry the counts).
+- Thresholds live in one place: `SMARTCLUB_REMOVAL_LIMITS` in
+  `apps/api/src/domains/integrations-smartclub/services/players.ts`.
+- `erase` is exempt from both guards: a POPIA erasure is not held, and the tombstoned ref has no
+  next push to re-evaluate a hold. (Its legacy-ref rule is unchanged: the last ref drops every
+  mapped membership; a non-last ref drops only its own stored set.)
+- Detection independent of cause: `GET /internal/league-roster-health` and the daily 06:00 SAST
+  cron flag league sides with a fixture in the next 14 days whose team is under 11 live members
+  (Sentry `league-roster-short-side`).
+
+### Fan-out placement: `fanOutTeamRefs` (2026-10-10)
+Smart Club places each eligible player on ALL of their club's competition sides, not only the
+side of the league they registered in — the sides medicoach ops used to hand-fill (EMCU
+divisions/streams, women's, 40+ veterans). Those sides ride a SEPARATE field because they are
+add-only:
+- **Who is placed** (Smart Club `medicoach-sync/player-placement.ts`, the same function the bundle
+  exporter uses): a man aged ≥15 → every side of the club in every `senior-open` league; a woman
+  ≥15 → every side in the club's `womens` leagues; a man ≥40 → every side in the club's
+  `veterans` leagues (beside the `veteransInstitutionRef` rule). Ages at the run's civil date in
+  the tenant's zone. A row without a usable gender or dob gets the `teamRefs` placement only.
+- **Explicit classification only.** A league fans out only when the tenant recipe gives it a
+  `category`; `junior`, unclassified, fixtures-only and excluded leagues never do. This is what
+  keeps a fan-out ref from naming a team medicoach never imported (sub-union leagues): one unknown
+  ref still makes the whole entry `unmapped-team` with no writes, exactly as for `teamRefs`.
+- **Upsert: add-only.** Medicoach resolves fan-out refs like team refs, adds/revives those
+  memberships, and stores them on the ref (`smartClubFanOutTeamIds`, beside
+  `smartClubDesiredTeamIds`). A fan-out id is NEVER in an upsert's removal licence, whatever
+  either set says on a later push — a recipe change, a classifier flip or a club rep unticking a
+  league can never remove anyone.
+- **The stored fan-out set is cumulative while placements stand.** Every upsert stores
+  `pushed fan-out ∪ (previously stored fan-out ∩ sides the player is still LIVE on)`, so a side
+  dropped from a later push (or a `[]`, or an absent field) stays in the set — and therefore in
+  the `remove` licence — for as long as the player is on it. A side the player has left (removed
+  by hand in medicoach, or by a licensed sync removal) drops out of the set on the next upsert. An
+  absent field and `[]` mean the same thing. A fan-out side held by the floor guard on `remove` is
+  recorded into the set and survives later upserts the same way.
+- **`remove` / `erase`: everywhere.** The licence widens to stored-desired ∪ stored-fan-out, so a
+  player who leaves the club comes off every side (`remove` still behind the floor + batch guards;
+  `erase` stays exempt). The entry itself carries no team sets (detail fields are upsert-only).
+- **Old senders / old tenants**: no `fanOutTeamRefs` on a ref that has never stored a fan-out set
+  ⇒ behaviour byte-identical to before (no fan-out attribute is written). When a tenant has
+  fan-out on, every upsert carries the field (possibly `[]`).
+- **The bundle** (`people.players[].fanOutTeamRefs`) carries the same split, so a bundle import
+  and the sync cannot drift.
+- **Report squad cap**: whole-pool sides can exceed medicoach's `REPORT_SQUAD_CAP` (100); league-
+  side reports above it are unsupported (recorded decision).
+- Onboarding a tenant and the season-carry order: Smart Club
+  `docs/runbooks/medicoach-client-onboarding.md`.
 
 ## Import/carry endpoints (v1)
 

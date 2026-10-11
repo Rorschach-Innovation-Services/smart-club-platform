@@ -175,6 +175,11 @@ export const PlayerSchema = z.object({
   position: z.string().optional(),
   /** Teams across the main club and (for veterans affiliates) the veterans club. */
   teamRefs: z.array(ref),
+  /**
+   * Fan-out sides (tenants with `placement.fanOut` only), disjoint from `teamRefs`: placed
+   * ADD-ONLY — the same split the player sync pushes (sync contract §4).
+   */
+  fanOutTeamRefs: z.array(ref).optional(),
   veteransInstitutionRef: ref.optional(),
 });
 
@@ -471,7 +476,8 @@ export const MedicoachBundleSchema = BundleShape.superRefine((b, ctx) => {
     expect(p.institutionRef, 'institution', `player ${p.externalRef}`);
     if (p.veteransInstitutionRef)
       expect(p.veteransInstitutionRef, 'institution', `player ${p.externalRef}`);
-    for (const tr of p.teamRefs) expect(tr, 'team', `player ${p.externalRef}`);
+    for (const tr of [...p.teamRefs, ...(p.fanOutTeamRefs ?? [])])
+      expect(tr, 'team', `player ${p.externalRef}`);
   }
   for (const l of b.leagues) {
     for (const tr of l.teamRefs) {

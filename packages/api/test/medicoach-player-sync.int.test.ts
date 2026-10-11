@@ -260,6 +260,129 @@ describe('repo write hooks', () => {
   });
 });
 
+describe('structure hook (club / series / season-run writes re-place the club)', () => {
+  const pendingKeys = async () =>
+    (await repo.listPendingPlayerSync(T)).map((r) => r.naturalKey).sort();
+  const mkSeries = (id: string, clubIds: string[], extra: Record<string, unknown> = {}) =>
+    ({
+      id,
+      name: `S ${id}`,
+      leagueKey: 'premier',
+      startDate: '2026-11-01',
+      released: false,
+      releasedAt: null,
+      fixtures: [],
+      teams: clubIds,
+      participants: clubIds.map((c) => ({ teamId: c, clubId: c, name: c })),
+      ...extra,
+    }) as unknown as Parameters<typeof repo.putSeries>[1];
+
+  /** Seeds solo with one active, one inactive and one placeholder row; returns the active nk. */
+  async function seedSolo(): Promise<string> {
+    const active = mkPlayer();
+    await repo.createPlayer(T, active);
+    await repo.createPlayer(T, mkPlayer({ status: 'inactive' }));
+    await repo.createPlayer(T, mkPlayer({ placeholder: true }));
+    for (const r of await repo.listPendingPlayerSync(T))
+      await repo.deletePendingPlayerSync(T, r.naturalKey);
+    return active.naturalKey;
+  }
+
+  test('club.leagues append enqueues the club’s ACTIVE players once (and nothing for others)', async () => {
+    await repo.putTenantConfig(config(true));
+    const nk = await seedSolo();
+    const other = mkPlayer({ clubId: 'other' });
+    await repo.createPlayer(T, other);
+    await repo.deletePendingPlayerSync(T, other.naturalKey);
+    const solo = (await repo.getClub(T, 'solo'))!;
+    await repo.updateClub(
+      T,
+      'solo',
+      { leagues: [...(solo.leagues ?? []), 'emcuD1'] },
+      'a',
+      later(),
+    );
+    assert.deepEqual(await pendingKeys(), [nk]);
+    // A non-structure edit (a note-like field) queues nothing.
+    for (const r of await repo.listPendingPlayerSync(T))
+      await repo.deletePendingPlayerSync(T, r.naturalKey);
+    await repo.updateClub(T, 'solo', { chair: 'New Chair' } as Partial<Club>, 'a', later());
+    assert.deepEqual(await pendingKeys(), []);
+    // Restore the club's leagues for the rest of the file.
+    const now = (await repo.getClub(T, 'solo'))!;
+    await repo.updateClub(T, 'solo', { leagues: ['premier'], version: now.version }, 'a', later());
+    await clearPlayerSync();
+  });
+
+  test('a series creation enqueues its participants’ players once; a fixture-only edit nothing', async () => {
+    await repo.putTenantConfig(config(true));
+    const nk = await seedSolo();
+    await repo.putSeriesIfVersion(T, mkSeries('s-hook-1', ['solo']), null);
+    const rows = await repo.listPendingPlayerSync(T);
+    assert.deepEqual(
+      rows.map((r) => r.naturalKey),
+      [nk],
+      'one row per person',
+    );
+    for (const r of rows) await repo.deletePendingPlayerSync(T, r.naturalKey);
+    await repo.updateSeries(T, 's-hook-1', { fixtures: [] });
+    assert.deepEqual(await pendingKeys(), []);
+    // A participant joining re-places only the joining club.
+    const other = mkPlayer({ clubId: 'other' });
+    await repo.createPlayer(T, other);
+    await repo.deletePendingPlayerSync(T, other.naturalKey);
+    const cur = (await repo.getSeries(T, 's-hook-1'))!;
+    await repo.updateSeries(T, 's-hook-1', {
+      participants: [
+        ...(cur.participants ?? []),
+        { teamId: 'other', clubId: 'other', name: 'other' },
+      ],
+    } as never);
+    assert.deepEqual(await pendingKeys(), [other.naturalKey]);
+    await repo.deleteSeries(T, 's-hook-1');
+    await clearPlayerSync();
+  });
+
+  test('a season run moving league re-places the clubs of its series', async () => {
+    await repo.putTenantConfig(config(true));
+    const nk = await seedSolo();
+    await repo.putSeries(T, mkSeries('s-hook-2', ['solo'], { seasonRunId: 'run-hook' }));
+    await repo.deletePendingPlayerSync(T, nk);
+    const run = {
+      id: 'run-hook',
+      leagueKey: 'premier',
+      seasonLabel: '2027/28',
+      structureSnapshot: {},
+      calendarSnapshot: {},
+      stages: [],
+      version: 1,
+    } as unknown as Parameters<typeof repo.putSeasonRun>[1];
+    await repo.putSeasonRun(T, run);
+    assert.deepEqual(await pendingKeys(), [nk], 'a new run re-places its series’ clubs');
+    await repo.deletePendingPlayerSync(T, nk);
+    await repo.updateSeasonRun(T, 'run-hook', { seasonLabel: '2027/28 (b)' });
+    assert.deepEqual(await pendingKeys(), [], 'a label edit moves nothing');
+    await repo.deleteSeasonRun(T, 'run-hook');
+    await repo.deleteSeries(T, 's-hook-2');
+    await clearPlayerSync();
+  });
+
+  test('with the player sync off a structure write queues nothing', async () => {
+    await repo.putTenantConfig(config(false));
+    const p = mkPlayer();
+    await repo.createPlayer(T, p);
+    await repo.putSeriesIfVersion(T, mkSeries('s-hook-3', ['solo']), null);
+    const solo = (await repo.getClub(T, 'solo'))!;
+    await repo.updateClub(T, 'solo', { leagues: [...(solo.leagues ?? []), 'x'] }, 'a', later());
+    assert.deepEqual(await pendingKeys(), []);
+    const now = (await repo.getClub(T, 'solo'))!;
+    await repo.updateClub(T, 'solo', { leagues: ['premier'], version: now.version }, 'a', later());
+    await repo.deleteSeries(T, 's-hook-3');
+    await repo.putTenantConfig(config(true));
+    await clearPlayerSync();
+  });
+});
+
 describe('the flag check behind every player write', () => {
   test('a caller-supplied config is used as-is (no read): flag on in it, off in the table', async () => {
     await repo.putTenantConfig(config(false));

@@ -13,6 +13,17 @@
  *   4. a player still without a team: every side of the club in that league when it has
  *      several, else the club's league-less squad team.
  *
+ * Fan-out (only when the tenant recipe sets `placement.fanOut`), returned SEPARATELY as
+ * `fanOutTeamRefs` (disjoint from `teamRefs`) because medicoach treats it as ADD-ONLY:
+ *   - a man aged ≥ seniorMinAge (15) at `evalDate` → every side of the player's club in every
+ *     `senior-open`-classified league;
+ *   - a woman aged ≥ womensMinAge (15) → every side in the club's `womens` leagues;
+ *   - a man aged ≥ veteransMinAge (40) → every side in the club's `veterans` leagues;
+ *   - missing/unrecognised gender or dob → rules 1–4 only, flagged `placementDataGap`.
+ * Only leagues the recipe classifies EXPLICITLY fan out; `junior`, unclassified,
+ * fixtures-only and excluded leagues never do. `evalDate` comes in on the context so this
+ * module stays clockless (the exporter and the sync each pass their own run date).
+ *
  * Sync intent is decided per PERSON (every row of the natural key across the tenant), never
  * per row — see {@link syncIntent}.
  */
@@ -26,7 +37,11 @@ import type {
   SeasonRun,
   TenantConfig,
 } from '../types.js';
-import type { TenantRecipes } from '../medicoach-recipes/types.js';
+import {
+  PLACEMENT_DEFAULTS,
+  type LeagueCategory,
+  type TenantRecipes,
+} from '../medicoach-recipes/types.js';
 
 /* ─────────────────────────── Placement ─────────────────────────── */
 
@@ -45,6 +60,71 @@ export interface PlacementContext {
   sidesOf(clubId: string, leagueKey: string): string[];
   /** The ref of the club's league-less squad team. */
   squadRef(clubId: string): string;
+  /** Fan-out settings; absent (or `fanOut: false`) ⇒ the legacy rules only, byte-identical. */
+  fanOut?: FanOutContext;
+}
+
+/** What the fan-out rules read: resolved thresholds, the explicit categories, the run date. */
+export interface FanOutContext {
+  /** `YYYY-MM-DD`, the civil date ages are computed at (one per run, both builders). */
+  evalDate: string;
+  /** leagueKey → category, from the tenant recipe. Unlisted ⇒ never fans out. */
+  categories: Map<string, LeagueCategory>;
+  seniorMinAge: number;
+  womensMinAge: number;
+  veteransMinAge: number;
+}
+
+/**
+ * The fan-out context for a run, or undefined when the tenant has fan-out off (the legacy rules
+ * then run untouched). Categories are read only for leagues the recipe names.
+ */
+export function fanOutContext(
+  recipes: Pick<TenantRecipes, 'leagues' | 'placement'>,
+  evalDate: string,
+): FanOutContext | undefined {
+  const p = recipes.placement;
+  if (!p?.fanOut) return undefined;
+  const categories = new Map<string, LeagueCategory>();
+  for (const [key, l] of Object.entries(recipes.leagues ?? {}))
+    if (l.category) categories.set(key, l.category);
+  return {
+    evalDate,
+    categories,
+    seniorMinAge: p.seniorMinAge ?? PLACEMENT_DEFAULTS.seniorMinAge,
+    womensMinAge: p.womensMinAge ?? PLACEMENT_DEFAULTS.womensMinAge,
+    veteransMinAge: p.veteransMinAge ?? PLACEMENT_DEFAULTS.veteransMinAge,
+  };
+}
+
+/**
+ * The tenant's civil date (`YYYY-MM-DD`) at `instant`, for a fixed `±HH:MM` offset (recipes'
+ * `utcOffset`; SAST has no DST). Callers pass the instant: this module never reads the clock.
+ */
+export function civilDateAt(instant: Date, utcOffset: string): string {
+  const m = /^([+-])(\d{2}):(\d{2})$/.exec(utcOffset);
+  const mins = m ? (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) : 0;
+  return new Date(instant.getTime() + mins * 60_000).toISOString().slice(0, 10);
+}
+
+/** Whole years from `dob` to `on` (both `YYYY-MM-DD`), or null when dob is not a date. */
+export function ageOn(dob: unknown, on: string): number | null {
+  const d = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(dob ?? '').trim());
+  const o = /^(\d{4})-(\d{2})-(\d{2})/.exec(on);
+  if (!d || !o) return null;
+  let age = Number(o[1]) - Number(d[1]);
+  if (`${o[2]}-${o[3]}` < `${d[2]}-${d[3]}`) age--;
+  return age >= 0 ? age : null;
+}
+
+/** `male` / `female` from the free-text registration field, else null (a data gap). */
+export function genderOf(g: unknown): 'male' | 'female' | null {
+  const v = String(g ?? '')
+    .trim()
+    .toLowerCase();
+  if (v === 'male' || v === 'm') return 'male';
+  if (v === 'female' || v === 'f') return 'female';
+  return null;
 }
 
 export type PlacementKind = 'singleSide' | 'veteransOnly' | 'allSidesOfAmbiguous' | 'clubSquad';
@@ -63,6 +143,13 @@ export interface Placement {
   ambiguousSides: number;
   /** A veterans side was added. */
   veteransResolved: boolean;
+  /**
+   * Fan-out sides (disjoint from `teamRefs`, ADD-ONLY in medicoach). Always `[]` when the
+   * tenant has fan-out off.
+   */
+  fanOutTeamRefs: string[];
+  /** Fan-out is on but the row lacks a usable gender or dob: legacy placement only. */
+  placementDataGap?: true;
 }
 
 /**
@@ -70,7 +157,8 @@ export interface Placement {
  * bundle and the sync share this function so the two paths cannot drift.
  */
 export function desiredTeamRefs(
-  player: Pick<PlayerRegistration, 'clubId' | 'team' | 'veteransClubId'>,
+  player: Pick<PlayerRegistration, 'clubId' | 'team' | 'veteransClubId'> &
+    Partial<Pick<PlayerRegistration, 'gender' | 'dob'>>,
   ctx: PlacementContext,
 ): Placement {
   const leagueKeys = new Set(ctx.leagues.map((l) => l.key));
@@ -124,13 +212,57 @@ export function desiredTeamRefs(
     else if (candidateCount > 1) clubSquadReason = 'multipleCandidateLeagues';
     else clubSquadReason = 'noRegisteredLeague';
   }
+  const fan = fanOutRefs(player, ctx, teamRefs);
   return {
     teamRefs,
     placement,
     ...(clubSquadReason ? { clubSquadReason } : {}),
     ambiguousSides,
     veteransResolved,
+    fanOutTeamRefs: fan.refs,
+    ...(fan.dataGap ? { placementDataGap: true as const } : {}),
   };
+}
+
+/**
+ * The fan-out sides of one row (see the module doc), excluding anything already in `teamRefs`.
+ * A club's sides in a league are what `sidesOf` knows: its registered leagues AND the series it
+ * plays in (a season carry can mint series only, under existing league keys).
+ */
+function fanOutRefs(
+  player: Pick<PlayerRegistration, 'clubId'> & Partial<Pick<PlayerRegistration, 'gender' | 'dob'>>,
+  ctx: PlacementContext,
+  teamRefs: string[],
+): { refs: string[]; dataGap: boolean } {
+  const f = ctx.fanOut;
+  if (!f) return { refs: [], dataGap: false };
+  const gender = genderOf(player.gender);
+  const age = ageOn(player.dob, f.evalDate);
+  if (!gender || age === null) return { refs: [], dataGap: true };
+  const wanted = (c: LeagueCategory): boolean =>
+    gender === 'male'
+      ? (c === 'senior-open' && age >= f.seniorMinAge) ||
+        (c === 'veterans' && age >= f.veteransMinAge)
+      : c === 'womens' && age >= f.womensMinAge;
+  const out: string[] = [];
+  for (const l of ctx.leagues) {
+    if (l.fixturesOnly) continue;
+    const c = f.categories.get(l.key);
+    if (!c || !wanted(c)) continue;
+    for (const t of ctx.sidesOf(player.clubId, l.key))
+      if (!teamRefs.includes(t) && !out.includes(t)) out.push(t);
+  }
+  return { refs: out, dataGap: false };
+}
+
+/**
+ * Leagues in the placement context the recipe leaves unclassified while fan-out is on: they
+ * never fan out. Reported (count + keys) by the exporter summary and the enqueue dry run so a
+ * new league that SHOULD fan out is noticed, not silently skipped.
+ */
+export function unclassifiedLeagueKeys(ctx: PlacementContext): string[] {
+  if (!ctx.fanOut) return [];
+  return ctx.leagues.filter((l) => !ctx.fanOut!.categories.has(l.key)).map((l) => l.key);
 }
 
 /** League keys the bundle never exports (`seed-*`, `demo`). */
@@ -150,7 +282,9 @@ export function buildPlacementContext(input: {
   clubs: Club[];
   series: Series[];
   seasonRuns: SeasonRun[];
-  recipes: Pick<TenantRecipes, 'excludeLeagues' | 'leagues'>;
+  recipes: Pick<TenantRecipes, 'excludeLeagues' | 'leagues' | 'placement'>;
+  /** The run's civil date (`YYYY-MM-DD`) for fan-out ages; required only when fan-out is on. */
+  evalDate?: string;
 }): PlacementContext {
   const { tenant, config, recipes } = input;
   const catalogue = config?.leagues ?? [];
@@ -202,11 +336,15 @@ export function buildPlacementContext(input: {
       : (s.teams ?? []).map((id) => ({ teamId: id, clubId: id }));
     for (const p of participants) if (p?.teamId && p.clubId) add(key, p.clubId, p.teamId);
   }
+  const fanOut = input.evalDate ? fanOutContext(recipes, input.evalDate) : undefined;
+  if (recipes.placement?.fanOut && !fanOut)
+    throw new Error('fan-out placement needs an evalDate (the run date)');
   return {
     leagues: [...leagues.values()],
     clubsById,
     sidesOf: (clubId, leagueKey) => sides.get(`${clubId}|${leagueKey}`) ?? [],
     squadRef: (clubId) => refs.squadTeam(tenant, clubId),
+    ...(fanOut ? { fanOut } : {}),
   };
 }
 
@@ -228,6 +366,13 @@ export type SyncIntent =
       primary: PlayerRegistration;
       /** Union of desired teams over every eligible row (main + veterans), primary's first. */
       teamRefs: string[];
+      /**
+       * Union of fan-out sides over every eligible row, minus `teamRefs`. Present ONLY when the
+       * tenant has fan-out on (absent ⇒ the wire entry is byte-identical to pre-fan-out).
+       */
+      fanOutTeamRefs?: string[];
+      /** Eligible rows that missed fan-out for a missing gender/dob (fan-out on only). */
+      placementDataGaps?: number;
       /** The primary row's veterans club, when it has one. */
       veteransClubId?: string;
       eligibleRows: number;
@@ -282,12 +427,24 @@ export function syncIntent(
   )[0];
   const ordered = [primary, ...eligible.filter((r) => r !== primary)];
   const teamRefs: string[] = [];
-  for (const r of ordered)
-    for (const t of desiredTeamRefs(r, ctx).teamRefs) if (!teamRefs.includes(t)) teamRefs.push(t);
+  const fanOut: string[] = [];
+  let gaps = 0;
+  for (const r of ordered) {
+    const placed = desiredTeamRefs(r, ctx);
+    for (const t of placed.teamRefs) if (!teamRefs.includes(t)) teamRefs.push(t);
+    for (const t of placed.fanOutTeamRefs) if (!fanOut.includes(t)) fanOut.push(t);
+    if (placed.placementDataGap) gaps++;
+  }
   return {
     op: 'upsert',
     primary,
     teamRefs,
+    ...(ctx.fanOut
+      ? {
+          fanOutTeamRefs: fanOut.filter((t) => !teamRefs.includes(t)),
+          ...(gaps ? { placementDataGaps: gaps } : {}),
+        }
+      : {}),
     ...(primary.veteransClubId ? { veteransClubId: primary.veteransClubId } : {}),
     eligibleRows: eligible.length,
   };
