@@ -287,6 +287,9 @@ async function resetTable() {
 before(async () => {
   ddb = await startDynalite(DDB_PORT, TABLE);
   app = (await import('../src/index.js')).app;
+  // Dates here follow the real clock: hold the 18:00 SAST notice window open (the gate has
+  // its own tests in captains-report-1800-gate.int.test.ts).
+  (await import('../src/captains-reports.js')).setReportNoticeWindowOverride(() => true);
   repo = await import('../src/repo.js');
   puller = await import('../src/medicoach-sync/puller.js');
   contract = await import('../src/medicoach-sync-contract.js');
@@ -1096,7 +1099,7 @@ describe('durable report opening (REPORTOPEN# markers)', () => {
 
     const { retryPendingReportOpens } = await import('../src/captains-reports.js');
     const retry = await retryPendingReportOpens('dolphins', { repo, ...sender });
-    assert.deepEqual(retry, { retried: 1, done: 1, failed: 0, gaveUp: 0 });
+    assert.deepEqual(retry, { retried: 1, done: 1, failed: 0, gaveUp: 0, deferred: 0 });
     assert.equal(notices.length, 2, 'both sides notified exactly once on the retry');
     assert.deepEqual(notices.map((n) => n.recipientKind).sort(), ['captain', 'chair']);
     assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
@@ -1132,7 +1135,7 @@ describe('durable report opening (REPORTOPEN# markers)', () => {
 
     const { retryPendingReportOpens } = await import('../src/captains-reports.js');
     const retry = await retryPendingReportOpens('dolphins', { repo, ...sender });
-    assert.deepEqual(retry, { retried: 1, done: 1, failed: 0, gaveUp: 0 });
+    assert.deepEqual(retry, { retried: 1, done: 1, failed: 0, gaveUp: 0, deferred: 0 });
     assert.deepEqual(
       notices.map((n) => n.recipientKind),
       ['chair', 'chair'],
@@ -1190,7 +1193,7 @@ describe('durable report opening (REPORTOPEN# markers)', () => {
 
     // The next run re-sends ONLY the notice that reached nobody.
     const retry = await retryPendingReportOpens('dolphins', { repo, ...sender });
-    assert.deepEqual(retry, { retried: 1, done: 1, failed: 0, gaveUp: 0 });
+    assert.deepEqual(retry, { retried: 1, done: 1, failed: 0, gaveUp: 0, deferred: 0 });
     assert.deepEqual(
       notices.map((n) => n.recipientKind),
       ['chair'],

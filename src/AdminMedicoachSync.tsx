@@ -363,11 +363,12 @@ export function syncNowToast(
 ): [string, string?] {
   if (r?.status === 'dry-run')
     return ['Dry run — the sync connection isn’t configured, so nothing was sent.'];
+  const reports = r?.reportsMessage ? ` ${r.reportsMessage}.` : '';
   const deferred = r?.playerPush?.deferred ?? 0;
-  if (!deferred) return ['Sync finished'];
+  if (!deferred) return [reports ? `Sync finished.${reports}` : 'Sync finished'];
   const sent = r?.playerPush?.counts?.sent ?? 0;
   return [
-    `Sync finished — sent ${sent} player(s), ${deferred} remaining; the next sync continues automatically`,
+    `Sync finished — sent ${sent} player(s), ${deferred} remaining; the next sync continues automatically${reports ? `.${reports}` : ''}`,
   ];
 }
 

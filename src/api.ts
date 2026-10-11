@@ -1106,6 +1106,8 @@ export const medicoachSyncNow = () =>
     counts?: Record<string, number>;
     /** The player push: "Sync now" sends a first slice; `deferred` wait for the next sync. */
     playerPush?: { status: string; deferred?: number; counts?: Record<string, number> };
+    /** Set before 18:00 SAST when captain's reports were queued instead of sent. */
+    reportsMessage?: string;
   }>('/integrations/medicoach/sync-now', {
     method: 'POST',
   });

@@ -12,6 +12,10 @@
  *      even when the pull failed, since it needs nothing from medicoach;
  *   4. send the one reminder for pending reports whose link expires within 2 days.
  *
+ * Captain's report notices (steps 2–4) go out only from 18:00 SAST (REPORT_NOTICE_HOUR):
+ * before that the REPORTOPEN# markers stay queued and reminders stay due. `deadlineMs` (set
+ * by the cron and "Sync now" handlers) bounds the drain; leftovers wait for the next run.
+ *
  * Last, after a pull that did not throw, `sweepScorecards` fetches the medicoach scorecards
  * recent results still lack (best-effort: a failure is a log line + Sentry, never the run's),
  * then — cron runs only — `reconcileIfDue` re-derives the awaiting-carry rows (MCAWAIT#) from
@@ -26,6 +30,8 @@
  * page knows when the sync last worked.
  */
 import {
+  REPORT_NOTICE_HOUR,
+  reportNoticeWindowOpen,
   retryPendingReportOpens,
   sendReportReminders,
   type ReminderSummary,
@@ -55,7 +61,14 @@ export interface TenantSyncSummary extends SyncRunSummary {
   reports?: ReportRetrySummary;
   reminders?: ReminderSummary;
   scorecards?: ScorecardSweepSummary;
+  /** This run's captain's-report notice tally (pull + retry). */
+  reportNotices?: { deferred: number; opened: number; notified: number; failed: number };
+  /** Plain-language note for "Sync now" when reports were queued for 18:00. */
+  reportsMessage?: string;
 }
+
+/** The "Sync now" note when notices are being held for the 18:00 SAST window. */
+export const REPORTS_QUEUED_MESSAGE = `Captain's reports queued — sent from ${REPORT_NOTICE_HOUR}:00`;
 
 export interface TenantSyncDeps extends PullerDeps {
   /** Overrides for the ops digest (tests); default to `opsDigestCell()` and the Meta sender. */
@@ -207,6 +220,7 @@ export async function runTenantSync(
       repo,
       ...(deps.now ? { now: deps.now } : {}),
       ...captainsReports,
+      ...(deps.deadlineMs !== undefined ? { deadlineMs: deps.deadlineMs } : {}),
     });
   const now = () => (deps.now ?? (() => new Date()))().toISOString();
   // Best-effort: losing the health stamp must never mask the run's own outcome.
@@ -252,6 +266,7 @@ export async function runTenantSync(
       repo,
       ...(deps.now ? { now: deps.now } : {}),
       ...(deps.captainsReports ?? {}),
+      ...(deps.deadlineMs !== undefined ? { deadlineMs: deps.deadlineMs } : {}),
     });
   } catch (err) {
     // A reminder failure never fails the sync run; the next run tries again.
@@ -301,13 +316,25 @@ export async function runTenantSync(
       `[medicoach-sync] ${tenant}: awaiting-carry reconciliation failed — ${err instanceof Error ? err.message : 'error'}`,
     );
     await import('../instrument.js')
-      .then(({ Sentry }) =>
-        Sentry.captureException(err, { tags: { job: 'mc-reconcile', tenant } }),
-      )
+      .then(({ Sentry }) => Sentry.captureException(err, { tags: { job: 'mc-reconcile', tenant } }))
       .catch(() => {});
   }
+  const reportNotices = {
+    deferred: (summary.reportsDeferred ?? 0) + reports.deferred,
+    opened: opened.size,
+    notified: noticeCount('sent'),
+    failed: noticeCount('failed'),
+  };
+  if (reportNotices.deferred + reportNotices.opened + reportNotices.notified + reportNotices.failed)
+    console.log(
+      `[captains-report] ${tenant}: deferred=${reportNotices.deferred} opened=${reportNotices.opened} notified=${reportNotices.notified} failed=${reportNotices.failed}`,
+    );
+  const queued =
+    reportNotices.deferred > 0 && !reportNoticeWindowOpen((deps.now ?? (() => new Date()))());
   return {
     ...summary,
+    reportNotices,
+    ...(queued ? { reportsMessage: REPORTS_QUEUED_MESSAGE } : {}),
     ...(push ? { push } : {}),
     ...(playerPush ? { playerPush } : {}),
     reports,

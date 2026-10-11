@@ -666,8 +666,10 @@ export default $config({
     // decision: worst-case 15 min delay at ~672 runs a week). It pulls changed fixtures for
     // every tenant with `features.medicoachSync`; a quiet run is a handful of small reads.
     // Dry-runs (logs only) while the MedicoachSync* secrets are empty.
+    // Fixed quarter-hour marks (not a drifting rate) so one run lands at 16:00 UTC = 18:00
+    // SAST, when queued captain's report notices are released (REPORT_NOTICE_HOUR).
     new sst.aws.Cron('MedicoachSyncPuller', {
-      schedule: 'rate(15 minutes)',
+      schedule: 'cron(0/15 * * * ? *)',
       function: {
         handler: 'packages/api/src/medicoach-sync/cron.handler',
         link: [

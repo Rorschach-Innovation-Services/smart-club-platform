@@ -82,6 +82,46 @@ export const REPORT_OPEN_MAX_ATTEMPTS = 5;
  */
 export const NOTICE_FAILED_ERROR = 'report notice failed on every channel';
 
+/**
+ * Captain's report notices (opening notices and reminders) go out only from this hour, SAST
+ * wall clock, until midnight: results stored earlier keep their REPORTOPEN# marker and are
+ * drained by the first sync run at/after 18:00 (the cron fires on the quarter hour, so one
+ * lands at 16:00 UTC). A result arriving after midnight waits for 18:00 that day.
+ *
+ * The gate is GLOBAL, not per tenant: every tenant is a South African union, so one fixed
+ * offset (TENANT_UTC_OFFSET_MINUTES, no DST) is exact for all of them.
+ */
+export const REPORT_NOTICE_HOUR = 18;
+
+/** True from 18:00:00 to 23:59:59 SAST (pure). */
+export function isReportNoticeWindowOpen(now: Date): boolean {
+  const local = new Date(now.getTime() + TENANT_UTC_OFFSET_MINUTES * 60_000);
+  return local.getUTCHours() >= REPORT_NOTICE_HOUR;
+}
+
+let windowOverride: ((now: Date) => boolean) | undefined;
+
+/**
+ * Force the notice window open/closed regardless of the clock. For tests whose dates follow
+ * the real clock only; `undefined` restores `isReportNoticeWindowOpen`.
+ */
+export function setReportNoticeWindowOverride(fn: ((now: Date) => boolean) | undefined): void {
+  windowOverride = fn;
+}
+
+/** The gate every automatic send path checks (honours the test override). */
+export function reportNoticeWindowOpen(now: Date): boolean {
+  return (windowOverride ?? isReportNoticeWindowOpen)(now);
+}
+
+/** A NOTIFY# claim still `in_progress` after this long is reported to Sentry (never resent). */
+export const STUCK_CLAIM_MS = 10 * 60_000;
+
+/** True once this invocation's wall-clock budget is spent (`deadlineMs` is epoch ms). */
+export function pastDeadline(deadlineMs: number | undefined): boolean {
+  return deadlineMs !== undefined && Date.now() >= deadlineMs;
+}
+
 const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/;
 const DAY_MS = 24 * 3600 * 1000;
 
@@ -479,6 +519,12 @@ export interface CaptainsReportDeps {
    * digest. Observation only: it never changes the outcome or the retry.
    */
   onOpenOutcome?: (o: { opened: string[]; notified: string[]; failed: string[] }) => void;
+  /**
+   * This invocation's wall-clock deadline (epoch ms, `Date.now()` based — not `now`). Checked
+   * before each REPORTOPEN# marker and each NOTIFY# claim; what is left stays queued for the
+   * next run. Unset = no deadline.
+   */
+  deadlineMs?: number;
 }
 
 export interface OpenOutcome {
@@ -486,6 +532,8 @@ export interface OpenOutcome {
   opened: string[];
   /** Reports whose notice actually reached someone (a channel sent). */
   notified: string[];
+  /** Reports whose notice was not claimed because the deadline passed (marker must stay). */
+  deferred?: string[];
 }
 
 type StoredFixture = Record<string, unknown> & {
@@ -672,6 +720,7 @@ export async function openCaptainReports(
       });
       if (sent === 'sent') out.notified.push(existing.id);
       else if (sent === 'failed') failedNotices.push(existing.id);
+      else if (sent === 'deferred') (out.deferred ??= []).push(existing.id);
       continue;
     }
     out.opened.push(report.id);
@@ -683,6 +732,7 @@ export async function openCaptainReports(
     });
     if (sent === 'sent') out.notified.push(report.id);
     else if (sent === 'failed') failedNotices.push(report.id);
+    else if (sent === 'deferred') (out.deferred ??= []).push(report.id);
   }
   // A notice that reached nobody (every channel tried failed) released its ledger claim;
   // throwing keeps the REPORTOPEN# marker, so the next run re-sends it (bounded by
@@ -732,6 +782,8 @@ function deliveryOf(
  *  - 'failed': nothing went out and a channel FAILED. For the opening/forward audience
  *    (`recipient#<memberId>`) the claim is released so the REPORTOPEN# retry can send again;
  *    a reminder is best-effort and keeps its claim (at most one).
+ *  - 'deferred': this invocation's deadline passed before the claim — nothing claimed or
+ *    sent; the caller keeps the work queued for the next run.
  */
 async function notifyRecipient(
   deps: CaptainsReportDeps,
@@ -746,7 +798,7 @@ async function notifyRecipient(
     /** Who is actually being reached, when it differs from the report's recipient kind. */
     recipientKind?: 'captain' | 'chair';
   },
-): Promise<'sent' | 'undelivered' | 'already' | 'failed'> {
+): Promise<'sent' | 'undelivered' | 'already' | 'failed' | 'deferred'> {
   const { repo } = deps;
   const now = deps.now ?? (() => new Date());
   const { contact, ccChair, purpose } = opts;
@@ -761,7 +813,11 @@ async function notifyRecipient(
   // reminder has its own audience.
   const reminder = purpose === 'reminder';
   const audience = `${reminder ? 'reminder' : 'recipient'}#${report.recipient.memberId}`;
-  if (!(await repo.claimCaptainsReportNotify(tenant, report.id, audience))) return 'already';
+  if (pastDeadline(deps.deadlineMs)) return 'deferred';
+  if (!(await repo.claimCaptainsReportNotify(tenant, report.id, audience))) {
+    await warnIfClaimStuck(deps, tenant, report, audience);
+    return 'already';
+  }
   const recipientKind: 'captain' | 'chair' =
     opts.recipientKind ?? (report.recipient.kind === 'captain' ? 'captain' : 'chair');
   const home = report.side === 'home' ? report.clubName : report.opponentName;
@@ -842,6 +898,36 @@ async function notifyRecipient(
   return delivered ? 'sent' : 'undelivered';
 }
 
+/**
+ * A claim this run hit that is still `in_progress` after STUCK_CLAIM_MS means a send crashed
+ * between claim and completion: tell Sentry (ids only). It is NEVER re-sent automatically.
+ * One GetItem for a report this run touched — no scans. Never throws.
+ */
+async function warnIfClaimStuck(
+  deps: CaptainsReportDeps,
+  tenant: string,
+  report: CaptainsReport,
+  audience: string,
+): Promise<void> {
+  try {
+    const row = await deps.repo.getCaptainsReportNotify(tenant, report.id, audience);
+    if (!row || row.status !== 'in_progress' || !row.startedAt) return;
+    const age = Date.now() - Date.parse(row.startedAt);
+    if (!(age > STUCK_CLAIM_MS)) return;
+    console.warn(
+      `[captains-report] ${tenant} ${report.id}: notice claim stuck in_progress for ${Math.round(age / 60_000)} min (not resent)`,
+    );
+    const { Sentry } = await import('./instrument.js');
+    Sentry.captureMessage("captain's report notice claim stuck in_progress", {
+      level: 'warning',
+      tags: { tenant, job: 'captains-report' },
+      extra: { reportId: report.id, audience: audience.split('#')[0], startedAt: row.startedAt },
+    });
+  } catch {
+    // Visibility only: never affects the send path.
+  }
+}
+
 let defaultSender: (n: ReportNotice) => Promise<NoticeResult[]> = (n) => sendReportNotice(n);
 
 /**
@@ -918,9 +1004,11 @@ export async function sendReportNotice(n: ReportNotice): Promise<NoticeResult[]>
  */
 export function captainsReportResultHook(deps: CaptainsReportDeps) {
   const log = deps.log ?? ((line: string) => console.log(line));
-  return async (event: ResultEventLike): Promise<void> => {
+  return async (event: ResultEventLike): Promise<void | 'deferred'> => {
     try {
       const outcome = await openCaptainReports(event, deps);
+      // The deadline passed before a notice was claimed: keep the marker for the next run.
+      if (outcome.deferred?.length) return 'deferred';
       if (outcome.opened.length || outcome.skipped)
         log(
           `[captains-report] ${event.tenant} ${event.seriesId}/${event.fixtureId}: ` +
@@ -964,6 +1052,8 @@ export interface ReportRetrySummary {
   done: number;
   failed: number;
   gaveUp: number;
+  /** Markers left queued: the 18:00 window is closed, or the run's deadline passed. */
+  deferred: number;
 }
 
 /**
@@ -979,11 +1069,18 @@ export async function retryPendingReportOpens(
 ): Promise<ReportRetrySummary> {
   const { repo } = deps;
   const now = deps.now ?? (() => new Date());
-  const out: ReportRetrySummary = { retried: 0, done: 0, failed: 0, gaveUp: 0 };
+  const out: ReportRetrySummary = { retried: 0, done: 0, failed: 0, gaveUp: 0, deferred: 0 };
   const markers = await repo.listReportOpenMarkers(tenant);
   if (!markers.length) return out;
+  // Before 18:00 SAST nothing is sent: every marker stays queued, untouched (a deferral is
+  // never an attempt — it must not count toward REPORT_OPEN_MAX_ATTEMPTS).
+  if (!reportNoticeWindowOpen(now())) return { ...out, deferred: markers.length };
   const config = await repo.getTenantConfig(tenant);
-  for (const m of markers) {
+  for (const [i, m] of markers.entries()) {
+    if (pastDeadline(deps.deadlineMs)) {
+      out.deferred += markers.length - i;
+      break;
+    }
     const stored = await repo.getFixtureResult(tenant, m.seriesId, m.fixtureId);
     if (
       !config ||
@@ -997,7 +1094,7 @@ export async function retryPendingReportOpens(
     }
     out.retried++;
     try {
-      await openCaptainReports(
+      const outcome = await openCaptainReports(
         {
           tenant,
           seriesId: m.seriesId,
@@ -1009,11 +1106,17 @@ export async function retryPendingReportOpens(
         },
         deps,
       );
+      if (outcome.deferred?.length) {
+        out.deferred++; // deadline hit mid-opening: the marker stays for the next run
+        continue;
+      }
       await repo.deleteReportOpenMarker(tenant, m.ref);
       out.done++;
     } catch (err) {
       const message = err instanceof Error ? err.message : 'report open failed';
       const attempts = await repo.markReportOpenFailed(tenant, m.ref, message, now().toISOString());
+      // 0 = the marker was already gone (a concurrent run finished it): nothing to give up on.
+      if (attempts === 0) continue;
       if (attempts >= REPORT_OPEN_MAX_ATTEMPTS) {
         out.gaveUp++;
         await repo.deleteReportOpenMarker(tenant, m.ref);
@@ -1239,12 +1342,15 @@ export interface ReminderSummary {
   sent: number;
   /** Reminders recorded but not delivered (no contact, dry run, every channel failed). */
   undelivered: number;
+  /** Due reminders held back: before 18:00 SAST, or the run's deadline passed. */
+  deferred?: number;
 }
 
 /**
  * Remind the current recipient of every PENDING report whose link expires within
  * REMINDER_LEAD_DAYS — once, at most (NOTIFY# audience `reminder#<memberId>`), on the same
- * channels with the same link. Runs in the 15-minute sync run (sync-enabled tenants only).
+ * channels with the same link. Runs in the 15-minute sync run (sync-enabled tenants only),
+ * from 18:00 SAST only (REPORT_NOTICE_HOUR).
  * A captain recipient is reached through the contact stored when the report was addressed
  * to them; a chair through the club's current chair contact.
  */
@@ -1255,6 +1361,9 @@ export async function sendReportReminders(
   const { repo } = deps;
   const now = deps.now ?? (() => new Date());
   const out: ReminderSummary = { due: 0, sent: 0, undelivered: 0 };
+  // Reminders follow the 18:00 SAST rule too: before it nothing is read or sent, and due
+  // reminders stay due (the window runs to midnight, so none is lost to the gate alone).
+  if (!reportNoticeWindowOpen(now())) return out;
   const nowMs = now().getTime();
   const due = (await repo.listCaptainsReports(tenant)).filter((r) => {
     if (r.status !== 'pending' || r.reminderSentAt) return false;
@@ -1280,6 +1389,10 @@ export async function sendReportReminders(
       ccChair: toCaptain ? chair : null,
       purpose: 'reminder',
     });
+    if (sent === 'deferred') {
+      out.deferred = (out.deferred ?? 0) + 1;
+      continue;
+    }
     if (sent === 'sent') out.sent++;
     else if (sent !== 'already') out.undelivered++;
   }
