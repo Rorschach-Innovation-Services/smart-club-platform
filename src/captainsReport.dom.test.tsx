@@ -193,7 +193,7 @@ describe('the second umpire is optional', () => {
     await rate(1, '2');
     await rate(2, '4');
     await userEvent.click(removeBtn(1));
-    const ask = screen.getByRole('alertdialog', { name: 'Remove umpire 1' });
+    const ask = screen.getByRole('alertdialog', { name: 'Remove A.Ngubane' });
     expect(ask).toHaveTextContent('Did A.Ngubane stand in this match?');
     // "Yes" keeps the card.
     await userEvent.click(within(ask).getByRole('button', { name: /Yes/ }));
@@ -221,6 +221,9 @@ describe('the second umpire is optional', () => {
     await userEvent.type(screen.getByRole('combobox', { name: 'Umpire 1' }), 'Club umpire');
     await userEvent.type(screen.getByRole('combobox', { name: 'Umpire 2' }), 'B.Sub');
     await userEvent.click(removeBtn(1));
+    const ask = screen.getByRole('alertdialog', { name: 'Remove Club umpire' });
+    expect(ask).toHaveTextContent('Remove Club umpire and their ratings?');
+    await userEvent.click(within(ask).getByRole('button', { name: 'No — remove' }));
     expect(screen.getByRole('combobox', { name: 'Umpire 1' })).toHaveValue('B.Sub');
     expect(screen.queryByTestId('umpire-card-2')).toBeNull();
   });
@@ -240,6 +243,51 @@ describe('the second umpire is optional', () => {
     const [, second] = submitted(onSubmit).umpires;
     expect(second).toMatchObject({ umpireId: 'u-dlamini', name: 'S.Dlamini' });
     expect(second.substitute).toBeUndefined();
+  });
+
+  it('an untouched card removes at once, with no question; focus lands on the survivor', async () => {
+    render([]);
+    await userEvent.click(removeBtn(2));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(screen.queryByTestId('umpire-card-2')).toBeNull();
+    expect(screen.getByTestId('umpire-card-1')).toHaveFocus();
+  });
+
+  it('a touched registry pick asks first; focus moves into the question, which is described', async () => {
+    render([]);
+    await userEvent.type(screen.getByRole('combobox', { name: 'Umpire 2' }), 'B.Sub');
+    await userEvent.click(removeBtn(2));
+    const ask = screen.getByRole('alertdialog', { name: 'Remove B.Sub' });
+    expect(ask).toHaveAccessibleDescription('Remove B.Sub and their ratings?');
+    expect(within(ask).getByRole('button', { name: 'Keep' })).toHaveFocus();
+    await userEvent.click(within(ask).getByRole('button', { name: 'No — remove' }));
+    expect(screen.queryByTestId('umpire-card-2')).toBeNull();
+    expect(screen.getByTestId('umpire-card-1')).toHaveFocus();
+  });
+
+  it('a rated but unnamed card asks about "this umpire"', async () => {
+    render([]);
+    await rate(2, '3');
+    await userEvent.click(removeBtn(2));
+    const ask = screen.getByRole('alertdialog', { name: 'Remove umpire 2' });
+    expect(ask).toHaveTextContent('Remove this umpire and their ratings?');
+  });
+
+  it('Escape cancels the question and returns focus to the Remove button', async () => {
+    render([NGUBANE, DLAMINI]);
+    await userEvent.click(removeBtn(2));
+    expect(screen.getByRole('alertdialog', { name: 'Remove S.Dlamini' })).toBeInTheDocument();
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(screen.getByTestId('umpire-card-2')).toBeInTheDocument();
+    expect(removeBtn(2)).toHaveFocus();
+  });
+
+  it('card 2 drops "(optional)" from its heading once it holds anything', async () => {
+    render([NGUBANE, DLAMINI]);
+    const two = screen.getByTestId('umpire-card-2');
+    expect(within(two).getByText('On-field umpire 2')).toBeInTheDocument();
+    expect(within(two).queryByText(/\(optional\)/)).toBeNull();
   });
 
   it('a stale two-card draft reopens with both cards removable', () => {

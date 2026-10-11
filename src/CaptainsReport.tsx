@@ -56,6 +56,7 @@ import {
   submissionProblems,
   umpireCardMode,
   umpireEntryComplete,
+  umpireEntryUntouched,
   type AppointedUmpire,
   type ReportUmpireEntry,
 } from '../packages/engine/src/captainsReport';
@@ -289,7 +290,7 @@ interface UmpireCardProps {
   onChange: (update: (u: ReportUmpireEntry) => ReportUmpireEntry) => void;
   /** Drop this card (offered while the report has two). */
   onRemove?: () => void;
-  /** Asking "Did <name> stand?" before removing a pre-filled appointed umpire. */
+  /** Asking before removing a card that has anything entered on it. */
   confirmingRemove?: boolean;
   onCancelRemove?: () => void;
   onConfirmRemove?: () => void;
@@ -335,12 +336,25 @@ export function UmpireCard({
     );
   };
   const selectValue = umpire.substitute ? SUBSTITUTE : (umpire.umpireId ?? '');
+  const untouched = umpireEntryUntouched(umpire);
+  const shownName = umpire.name?.trim();
+  const appointedPick = !umpire.substitute && appointed.some((a) => a.umpireId === umpire.umpireId);
+  const questionId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const removeRef = useRef<HTMLDivElement>(null);
+  const wasConfirming = useRef(false);
+  // Focus follows the question: into it on open, back to the Remove button on cancel.
+  useEffect(() => {
+    if (confirmingRemove) dialogRef.current?.querySelector('button')?.focus();
+    else if (wasConfirming.current) removeRef.current?.querySelector('button')?.focus();
+    wasConfirming.current = !!confirmingRemove;
+  }, [confirmingRemove]);
 
   return (
-    <div className="rp-section" data-testid={`umpire-card-${n}`}>
+    <div className="rp-section" data-testid={`umpire-card-${n}`} tabIndex={-1}>
       <SectionHead
         n={n === 1 ? '2A' : '2B'}
-        title={n === 1 ? `On-field umpire ${n}` : `On-field umpire ${n} (optional)`}
+        title={n === 1 || !untouched ? `On-field umpire ${n}` : `On-field umpire ${n} (optional)`}
         right={
           avg != null && (
             <div className="cr-avg">
@@ -354,14 +368,26 @@ export function UmpireCard({
         (confirmingRemove ? (
           <div
             className="rp-validation"
+            ref={dialogRef}
             role="alertdialog"
-            aria-label={`Remove umpire ${n}`}
+            aria-label={shownName ? `Remove ${shownName}` : `Remove umpire ${n}`}
+            aria-describedby={questionId}
             style={{ marginBottom: 12 }}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                onCancelRemove?.();
+              }
+            }}
           >
-            <div style={{ marginBottom: 8 }}>Did {umpire.name} stand in this match?</div>
+            <div id={questionId} style={{ marginBottom: 8 }}>
+              {appointedPick
+                ? `Did ${umpire.name} stand in this match?`
+                : `Remove ${shownName || 'this umpire'} and their ratings?`}
+            </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <Btn tone="outline" size="sm" onClick={onCancelRemove}>
-                Yes — keep {umpire.name}
+                {appointedPick ? `Yes — keep ${umpire.name}` : 'Keep'}
               </Btn>
               <Btn tone="outline" size="sm" onClick={onConfirmRemove}>
                 No — remove
@@ -369,7 +395,7 @@ export function UmpireCard({
             </div>
           </div>
         ) : (
-          <div style={{ marginBottom: 12 }}>
+          <div ref={removeRef} style={{ marginBottom: 12 }}>
             <Btn tone="outline" size="sm" onClick={onRemove}>
               Remove — only one umpire stood
             </Btn>
@@ -774,17 +800,24 @@ export function CaptainsReportForm({
   const outstanding = steps.filter((s) => !s.done).length;
   const progressLabel = `${steps.length - outstanding} of ${steps.length} complete`;
 
+  // After a removal, focus lands on the surviving card rather than dropping to <body>.
+  const cardsRef = useRef<HTMLDivElement>(null);
+  const focusSurvivor = useRef(false);
+  useEffect(() => {
+    if (!focusSurvivor.current) return;
+    focusSurvivor.current = false;
+    cardsRef.current?.querySelector<HTMLElement>('[data-testid^="umpire-card-"]')?.focus();
+  }, [umpires.length]);
   function removeCard(i: number) {
+    focusSurvivor.current = true;
     setConfirmRemove(null);
     setUmpires((all) => all.filter((_, j) => j !== i));
     setCardKeys((all) => all.filter((_, j) => j !== i));
   }
-  // A pre-filled appointed umpire is only dropped once the captain says they didn't stand.
+  // A card with anything on it is only dropped after the captain confirms; a blank one goes at once.
   function requestRemove(i: number) {
-    const u = umpires[i];
-    const appointedPick = !u.substitute && appointed.some((a) => a.umpireId === u.umpireId);
-    if (appointedPick) setConfirmRemove(i);
-    else removeCard(i);
+    if (umpireEntryUntouched(umpires[i])) removeCard(i);
+    else setConfirmRemove(i);
   }
   // Only an appointment makes the added card a stand-in; a registry umpire is not a substitute.
   function addCard() {
@@ -839,25 +872,27 @@ export function CaptainsReportForm({
           </div>
         </details>
 
-        {umpires.map((u, i) => (
-          <UmpireCard
-            key={cardKeys[i] ?? i}
-            n={i + 1}
-            umpire={u}
-            appointed={appointed}
-            choices={appointedChoices(appointed, umpires, i)}
-            registry={registry}
-            takenIds={umpires
-              .filter((_, j) => j !== i)
-              .map((x) => x.umpireId)
-              .filter((x): x is string => !!x)}
-            onChange={(fn) => setUmpires((all) => all.map((x, j) => (j === i ? fn(x) : x)))}
-            onRemove={umpires.length === 2 ? () => requestRemove(i) : undefined}
-            confirmingRemove={confirmRemove === i}
-            onCancelRemove={() => setConfirmRemove(null)}
-            onConfirmRemove={() => removeCard(i)}
-          />
-        ))}
+        <div ref={cardsRef}>
+          {umpires.map((u, i) => (
+            <UmpireCard
+              key={cardKeys[i] ?? i}
+              n={i + 1}
+              umpire={u}
+              appointed={appointed}
+              choices={appointedChoices(appointed, umpires, i)}
+              registry={registry}
+              takenIds={umpires
+                .filter((_, j) => j !== i)
+                .map((x) => x.umpireId)
+                .filter((x): x is string => !!x)}
+              onChange={(fn) => setUmpires((all) => all.map((x, j) => (j === i ? fn(x) : x)))}
+              onRemove={umpires.length === 2 ? () => requestRemove(i) : undefined}
+              confirmingRemove={confirmRemove === i}
+              onCancelRemove={() => setConfirmRemove(null)}
+              onConfirmRemove={() => removeCard(i)}
+            />
+          ))}
+        </div>
         {umpires.length === 1 && (
           <div style={{ marginBottom: 16 }}>
             <Btn tone="outline" size="sm" icon={Icon.Plus} onClick={addCard}>

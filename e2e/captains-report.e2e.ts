@@ -378,12 +378,13 @@ test('the away chair files through the submit-once link, which then closes', asy
   await expect(p.getByText("Crusaders / Captain's Report")).toBeVisible();
   await expect(p.locator('meta[name="referrer"]')).toHaveAttribute('content', 'no-referrer');
   // Only one umpire stood: the chair removes appointed card 2, which asks first.
-  await expect(p.getByText(`On-field umpire 2 (optional)`)).toBeVisible();
+  // Pre-filled with the appointed umpire, card 2 is not headed "(optional)".
+  await expect(p.getByText('On-field umpire 2', { exact: true })).toBeVisible();
   await p
     .getByTestId('umpire-card-2')
     .getByRole('button', { name: 'Remove — only one umpire stood' })
     .click();
-  const ask = p.getByRole('alertdialog', { name: 'Remove umpire 2' });
+  const ask = p.getByRole('alertdialog', { name: `Remove ${UMP_B}` });
   await expect(ask).toContainText(`Did ${UMP_B} stand in this match?`);
   await ask.getByRole('button', { name: 'No — remove' }).click();
   await expect(p.getByTestId('umpire-card-2')).toHaveCount(0);
