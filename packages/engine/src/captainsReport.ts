@@ -87,6 +87,26 @@ export function avgRating(u: Pick<ReportUmpireEntry, 'ratings'>): number | null 
 export const umpireEntryComplete = (u: ReportUmpireEntry): boolean =>
   !!u.name.trim() && RATING_CRITERIA.every((c) => typeof u.ratings?.[c.key] === 'number');
 
+/** A card the captain never touched: no umpire, no substitute pick, no ratings or notes. */
+export const umpireEntryUntouched = (u: ReportUmpireEntry): boolean =>
+  !u.name?.trim() &&
+  !u.umpireId &&
+  !u.substitute &&
+  !RATING_CRITERIA.some((c) => typeof u.ratings?.[c.key] === 'number') &&
+  !Object.values(u.concerns ?? {}).some(Boolean) &&
+  !u.otherConcern?.trim() &&
+  !u.comments?.trim();
+
+/**
+ * The cards a report actually rates: card 1 always; an optional card 2 only once the captain
+ * has touched it. A completely untouched trailing card 2 is left out (so it never blocks
+ * Submit); a half-filled one stays in and is validated in full.
+ */
+export function keptUmpireEntries(cards: ReportUmpireEntry[]): ReportUmpireEntry[] {
+  if (cards.length === 2 && umpireEntryUntouched(cards[1])) return cards.slice(0, 1);
+  return cards;
+}
+
 /** Any criterion rated `LOW_RATING` or below. */
 export const hasLowRating = (u: Pick<ReportUmpireEntry, 'ratings'>): boolean =>
   RATING_CRITERIA.some((c) => {

@@ -52,8 +52,9 @@ const optionsOf = (select: HTMLElement) =>
 beforeEach(() => localStorage.clear());
 
 describe('umpire cards from the appointment', () => {
-  it('no appointment → two registry pickers', () => {
+  it('no appointment → two registry pickers, the second optional', () => {
     render([]);
+    expect(screen.getByText('On-field umpire 2 (optional)')).toBeInTheDocument();
     expect(screen.getByTestId('umpire-card-1')).toBeInTheDocument();
     expect(screen.getByTestId('umpire-card-2')).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: 'Umpire 1' })).toHaveValue('');
@@ -114,6 +115,208 @@ describe('submitting', () => {
         umpires: [expect.objectContaining({ umpireId: 'u-ngubane', name: 'A.Ngubane' })],
       }),
     );
+  });
+});
+
+const rate = async (n: number, score: string) => {
+  const card = screen.getByTestId(`umpire-card-${n}`);
+  for (const group of within(card).getAllByRole('radiogroup'))
+    await userEvent.click(within(group).getByRole('radio', { name: score }));
+};
+const finishCaptain = async () => {
+  await userEvent.type(screen.getByRole('combobox', { name: "Captain's name" }), 'S. Mthembu');
+  await userEvent.click(screen.getByRole('checkbox'));
+};
+const submitBtn = () => screen.getAllByRole('button', { name: 'Submit report' })[0];
+const removeBtn = (n: number) =>
+  within(screen.getByTestId(`umpire-card-${n}`)).getByRole('button', {
+    name: 'Remove — only one umpire stood',
+  });
+const submitted = (onSubmit: ReturnType<typeof vi.fn>) =>
+  (onSubmit.mock.calls[0] as unknown as [{ umpires: Array<Record<string, unknown>> }])[0];
+
+describe('the second umpire is optional', () => {
+  it('no appointment: card 2 is headed optional and an untouched card 2 never blocks Submit', async () => {
+    const { onSubmit } = render([]);
+    expect(within(screen.getByTestId('umpire-card-2')).getByText(/\(optional\)/)).toBeVisible();
+    await userEvent.type(screen.getByRole('combobox', { name: 'Umpire 1' }), 'B.Sub');
+    await rate(1, '4');
+    await finishCaptain();
+    expect(submitBtn()).toBeEnabled();
+    await userEvent.click(submitBtn());
+    expect(submitted(onSubmit).umpires).toEqual([
+      expect.objectContaining({ umpireId: 'u-sub', name: 'B.Sub' }),
+    ]);
+  });
+
+  it('a half-filled card 2 is validated in full', async () => {
+    render([]);
+    await userEvent.type(screen.getByRole('combobox', { name: 'Umpire 1' }), 'B.Sub');
+    await rate(1, '4');
+    await userEvent.type(screen.getByRole('combobox', { name: 'Umpire 2' }), 'Club umpire');
+    await finishCaptain();
+    expect(submitBtn()).toBeDisabled();
+  });
+
+  it('remove card 2 and submit one rating', async () => {
+    const { onSubmit } = render([]);
+    await userEvent.click(removeBtn(2));
+    expect(screen.queryByTestId('umpire-card-2')).toBeNull();
+    // A lone card has no remove control.
+    expect(
+      within(screen.getByTestId('umpire-card-1')).queryByRole('button', { name: /^Remove/ }),
+    ).toBeNull();
+    await userEvent.type(screen.getByRole('combobox', { name: 'Umpire 1' }), 'B.Sub');
+    await rate(1, '3');
+    await finishCaptain();
+    await userEvent.click(submitBtn());
+    expect(submitted(onSubmit).umpires).toHaveLength(1);
+  });
+
+  it('no appointment: "Rate a second umpire" adds a plain card, stored WITHOUT substitute', async () => {
+    const { onSubmit } = render([]);
+    await userEvent.click(removeBtn(2));
+    await userEvent.click(screen.getByRole('button', { name: 'Rate a second umpire' }));
+    await userEvent.type(screen.getByRole('combobox', { name: 'Umpire 1' }), 'B.Sub');
+    await userEvent.type(screen.getByRole('combobox', { name: 'Umpire 2' }), 'Club umpire');
+    await rate(1, '4');
+    await rate(2, '5');
+    await finishCaptain();
+    await userEvent.click(submitBtn());
+    const [, two] = submitted(onSubmit).umpires;
+    expect(two).toMatchObject({ name: 'Club umpire' });
+    expect(two.substitute).toBeUndefined();
+  });
+
+  it('pair: removing appointed card 1 asks first; the survivor keeps its own ratings', async () => {
+    const { onSubmit } = render([NGUBANE, DLAMINI]);
+    await rate(1, '2');
+    await rate(2, '4');
+    await userEvent.click(removeBtn(1));
+    const ask = screen.getByRole('alertdialog', { name: 'Remove A.Ngubane' });
+    expect(ask).toHaveTextContent('Did A.Ngubane stand in this match?');
+    // "Yes" keeps the card.
+    await userEvent.click(within(ask).getByRole('button', { name: /Yes/ }));
+    expect(screen.getByTestId('umpire-card-2')).toBeInTheDocument();
+    await userEvent.click(removeBtn(1));
+    await userEvent.click(screen.getByRole('button', { name: 'No — remove' }));
+    expect(screen.queryByTestId('umpire-card-2')).toBeNull();
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(screen.getByRole('combobox', { name: 'Umpire 1' })).toHaveValue('u-dlamini');
+    const survivor = screen.getByTestId('umpire-card-1');
+    for (const group of within(survivor).getAllByRole('radiogroup'))
+      expect(within(group).getByRole('radio', { name: '4' })).toHaveAttribute(
+        'aria-checked',
+        'true',
+      );
+    await finishCaptain();
+    await userEvent.click(submitBtn());
+    expect(submitted(onSubmit).umpires).toEqual([
+      expect.objectContaining({ umpireId: 'u-dlamini' }),
+    ]);
+  });
+
+  it('removing card 1 does not leak the typed-name widget into the survivor', async () => {
+    render([]);
+    await userEvent.type(screen.getByRole('combobox', { name: 'Umpire 1' }), 'Club umpire');
+    await userEvent.type(screen.getByRole('combobox', { name: 'Umpire 2' }), 'B.Sub');
+    await userEvent.click(removeBtn(1));
+    const ask = screen.getByRole('alertdialog', { name: 'Remove Club umpire' });
+    expect(ask).toHaveTextContent('Remove Club umpire and their ratings?');
+    await userEvent.click(within(ask).getByRole('button', { name: 'No — remove' }));
+    expect(screen.getByRole('combobox', { name: 'Umpire 1' })).toHaveValue('B.Sub');
+    expect(screen.queryByTestId('umpire-card-2')).toBeNull();
+  });
+
+  it('pair: remove → re-add → re-pick the appointed umpire stores them un-substituted', async () => {
+    const { onSubmit } = render([NGUBANE, DLAMINI]);
+    await userEvent.click(removeBtn(2));
+    await userEvent.click(screen.getByRole('button', { name: 'No — remove' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Rate a second umpire' }));
+    const two = screen.getByRole('combobox', { name: 'Umpire 2' });
+    expect(optionsOf(two)).toContain('S.Dlamini (appointed)');
+    await userEvent.selectOptions(two, 'u-dlamini');
+    await rate(1, '4');
+    await rate(2, '4');
+    await finishCaptain();
+    await userEvent.click(submitBtn());
+    const [, second] = submitted(onSubmit).umpires;
+    expect(second).toMatchObject({ umpireId: 'u-dlamini', name: 'S.Dlamini' });
+    expect(second.substitute).toBeUndefined();
+  });
+
+  it('an untouched card removes at once, with no question; focus lands on the survivor', async () => {
+    render([]);
+    await userEvent.click(removeBtn(2));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(screen.queryByTestId('umpire-card-2')).toBeNull();
+    expect(screen.getByTestId('umpire-card-1')).toHaveFocus();
+  });
+
+  it('a touched registry pick asks first; focus moves into the question, which is described', async () => {
+    render([]);
+    await userEvent.type(screen.getByRole('combobox', { name: 'Umpire 2' }), 'B.Sub');
+    await userEvent.click(removeBtn(2));
+    const ask = screen.getByRole('alertdialog', { name: 'Remove B.Sub' });
+    expect(ask).toHaveAccessibleDescription('Remove B.Sub and their ratings?');
+    expect(within(ask).getByRole('button', { name: 'Keep' })).toHaveFocus();
+    await userEvent.click(within(ask).getByRole('button', { name: 'No — remove' }));
+    expect(screen.queryByTestId('umpire-card-2')).toBeNull();
+    expect(screen.getByTestId('umpire-card-1')).toHaveFocus();
+  });
+
+  it('a rated but unnamed card asks about "this umpire"', async () => {
+    render([]);
+    await rate(2, '3');
+    await userEvent.click(removeBtn(2));
+    const ask = screen.getByRole('alertdialog', { name: 'Remove umpire 2' });
+    expect(ask).toHaveTextContent('Remove this umpire and their ratings?');
+  });
+
+  it('Escape cancels the question and returns focus to the Remove button', async () => {
+    render([NGUBANE, DLAMINI]);
+    await userEvent.click(removeBtn(2));
+    expect(screen.getByRole('alertdialog', { name: 'Remove S.Dlamini' })).toBeInTheDocument();
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(screen.getByTestId('umpire-card-2')).toBeInTheDocument();
+    expect(removeBtn(2)).toHaveFocus();
+  });
+
+  it('card 2 drops "(optional)" from its heading once it holds anything', async () => {
+    render([NGUBANE, DLAMINI]);
+    const two = screen.getByTestId('umpire-card-2');
+    expect(within(two).getByText('On-field umpire 2')).toBeInTheDocument();
+    expect(within(two).queryByText(/\(optional\)/)).toBeNull();
+  });
+
+  it('a stale two-card draft reopens with both cards removable', () => {
+    const report = shell([]);
+    localStorage.setItem(
+      `captains-report-draft:${report.id}`,
+      JSON.stringify({
+        captainName: 'S. Mthembu',
+        umpires: [
+          {
+            name: 'B.Sub',
+            umpireId: 'u-sub',
+            ratings: {},
+            concerns: {},
+            otherConcern: '',
+            comments: '',
+          },
+          { name: 'Club umpire', ratings: {}, concerns: {}, otherConcern: '', comments: '' },
+        ],
+        general: '',
+        declaration: false,
+      }),
+    );
+    renderWithProviders(
+      <CaptainsReportForm report={report} registry={REGISTRY} onSubmit={vi.fn()} />,
+    );
+    expect(screen.getByRole('combobox', { name: 'Umpire 2' })).toHaveValue('Club umpire');
+    expect(removeBtn(1)).toBeInTheDocument();
+    expect(removeBtn(2)).toBeInTheDocument();
   });
 });
 
