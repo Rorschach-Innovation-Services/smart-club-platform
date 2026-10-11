@@ -320,7 +320,9 @@ export async function runTenantSync(
       .catch(() => {});
   }
   const reportNotices = {
-    deferred: (summary.reportsDeferred ?? 0) + reports.deferred,
+    // The retry lists EVERY queued marker — including ones the pull just deferred — so its
+    // count alone is the whole queue; adding the puller's would double-count the new ones.
+    deferred: reports.deferred,
     opened: opened.size,
     notified: noticeCount('sent'),
     failed: noticeCount('failed'),

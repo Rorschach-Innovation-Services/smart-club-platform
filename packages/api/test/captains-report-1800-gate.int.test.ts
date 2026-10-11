@@ -375,7 +375,7 @@ describe('the 18:00 SAST gate', () => {
     const { REPORTS_QUEUED_MESSAGE } = await import('../src/medicoach-sync/run.js');
     assert.equal(run.reportsMessage, REPORTS_QUEUED_MESSAGE);
     assert.match(String(run.reportsMessage), /queued.*18:00/);
-    assert.equal(run.reportNotices?.deferred, 2, 'the pull deferral + the untouched marker');
+    assert.equal(run.reportNotices?.deferred, 1, 'one queued report, counted once (not per pass)');
     assert.equal(run.reports?.deferred, 1);
     assert.equal(notices.length, 0);
     assert.equal((await repo.listReportOpenMarkers('dolphins')).length, 1);

@@ -224,8 +224,9 @@ test.beforeAll(async ({ request }) => {
 });
 
 test.afterAll(async ({ request }) => {
-  await new Promise<void>((r) => stub.close(() => r()));
+  // Window first: a hung stub close must not leak the forced-open override to later specs.
   await setReportNoticeWindow(request, 'real');
+  await new Promise<void>((r) => stub.close(() => r()));
   if (!priorFeatures) return;
   await request.put(`${API_BASE}/platform/tenants/${TENANT}`, {
     headers: operator(),

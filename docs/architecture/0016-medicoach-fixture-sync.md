@@ -129,7 +129,9 @@ importer's `putSeries`) would overwrite them or lose them to a version conflict.
   claim; leftovers stay queued. Never sent twice: every automatic send claims `NOTIFY#`
   first, a delivered channel (e.g. email-only) completes the claim, and nothing re-queues
   or re-sends an already notified report. A claim seen stuck `in_progress` for more than
-  10 minutes is reported to Sentry, never re-sent.
+  10 minutes is reported to Sentry, never re-sent. The gate covers the AUTOMATIC paths only:
+  a chair's manual "Send to captain" forward is a deliberate human action and sends at any
+  hour (still claim-protected, so never twice).
 - **Honest delivery** — every notice (the opening, a chair's forward, the reminder) records
   one `deliveries[]` entry per channel on the report: `sent | failed | skipped` with a reason
   (`no-contact`, `no-email`, `no-cell`, `dry-run`, `template-pending`, `send-failed`), the

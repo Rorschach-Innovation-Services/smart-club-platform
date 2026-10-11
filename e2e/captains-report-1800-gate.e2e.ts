@@ -38,7 +38,7 @@ const isoDay = (offset: number) =>
 const MATCH_DATE = isoDay(-3);
 
 let stub: Server;
-let page: unknown = null;
+let stubPage: unknown = null;
 let priorFeatures: Record<string, boolean> | undefined;
 let priorIntegrations: unknown;
 
@@ -56,7 +56,7 @@ function startStub(): Promise<void> {
       res.writeHead(401).end('{"error":"bad signature"}');
       return;
     }
-    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(page));
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(stubPage));
   });
   return new Promise((resolve) => stub.listen(STUB_PORT, '127.0.0.1', () => resolve()));
 }
@@ -194,8 +194,9 @@ test.beforeAll(async ({ request }) => {
 });
 
 test.afterAll(async ({ request }) => {
-  await new Promise<void>((r) => stub.close(() => r()));
+  // Window first: a hung stub close must not leak the forced override to later specs.
   await setReportNoticeWindow(request, 'real');
+  await new Promise<void>((r) => stub.close(() => r()));
   if (!priorFeatures) return;
   await request.put(`${API_BASE}/platform/tenants/${TENANT}`, {
     headers: operator(),
@@ -208,7 +209,7 @@ test("report notices wait for 18:00, then go out once per side — never twice",
   request,
 }) => {
   await seedFixture(request);
-  page = resultPage();
+  stubPage = resultPage();
 
   await signInAsAdmin(browser);
   await browser.locator('aside.nav .nav-item', { hasText: 'Medicoach sync' }).click();
