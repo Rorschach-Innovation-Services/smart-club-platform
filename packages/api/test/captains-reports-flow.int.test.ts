@@ -257,6 +257,9 @@ async function resetTable() {
 before(async () => {
   ddb = await startDynalite(DDB_PORT, TABLE);
   app = (await import('../src/index.js')).app;
+  // Dates here follow the real clock: hold the 18:00 SAST notice window open (the gate has
+  // its own tests in captains-report-1800-gate.int.test.ts).
+  (await import('../src/captains-reports.js')).setReportNoticeWindowOverride(() => true);
   repo = await import('../src/repo.js');
   puller = await import('../src/medicoach-sync/puller.js');
   contract = await import('../src/medicoach-sync-contract.js');

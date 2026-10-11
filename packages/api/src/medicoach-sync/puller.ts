@@ -29,7 +29,10 @@
  * A newly stored result is first marked `REPORTOPEN#<ref>`; the marker is deleted once the
  * hook succeeded, so a report/notify failure is retried by the next run
  * (`retryPendingReportOpens`, up to REPORT_OPEN_MAX_ATTEMPTS) instead of being lost — a
- * replay never re-fires the hook. A notice counts as failed only when it reached nobody
+ * replay never re-fires the hook. Before 18:00 SAST (REPORT_NOTICE_HOUR) — or once the run's
+ * `deadlineMs` has passed — the hook is NOT called and the marker is NOT deleted: the result
+ * is stored and its reports wait, queued, for the first run in the window (counted as
+ * `reportsDeferred`; a deferral is never an attempt). A notice counts as failed only when it reached nobody
  * (every channel tried failed): its NOTIFY# claim is released and the hook throws, so the
  * retry re-sends it. One channel delivered is done; a delivered notice is never re-sent.
  *
@@ -51,6 +54,8 @@ import { isSlotRef } from '../../../engine/src/formats.js';
 import {
   captainsReportClearedHook,
   captainsReportResultHook,
+  pastDeadline,
+  reportNoticeWindowOpen,
   type CaptainsReportDeps,
 } from '../captains-reports.js';
 import { hasFeature } from '../features.js';
@@ -137,8 +142,11 @@ export interface PullerDeps {
   secret: string;
   fetch?: typeof fetch;
   now?: () => Date;
-  /** Defaults to opening captain's reports (captains-reports.ts) — never throws. */
-  onResultStored?: (event: ResultStoredEvent) => Promise<void>;
+  /**
+   * Defaults to opening captain's reports (captains-reports.ts). Resolving `'deferred'` keeps
+   * the REPORTOPEN# marker (the run's deadline passed before a notice was claimed).
+   */
+  onResultStored?: (event: ResultStoredEvent) => Promise<void | 'deferred'>;
   /** Defaults to voiding pending captain's reports / flagging submitted ones. */
   onResultCleared?: (event: ResultClearedEvent) => Promise<void>;
   /** Overrides for the default captain's-report hooks (tests inject a capturing sender). */
@@ -148,6 +156,8 @@ export interface PullerDeps {
   /** Overrides the conflict email of the default schedule handler (tests capture it). */
   notifyConflict?: import('./schedule.js').InboundScheduleDeps['notifyConflict'];
   log?: (line: string) => void;
+  /** This invocation's wall-clock deadline (epoch ms); past it, report openings stay queued. */
+  deadlineMs?: number;
 }
 
 export interface SyncRunSummary {
@@ -162,6 +172,8 @@ export interface SyncRunSummary {
   error?: string;
   /** What a dry run would have requested (path + query; no host, no secret). */
   wouldRequest?: string;
+  /** Stored results whose report opening was left queued (before 18:00 SAST, or deadline). */
+  reportsDeferred?: number;
 }
 
 export class MedicoachSyncError extends Error {
@@ -299,7 +311,13 @@ export async function runMedicoachSync(
   const now = deps.now ?? (() => new Date());
   const doFetch = deps.fetch ?? fetch;
   const resultHook =
-    deps.onResultStored ?? captainsReportResultHook({ repo, now, ...(deps.captainsReports ?? {}) });
+    deps.onResultStored ??
+    captainsReportResultHook({
+      repo,
+      now,
+      ...(deps.captainsReports ?? {}),
+      ...(deps.deadlineMs !== undefined ? { deadlineMs: deps.deadlineMs } : {}),
+    });
   const clearedHook =
     deps.onResultCleared ?? captainsReportClearedHook({ repo, ...(deps.captainsReports ?? {}) });
   const scheduleHook =
@@ -476,29 +494,37 @@ export async function runMedicoachSync(
           );
           if (stored) {
             counts.resultsStored++;
-            try {
-              await resultHook({
-                tenant,
-                seriesId,
-                fixtureId,
-                ref: change.ref,
-                result: change.result,
-                first: !prior || prior.cleared === true,
-                config,
-              });
-              await repo.deleteReportOpenMarker(tenant, change.ref);
-            } catch (err) {
-              // The result is stored; the marker keeps the report opening for the next run.
-              // Never fails the sync run (ids only — no payload is logged).
-              await repo.markReportOpenFailed(
-                tenant,
-                change.ref,
-                err instanceof Error ? err.message : 'report hook failed',
-                now().toISOString(),
-              );
-              log(
-                `[medicoach-sync] ${tenant}: captain's reports for ${seriesId}/${fixtureId} will be retried`,
-              );
+            if (!reportNoticeWindowOpen(now()) || pastDeadline(deps.deadlineMs)) {
+              // Before 18:00 SAST (or out of time): the hook is not called and the marker
+              // stays — it IS the queue. Never thrown: a throw would count as an attempt.
+              summary.reportsDeferred = (summary.reportsDeferred ?? 0) + 1;
+            } else {
+              try {
+                const hooked = await resultHook({
+                  tenant,
+                  seriesId,
+                  fixtureId,
+                  ref: change.ref,
+                  result: change.result,
+                  first: !prior || prior.cleared === true,
+                  config,
+                });
+                if (hooked === 'deferred')
+                  summary.reportsDeferred = (summary.reportsDeferred ?? 0) + 1;
+                else await repo.deleteReportOpenMarker(tenant, change.ref);
+              } catch (err) {
+                // The result is stored; the marker keeps the report opening for the next run.
+                // Never fails the sync run (ids only — no payload is logged).
+                await repo.markReportOpenFailed(
+                  tenant,
+                  change.ref,
+                  err instanceof Error ? err.message : 'report hook failed',
+                  now().toISOString(),
+                );
+                log(
+                  `[medicoach-sync] ${tenant}: captain's reports for ${seriesId}/${fixtureId} will be retried`,
+                );
+              }
             }
             if (change.result.source !== 'import') {
               // The scorecard behind it (never for migrations/backfills), within the page's

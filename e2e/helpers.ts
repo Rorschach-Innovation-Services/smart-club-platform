@@ -699,3 +699,15 @@ export async function createReleasedVeteransSeries(
   expect(release.ok(), `release series → ${release.status()} ${await release.text()}`).toBeTruthy();
   return id;
 }
+
+/**
+ * Force the captain's-report 18:00 SAST notice window on the LOCAL stack (local/server.ts
+ * test hook — never in the Lambda): 'open' / 'closed', or 'real' to follow the clock again.
+ */
+export async function setReportNoticeWindow(
+  request: APIRequestContext,
+  mode: 'open' | 'closed' | 'real',
+): Promise<void> {
+  const res = await request.post(`${API_BASE}/__e2e/report-notice-window`, { data: { mode } });
+  expect(res.ok(), `report-notice-window ${mode} → ${res.status()} ${await res.text()}`).toBeTruthy();
+}

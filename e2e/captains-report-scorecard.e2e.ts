@@ -13,6 +13,7 @@ import {
   dismissOnboarding,
   operatorAuth,
   signInAsRep,
+  setReportNoticeWindow,
 } from './helpers';
 
 /**
@@ -280,6 +281,8 @@ async function rateUmpires(p: import('@playwright/test').Page, score: string) {
 test.describe.configure({ mode: 'serial' });
 
 test.beforeAll(async ({ request }) => {
+  // Notices go out from 18:00 SAST only; force the window open so the spec runs at any hour.
+  await setReportNoticeWindow(request, 'open');
   await startStub();
   const cfg = await request.get(`${API_BASE}/platform/tenants/${TENANT}`, { headers: operator() });
   expect(cfg.ok()).toBeTruthy();
@@ -296,6 +299,8 @@ test.beforeAll(async ({ request }) => {
 });
 
 test.afterAll(async ({ request }) => {
+  // Window first: a hung stub close must not leak the forced-open override to later specs.
+  await setReportNoticeWindow(request, 'real');
   await new Promise<void>((r) => stub.close(() => r()));
   if (!prior) return;
   await request.put(`${API_BASE}/platform/tenants/${TENANT}`, {

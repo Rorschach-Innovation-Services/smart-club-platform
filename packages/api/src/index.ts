@@ -5162,6 +5162,9 @@ function inSeasonClashRefusal(
  * subject changes each time. That is fine at today's tenant sizes; revisit if a tenant's
  * fixture count makes 20 rebuilds per pre-check felt.
  */
+/** "Sync now" stops draining captain's reports after this long (30 s gateway limit). */
+const SYNC_NOW_REPORT_BUDGET_MS = 20_000;
+
 /**
  * Admin "Sync now" (ADR 0016): run the medicoach puller for the caller's tenant right away,
  * instead of waiting for the 15-minute cron. Same code path as the cron; returns the run
@@ -5178,6 +5181,8 @@ app.post('/integrations/medicoach/sync-now', async (c) => {
       repo,
       url: medicoachSyncUrl(),
       secret: medicoachSyncSecret(),
+      // Behind the 30 s gateway limit: the report drain stops after ~20 s; the cron does the rest.
+      deadlineMs: Date.now() + SYNC_NOW_REPORT_BUDGET_MS,
     });
     if (summary.status === 'disabled')
       throw new HttpError(409, 'the medicoach sync is not enabled for this tenant');

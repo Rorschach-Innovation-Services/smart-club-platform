@@ -101,16 +101,35 @@ async function main(): Promise<void> {
   // 4. Serve the Hono app.
   const { serve } = await import('@hono/node-server');
   const { app } = await import('../index.js');
+  const { setReportNoticeWindowOverride } = await import('../captains-reports.js');
   serve({
-    fetch: (req, ...rest) =>
-      new URL(req.url).pathname === '/__local/stack'
-        ? Response.json({ root: STACK_ROOT, pid: process.pid })
-        : app.fetch(req, ...rest),
+    fetch: (req, ...rest) => {
+      const { pathname } = new URL(req.url);
+      if (pathname === '/__local/stack')
+        return Response.json({ root: STACK_ROOT, pid: process.pid });
+      // e2e only: force the 18:00 SAST captain's-report notice window open/closed, or back to
+      // the real clock. Lives here (outside the Hono app), so the Lambda never has it.
+      if (pathname === '/__e2e/report-notice-window' && req.method === 'POST')
+        return setReportNoticeWindow(req, setReportNoticeWindowOverride);
+      return app.fetch(req, ...rest);
+    },
     port: API_PORT,
   });
   console.log(`\n✓ Local API ready at http://localhost:${API_PORT}`);
   console.log(`  Point the SPA at it: VITE_API_URL=http://localhost:${API_PORT} VITE_LOCAL_AUTH=1`);
   console.log('  Auth is the dev bypass (x-dev-auth) — no Cognito. Ctrl-C to stop.\n');
+}
+
+async function setReportNoticeWindow(
+  req: Request,
+  setOverride: (fn: ((now: Date) => boolean) | undefined) => void,
+): Promise<Response> {
+  const { mode } = (await req.json().catch(() => ({}))) as { mode?: unknown };
+  if (mode === 'open') setOverride(() => true);
+  else if (mode === 'closed') setOverride(() => false);
+  else if (mode === 'real') setOverride(undefined);
+  else return Response.json({ error: "mode must be 'open', 'closed' or 'real'" }, { status: 400 });
+  return Response.json({ mode });
 }
 
 main().catch((err) => {

@@ -2408,17 +2408,25 @@ export async function markReportOpenFailed(
   error: string,
   at: string,
 ): Promise<number> {
-  const res = await ddb.send(
-    new UpdateCommand({
-      TableName: TABLE,
-      Key: reportOpenKey(tenant, ref),
-      UpdateExpression:
-        'SET attempts = if_not_exists(attempts, :zero) + :one, lastError = :e, lastAttemptAt = :at',
-      ExpressionAttributeValues: { ':zero': 0, ':one': 1, ':e': error.slice(0, 300), ':at': at },
-      ReturnValues: 'UPDATED_NEW',
-    }),
-  );
-  return Number(res.Attributes?.attempts ?? 0);
+  // Conditional on the marker still existing: a concurrent run that already finished (and
+  // deleted) it must not have it resurrected as a bare attempts row. 0 = already handled.
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportOpenKey(tenant, ref),
+        UpdateExpression:
+          'SET attempts = if_not_exists(attempts, :zero) + :one, lastError = :e, lastAttemptAt = :at',
+        ConditionExpression: 'attribute_exists(pk)',
+        ExpressionAttributeValues: { ':zero': 0, ':one': 1, ':e': error.slice(0, 300), ':at': at },
+        ReturnValues: 'UPDATED_NEW',
+      }),
+    );
+    return Number(res.Attributes?.attempts ?? 0);
+  } catch (err) {
+    if (isCcf(err)) return 0;
+    throw err;
+  }
 }
 
 async function listSyncPartitionKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
@@ -3335,6 +3343,27 @@ export async function claimCaptainsReportNotify(
     if (isCcf(err)) return false;
     throw err;
   }
+}
+
+/** One NOTIFY# ledger row (status + start time only), or null. A single GetItem — no scan. */
+export async function getCaptainsReportNotify(
+  tenant: string,
+  reportId: string,
+  audience: string,
+): Promise<{ status: string; startedAt?: string } | null> {
+  const res = await ddb.send(
+    new GetCommand({
+      TableName: TABLE,
+      Key: captainsReportNotifyKey(tenant, reportId, audience),
+      ProjectionExpression: '#s, startedAt',
+      ExpressionAttributeNames: { '#s': 'status' },
+    }),
+  );
+  if (!res.Item) return null;
+  return {
+    status: String(res.Item.status),
+    ...(res.Item.startedAt ? { startedAt: String(res.Item.startedAt) } : {}),
+  };
 }
 
 /** Record a claimed send's per-channel outcome (status only — no addresses). */
