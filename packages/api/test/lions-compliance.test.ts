@@ -63,6 +63,7 @@ const EXPECTED: Array<[string, string]> = [
   ['Alexandra CC/AGMNOTICE2025.pdf', 'agmMinutes'],
   ['Alexandra CC/Final Alex_Constitution - martin rathogwa.pdf', 'constitution'],
   ['Azaadville/ACC AGM Minutes .pages', 'skip'],
+  ['Azaadville/ACC AGM Minutes .pdf', 'agmMinutes'],
   ['Azaadville/extracted/_inline-email-images/image003.jpg', 'skip'],
   ['Azaadville/extracted/_inline-email-images/image004.png', 'skip'],
   ['Azaadville/extracted/_inline-email-images/image005.gif', 'skip'],
@@ -230,13 +231,13 @@ const classifyRel = (rel: string) => classifyFile(rel, rel.split('/').at(-1)!);
 const LIONS_ACTIVE = activeRequiredDocs({ requiredDocs: CATALOGUES.lions } as never);
 const idOf = (name: string) => resolveClubName(name)!.id;
 
-describe('classifier over the real cleaned CGL pack (131 files)', () => {
+describe('classifier over the real cleaned CGL pack (132 files)', () => {
   const { classified, unclassified, unmappedFolders, badReassignments } = classifyAll(
     toEntries(REAL_PACK_PATHS),
   );
 
   test('zero unclassified files, zero unmapped folders, zero bad reassignments', () => {
-    assert.equal(REAL_PACK_PATHS.length, 131);
+    assert.equal(REAL_PACK_PATHS.length, 132);
     assert.deepEqual(
       unclassified.map((f: { rel: string }) => f.rel),
       [],
@@ -250,8 +251,8 @@ describe('classifier over the real cleaned CGL pack (131 files)', () => {
     for (const [rel, want] of EXPECTED) assert.equal(got.get(rel), want, rel);
   });
 
-  test('113 files import and 18 are deliberate skips', () => {
-    assert.equal(classified.filter((f) => f.docKey).length, 113);
+  test('114 files import and 18 are deliberate skips', () => {
+    assert.equal(classified.filter((f) => f.docKey).length, 114);
     assert.equal(classified.filter((f) => f.skipReason).length, 18);
   });
 
@@ -272,10 +273,10 @@ describe('classifier over the real cleaned CGL pack (131 files)', () => {
     );
   });
 
-  test('every FILE_OVERRIDES key names a real file, except the pending Pages export', () => {
+  test('every FILE_OVERRIDES key names a real file (Pages export landed 12 Oct 2026)', () => {
     const real = new Set(REAL_PACK_PATHS);
     const stale = Object.keys(FILE_OVERRIDES).filter((rel) => !real.has(rel));
-    assert.deepEqual(stale, ['Azaadville/ACC AGM Minutes .pdf']);
+    assert.deepEqual(stale, []);
   });
 
   test('every produced docKey is a catalogue key; single-file keys hold one file per club', () => {
