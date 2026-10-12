@@ -618,7 +618,7 @@ async function sendSesEmail(
   to: string,
   content: { subject: string; text: string; html: string },
   dryRunLabel: string,
-  /** `replyTo` sets the SES ReplyToAddresses (absent ⇒ replies go to the From address). */
+  /** `replyTo` sets the SES ReplyToAddresses (absent ⇒ MEDICOACH_SUPPORT_EMAIL). */
   opts: { replyTo?: string } = {},
 ): Promise<{ messageId: string }> {
   if (EMAIL_DRY_RUN) {
@@ -629,7 +629,8 @@ async function sendSesEmail(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
       Destination: { ToAddresses: [to] },
-      ...(opts.replyTo ? { ReplyToAddresses: [opts.replyTo] } : {}),
+      // Human replies go to the monitored support inbox; bounces go to the sender address.
+      ReplyToAddresses: [opts.replyTo ?? MEDICOACH_SUPPORT_EMAIL],
       Message: {
         Subject: { Data: content.subject, Charset: 'UTF-8' },
         Body: {
