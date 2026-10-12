@@ -434,7 +434,6 @@ describe('pendingBroadcastTemplates (the --confirm WhatsApp blocker)', () => {
 });
 
 describe('retryable vs permanent send failures', () => {
-
   test('Meta rate/limit codes and transport errors are retryable', () => {
     for (const code of [130429, 131048, 131056, 80007]) {
       assert.ok(

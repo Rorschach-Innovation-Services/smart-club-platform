@@ -186,8 +186,8 @@ export function MedicoachConsolePage({ toast }: { toast: Toast }) {
             </div>
             <p style={HINT}>
               The stage is inferred from this client&apos;s settings until the Match Centre reports
-              its own connection summary. Conflicts and the outbox are on the client&apos;s Medicoach
-              sync page (Sync detail).
+              its own connection summary. Conflicts and the outbox are on the client&apos;s
+              Medicoach sync page (Sync detail).
             </p>
           </Card>
 

@@ -46,7 +46,11 @@ export interface OptOutArgs {
 }
 
 export function parseArgs(argv: string[]): OptOutArgs {
-  const out: Partial<OptOutArgs> = { reason: 'medicoach-account-deleted', remove: false, confirm: false };
+  const out: Partial<OptOutArgs> = {
+    reason: 'medicoach-account-deleted',
+    remove: false,
+    confirm: false,
+  };
   const value = (flag: string, v: string | undefined): string => {
     if (!v || v.startsWith('--')) throw new UsageError(`${flag} needs a value`);
     return v;

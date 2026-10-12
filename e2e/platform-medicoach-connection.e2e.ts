@@ -1,6 +1,9 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { createServer, type Server } from 'node:http';
-import { verifySignature, IMPORT_CHECK_REFS_PATH } from '../packages/api/src/medicoach-sync-contract';
+import {
+  verifySignature,
+  IMPORT_CHECK_REFS_PATH,
+} from '../packages/api/src/medicoach-sync-contract';
 import {
   API_BASE,
   RUN,
@@ -68,9 +71,12 @@ function startStub(): Promise<void> {
 }
 
 async function signInAsOperator(page: Page) {
-  await page.addInitScript((identity) => {
-    localStorage.setItem('smartclub.devAuth', JSON.stringify(identity));
-  }, operatorIdentity([TENANT]));
+  await page.addInitScript(
+    (identity) => {
+      localStorage.setItem('smartclub.devAuth', JSON.stringify(identity));
+    },
+    operatorIdentity([TENANT]),
+  );
 }
 
 /** The connection view straight from the API — tells the spec whether the stack is a dry run. */
@@ -214,7 +220,9 @@ test('an operator checks the Match Centre connection when medicoach cannot be re
   await expect(row).toBeVisible();
   await expect(row.getByText(/^(Live|In setup)$/)).toBeVisible();
   // The Dry-run pill is gated on the client's sync being on (like the awaiting pill).
-  await expect(row.getByText('Dry-run', { exact: true })).toHaveCount(dryRun && syncEnabled ? 1 : 0);
+  await expect(row.getByText('Dry-run', { exact: true })).toHaveCount(
+    dryRun && syncEnabled ? 1 : 0,
+  );
 });
 
 test('released fixtures medicoach has no record of are listed and badged as awaiting carry', async ({

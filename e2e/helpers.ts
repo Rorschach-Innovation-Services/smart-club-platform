@@ -709,5 +709,8 @@ export async function setReportNoticeWindow(
   mode: 'open' | 'closed' | 'real',
 ): Promise<void> {
   const res = await request.post(`${API_BASE}/__e2e/report-notice-window`, { data: { mode } });
-  expect(res.ok(), `report-notice-window ${mode} → ${res.status()} ${await res.text()}`).toBeTruthy();
+  expect(
+    res.ok(),
+    `report-notice-window ${mode} → ${res.status()} ${await res.text()}`,
+  ).toBeTruthy();
 }
