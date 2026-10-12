@@ -221,6 +221,7 @@ import {
 import type {
   CaptainsReport,
   Club,
+  FixtureOfficials,
   ClubCommEvent,
   ClubSpec,
   CompetitionStructure,
@@ -6841,6 +6842,56 @@ app.delete('/series/:id', requireAdmin, async (c) => {
    approval reset, no clash gate. Contacts (phone/email) are admin-only. */
 
 /**
+ * Enqueue appointment notices after a committed officials write (manual PUT or workbook
+ * confirm only — merges, series deletes and CLIs stay silent). Removed pairs lose their ledger
+ * row (so a later re-appointment notifies again); every pair in the RESULTING set gets a
+ * conditional `queued` row, which an existing row (already queued or sent) absorbs. Sends
+ * happen in the OfficialNotices cron, never here. Best-effort: never throws.
+ */
+async function queueOfficialsNotices(
+  tenant: string,
+  events: Array<{
+    seriesId: string;
+    fixtureId: string;
+    previous: FixtureOfficials | null | undefined;
+    next: FixtureOfficials | null | undefined;
+  }>,
+): Promise<void> {
+  const imp = await import('./import-umpire-appointments.js');
+  for (const e of events) {
+    try {
+      for (const p of imp.diffOfficials(e.previous, e.next)) {
+        await repo.deleteOfficialsNotify(tenant, {
+          seriesId: e.seriesId,
+          fixtureId: e.fixtureId,
+          ...p,
+        });
+      }
+      for (const p of imp.officialPairs(e.next)) {
+        await repo.queueOfficialsNotify(tenant, {
+          seriesId: e.seriesId,
+          fixtureId: e.fixtureId,
+          ...p,
+        });
+      }
+    } catch (err) {
+      console.error(
+        `officials-notify: could not enqueue ${tenant}/${e.seriesId}/${e.fixtureId}`,
+        err,
+      );
+      Sentry.captureException(err, {
+        tags: {
+          tenant,
+          seriesId: e.seriesId,
+          fixtureId: e.fixtureId,
+          op: 'officials-notify-queue',
+        },
+      });
+    }
+  }
+}
+
+/**
  * Appoint a fixture's officials: up to two umpires and an optional referee, by registry
  * id. An empty body (`{ umpires: [] }`) clears the appointment.
  */
@@ -6866,8 +6917,32 @@ app.put('/series/:id/fixtures/:fixtureId/officials', requireAdmin, async (c) => 
     updatedAt: now(),
     updatedBy: ra.email ?? 'unknown',
   };
+  // Read only to compute removals for the notice ledger. A race with another admin PUT can
+  // leave a stale queued row; the cron re-checks current officials before sending.
+  const previous = await repo.getFixtureOfficials(ra.tenant, seriesId, fixtureId);
   await repo.putFixtureOfficials(ra.tenant, seriesId, fixtureId, officials);
+  await queueOfficialsNotices(ra.tenant, [{ seriesId, fixtureId, previous, next: officials }]);
   return c.json({ seriesId, fixtureId, ...officials });
+});
+
+/**
+ * Appointment-notice status per official for one series (the editor's badges). Whitelisted
+ * fields only: send results, errors and addresses never reach the client.
+ */
+app.get('/series/:id/officials/notify-status', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const rows = await repo.listOfficialsNotifyForSeries(ra.tenant, c.req.param('id'));
+  return c.json({
+    rows: rows.map((r) => ({
+      fixtureId: r.fixtureId,
+      role: r.role,
+      umpireId: r.umpireId,
+      status: r.status,
+      attempts: r.attempts,
+      ...(r.reason ? { reason: r.reason } : {}),
+      ...(r.completedAt ? { completedAt: r.completedAt } : {}),
+    })),
+  });
 });
 
 /** The registry. Admins get every entry with contacts; club members get active names only. */
@@ -7063,7 +7138,7 @@ async function planAppointmentsUpload(c: Context<HonoEnv>, tenant: string) {
     createUmpires: body?.createUmpires === true,
     at: now(),
   });
-  return { imp, parsed, plan, planHash: body?.planHash };
+  return { imp, parsed, plan, planHash: body?.planHash, existing };
 }
 
 app.post('/umpires/appointments/preview', requireAdmin, async (c) => {
@@ -7074,15 +7149,37 @@ app.post('/umpires/appointments/preview', requireAdmin, async (c) => {
 
 app.post('/umpires/appointments/confirm', requireAdmin, async (c) => {
   const { tenant, email } = c.get('requestAuth')!;
-  const { imp, parsed, plan, planHash } = await planAppointmentsUpload(c, tenant);
+  const { imp, parsed, plan, planHash, existing } = await planAppointmentsUpload(c, tenant);
   if (typeof planHash !== 'string' || planHash !== imp.appointmentPlanHash(plan))
     throw new HttpError(
       409,
       'Appointments or umpires changed since your preview. Check the updated preview, then confirm again.',
       { code: 'plan_changed', preview: imp.appointmentPreview(parsed, plan) },
     );
-  const out = await imp.writeAppointmentImport(repo, tenant, plan, email ?? 'unknown', now());
-  return c.json(out);
+  let written = false;
+  try {
+    const out = await imp.writeAppointmentImport(repo, tenant, plan, email ?? 'unknown', now());
+    written = true;
+    return c.json(out);
+  } finally {
+    // Notices only for fixtures this confirm changed (resulting officials per fixture). Also on
+    // a mid-import failure: a re-confirm sees the written fixtures as `unchanged`, so they must
+    // be queued now. Rows for fixtures that never got written are dropped as stale by the cron;
+    // removals are skipped then (previous = next), so no still-appointed official loses a row.
+    await queueOfficialsNotices(
+      tenant,
+      plan.plan.writes
+        .filter((w) => w.action !== 'unchanged')
+        .map((w) => ({
+          seriesId: w.match.seriesId,
+          fixtureId: w.match.fixtureId,
+          previous: written
+            ? existing.get(`${w.match.seriesId}#${w.match.fixtureId}`)
+            : w.officials,
+          next: w.officials,
+        })),
+    );
+  }
 });
 
 /* ─── Captain's reports (ADR 0016, Slice 2) ───

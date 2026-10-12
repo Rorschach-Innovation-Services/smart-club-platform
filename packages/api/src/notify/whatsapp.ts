@@ -451,6 +451,57 @@ export async function sendFixtureReminderWhatsApp(
   );
 }
 
+export interface OfficialAppointedWhatsAppInput {
+  to: string; // already E.164 (see toE164)
+  officialName: string;
+  /** 'umpire' | 'referee'. */
+  roleLabel: string;
+  orgName: string;
+  /** "Umzinto CC v African Warriors · Premier League". */
+  matchLine: string;
+  /** "Sat 2026-11-15, 09:00 at Kingsmead". */
+  whenWhere: string;
+}
+
+/**
+ * Build the five positional body params for `official_appointed`, in order: {{1}} official
+ * name (fallback 'there'), {{2}} role, {{3}} org name, {{4}} match line, {{5}} when and where.
+ * Exported so the param order/count can be asserted against the registry directly.
+ */
+export function officialAppointedParams(
+  input: Pick<
+    OfficialAppointedWhatsAppInput,
+    'officialName' | 'roleLabel' | 'orgName' | 'matchLine' | 'whenWhere'
+  >,
+): TemplateParam[] {
+  return [
+    { type: 'text', text: cleanParam(input.officialName || 'there') },
+    { type: 'text', text: cleanParam(input.roleLabel) },
+    { type: 'text', text: cleanParam(input.orgName) },
+    { type: 'text', text: cleanParam(input.matchLine) },
+    { type: 'text', text: cleanParam(input.whenWhere) },
+  ];
+}
+
+/**
+ * Appointment notice to an umpire/referee. Uses the `officialAppointed` registry entry and
+ * throws `WhatsAppTemplatePendingError` until it is "registered" (the OfficialNotices cron
+ * already skips the channel before then).
+ */
+export async function sendOfficialAppointedWhatsApp(
+  input: OfficialAppointedWhatsAppInput,
+): Promise<{ messageId: string }> {
+  const def = WHATSAPP_TEMPLATES.officialAppointed;
+  assertTemplateSendable(def);
+  return sendTemplate(
+    input.to,
+    def.name,
+    def.lang,
+    officialAppointedParams(input),
+    `appointment notice for ${input.officialName || 'an official'} (${input.roleLabel})`,
+  );
+}
+
 export interface CaptainsReportDueWhatsAppInput {
   to: string; // already E.164 (see toE164)
   recipientName: string;

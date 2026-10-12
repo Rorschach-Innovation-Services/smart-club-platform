@@ -956,6 +956,21 @@ export const putFixtureOfficials = (seriesId: string, fixtureId: string, umpireI
     { method: 'PUT', body: { umpires: umpireIds.map((umpireId) => ({ umpireId })) } },
   );
 
+// Appointment-notice status per official for one series (admin only; badges in the editor).
+export interface OfficialsNotifyStatusRow {
+  fixtureId: string;
+  role: 'umpire' | 'referee';
+  umpireId: string;
+  status: 'queued' | 'completed' | 'exhausted';
+  attempts: number;
+  reason?: string;
+  completedAt?: string;
+}
+export const getOfficialsNotifyStatus = (seriesId: string) =>
+  request<{ rows: OfficialsNotifyStatusRow[] }>(
+    `/series/${encodeURIComponent(seriesId)}/officials/notify-status`,
+  );
+
 // ── Medicoach sync (ADR 0016) ── admin only; visible when `features.medicoachSync` is on.
 export interface MedicoachSyncSchedule {
   scheduledTime: string | null;

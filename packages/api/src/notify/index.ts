@@ -29,6 +29,8 @@ import {
   postponementDeclinedEmailContent,
   fixtureReminderEmailContent,
   sendFixtureReminderEmail,
+  officialAppointedEmailContent,
+  sendOfficialAppointedEmail,
 } from './email.js';
 import type {
   TutorialLink,
@@ -47,6 +49,7 @@ import {
   sendRegLinkWhatsApp,
   sendClearanceWhatsApp,
   sendFixtureReminderWhatsApp,
+  sendOfficialAppointedWhatsApp,
   toE164,
 } from './whatsapp.js';
 
@@ -1093,6 +1096,93 @@ export async function sendFixtureReminder(args: {
         clubName,
         dateLabel,
         portalLink,
+      });
+      return { channel: 'whatsapp', status: 'sent', to: e164, messageId };
+    } catch (err) {
+      return { channel: 'whatsapp', status: 'failed', to: e164, error: errMessage(err) };
+    }
+  };
+
+  const results = await Promise.all(channels.map((ch) => (ch === 'email' ? email() : whatsapp())));
+  return { results };
+}
+
+// ───────────────────── Official appointment notices (OfficialNotices cron) ─────────────────────
+//
+// One notice per (fixture, role, official), over the channels the caller passes (the cron has
+// already applied the whatsappInvites flag and the template-registered gate). Non-throwing per
+// channel. Officials get the real time/venue even when withheld from clubs (ADR 0011 is a
+// club-facing gate).
+
+/** Tell an umpire/referee they were appointed to a fixture. */
+export async function sendOfficialAppointedNotice(args: {
+  official: { name?: string; email?: string; phone?: string };
+  roleLabel: 'umpire' | 'referee';
+  orgName: string;
+  seriesName: string;
+  /** "Umzinto CC v African Warriors". */
+  fixtureLabel: string;
+  /** "Sat 2026-11-15". */
+  dateLabel: string;
+  time?: string;
+  venue?: string;
+  channels: Channel[];
+}): Promise<{ results: SendResult[] }> {
+  const { official, roleLabel, orgName, seriesName, fixtureLabel, dateLabel, channels } = args;
+  const time = args.time?.trim() || undefined;
+  const venue = args.venue?.trim() || undefined;
+  const officialName = (official.name ?? '').trim();
+
+  const email = async (): Promise<SendResult> => {
+    const to = (official.email ?? '').trim();
+    if (!EMAIL_RE.test(to)) {
+      return {
+        channel: 'email',
+        status: 'skipped',
+        ...(to ? { to } : {}),
+        error: 'no valid official email on file',
+      };
+    }
+    try {
+      const { messageId } = await sendOfficialAppointedEmail(
+        to,
+        officialAppointedEmailContent({
+          officialName,
+          roleLabel,
+          orgName,
+          seriesName,
+          fixtureLabel,
+          dateLabel,
+          ...(time ? { time } : {}),
+          ...(venue ? { venue } : {}),
+        }),
+        roleLabel,
+      );
+      return { channel: 'email', status: 'sent', to, messageId };
+    } catch (err) {
+      return { channel: 'email', status: 'failed', to, error: errMessage(err) };
+    }
+  };
+
+  const whatsapp = async (): Promise<SendResult> => {
+    const cell = (official.phone ?? '').trim();
+    const e164 = toE164(cell);
+    if (!e164) {
+      return {
+        channel: 'whatsapp',
+        status: 'skipped',
+        ...(cell ? { to: cell } : {}),
+        error: 'no valid official cell on file',
+      };
+    }
+    try {
+      const { messageId } = await sendOfficialAppointedWhatsApp({
+        to: e164,
+        officialName,
+        roleLabel,
+        orgName,
+        matchLine: `${fixtureLabel} · ${seriesName}`,
+        whenWhere: `${dateLabel}, ${time ?? 'time TBC'} at ${venue ?? 'venue TBC'}`,
       });
       return { channel: 'whatsapp', status: 'sent', to: e164, messageId };
     } catch (err) {

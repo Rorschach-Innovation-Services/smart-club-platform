@@ -42,7 +42,7 @@
  * `status` is documentation, not a runtime gate — nothing here can verify Meta's
  * state, and the send path fails open (attempts the send) for every entry. The exceptions
  * are `fixtureReminder` (the FixtureReminders cron skips WhatsApp until it is
- * "registered"), `captainsReportDue` / `captainsReportOpsDigest` (their senders skip the
+ * "registered"), `officialAppointed` (the OfficialNotices cron's WhatsApp gate), `captainsReportDue` / `captainsReportOpsDigest` (their senders skip the
  * channel as template-pending until it is "registered"), `clearancePendingV2` (the
  * ClearanceReminders cron's WhatsApp gate), the three `dolphins*` welcome-broadcast entries and
  * the two `emcu*` scorer-broadcast entries (their senders throw until "registered") — see those
@@ -200,6 +200,33 @@ export const WHATSAPP_TEMPLATES = {
       'See the match details in your club portal: {{4}}\n\n' +
       'If you have any questions, please contact your union office.',
     // Approved in Meta Business Manager 6 Oct 2026.
+    status: 'registered',
+  },
+
+  /**
+   * Appointment notice to an umpire or referee (the OfficialNotices cron), sent once per
+   * (fixture, role, official) when they are appointed. Body-only Utility template, no
+   * header/footer/buttons (officials have no portal login, so there is nothing to link to).
+   * Officials get the REAL kick-off time and ground even when the series withholds them from
+   * clubs — ADR 0011 is a club-facing gate.
+   *
+   * Approved in Meta 12 Oct 2026 (Utility, "Active – Quality pending"; template id
+   * 1982007072467151). The approved copy ends "please contact info@medicoach.co.za" — edited
+   * from the drafted "the union office" during creation — so bodyText mirrors Meta verbatim,
+   * per the registry convention. Like `fixtureReminder`, this status IS read at runtime: the
+   * cron skips the WhatsApp channel unless it is "registered" (email goes out regardless).
+   * Go-live: flip status to "registered" and deploy.
+   */
+  officialAppointed: {
+    name: 'official_appointed',
+    lang: 'en',
+    paramCount: 5,
+    params: ['official name', 'role', 'org name', 'match line', 'when and where'],
+    bodyText:
+      'Hello {{1}},\n\n' +
+      'You have been appointed as {{2}} for the following {{3}} fixture:\n\n' +
+      '{{4}}\n{{5}}\n\n' +
+      'If you are unavailable for this appointment, please contact info@medicoach.co.za as soon as possible.',
     status: 'registered',
   },
 

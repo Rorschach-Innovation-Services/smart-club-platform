@@ -7,7 +7,13 @@ import { describe, it, expect, vi } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-utils';
-import { AdminUmpiresView, UmpireCell, doubleBookingIndex, mergeErrorMessage } from './umpires';
+import {
+  AdminUmpiresView,
+  UmpireCell,
+  doubleBookingIndex,
+  mergeErrorMessage,
+  noticeBadge,
+} from './umpires';
 import { ApiError } from './api';
 import type { CaptainsReport, Club, Series, Umpire } from './types';
 
@@ -325,5 +331,86 @@ describe('Upload appointments and merge refusals', () => {
     );
     expect(mergeErrorMessage(err)).toBe('Already merged into S.Gasa');
     expect(mergeErrorMessage(new ApiError(409, 'other', 'something_else'))).toBeNull();
+  });
+});
+
+describe('appointment notice badges and the no-contact hint', () => {
+  it('maps ledger rows to badges; a backfilled row shows none', () => {
+    expect(noticeBadge(undefined)).toBeNull();
+    expect(noticeBadge({ status: 'queued' })).toEqual({ label: 'Notice queued' });
+    expect(noticeBadge({ status: 'exhausted' })).toEqual({ label: 'Couldn’t reach' });
+    expect(noticeBadge({ status: 'completed', completedAt: '2026-10-12T08:00:00Z' })).toEqual({
+      label: 'Notified ✓',
+      title: '2026-10-12T08:00:00Z',
+    });
+    expect(noticeBadge({ status: 'completed', reason: 'backfill' })).toBeNull();
+  });
+
+  it('shows the badge next to an assigned umpire and hints when they have no contacts', async () => {
+    const loadNotifyStatus = vi.fn().mockResolvedValue({
+      rows: [
+        {
+          fixtureId: 'f1',
+          role: 'umpire',
+          umpireId: 'u-a-ngubane',
+          status: 'completed',
+          attempts: 1,
+          completedAt: '2026-10-12T08:00:00Z',
+        },
+        { fixtureId: 'f1', role: 'umpire', umpireId: 'u-b-tyali', status: 'queued', attempts: 0 },
+      ],
+    });
+    const user = userEvent.setup();
+    renderWithProviders(
+      <UmpireCell
+        series={S1}
+        fixture={{
+          id: 'f1',
+          officials: {
+            umpires: [
+              { umpireId: 'u-a-ngubane', name: 'A.Ngubane' },
+              { umpireId: 'u-b-tyali', name: 'B.Tyali' },
+            ],
+          },
+        }}
+        allSeries={[S1, S2]}
+        clubs={clubs}
+        umpires={UMPIRES}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+        loadNotifyStatus={loadNotifyStatus}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Assign umpires' }));
+    expect(loadNotifyStatus).toHaveBeenCalledWith('s1');
+    expect(await screen.findByText('Notified ✓')).toBeTruthy();
+    expect(screen.getByText('Notice queued')).toBeTruthy();
+    // A.Ngubane has a cell; B.Tyali has nothing on file.
+    expect(screen.getAllByText(/No email or cell on file/)).toHaveLength(1);
+    // Saving stays allowed.
+    expect(
+      (screen.getByRole('button', { name: /save umpires/i }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it('a failed status load shows no badge and no error', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <UmpireCell
+        series={S1}
+        fixture={{
+          id: 'f1',
+          officials: { umpires: [{ umpireId: 'u-a-ngubane', name: 'A.Ngubane' }] },
+        }}
+        allSeries={[S1, S2]}
+        clubs={clubs}
+        umpires={UMPIRES}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+        loadNotifyStatus={vi.fn().mockRejectedValue(new Error('boom'))}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Assign umpires' }));
+    await Promise.resolve();
+    expect(screen.queryByText(/Notified|Notice queued|Couldn’t reach/)).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });

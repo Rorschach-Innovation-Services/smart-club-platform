@@ -1454,6 +1454,69 @@ export function sendFixtureReminderEmail(
   return sendPostponementEmail(to, content, 'fixture-reminder');
 }
 
+// ───────────────────────── Official appointment notices (OfficialNotices cron) ─────────────────────────
+//
+// Officials get the REAL kick-off time and ground even when the series withholds them from clubs:
+// ADR 0011 is a club-facing gate, and an umpire must know where and when to turn up.
+
+export interface OfficialAppointedEmailInput {
+  officialName: string;
+  roleLabel: 'umpire' | 'referee';
+  /** The union's display name. */
+  orgName: string;
+  seriesName: string;
+  /** "Umzinto CC v African Warriors". */
+  fixtureLabel: string;
+  /** "Sat 2026-11-15". */
+  dateLabel: string;
+  time?: string;
+  venue?: string;
+}
+
+/** The appointment notice to one umpire/referee for one fixture. */
+export function officialAppointedEmailContent(input: OfficialAppointedEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const greetName = input.officialName || 'there';
+  const subject = `Appointment — ${input.fixtureLabel} · ${input.dateLabel}`;
+  const intro = `You have been appointed as ${input.roleLabel} for the following ${input.orgName} fixture:`;
+  const rows: Array<[string, string]> = [
+    ['Fixture', input.fixtureLabel],
+    ['Competition', input.seriesName],
+    ['Date', input.dateLabel],
+    ['Time', input.time || 'time to be confirmed'],
+    ['Venue', input.venue || 'venue to be confirmed'],
+  ];
+  const outro =
+    'If you are unavailable for this appointment, please contact the union office as soon as possible.';
+  const text =
+    `Hello ${greetName},\n\n` +
+    `${intro}\n\n` +
+    rows.map(([k, v]) => `  ${k}: ${v}`).join('\n') +
+    `\n\n${outro}\n\n` +
+    `Thank you,\nThe union office`;
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>Hello ${escapeHtml(greetName)},</p>` +
+    `<p>${escapeHtml(intro)}</p>` +
+    `<ul>${rows.map(([k, v]) => `<li><strong>${escapeHtml(k)}:</strong> ${escapeHtml(v)}</li>`).join('')}</ul>` +
+    `<p>${escapeHtml(outro)}</p>` +
+    `<p>Thank you,<br/>The union office</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+/** Send one rendered appointment notice. Same dry-run gate as the other senders. */
+export function sendOfficialAppointedEmail(
+  to: string,
+  content: { subject: string; text: string; html: string },
+  role: 'umpire' | 'referee',
+): Promise<{ messageId: string }> {
+  return sendPostponementEmail(to, content, `official-appointed-${role}`);
+}
+
 /** Send one rendered postponement notice. Same dry-run gate as the other senders. */
 export async function sendPostponementEmail(
   to: string,

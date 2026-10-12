@@ -196,6 +196,29 @@ export const fixtureOfficialsListKey = (tenant: string) => ({
   skPrefix: 'FIXOFFICIALS#',
 });
 
+/**
+ * The appointment-notice ledger: one row per (fixture, role, official), in the officials
+ * partition under a `NOTIFY#officials#` prefix (every FIXOFFICIALS read uses
+ * `begins_with(sk,'FIXOFFICIALS#')`, so these never surface as appointments). The two
+ * appointment routes enqueue rows; the OfficialNotices cron drains them.
+ */
+export const officialsNotifyKey = (
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+  role: string,
+  umpireId: string,
+) => ({
+  pk: `${tenantPrefix(tenant)}#OFFICIALS`,
+  sk: `NOTIFY#officials#${seriesId}#${fixtureId}#${role}#${umpireId}`,
+});
+
+/** pk + sk-prefix to query a tenant's officials-notice ledger (optionally one series'). */
+export const officialsNotifyListKey = (tenant: string, seriesId?: string) => ({
+  pk: `${tenantPrefix(tenant)}#OFFICIALS`,
+  skPrefix: seriesId ? `NOTIFY#officials#${seriesId}#` : 'NOTIFY#officials#',
+});
+
 /** A player registration, partitioned under its club; naturalKey gives dedup. */
 export const playerKey = (tenant: string, clubId: string, naturalKey: string) => ({
   pk: `${tenantPrefix(tenant)}#CLUB#${clubId}`,

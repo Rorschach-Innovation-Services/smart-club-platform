@@ -17,6 +17,7 @@ const {
   clearanceV2Params,
   clearanceTemplateFor,
   fixtureReminderParams,
+  officialAppointedParams,
   captainsReportDueParams,
   captainsReportOpsDigestParams,
   sendCaptainsReportOpsDigestWhatsApp,
@@ -99,6 +100,16 @@ const BUILDERS = [
       clubName: 'Adelaar CC',
       dateLabel: 'Sat 2026-11-07',
       portalLink: LINK,
+    }),
+  },
+  {
+    key: 'officialAppointed' as const,
+    params: officialAppointedParams({
+      officialName: 'Andile Ngubane',
+      roleLabel: 'umpire',
+      orgName: 'KZN Cricket Union',
+      matchLine: 'Umzinto CC v African Warriors · Premier League',
+      whenWhere: 'Sat 2026-11-15, 09:00 at Kingsmead',
     }),
   },
   {
