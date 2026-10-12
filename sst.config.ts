@@ -664,6 +664,35 @@ export default $config({
       },
     });
 
+    // ── Official appointment notices cron ── every 5 minutes. Drains the queued
+    // NOTIFY#officials ledger rows the two appointment routes enqueue (manual PUT + workbook
+    // confirm) and emails / WhatsApps each newly appointed umpire or referee. Same least-privilege
+    // link/env as FixtureReminders minus the portal-origin vars (the notice carries no link).
+    new sst.aws.Cron('OfficialNotices', {
+      schedule: 'rate(5 minutes)',
+      function: {
+        handler: 'packages/api/src/crons/official-notices.handler',
+        link: [table, fromEmail, whatsappAccessToken, whatsappPhoneNumberId],
+        permissions: [{ actions: ['ses:SendEmail', 'ses:SendRawEmail'], resources: ['*'] }],
+        timeout: '5 minutes',
+        // Rows stay `queued` during the send (no claim step), so two overlapping runs could
+        // double-send the tail of a slow drain. One reserved slot makes runs strictly serial:
+        // a throttled tick is retried later and finds those rows `completed`.
+        concurrency: { reserved: 1 },
+        environment: {
+          TABLE_NAME: table.name,
+          STAGE: $app.stage,
+          SENTRY_DSN: sentryDsnApi.value,
+          SENTRY_RELEASE: sentryRelease,
+          SES_REGION: 'eu-west-1',
+          FROM_EMAIL: fromEmail.value,
+          WHATSAPP_ACCESS_TOKEN: whatsappAccessToken.value,
+          WHATSAPP_PHONE_NUMBER_ID: whatsappPhoneNumberId.value,
+          NOTIFY_DRY_RUN: process.env.NOTIFY_DRY_RUN ?? '',
+        },
+      },
+    });
+
     // ── Medicoach sync puller (ADR 0016) ── One cron, every 15 minutes, all day (user
     // decision: worst-case 15 min delay at ~672 runs a week). It pulls changed fixtures for
     // every tenant with `features.medicoachSync`; a quiet run is a handful of small reads.

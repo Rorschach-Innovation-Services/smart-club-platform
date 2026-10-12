@@ -243,6 +243,70 @@ To activate:
 
 ---
 
+## Appendix — `official_appointed` (umpire/referee appointment notices) — APPROVED 12 Oct 2026
+
+The OfficialNotices cron (`packages/api/src/crons/official-notices.ts`, every 5 minutes) tells an
+umpire or referee they were appointed to a fixture. The two appointment routes (the fixture
+officials editor and the appointments workbook confirm) only queue a `NOTIFY#officials` ledger
+row; the cron sends it. Email goes out as soon as this deploys. The template was created and
+approved in Meta on 12 Oct 2026 (Utility, "Active – Quality pending", template id 1982007072467151) and the registry entry is `registered`.
+
+| Template purpose   | Registry name (code) | Sent to          | When                             |
+| ------------------ | -------------------- | ---------------- | -------------------------------- |
+| Appointment notice | `official_appointed` | umpire / referee | within ~5 min of being appointed |
+
+**Runtime gate:** like `fixture_reminder`, this entry's registry `status` is read at runtime. The
+cron skips WhatsApp while `officialAppointed` in `packages/api/src/notify/whatsapp-templates.ts`
+is anything other than `'registered'`, and also needs the tenant's `whatsappInvites` feature on.
+
+Meta definition: name `official_appointed` · Category **Utility** · Language English (`en`) ·
+5 positional body params · no header, footer or buttons.
+
+| Var     | Value                                 | Sample                                           |
+| ------- | ------------------------------------- | ------------------------------------------------ |
+| `{{1}}` | official name (falls back to "there") | `Andile Ngubane`                                 |
+| `{{2}}` | role: `umpire` or `referee`           | `umpire`                                         |
+| `{{3}}` | union name                            | `KZN Cricket Union`                              |
+| `{{4}}` | match line                            | `Umzinto CC v African Warriors · Premier League` |
+| `{{5}}` | when and where                        | `Sat 15 Nov 2026, 09:00 at Kingsmead`            |
+
+Body (must match `bodyText` exactly):
+
+```
+Hello {{1}},
+
+You have been appointed as {{2}} for the following {{3}} fixture:
+
+{{4}}
+{{5}}
+
+If you are unavailable for this appointment, please contact info@medicoach.co.za as soon as possible.
+```
+
+(The approved closing line names `info@medicoach.co.za`; the drafted "the union office" was
+edited during creation. `bodyText` in the registry mirrors the approved copy.)
+
+Officials get the real kick-off time and ground even when the series withholds them from clubs
+(ADR 0011 is a club-facing gate). A missing time or ground reads `time TBC` / `venue TBC`.
+
+Activation history: created in WhatsApp Manager (medicoach WABA) and approved 12 Oct 2026;
+`officialAppointed` status flipped to `'registered'` the same day. WhatsApp goes out on the
+first deploy carrying that flag (per tenant, where `whatsappInvites` is on).
+
+Rollout: run `npm run backfill-official-notify` (dry run), then with `--confirm`, per stage,
+before or in the same window as the deploy that adds the cron. It marks every existing appointment
+as already notified, so the first cron run does not message current officials.
+
+Contact quality: an umpire with no usable email or cell on the registry stays queued (no attempt is
+counted) and is notified on the first cron run after their contacts are added on the Umpires page.
+Provider failures retry every run and stop after 10 attempts (row marked `exhausted`, reported to
+Sentry).
+
+Scope: replaced or removed officials get NO cancellation notice (deliberate). A swapped-out umpire
+who was already notified is not told; their ledger row is simply deleted.
+
+---
+
 ## Retired — `club_clearance_pending` (v1)
 
 `club_clearance_pending` (4 params, no link; template ID 1015867618110855) was the clearance

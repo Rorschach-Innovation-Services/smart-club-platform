@@ -20,6 +20,11 @@ const SES_REGION = process.env.SES_REGION ?? 'eu-west-1';
 const FROM_EMAIL = process.env.FROM_EMAIL;
 export const EMAIL_DRY_RUN = process.env.NOTIFY_DRY_RUN === '1' || !FROM_EMAIL;
 
+/** MediCoach support: in both emails and both WhatsApp bodies, and the emails' SES reply-to. */
+export const MEDICOACH_SUPPORT_EMAIL = 'info@medicoach.co.za';
+/** Default SES Reply-To for every send that doesn't set its own: replies land in the support inbox. */
+const DEFAULT_REPLY_TO = [MEDICOACH_SUPPORT_EMAIL];
+
 // Construct once at module load (matches repo.ts's client lifecycle); skip entirely
 // in dry-run so no credentials/region are required offline.
 const ses = EMAIL_DRY_RUN ? null : new SESClient({ region: SES_REGION });
@@ -81,6 +86,7 @@ export async function sendStaffInviteEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -208,6 +214,7 @@ export async function sendRegLinkEmail(input: RegLinkEmailInput): Promise<{ mess
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -317,6 +324,7 @@ export async function sendClearanceEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -452,6 +460,7 @@ export async function sendClearanceResolvedEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -576,6 +585,7 @@ export async function sendClearanceReopenedSourceEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -602,6 +612,7 @@ export async function sendClearanceReopenedDestEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -618,7 +629,7 @@ async function sendSesEmail(
   to: string,
   content: { subject: string; text: string; html: string },
   dryRunLabel: string,
-  /** `replyTo` sets the SES ReplyToAddresses (absent ⇒ replies go to the From address). */
+  /** `replyTo` sets the SES ReplyToAddresses (absent ⇒ MEDICOACH_SUPPORT_EMAIL). */
   opts: { replyTo?: string } = {},
 ): Promise<{ messageId: string }> {
   if (EMAIL_DRY_RUN) {
@@ -629,7 +640,8 @@ async function sendSesEmail(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
       Destination: { ToAddresses: [to] },
-      ...(opts.replyTo ? { ReplyToAddresses: [opts.replyTo] } : {}),
+      // Human replies go to the monitored support inbox; bounces go to the sender address.
+      ReplyToAddresses: [opts.replyTo ?? MEDICOACH_SUPPORT_EMAIL],
       Message: {
         Subject: { Data: content.subject, Charset: 'UTF-8' },
         Body: {
@@ -989,6 +1001,7 @@ export async function sendFixturesEmail(input: FixturesEmailInput): Promise<{ me
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -1081,6 +1094,7 @@ export async function sendVeteransRequestEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -1166,6 +1180,7 @@ export async function sendVeteransRequestResolvedEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -1453,6 +1468,68 @@ export function sendFixtureReminderEmail(
   return sendPostponementEmail(to, content, 'fixture-reminder');
 }
 
+// ───────────────────────── Official appointment notices (OfficialNotices cron) ─────────────────────────
+//
+// Officials get the REAL kick-off time and ground even when the series withholds them from clubs:
+// ADR 0011 is a club-facing gate, and an umpire must know where and when to turn up.
+
+export interface OfficialAppointedEmailInput {
+  officialName: string;
+  roleLabel: 'umpire' | 'referee';
+  /** The union's display name. */
+  orgName: string;
+  seriesName: string;
+  /** "Umzinto CC v African Warriors". */
+  fixtureLabel: string;
+  /** "Sat 2026-11-15". */
+  dateLabel: string;
+  time?: string;
+  venue?: string;
+}
+
+/** The appointment notice to one umpire/referee for one fixture. */
+export function officialAppointedEmailContent(input: OfficialAppointedEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const greetName = input.officialName || 'there';
+  const subject = `Appointment — ${input.fixtureLabel} · ${input.dateLabel}`;
+  const intro = `You have been appointed as ${input.roleLabel} for the following ${input.orgName} fixture:`;
+  const rows: Array<[string, string]> = [
+    ['Fixture', input.fixtureLabel],
+    ['Competition', input.seriesName],
+    ['Date', input.dateLabel],
+    ['Time', input.time || 'time to be confirmed'],
+    ['Venue', input.venue || 'venue to be confirmed'],
+  ];
+  const outro = `If you are unavailable for this appointment, please contact ${MEDICOACH_SUPPORT_EMAIL} as soon as possible.`;
+  const text =
+    `Hello ${greetName},\n\n` +
+    `${intro}\n\n` +
+    rows.map(([k, v]) => `  ${k}: ${v}`).join('\n') +
+    `\n\n${outro}\n\n` +
+    `Thank you,\nThe union office`;
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>Hello ${escapeHtml(greetName)},</p>` +
+    `<p>${escapeHtml(intro)}</p>` +
+    `<ul>${rows.map(([k, v]) => `<li><strong>${escapeHtml(k)}:</strong> ${escapeHtml(v)}</li>`).join('')}</ul>` +
+    `<p>${escapeHtml(outro)}</p>` +
+    `<p>Thank you,<br/>The union office</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+/** Send one rendered appointment notice. Same dry-run gate as the other senders. */
+export function sendOfficialAppointedEmail(
+  to: string,
+  content: { subject: string; text: string; html: string },
+  role: 'umpire' | 'referee',
+): Promise<{ messageId: string }> {
+  return sendPostponementEmail(to, content, `official-appointed-${role}`);
+}
+
 /** Send one rendered postponement notice. Same dry-run gate as the other senders. */
 export async function sendPostponementEmail(
   to: string,
@@ -1466,6 +1543,7 @@ export async function sendPostponementEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: content.subject, Charset: 'UTF-8' },
@@ -1555,6 +1633,7 @@ export async function sendCaptainsReportDueEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [input.to], ...(input.cc ? { CcAddresses: [input.cc] } : {}) },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -1624,6 +1703,7 @@ export async function sendSyncConflictEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [input.to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -1860,8 +1940,6 @@ export async function sendPlayerWelcomeEmail(
 
 // ── EMCU scorer broadcast (one-off CLI: send-emcu-scorer-broadcast.ts) ──
 
-/** MediCoach support: in both emails and both WhatsApp bodies, and the emails' SES reply-to. */
-export const MEDICOACH_SUPPORT_EMAIL = 'info@medicoach.co.za';
 export const MEDICOACH_APP_LINKS = {
   ios: 'https://apps.apple.com/us/app/medicoach-ams/id6760149086',
   android: 'https://play.google.com/store/apps/details?id=co.za.medicoach.app',

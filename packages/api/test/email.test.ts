@@ -19,6 +19,7 @@ import {
   postponementAdminFinalEmailContent,
   postponementDeclinedEmailContent,
   fixtureReminderEmailContent,
+  officialAppointedEmailContent,
   fixtureReminderDateLabel,
   clearancePendingEmailContent,
   clearanceResolvedEmailContent,
@@ -554,5 +555,59 @@ describe('clearance notice deep links', () => {
     });
     assert.ok(without.text.includes('- Thabo Nkosi: Northlands CC → Glenwood CC (9 days)\n'));
     assert.ok(!without.html.includes('<a '));
+  });
+});
+
+describe('officialAppointedEmailContent', () => {
+  const base = {
+    officialName: 'Andile Ngubane',
+    roleLabel: 'umpire' as const,
+    orgName: 'KZN Dolphins',
+    seriesName: 'Premier League',
+    fixtureLabel: 'Umzinto CC v African Warriors',
+    dateLabel: 'Sat 2026-11-15',
+  };
+
+  test('names the role, org, fixture, date, time and venue', () => {
+    const { subject, text, html } = officialAppointedEmailContent({
+      ...base,
+      time: '09:00',
+      venue: 'Kingsmead',
+    });
+    assert.equal(subject, 'Appointment — Umzinto CC v African Warriors · Sat 2026-11-15');
+    assert.ok(text.startsWith('Hello Andile Ngubane,'));
+    assert.ok(
+      text.includes('You have been appointed as umpire for the following KZN Dolphins fixture:'),
+    );
+    assert.ok(text.includes('  Competition: Premier League'));
+    assert.ok(text.includes('  Time: 09:00'));
+    assert.ok(text.includes('  Venue: Kingsmead'));
+    assert.ok(
+      text.includes(
+        'If you are unavailable for this appointment, please contact info@medicoach.co.za as soon as possible.',
+      ),
+    );
+    assert.ok(html.includes('<strong>Venue:</strong> Kingsmead'));
+  });
+
+  test('referee wording, and to-be-confirmed fallbacks for a missing time/venue', () => {
+    const { text, html } = officialAppointedEmailContent({ ...base, roleLabel: 'referee' });
+    assert.ok(text.includes('appointed as referee for'));
+    assert.ok(!text.includes('match referee'));
+    assert.ok(text.includes('  Time: time to be confirmed'));
+    assert.ok(text.includes('  Venue: venue to be confirmed'));
+    assert.ok(html.includes('venue to be confirmed'));
+  });
+
+  test('escapes HTML and greets "there" without a name', () => {
+    const { text, html } = officialAppointedEmailContent({
+      ...base,
+      officialName: '',
+      fixtureLabel: 'A & B <CC>',
+      venue: '<script>x</script>',
+    });
+    assert.ok(text.startsWith('Hello there,'));
+    assert.ok(html.includes('A &amp; B &lt;CC&gt;'));
+    assert.ok(!html.includes('<script>'));
   });
 });

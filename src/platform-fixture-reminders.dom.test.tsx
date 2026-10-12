@@ -76,6 +76,33 @@ describe('FixtureRemindersCard', () => {
     await user.click(saveBtn());
     expect(await screen.findByText(/at most 4 entries/i)).toBeInTheDocument();
   });
+
+  it('says so when edited lead days normalise to the saved value', async () => {
+    const { user } = setup({ enabled: true, leadDays: [1, 7], channels: ['email'] });
+    const lead = screen.getByLabelText(/lead days/i);
+    await user.clear(lead);
+    await user.type(lead, '7,1');
+    expect(saveBtn()).toBeDisabled();
+    expect(screen.getByText(/these match the saved settings/i)).toBeInTheDocument();
+  });
+
+  it('enables Save without the hint when lead days really change', async () => {
+    const { user } = setup({ enabled: true, leadDays: [1, 7], channels: ['email'] });
+    const lead = screen.getByLabelText(/lead days/i);
+    await user.clear(lead);
+    await user.type(lead, '7,2');
+    expect(saveBtn()).toBeEnabled();
+    expect(screen.queryByText(/these match the saved settings/i)).not.toBeInTheDocument();
+  });
+
+  it('normalises the lead days text on blur', async () => {
+    const { user } = setup({ enabled: true, leadDays: [1, 7], channels: ['email'] });
+    const lead = screen.getByLabelText(/lead days/i);
+    await user.clear(lead);
+    await user.type(lead, '7,1');
+    await user.tab();
+    expect(lead).toHaveValue('1, 7');
+  });
 });
 
 describe('parseLeadDays', () => {

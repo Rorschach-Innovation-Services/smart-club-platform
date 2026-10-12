@@ -1624,6 +1624,7 @@ export function FixtureTable({
                       warnings={umpireWarnings.get(`${series.id}#${f.id}`)}
                       onSave={onSaveOfficials}
                       onCreate={onCreateUmpire}
+                      loadNotifyStatus={onSaveOfficials ? api.getOfficialsNotifyStatus : undefined}
                     />
                   </td>
                   <td>

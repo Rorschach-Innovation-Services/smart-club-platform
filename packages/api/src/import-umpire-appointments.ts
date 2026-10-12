@@ -521,6 +521,37 @@ const sameOfficials = (a: FixtureOfficials | null | undefined, b: FixtureOfficia
   a.umpires.map((u) => u.umpireId).join('|') === b.umpires.map((u) => u.umpireId).join('|') &&
   (a.referee?.umpireId ?? '') === (b.referee?.umpireId ?? '');
 
+/** One appointed official on a fixture, as the notice ledger keys it. */
+export interface OfficialPair {
+  umpireId: string;
+  role: 'umpire' | 'referee';
+}
+
+/** Every (umpireId, role) pair in an appointment (deduped; empty for null). */
+export function officialPairs(officials: FixtureOfficials | null | undefined): OfficialPair[] {
+  if (!officials) return [];
+  const out: OfficialPair[] = [];
+  const seen = new Set<string>();
+  const add = (umpireId: string, role: OfficialPair['role']) => {
+    const k = `${role}#${umpireId}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push({ umpireId, role });
+  };
+  for (const u of officials.umpires ?? []) add(u.umpireId, 'umpire');
+  if (officials.referee) add(officials.referee.umpireId, 'referee');
+  return out;
+}
+
+/** The pairs in `previous` that are no longer in `next` (removed or changed role). */
+export function diffOfficials(
+  previous: FixtureOfficials | null | undefined,
+  next: FixtureOfficials | null | undefined,
+): OfficialPair[] {
+  const keep = new Set(officialPairs(next).map((p) => `${p.role}#${p.umpireId}`));
+  return officialPairs(previous).filter((p) => !keep.has(`${p.role}#${p.umpireId}`));
+}
+
 /**
  * Turn matched rows into FIXOFFICIALS writes. `existing` is the stored appointment per
  * `seriesId#fixtureId`; an identical one is `unchanged` (no write), which is what makes a

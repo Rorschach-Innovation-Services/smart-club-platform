@@ -112,6 +112,8 @@ import {
   umpiresListGsi1pk,
   fixtureOfficialsKey,
   fixtureOfficialsListKey,
+  officialsNotifyKey,
+  officialsNotifyListKey,
   captainsReportKey,
   captainsReportsListKey,
   captainsReportCounterKey,
@@ -2552,7 +2554,10 @@ export async function deleteFixtureOfficialsForSeries(
   const keys = (await listFixtureOfficials(tenant))
     .filter((o) => o.seriesId === seriesId)
     .map((o) => fixtureOfficialsKey(tenant, o.seriesId, o.fixtureId));
-  if (keys.length) await batchDelete(keys);
+  // The series' appointment-notice ledger goes with it (a queued row would otherwise point
+  // the cron at a series that no longer exists).
+  const ledger = await listOfficialsNotifyKeys(tenant, seriesId);
+  if (keys.length || ledger.length) await batchDelete([...keys, ...ledger]);
   return keys.length;
 }
 
@@ -2564,7 +2569,192 @@ async function listUmpireAndOfficialsKeys(
   const officials = (await listFixtureOfficials(tenant)).map((o) =>
     fixtureOfficialsKey(tenant, o.seriesId, o.fixtureId),
   );
-  return [...umpires, ...officials];
+  // The appointment-notice ledger (statuses only, but keyed by umpire id) shares the partition.
+  const ledger = await listOfficialsNotifyKeys(tenant);
+  return [...umpires, ...officials, ...ledger];
+}
+
+// ── Official appointment notices (NOTIFY#officials ledger-as-queue) ──
+// The two appointment routes enqueue one `queued` row per (fixture, role, official) with a
+// conditional put; the OfficialNotices cron drains them. A row that already exists (queued,
+// completed or exhausted) absorbs a re-save, so an identical re-appointment never re-sends;
+// removing an official deletes the row, so a later re-appointment sends again.
+
+export type OfficialRole = 'umpire' | 'referee';
+export type OfficialsNotifyStatus = 'queued' | 'completed' | 'exhausted';
+
+export interface OfficialsNotifyRow {
+  seriesId: string;
+  fixtureId: string;
+  role: OfficialRole;
+  umpireId: string;
+  status: OfficialsNotifyStatus;
+  attempts: number;
+  queuedAt: string;
+  /** Why a row was completed without a send ('backfill'). */
+  reason?: string;
+  completedAt?: string;
+  lastError?: string;
+  results?: Array<{ channel: string; status: string; error?: string }>;
+}
+
+/** Ledger rows outlive a season comfortably, then self-expire. */
+const OFFICIALS_NOTIFY_TTL_SECONDS = 400 * 24 * 3600;
+
+/**
+ * Enqueue a notice for one appointed official. True ⇒ a new row was written; false ⇒ a row
+ * already exists (queued, sent or exhausted) and nothing changes. `initial` lets the backfill
+ * CLI claim a pre-feature appointment as already `completed` so the cron never sends it.
+ */
+export async function queueOfficialsNotify(
+  tenant: string,
+  pair: { seriesId: string; fixtureId: string; role: OfficialRole; umpireId: string },
+  initial: { status: 'queued' } | { status: 'completed'; reason: string } = { status: 'queued' },
+): Promise<boolean> {
+  const at = new Date().toISOString();
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: {
+          ...officialsNotifyKey(tenant, pair.seriesId, pair.fixtureId, pair.role, pair.umpireId),
+          seriesId: pair.seriesId,
+          fixtureId: pair.fixtureId,
+          role: pair.role,
+          umpireId: pair.umpireId,
+          status: initial.status,
+          attempts: 0,
+          queuedAt: at,
+          ...(initial.status === 'completed' ? { reason: initial.reason, completedAt: at } : {}),
+          expiresAt: Math.floor(Date.now() / 1000) + OFFICIALS_NOTIFY_TTL_SECONDS,
+        },
+        ConditionExpression: 'attribute_not_exists(pk)',
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+async function listOfficialsNotifyRows(
+  tenant: string,
+  seriesId?: string,
+): Promise<OfficialsNotifyRow[]> {
+  const { pk, skPrefix } = officialsNotifyListKey(tenant, seriesId);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => {
+    const { expiresAt: _ttl, ...rest } = stripKeys<OfficialsNotifyRow & { expiresAt?: number }>(i)!;
+    return rest;
+  });
+}
+
+/** Every ledger row in a tenant (any status) — tests and the backfill report read this. */
+export async function listOfficialsNotify(tenant: string): Promise<OfficialsNotifyRow[]> {
+  return listOfficialsNotifyRows(tenant);
+}
+
+/** One series' ledger rows (any status) — the officials editor's notice-status badges. */
+export async function listOfficialsNotifyForSeries(
+  tenant: string,
+  seriesId: string,
+): Promise<OfficialsNotifyRow[]> {
+  return listOfficialsNotifyRows(tenant, seriesId);
+}
+
+/** The rows still waiting for the cron. One partition Query, no scan. */
+export async function listQueuedOfficialsNotify(tenant: string): Promise<OfficialsNotifyRow[]> {
+  return (await listOfficialsNotifyRows(tenant)).filter((r) => r.status === 'queued');
+}
+
+const rowKey = (
+  tenant: string,
+  r: Pick<OfficialsNotifyRow, 'seriesId' | 'fixtureId' | 'role' | 'umpireId'>,
+) => officialsNotifyKey(tenant, r.seriesId, r.fixtureId, r.role, r.umpireId);
+
+/** Mark a row sent (per-channel statuses only — never addresses). */
+export async function completeOfficialsNotify(
+  tenant: string,
+  row: Pick<OfficialsNotifyRow, 'seriesId' | 'fixtureId' | 'role' | 'umpireId'>,
+  results: Array<{ channel: string; status: string; error?: string }>,
+): Promise<void> {
+  await ddb
+    .send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: rowKey(tenant, row),
+        UpdateExpression: 'SET #s = :done, #res = :r, completedAt = :at',
+        ExpressionAttributeNames: { '#s': 'status', '#res': 'results' },
+        ExpressionAttributeValues: {
+          ':done': 'completed',
+          ':r': results.map((r) => ({
+            channel: r.channel,
+            status: r.status,
+            ...(r.error ? { error: r.error } : {}),
+          })),
+          ':at': new Date().toISOString(),
+        },
+        // A row deleted meanwhile (official removed) must not be resurrected by the update.
+        ConditionExpression: 'attribute_exists(pk)',
+      }),
+    )
+    .catch((err) => {
+      if (!isCcf(err)) throw err;
+    });
+}
+
+/**
+ * Count one failed/undeliverable drain attempt. At `cap` the row is marked `exhausted` (the
+ * cron stops retrying it). Returns the new attempt count, or null when the row is gone.
+ */
+export async function bumpOfficialsNotifyAttempt(
+  tenant: string,
+  row: Pick<OfficialsNotifyRow, 'seriesId' | 'fixtureId' | 'role' | 'umpireId' | 'attempts'>,
+  cap: number,
+  lastError: string,
+): Promise<number | null> {
+  const attempts = (row.attempts ?? 0) + 1;
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: rowKey(tenant, row),
+        UpdateExpression: 'SET attempts = :n, lastError = :e, #s = :st',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: {
+          ':n': attempts,
+          ':e': lastError,
+          ':st': attempts >= cap ? 'exhausted' : 'queued',
+        },
+        ConditionExpression: 'attribute_exists(pk)',
+      }),
+    );
+    return attempts;
+  } catch (err) {
+    if (isCcf(err)) return null;
+    throw err;
+  }
+}
+
+/** Drop a ledger row (the official was removed from the fixture, or the row went stale). */
+export async function deleteOfficialsNotify(
+  tenant: string,
+  row: Pick<OfficialsNotifyRow, 'seriesId' | 'fixtureId' | 'role' | 'umpireId'>,
+): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: TABLE, Key: rowKey(tenant, row) }));
+}
+
+/** Ledger keys for sweeps (a whole tenant, or one series). */
+async function listOfficialsNotifyKeys(
+  tenant: string,
+  seriesId?: string,
+): Promise<Array<{ pk: string; sk: string }>> {
+  return (await listOfficialsNotifyRows(tenant, seriesId)).map((r) => rowKey(tenant, r));
 }
 
 // ── Captain's reports (ADR 0016, Slice 2) ──
@@ -8570,6 +8760,8 @@ export async function clearCohort(tenant: string): Promise<number> {
   // not cohort data, so it stays.
   for (const o of await listFixtureOfficials(tenant))
     keys.push(fixtureOfficialsKey(tenant, o.seriesId, o.fixtureId));
+  // …and so does their appointment-notice ledger (every series is being cleared).
+  for (const k of await listOfficialsNotifyKeys(tenant)) keys.push(k);
 
   // Captain's reports hang off the fixtures being cleared (reports, counters, ledger).
   for (const k of await listCaptainsReportPartitionKeys(tenant)) keys.push(k);
