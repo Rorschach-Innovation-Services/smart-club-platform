@@ -62,6 +62,25 @@ describe('mapFixture status', () => {
     assert.match(out.fixture.notes![0], /Postponed/);
   });
 
+  test('a portal postponement (ADR 0015) exports at the rescheduled date, never originalDate', () => {
+    // What an accepted/admin-ruled postponement leaves on the stored fixture.
+    const stored = {
+      ...base,
+      status: 'postponed',
+      date: '2026-12-12',
+      time: '13:00',
+      originalDate: '2026-10-03',
+      postponementId: 'req-1',
+    } as SourceFixture;
+    const out = ok(stored);
+    assert.equal(out.postponed, true);
+    assert.equal(out.fixture.scheduledTime, '2026-12-12T13:00:00+02:00');
+    assert.equal(out.fixture.sourceStatus, 'postponed');
+    // The postponement bookkeeping is smart-club-internal and never rides into the bundle.
+    assert.equal(JSON.stringify(out.fixture).includes('2026-10-03'), false);
+    assert.equal(JSON.stringify(out.fixture).includes('req-1'), false);
+  });
+
   test('completed and null stay scheduled, with sourceStatus preserved for the results backfill', () => {
     assert.equal(ok({ ...base, status: 'completed' }).fixture.sourceStatus, 'completed');
     assert.equal(ok({ ...base, status: 'completed' }).fixture.status, 'scheduled');

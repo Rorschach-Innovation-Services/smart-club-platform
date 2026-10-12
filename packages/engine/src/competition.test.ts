@@ -238,4 +238,24 @@ describe('advanceKnockout', () => {
     expect([r.fixtures[2].home, r.fixtures[2].away]).toEqual(['E', 'win:f2']);
     expect(r.waiting).toEqual(['f2 has no winner yet']);
   });
+
+  it('never touches a side filled by hand (ADR 0022 §7: no longer a slot ref)', () => {
+    // f3's home was set manually to Z (placeholder kept in slots, flagged slotsManual);
+    // f1's result says E — advance fills only the away side, which is still a slot ref.
+    const manual = [
+      { id: 'f1', home: 'A', away: 'E', result: { winner: 'away' as const } },
+      { id: 'f2', home: 'D', away: 'B', result: { winner: 'home' as const } },
+      {
+        id: 'f3',
+        home: 'Z',
+        away: 'win:f2',
+        slots: { home: 'win:f1' },
+        slotsManual: { home: true },
+      },
+    ];
+    const r = advanceKnockout(manual, groups);
+    expect([r.fixtures[2].home, r.fixtures[2].away]).toEqual(['Z', 'D']);
+    expect(r.fixtures[2].slots).toEqual({ home: 'win:f1', away: 'win:f2' });
+    expect(r.filled).toBe(1);
+  });
 });

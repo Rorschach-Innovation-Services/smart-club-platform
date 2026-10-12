@@ -21,7 +21,7 @@ import {
   hasActiveFilters,
   emptyPlayerFilters,
 } from './playerFilters';
-import { filterClearances } from './clearanceFilters';
+import { filterClearances, readClearanceLinkId, clearanceLinkMissing } from './clearanceFilters';
 import { GUIDE_URL } from './help/HelpDrawer';
 import { AllFixturesView, GroundsWeek, ResultsView, WeekView, type HubManage } from './FixturesHub';
 import { buildFixtureIndex } from './fixture-index';
@@ -71,6 +71,7 @@ import {
   slugifyLeagueKey,
   labelByKey,
   teamCounts,
+  clubSides,
   OVERARCHING_DISTRICT,
 } from '../packages/engine/src/leagues';
 import {
@@ -85,10 +86,17 @@ import {
   isLocked,
   VENUE_REASON_PREFIX,
 } from '../packages/engine/src/venues';
-import { isSlotRef, slotRefLabel } from '../packages/engine/src/formats';
+import {
+  isSlotRef,
+  slotRefLabel,
+  slotSource,
+  type SlotFixture,
+} from '../packages/engine/src/formats';
 import { resolveCompetitionDefaults } from '../packages/engine/src/defaults';
+import { TRANSFER_WINDOW_REJECTOR } from './types';
 import type {
   AdminClearanceView,
+  TransferWindowStatus,
   Club,
   CompetitionStructure,
   League,
@@ -165,6 +173,7 @@ import {
   InfoDot,
   ScrollX,
   FieldGuide,
+  ClearanceLinkMissingNotice,
 } from './atoms';
 
 /* ─── Local view-state shapes — explicit type params for `useState(null)` state that is
@@ -287,6 +296,17 @@ export type CheckClashes = (
   candidates: unknown[],
 ) => Promise<{ results: ClashResult[] }>;
 
+/** Knockout "Set team" (ADR 0018): put a real team into one fixture's placeholder side, or
+ *  `teamId: null` to put the placeholder back. Server-side (PATCH /series/:id `setSide`), so
+ *  the participant snapshot and the clash gate are applied there; rejects with the API error
+ *  (a `venue_clash` 409 carries `details.clashes`). */
+export type SetSide = (
+  seriesId: string,
+  fixtureId: string,
+  side: 'home' | 'away',
+  teamId: string | null,
+) => Promise<unknown>;
+
 /* ─── AdminFixtures — series cards + drilldown fixture table with travel distance ─── */
 /** The Fixtures & Venues tabs: the finding-things views, then the existing tools. */
 export type FixturesTab = 'week' | 'fixtures' | 'results' | 'venues' | 'series';
@@ -325,6 +345,8 @@ interface AdminFixturesProps {
   /** Admin-only clash pre-check (ADR 0011 addendum). Absent ⇒ the editor shows no hints,
    *  everything else unchanged. Results align by index with the candidates sent. */
   onCheckClashes?: CheckClashes;
+  /** Knockout Set team / revert. Absent ⇒ placeholder sides stay read-only. */
+  onSetSide?: SetSide;
   toast: (message: string, tone?: string) => void;
   allCalendars?: SeasonCalendar[];
   allSeasonRuns?: SeasonRun[];
@@ -357,7 +379,10 @@ interface AdminFixturesProps {
   /** The scorer register; appointments ride on each fixture's `officials.scorers`. */
   scorers?: Scorer[];
   onSaveScorers?: (seriesId: string, fixtureId: string, scorerIds: string[]) => Promise<unknown>;
-  onCreateScorer?: (displayName: string) => Promise<Scorer>;
+  onCreateScorer?: (
+    displayName: string,
+    contacts?: import('./FixtureManage').PersonContacts,
+  ) => Promise<Scorer>;
   /** Confirm a fixture's result as checked; rejects 409 `result_changed` on a stale page. */
   onConfirmResult?: (seriesId: string, fixtureId: string, recordedAt: string) => Promise<unknown>;
   onUnconfirmResult?: (seriesId: string, fixtureId: string) => Promise<unknown>;
@@ -515,6 +540,7 @@ export function AdminFixtures({
   onReveal,
   onSetApproved,
   onCheckClashes,
+  onSetSide,
   toast,
   allCalendars = [],
   allSeasonRuns = [],
@@ -905,6 +931,7 @@ export function AdminFixtures({
                 allSeasonRuns={allSeasonRuns}
                 onAllocateVenues={onAllocateVenues}
                 onCheckClashes={onCheckClashes}
+                onSetSide={onSetSide}
                 allSeries={allSeries}
                 umpires={umpires}
                 onSaveOfficials={onSaveOfficials}
@@ -1237,6 +1264,7 @@ export function FixtureTable({
   allSeasonRuns = [] as SeasonRun[],
   onAllocateVenues,
   onCheckClashes,
+  onSetSide = undefined as SetSide | undefined,
   // Umpire allocation: every series (for the cross-series double-booking warning), the
   // registry, and the officials write. Without them the column renders names read-only.
   allSeries = undefined as Series[] | undefined,
@@ -1408,7 +1436,7 @@ export function FixtureTable({
               series.seriesType,
               `${series.teams.length} teams`,
               `${series.fixtures.length} fixtures`,
-              showOvers && `${series.maxOvers} overs`,
+              showOvers && series.maxOvers != null && `${series.maxOvers} overs`,
               // A season-generated series has no category — the competition already says
               // what it is. Joining on the present parts avoids a dangling separator.
               series.category,
@@ -1553,6 +1581,11 @@ export function FixtureTable({
                     seriesId={series.id}
                     released={series.released}
                     onCheckClashes={onCheckClashes}
+                    onSetSide={onSetSide}
+                    clubs={clubs}
+                    // No participant snapshot: the series' sides are club ids (Set team
+                    // offers clubs only).
+                    legacy={!series.participants?.length}
                     teams={series.teams.map((id) => {
                       const r = teamBy(id);
                       return { id, name: r.name, ground: r.ground, club: r.club };
@@ -1600,6 +1633,13 @@ export function FixtureTable({
                       }
                       return seriesHasTimes ? <div className="fix-row-time">Time TBC</div> : null;
                     })()}
+                    {/* A postponed fixture keeps its first schedule in `originalDate` (ADR 0015);
+                        `date` is already the new one. */}
+                    {status === 'postponed' && f.originalDate && f.originalDate !== f.date && (
+                      <div className="fix-row-time">
+                        was <s>{formatWeekdayDay(f.originalDate)}</s>
+                      </div>
+                    )}
                   </td>
                   <td>
                     <div className="fix-row-team">
@@ -1624,14 +1664,14 @@ export function FixtureTable({
                         )}
                         <VenueReasonPill reason={f.venueReason} status={f.venueStatus} />
                       </div>
+                      <div className="fix-row-venue-suburb">{home.ground?.suburb || ''}</div>
                       {/* The reason is the whole point of a greedy allocator over a solver:
                           an operator can argue with "home ground closed for maintenance",
-                          not with an objective value. */}
-                      <div className="fix-row-venue-suburb">
-                        {f.venueReason && f.venueStatus !== 'home'
-                          ? f.venueReason
-                          : home.ground?.suburb || ''}
-                      </div>
+                          not with an objective value. A secondary note under the suburb, so a
+                          reason ("Union reminder fixtures upload") never reads as a place. */}
+                      {f.venueReason && f.venueStatus !== 'home' && (
+                        <div className="fix-row-venue-note">{f.venueReason}</div>
+                      )}
                     </div>
                   </td>
                   <td>
@@ -1666,6 +1706,7 @@ export function FixtureTable({
                       warnings={umpireWarnings.get(`${series.id}#${f.id}`)}
                       onSave={onSaveOfficials}
                       onCreate={onCreateUmpire}
+                      loadNotifyStatus={onSaveOfficials ? api.getOfficialsNotifyStatus : undefined}
                     />
                   </td>
                   <td>
@@ -1863,6 +1904,116 @@ export function FixtureTable({
   );
 }
 
+/**
+ * One knockout side in the fixture editor (ADR 0018): what the side is now (the placeholder's
+ * label, or the team set into it), plus "Set team" — series teams first, then every other
+ * side in the tenant grouped by club, for a winner from outside the series ("Community Cup
+ * winner") — and "Revert to placeholder" once a team has been set. A legacy series (no
+ * participant snapshot) takes clubs only, so it lists one option per club (its club id).
+ * Without `onSet` (no write path, or a side the medicoach sync fills) it is read-only, with
+ * `note` saying why.
+ */
+function KnockoutSide({
+  id,
+  sideLabel,
+  value,
+  placeholder,
+  otherSide,
+  fixtures,
+  teams,
+  clubs,
+  legacy = false,
+  busy,
+  onSet,
+  note,
+}: {
+  id: string;
+  sideLabel: 'home' | 'away';
+  value: string;
+  placeholder?: string;
+  otherSide: string;
+  fixtures: unknown[];
+  teams: Array<{ id: string; name: string }>;
+  clubs: Club[];
+  legacy?: boolean;
+  busy: boolean;
+  onSet?: (teamId: string | null) => void;
+  note?: string;
+}) {
+  const [pick, setPick] = useStateA('');
+  const shown = isSlotRef(value)
+    ? (slotRefLabel(value, fixtures as SlotFixture[]) ?? value)
+    : (teams.find((t) => t.id === value)?.name ?? value);
+  const inSeries = new Set(teams.map((t) => t.id));
+  const others = clubs
+    .map((c) => ({
+      club: c.name,
+      sides: (legacy ? [{ teamId: c.id, name: c.name }] : clubSides(c)).filter(
+        (p) => !inSeries.has(p.teamId),
+      ),
+    }))
+    .filter((g) => g.sides.length)
+    .sort((a, b) => a.club.localeCompare(b.club));
+  const usable = (teamId: string) => teamId !== value && teamId !== otherSide;
+  return (
+    <>
+      <input id={id} type="text" value={shown} disabled />
+      {placeholder && (
+        <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
+          Placeholder: {slotRefLabel(placeholder, fixtures as SlotFixture[]) ?? placeholder}
+        </div>
+      )}
+      {note && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>{note}</div>}
+      {onSet && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+          <select
+            aria-label={`Team to set as ${sideLabel}`}
+            value={pick}
+            onChange={(e) => setPick(e.target.value)}
+            disabled={busy}
+          >
+            <option value="">Choose a team…</option>
+            {teams.length > 0 && (
+              <optgroup label="In this series">
+                {teams.map((t) => (
+                  <option key={t.id} value={t.id} disabled={!usable(t.id)}>
+                    {t.name}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            {others.map((g) => (
+              <optgroup key={g.club} label={g.club}>
+                {g.sides.map((p) => (
+                  <option key={p.teamId} value={p.teamId} disabled={!usable(p.teamId)}>
+                    {p.name}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+          <Btn
+            tone="outline"
+            size="sm"
+            disabled={busy || !pick || !usable(pick)}
+            onClick={() => {
+              onSet(pick);
+              setPick('');
+            }}
+          >
+            Set {sideLabel} team
+          </Btn>
+          {placeholder && (
+            <Btn tone="ghost" size="sm" disabled={busy} onClick={() => onSet(null)}>
+              Revert {sideLabel} to placeholder
+            </Btn>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
 /* Inline edit row */
 function EditFixtureRow({
   fixture,
@@ -1873,6 +2024,9 @@ function EditFixtureRow({
   seriesId,
   released,
   onCheckClashes,
+  onSetSide = undefined as SetSide | undefined,
+  clubs = [] as Club[],
+  legacy = false,
 }) {
   const vt = useVertical().terms;
   // Each label is bound to its control. These sit BESIDE their inputs, so without an id
@@ -2106,6 +2260,44 @@ function EditFixtureRow({
     }
   }
 
+  // Knockout Set team / revert (ADR 0018). A server action, not part of the draft: it lands
+  // on its own, then the draft's side follows it so a later Save can't write the old value
+  // back. Errors reuse the save panel — a clash 409 reads exactly like a refused save.
+  async function setSide(side: 'home' | 'away', teamId: string | null) {
+    if (!onSetSide || !seriesId) return;
+    setSaving(true);
+    setSaveClashes(null);
+    setSaveError(null);
+    try {
+      await onSetSide(seriesId, fixture.id, side, teamId);
+      u(side, teamId ?? fixture.slots?.[side] ?? draft[side]);
+    } catch (err) {
+      const clashes = (err as ApiError)?.details?.clashes as Clash[] | undefined;
+      if (clashes?.length) setSaveClashes(clashes);
+      else if (
+        err instanceof ApiError &&
+        err.status === 409 &&
+        err.message === SERIES_CONFLICT_MESSAGE
+      )
+        setSaveError(SERIES_CONFLICT_FRIENDLY);
+      else setSaveError((err instanceof Error && err.message) || 'Could not set the team.');
+    } finally {
+      setSaving(false);
+    }
+  }
+  // A side the editor treats as a knockout slot: still a placeholder, or set from one (its
+  // placeholder kept in `slots`). Those change through Set team / revert, never the select.
+  const isKnockoutSide = (side: 'home' | 'away') =>
+    isSlotRef(draft[side]) || isSlotRef(fixture.slots?.[side] ?? '');
+  // On a medicoach-synced series a `win:`/`lose:` side is filled by the sync from the result
+  // (ADR 0016/0018): no Set team / revert there; `pos:`/`tbd:` sides stay settable.
+  const syncOwned = (side: 'home' | 'away') =>
+    fixture.syncMapped === true && !!slotSource(fixture.slots?.[side] ?? draft[side] ?? '');
+  const setterFor = (side: 'home' | 'away') =>
+    onSetSide && seriesId && !syncOwned(side)
+      ? (teamId: string | null) => setSide(side, teamId)
+      : undefined;
+
   return (
     <tr className="fix-edit-tr">
       <td colSpan={9}>
@@ -2138,18 +2330,29 @@ function EditFixtureRow({
               onChange={(e) => u('time', e.target.value)}
             />
           </div>
-          {/* A knockout side that is still a forward reference (`win:f3`) has no entry in
-              `teams`, so the select would render blank and any touch would silently
-              replace the bracket reference with a concrete club — breaking the link the
-              rest of the round depends on. Show what it is, read-only, instead. */}
+          {/* A knockout side that is still a placeholder (`win:f3`, `pos:…`, `tbd:…`) has no
+              entry in `teams`, so the select would render blank and any touch would silently
+              replace the bracket reference with a concrete club — breaking the link the rest
+              of the round depends on. Show what it is, read-only, with Set team / revert
+              (ADR 0018) as the only way to change it. */}
           <div className="fix-edit-field">
             <label htmlFor={`${uid}-home`}>Home (host)</label>
-            {isSlotRef(draft.home) ? (
-              <input
+            {isKnockoutSide('home') ? (
+              <KnockoutSide
                 id={`${uid}-home`}
-                type="text"
-                value={slotRefLabel(draft.home, fixtures) ?? draft.home}
-                disabled
+                sideLabel="home"
+                value={draft.home}
+                placeholder={fixture.slots?.home}
+                otherSide={draft.away}
+                fixtures={fixtures}
+                teams={teams}
+                clubs={clubs}
+                legacy={legacy}
+                busy={saving}
+                onSet={setterFor('home')}
+                note={
+                  syncOwned('home') ? 'Filled by the medicoach sync from the result' : undefined
+                }
               />
             ) : (
               <select
@@ -2167,12 +2370,22 @@ function EditFixtureRow({
           </div>
           <div className="fix-edit-field">
             <label htmlFor={`${uid}-away`}>Away (visitors)</label>
-            {isSlotRef(draft.away) ? (
-              <input
+            {isKnockoutSide('away') ? (
+              <KnockoutSide
                 id={`${uid}-away`}
-                type="text"
-                value={slotRefLabel(draft.away, fixtures) ?? draft.away}
-                disabled
+                sideLabel="away"
+                value={draft.away}
+                placeholder={fixture.slots?.away}
+                otherSide={draft.home}
+                fixtures={fixtures}
+                teams={teams}
+                clubs={clubs}
+                legacy={legacy}
+                busy={saving}
+                onSet={setterFor('away')}
+                note={
+                  syncOwned('away') ? 'Filled by the medicoach sync from the result' : undefined
+                }
               />
             ) : (
               <select
@@ -4482,7 +4695,8 @@ export function nextChairContact(
    chair changes later. Mirrors EditSupportContactModal's EMAIL_RE validation so
    an invalid address can't be saved into a broken mailto:. */
 export function ChairContactModal({ club, onClose, onSave, toast }) {
-  const vt = useVertical().terms;
+  const vertical = useVertical();
+  const vt = vertical.terms;
   const seed = club.exco?.chair || {};
   const [name, setName] = useStateA(seed.name || club.chair || '');
   const [email, setEmail] = useStateA(seed.email || '');
@@ -4552,8 +4766,9 @@ export function ChairContactModal({ club, onClose, onSave, toast }) {
             />
             {nameChanged && (
               <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6, lineHeight: 1.5 }}>
-                Term dates and ID details of the previous {vt.chair} will be cleared; the {vt.club}
-                completes them on its affiliation form.
+                {vertical.sport === 'cricket'
+                  ? `Term dates and ID details of the previous ${vt.chair} will be cleared; the ${vt.club} completes them on its affiliation form.`
+                  : `The previous ${vt.chair}'s other details will be cleared; the ${vt.club} completes them on its affiliation form.`}
               </div>
             )}
           </div>
@@ -5611,10 +5826,13 @@ export function AdminClubDetail({
                   'clearance-approved': 'Clearance approved notice',
                   'clearance-rejected': 'Clearance rejected notice',
                   'clearance-reopened': 'Clearance reopened notice',
+                  'clearance-inbound': 'Clearance inbound notice',
+                  'clearance-reminder': 'Clearance reminder',
                   'veterans-request': 'Veterans request notice',
                   'veterans-request-accepted': 'Veterans request accepted notice',
                   'veterans-request-declined': 'Veterans request declined notice',
                   fixtures: 'Fixtures shared with players',
+                  'fixture-reminder': 'Fixture reminder',
                 };
                 const sendItems = (club.commLog || []).map((e) => {
                   const isFixtures = e.kind === 'fixtures';
@@ -6372,7 +6590,8 @@ function AffiliationViewModal({ club, allLeagues, onClose }) {
                       <Row label="Cell" value={m.cell} />
                       <Row label="Gender" value={m.gender} />
                       <Row label="Race" value={m.race} />
-                      {key === 'chair' && (
+                      {/* ID / term are a cricket-only capture; schools never collect them. */}
+                      {key === 'chair' && vertical.sport === 'cricket' && (
                         <>
                           <Row label="ID number" value={m.idNumber} />
                           <Row
@@ -7323,6 +7542,36 @@ export function AdminTeamAccessView({
   );
 }
 
+/**
+ * Transfer-window status line for the clearances console. `status` is the SERVER-computed one
+ * from the tenant payload (absent ⇒ no windows configured ⇒ nothing to say).
+ */
+export function TransferWindowBanner({ status }: { status?: TransferWindowStatus }) {
+  if (!status) return null;
+  const text = status.open
+    ? `Transfers open${status.current ? ` — ${status.current.label} until ${formatDayYear(status.current.end)}` : ''}`
+    : status.next
+      ? `Transfers closed — next window: ${status.next.label} from ${formatDayYear(status.next.start)}`
+      : 'Transfers closed — no upcoming window';
+  return (
+    <div
+      role="status"
+      style={{
+        marginTop: 14,
+        padding: '8px 12px',
+        borderRadius: 8,
+        fontSize: 12.5,
+        background: status.open ? 'var(--green-soft, #E6F4EA)' : 'var(--coral-soft, #FDECEA)',
+        color: status.open ? 'var(--green, #1E7B3A)' : 'var(--coral, #C0392B)',
+      }}
+    >
+      {text}
+      {!status.open &&
+        '. Clubs cannot request clearances; registrations naming another club are auto-rejected.'}
+    </div>
+  );
+}
+
 /* ─── AdminClearances — oversight of every clearance across the cohort ─── */
 export function AdminClearances({
   clearances,
@@ -7332,10 +7581,15 @@ export function AdminClearances({
   onReject,
   onReassign,
   onReopen,
+  onRemind = undefined,
   onRevokeCertificate,
   onCertificateViewed = undefined,
+  transferWindowStatus = undefined,
   busyId,
   busyAction,
+  // False while the list is still loading — `clearances` is `[]` then, so the dead-link
+  // notice below would flash before the real list lands.
+  clearancesLoaded = true,
 }) {
   const [confirm, setConfirm] = useStateA<ClearanceConfirmState | null>(null);
   // Optional note the admin attaches to a rejection (shown to both clubs).
@@ -7347,8 +7601,14 @@ export function AdminClearances({
   // Target club for a reallocation (the reassign confirm's picker).
   const [reassignTarget, setReassignTarget] = useStateA('');
   const [filter, setFilter] = useStateA('all');
+  // `?clearance=<id>` (from a clearance notification email) seeds the search with that id —
+  // the filter matches on `r.id` and the default pill is All, so it surfaces at any status.
+  const [linkId] = useStateA(() =>
+    typeof window !== 'undefined' ? readClearanceLinkId(window.location.search) : null,
+  );
+  const [linkNoticeDismissed, setLinkNoticeDismissed] = useStateA(false);
   // Free-text search across every status; combines with the status pills below.
-  const [q, setQ] = useStateA('');
+  const [q, setQ] = useStateA(linkId ?? '');
   const teamLabel = labelByKey(leagues ?? []);
   // requestedAt is an INSTANT — the local calendar day, not the UTC one, or a request
   // logged at 01:00 SAST reads as the previous day.
@@ -7402,6 +7662,18 @@ export function AdminClearances({
           </Btn>
         </div>
       </div>
+
+      <TransferWindowBanner status={transferWindowStatus} />
+
+      {clearancesLoaded && !linkNoticeDismissed && clearanceLinkMissing(linkId, all) && (
+        <ClearanceLinkMissingNotice
+          onDismiss={() => {
+            setLinkNoticeDismissed(true);
+            // Drop the dead seeded search too, so dismissing lands on the full list.
+            if (q === linkId) setQ('');
+          }}
+        />
+      )}
 
       <div className="players-stats">
         <div className="players-stat">
@@ -7602,6 +7874,11 @@ export function AdminClearances({
                         : `The Union office can override ${req.fromClubName}'s approval and issue the clearance to ${req.toClubName}, or reject it — ${rejectClause[predicted]}.${canReallocate ? ` If ${req.fromClubName} has since registered under a slightly different name, reallocate this clearance to it instead.` : ''}`}
                     </div>
                   </div>
+                  {onRemind && !offSystem && (
+                    <Btn tone="outline" disabled={busy} onClick={() => onRemind(req)}>
+                      {busy && busyAction === 'remind' ? 'Sending…' : 'Send reminder'}
+                    </Btn>
+                  )}
                   {canReallocate && (
                     <Btn
                       tone="outline"
@@ -7690,7 +7967,11 @@ export function AdminClearances({
 
               {req.status !== 'pending' && (
                 <div className="clr-resolved-bar">
-                  {req.status === 'rejected' ? (
+                  {req.status === 'rejected' && req.rejectedBy === TRANSFER_WINDOW_REJECTOR ? (
+                    <Pill tone="coral" dot>
+                      Auto-rejected — window closed
+                    </Pill>
+                  ) : req.status === 'rejected' ? (
                     <Pill tone="coral" dot>
                       Rejected{req.rejectedBy ? ` · ${req.rejectedBy}` : ''}
                     </Pill>
@@ -7711,6 +7992,11 @@ export function AdminClearances({
                   {req.status === 'rejected' && req.rejectOutcome === 'stays-at-destination' && (
                     <span style={{ fontSize: 11, color: 'var(--muted)' }}>
                       Stays at {req.toClubName}
+                    </span>
+                  )}
+                  {req.status === 'rejected' && req.rejectOutcome === 'not-registered' && (
+                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+                      Not registered at {req.toClubName}
                     </span>
                   )}
                   {req.status === 'rejected' && req.rejectReason && (
@@ -7757,7 +8043,10 @@ export function AdminClearances({
                           kind: 'reopen',
                           title: 'Reopen this clearance?',
                           req,
-                          body: `${req.playerName}'s registration goes back to how it was before the rejection, and ${req.fromClubName}'s chair is notified again. It can be rejected again afterwards.`,
+                          body:
+                            req.rejectOutcome === 'not-registered'
+                              ? `${req.playerName} is placed on ${req.toClubName}'s roster as clearance pending, and ${req.fromClubName}'s chair is asked to decide. It can be rejected again afterwards.`
+                              : `${req.playerName}'s registration goes back to how it was before the rejection, and ${req.fromClubName}'s chair is notified again. It can be rejected again afterwards.`,
                           // Keep the dialog open until the request settles; close on success and
                           // on 'conflict' (already refetched), stay open only on 'failed'.
                           onYes: async () => {
@@ -8473,7 +8762,9 @@ function playerRoleLabel(p, playerProfile: 'cricket' | 'positions' = 'cricket') 
 
 const PLAYERS_PER_PAGE = 25;
 
-export function AdminPlayersView({ clubs, leagues, toast }) {
+// `onErasePlayer(naturalKey, playerName)` (main.tsx) runs the tenant-wide erasure; it resolves on
+// success and rejects (already toasted) on failure. Absent ⇒ the detail modal shows no erase zone.
+export function AdminPlayersView({ clubs, leagues, toast, onErasePlayer = undefined }) {
   const vt = useVertical().terms;
   const list = clubs ?? [];
   const teamLabel = labelByKey(leagues ?? []);
@@ -8802,6 +9093,17 @@ export function AdminPlayersView({ clubs, leagues, toast }) {
                         queryKey: qk.players(selectedPlayer.clubId),
                       }),
                     ),
+                }
+              : undefined
+          }
+          adminErase={
+            onErasePlayer
+              ? {
+                  onErase: () =>
+                    onErasePlayer(
+                      selectedPlayer.naturalKey,
+                      `${selectedPlayer.firstName ?? ''} ${selectedPlayer.lastName ?? ''}`.trim(),
+                    ).then(() => setSelectedPlayer(null)),
                 }
               : undefined
           }

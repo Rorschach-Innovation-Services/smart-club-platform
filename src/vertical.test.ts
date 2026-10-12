@@ -14,6 +14,13 @@ describe('vertical profiles', () => {
     expect(resolveVertical({ sport: 'netball' as never }).sport).toBe('cricket');
     expect(resolveVertical({ sport: 'football' }).sport).toBe('football');
   });
+
+  it('requires the football Director of Academics but keeps the cricket Vice-Chair optional', () => {
+    const vc = (sport: 'cricket' | 'football') =>
+      VERTICALS[sport].leadershipRoles.find((r) => r.key === 'vc');
+    expect(vc('football')).toEqual({ key: 'vc', label: 'Director of Academics', required: true });
+    expect(vc('cricket')).toEqual({ key: 'vc', label: 'Vice-Chair', required: false });
+  });
 });
 
 describe('resolveCopy · vertical terms', () => {

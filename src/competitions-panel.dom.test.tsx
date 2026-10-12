@@ -1,5 +1,5 @@
 /**
- * Fixtures & Venues → Leagues & tournaments (ADR 0018): the competitions table, Create
+ * Fixtures & Venues → Leagues & tournaments (ADR 0022): the competitions table, Create
  * league / tournament (preview first, randomise, save as a draft), one competition's views,
  * and the failure paths — a refused draw, a name already taken, the server unreachable, a
  * knockout with nothing to fill — which keep the admin where they were with the reason.

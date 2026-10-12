@@ -379,8 +379,12 @@ describe('This week', () => {
     await user.click(
       within(dlg).getByRole('button', { name: /add “thandeka m” as a new scorer/i }),
     );
+    // A new scorer gets an optional contacts step so the appointment notice can reach them.
+    const step = within(dlg).getByRole('group', { name: /new scorer contacts/i });
+    await user.type(within(step).getByLabelText(/phone/i), ' 0821234567 ');
+    await user.click(within(step).getByRole('button', { name: 'Add scorer' }));
     await user.click(within(dlg).getByRole('button', { name: /save scorers/i }));
-    expect(h.onCreateScorer).toHaveBeenCalledWith('Thandeka M');
+    expect(h.onCreateScorer).toHaveBeenCalledWith('Thandeka M', { phone: '0821234567' });
     expect(h.onSaveScorers).toHaveBeenCalledWith('s1', 'f3', ['s1', 's-new']);
   });
 

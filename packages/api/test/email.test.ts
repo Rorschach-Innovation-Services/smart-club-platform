@@ -13,6 +13,23 @@ import {
   type RegLinkEmailInput,
   veteransRequestEmailContent,
   veteransRequestResolvedEmailContent,
+  postponementOpenedEmailContent,
+  postponementCounteredEmailContent,
+  postponementAgreedEmailContent,
+  postponementAdminFinalEmailContent,
+  postponementDeclinedEmailContent,
+  fixtureReminderEmailContent,
+  officialAppointedEmailContent,
+  fixtureReminderDateLabel,
+  clearancePendingEmailContent,
+  clearanceResolvedEmailContent,
+  clearanceReopenedSourceEmailContent,
+  clearanceReopenedDestEmailContent,
+  clearanceOpenedDestEmailContent,
+  clearanceOpenedAdminEmailContent,
+  clearanceOpenedAdminSummaryEmailContent,
+  clearanceAutoRejectedAdminEmailContent,
+  clearanceReminderDigestEmailContent,
 } from '../src/notify/email.js';
 import { orgCopy } from '../src/branding.js';
 
@@ -169,6 +186,143 @@ describe('veteransRequestResolvedEmailContent (ADR 0013)', () => {
   });
 });
 
+describe('postponement notices (ADR 0015)', () => {
+  const fixtureLabel = 'Glenwood CC v Northlands CC · Premier League';
+
+  test('opened: names both dates, the reason, and escapes HTML', () => {
+    const { subject, text, html } = postponementOpenedEmailContent({
+      chairName: 'Pat',
+      requestingClubName: 'Glenwood CC',
+      fixtureLabel,
+      originalDate: '2026-11-07',
+      originalTime: '10:00',
+      proposedDate: '2026-11-14',
+      reason: 'Ground <flooded>',
+    });
+    assert.equal(subject, `Postponement request — ${fixtureLabel}`);
+    assert.match(text, /^Hello Pat,/);
+    assert.match(text, /scheduled for Sat 2026-11-07 at 10:00, to Sat 2026-11-14\./);
+    assert.match(text, /Reason from Glenwood CC: Ground <flooded>/);
+    assert.match(html, /Ground &lt;flooded&gt;/);
+  });
+
+  test('a time that is not passed in never appears (withheld times stay hidden)', () => {
+    const { text } = postponementCounteredEmailContent({
+      chairName: '',
+      counteringClubName: 'Northlands CC',
+      fixtureLabel,
+      originalDate: '2026-11-07',
+      proposedDate: '2026-11-21',
+    });
+    assert.match(text, /^Hello there,/);
+    assert.doesNotMatch(text, / at \d\d:\d\d/);
+  });
+
+  test('agreed / admin-final / declined / withdrawn copy', () => {
+    assert.match(
+      postponementAgreedEmailContent({
+        chairName: 'Pat',
+        fixtureLabel,
+        originalDate: '2026-11-07',
+        newDate: '2026-11-14',
+        newTime: '13:00',
+      }).text,
+      /is now on Sat 2026-11-14 at 13:00/,
+    );
+    const ruling = postponementAdminFinalEmailContent({
+      chairName: 'Pat',
+      fixtureLabel,
+      originalDate: '2026-11-07',
+      newDate: '2026-11-28',
+      venueName: 'Kings Park',
+    });
+    assert.match(ruling.text, /Venue: Kings Park/);
+    assert.match(ruling.text, /Please acknowledge this ruling in your club portal\./);
+    assert.match(
+      postponementDeclinedEmailContent({
+        chairName: 'Pat',
+        actingClubName: 'Northlands CC',
+        fixtureLabel,
+        originalDate: '2026-11-07',
+        outcome: 'declined',
+      }).text,
+      /Northlands CC has declined the request to postpone .*stays on Sat 2026-11-07\./,
+    );
+    assert.equal(
+      postponementDeclinedEmailContent({
+        chairName: 'Pat',
+        actingClubName: 'Glenwood CC',
+        fixtureLabel,
+        originalDate: '2026-11-07',
+        outcome: 'withdrawn',
+      }).subject,
+      `Postponement withdrawn — ${fixtureLabel}`,
+    );
+  });
+});
+
+describe('fixture reminder email', () => {
+  const base = {
+    chairName: 'Sam',
+    clubName: 'Glenwood CC',
+    dateLabel: fixtureReminderDateLabel('2026-11-07'),
+  };
+
+  test('date label carries the weekday', () => {
+    assert.equal(fixtureReminderDateLabel('2026-11-07'), 'Sat 2026-11-07');
+  });
+
+  test('lists each fixture with opponent, home/away, revealed time and venue, and the portal link', () => {
+    const { subject, text, html } = fixtureReminderEmailContent({
+      ...base,
+      portalLink: 'https://glenwood.example.com',
+      fixtures: [
+        {
+          seriesName: 'Premier League',
+          sideName: 'Glenwood CC',
+          opponentName: 'Northlands <CC>',
+          isHome: true,
+          time: '10:00',
+          venue: 'Glenwood Oval',
+        },
+        {
+          seriesName: 'Reserve League',
+          sideName: 'Glenwood B',
+          opponentName: 'Crusaders',
+          isHome: false,
+        },
+      ],
+    });
+    assert.equal(subject, 'Fixture reminder — Glenwood CC · Sat 2026-11-07');
+    assert.match(text, /Hello Sam/);
+    assert.match(text, /has 2 fixtures on Sat 2026-11-07/);
+    assert.match(
+      text,
+      /Premier League · Glenwood CC vs Northlands <CC> \(Home\) · 10:00 · Glenwood Oval/,
+    );
+    assert.match(text, /Reserve League · Glenwood B vs Crusaders \(Away\)\n/);
+    assert.match(text, /club portal: https:\/\/glenwood\.example\.com/);
+    // HTML escapes user-supplied names and links the portal.
+    assert.match(html, /Northlands &lt;CC&gt;/);
+    assert.doesNotMatch(html, /Northlands <CC>/);
+    assert.match(html, /<a href="https:\/\/glenwood\.example\.com">/);
+  });
+
+  test('a time or venue that is not passed in never appears, and no link when the tenant has none', () => {
+    const { text, html } = fixtureReminderEmailContent({
+      ...base,
+      fixtures: [
+        { seriesName: 'Premier League', sideName: 'Glenwood CC', opponentName: 'X', isHome: true },
+      ],
+    });
+    assert.match(text, /has a fixture on/);
+    assert.match(text, /Premier League · Glenwood CC vs X \(Home\)\n/);
+    assert.doesNotMatch(text, /\d{2}:\d{2}/);
+    assert.match(text, /details in your club portal\./);
+    assert.doesNotMatch(html, /<a /);
+  });
+});
+
 describe("captainsReportDueEmailContent · the captain's report link", () => {
   const input = {
     to: 'captain@example.com',
@@ -201,5 +355,259 @@ describe("captainsReportDueEmailContent · the captain's report link", () => {
     const { captainsReportDueEmailContent } = await import('../src/notify/email.js');
     const { text } = captainsReportDueEmailContent({ ...input, forwardedBy: 'Uma Chair' });
     assert.match(text, /Uma Chair asked you to complete/);
+  });
+
+  test('every variant asks for the match scorecard as well as the umpires', async () => {
+    const { captainsReportDueEmailContent } = await import('../src/notify/email.js');
+    for (const v of [
+      input,
+      { ...input, recipientKind: 'chair' as const },
+      { ...input, forwardedBy: 'Uma Chair' },
+      { ...input, reminder: true },
+    ]) {
+      const { text, html } = captainsReportDueEmailContent(v);
+      assert.match(text, /match scorecard/);
+      assert.match(html, /match scorecard/);
+    }
+  });
+});
+
+describe('clearance notice deep links', () => {
+  const CHAIR_LINK = 'https://glenwood.example.com/club/c1/clearances?clearance=clr-1&x=<y>';
+  const ADMIN_LINK = 'https://glenwood.example.com/admin/clearances?clearance=clr-1';
+  const LIST_LINK = 'https://glenwood.example.com/admin/clearances';
+  const chairCopy = {
+    to: 'chair@example.com',
+    chairName: 'Sam',
+    fromClubName: 'Northlands CC',
+    playerName: 'Thabo Nkosi',
+    toClubName: 'Glenwood CC',
+  };
+  const adminCopy = {
+    to: 'admin@example.com',
+    fromClubName: 'Northlands CC',
+    playerName: 'Thabo Nkosi',
+    toClubName: 'Glenwood CC',
+  };
+
+  type Content = { subject: string; text: string; html: string };
+  /** Every chair builder, rendered with and without its link. */
+  const chairBuilders: Array<[string, (link?: string) => Content]> = [
+    ['pending', (portalLink) => clearancePendingEmailContent({ ...chairCopy, portalLink })],
+    [
+      'resolved (approved)',
+      (portalLink) =>
+        clearanceResolvedEmailContent({ ...chairCopy, outcome: 'approved', portalLink }),
+    ],
+    [
+      'resolved (rejected, with reason)',
+      (portalLink) =>
+        clearanceResolvedEmailContent({
+          ...chairCopy,
+          outcome: 'rejected',
+          reason: 'unpaid fees',
+          rejectOutcome: 'source-reactivated',
+          portalLink,
+        }),
+    ],
+    [
+      'reopened (source)',
+      (portalLink) => clearanceReopenedSourceEmailContent({ ...chairCopy, portalLink }),
+    ],
+    [
+      'reopened (destination)',
+      (portalLink) => clearanceReopenedDestEmailContent({ ...chairCopy, portalLink }),
+    ],
+    [
+      'opened (destination)',
+      (portalLink) => clearanceOpenedDestEmailContent({ ...chairCopy, portalLink }),
+    ],
+  ];
+
+  for (const [name, build] of chairBuilders) {
+    test(`${name}: the link rides in text + HTML, right before the union-office fallback`, () => {
+      const { text, html } = build(CHAIR_LINK);
+      assert.ok(text.includes(`Review it here: ${CHAIR_LINK}\n\n`));
+      const escaped =
+        'https://glenwood.example.com/club/c1/clearances?clearance=clr-1&amp;x=&lt;y&gt;';
+      assert.ok(html.includes(`<p>Review it here: <a href="${escaped}">${escaped}</a></p>`));
+      assert.ok(!html.includes('<y>'), 'the link is HTML-escaped');
+      // The escape hatch for a chair with no portal login always stays, after the link.
+      assert.ok(
+        text.indexOf('Review it here') < text.indexOf('contact your union office'),
+        'link line first, then the union-office fallback',
+      );
+    });
+
+    test(`${name}: with no link the body is unchanged — no link line, no anchor`, () => {
+      const without = build();
+      assert.ok(!without.text.includes('Review it here'));
+      assert.ok(!without.html.includes('<a '));
+      assert.match(without.text, /contact your union office/);
+      // Adding a link only inserts the link paragraph: strip it and the bodies match exactly.
+      const withLink = build(CHAIR_LINK);
+      assert.equal(withLink.text.replace(`Review it here: ${CHAIR_LINK}\n\n`, ''), without.text);
+      assert.equal(
+        withLink.html.replace(/<p>Review it here: <a [^]*?<\/a><\/p>/, ''),
+        without.html,
+      );
+      assert.equal(withLink.subject, without.subject);
+    });
+  }
+
+  test('pending: the extracted builder keeps the original pending copy', () => {
+    const { subject, text, html } = clearancePendingEmailContent({
+      ...chairCopy,
+      playerName: 'Thabo\nNkosi',
+    });
+    assert.equal(subject, 'Clearance pending — Thabo Nkosi');
+    assert.equal(
+      text,
+      'Hello Sam,\n\n' +
+        "A player clearance is awaiting Northlands CC's review: Thabo\nNkosi has applied to join " +
+        'Glenwood CC and needs a clearance from your club.\n\n' +
+        'Please have this reviewed and approved or rejected in your club portal, or contact your ' +
+        'union office if you have any questions.\n\n' +
+        'Thank you,\nThe union office',
+    );
+    assert.match(html, /<strong>Northlands CC<\/strong>'s review/);
+  });
+
+  test('admin opened: per-clearance admin link, none without', () => {
+    const withLink = clearanceOpenedAdminEmailContent({ ...adminCopy, adminLink: ADMIN_LINK });
+    assert.ok(withLink.text.includes(`Review it here: ${ADMIN_LINK}\n\nThe union office platform`));
+    assert.ok(withLink.html.includes(`<a href="${ADMIN_LINK}">${ADMIN_LINK}</a>`));
+    const without = clearanceOpenedAdminEmailContent(adminCopy);
+    assert.ok(!without.text.includes('Review it here'));
+    assert.ok(!without.html.includes('<a '));
+    assert.match(
+      without.text,
+      /listed under Clearances in the admin console\.\n\nThe union office platform$/,
+    );
+  });
+
+  test('admin auto-rejected: per-clearance admin link after the reason, none without', () => {
+    const base = { ...adminCopy, reason: 'transfers are closed' };
+    const withLink = clearanceAutoRejectedAdminEmailContent({ ...base, adminLink: ADMIN_LINK });
+    assert.ok(
+      withLink.text.includes(
+        `Reason: transfers are closed\n\nReview it here: ${ADMIN_LINK}\n\nThe union office platform`,
+      ),
+    );
+    assert.ok(withLink.html.includes(`<a href="${ADMIN_LINK}">`));
+    const without = clearanceAutoRejectedAdminEmailContent(base);
+    assert.ok(!without.text.includes('Review it here'));
+    assert.ok(!without.html.includes('<a '));
+    assert.match(without.text, /Reason: transfers are closed\n\nThe union office platform$/);
+  });
+
+  test('admin summary: links the clearances LIST, none without', () => {
+    const base = {
+      toClubName: 'Glenwood CC',
+      clearances: [{ playerName: 'Thabo Nkosi', fromClubName: 'Northlands CC' }],
+    };
+    const withLink = clearanceOpenedAdminSummaryEmailContent({ ...base, adminLink: LIST_LINK });
+    assert.ok(
+      withLink.text.includes(`Review them here: ${LIST_LINK}\n\nThe union office platform`),
+    );
+    assert.ok(withLink.html.includes(`<a href="${LIST_LINK}">${LIST_LINK}</a>`));
+    const without = clearanceOpenedAdminSummaryEmailContent(base);
+    assert.ok(!without.text.includes('Review them here'));
+    assert.ok(!without.html.includes('<a '));
+  });
+
+  test('reminder digest: each line carries its own admin deep link; lines without one stay plain', () => {
+    const line = {
+      id: 'clr-1',
+      playerName: 'Thabo Nkosi',
+      fromClubName: 'Northlands CC',
+      toClubName: 'Glenwood CC',
+      daysPending: 9,
+    };
+    const withLinks = clearanceReminderDigestEmailContent({
+      orgName: 'Dolphins',
+      nudged: [{ ...line, adminLink: ADMIN_LINK }],
+      chairless: [
+        {
+          ...line,
+          id: 'clr-2',
+          fromClubName: 'Off System CC',
+          adminLink: 'https://glenwood.example.com/admin/clearances?clearance=clr-2',
+        },
+      ],
+    });
+    assert.ok(
+      withLinks.text.includes(
+        `- Thabo Nkosi: Northlands CC → Glenwood CC (9 days) — ${ADMIN_LINK}`,
+      ),
+    );
+    assert.ok(
+      withLinks.text.includes(
+        '- Thabo Nkosi: Off System CC → Glenwood CC (9 days) — https://glenwood.example.com/admin/clearances?clearance=clr-2',
+      ),
+    );
+    assert.ok(withLinks.html.includes(`(9 days) — <a href="${ADMIN_LINK}">Review</a></li>`));
+
+    const without = clearanceReminderDigestEmailContent({
+      orgName: 'Dolphins',
+      nudged: [line],
+      chairless: [],
+    });
+    assert.ok(without.text.includes('- Thabo Nkosi: Northlands CC → Glenwood CC (9 days)\n'));
+    assert.ok(!without.html.includes('<a '));
+  });
+});
+
+describe('officialAppointedEmailContent', () => {
+  const base = {
+    officialName: 'Andile Ngubane',
+    roleLabel: 'umpire' as const,
+    orgName: 'KZN Dolphins',
+    seriesName: 'Premier League',
+    fixtureLabel: 'Umzinto CC v African Warriors',
+    dateLabel: 'Sat 2026-11-15',
+  };
+
+  test('names the role, org, fixture, date, time and venue', () => {
+    const { subject, text, html } = officialAppointedEmailContent({
+      ...base,
+      time: '09:00',
+      venue: 'Kingsmead',
+    });
+    assert.equal(subject, 'Appointment — Umzinto CC v African Warriors · Sat 2026-11-15');
+    assert.ok(text.startsWith('Hello Andile Ngubane,'));
+    assert.ok(
+      text.includes('You have been appointed as umpire for the following KZN Dolphins fixture:'),
+    );
+    assert.ok(text.includes('  Competition: Premier League'));
+    assert.ok(text.includes('  Time: 09:00'));
+    assert.ok(text.includes('  Venue: Kingsmead'));
+    assert.ok(
+      text.includes(
+        'If you are unavailable for this appointment, please contact info@medicoach.co.za as soon as possible.',
+      ),
+    );
+    assert.ok(html.includes('<strong>Venue:</strong> Kingsmead'));
+  });
+
+  test('referee wording, and to-be-confirmed fallbacks for a missing time/venue', () => {
+    const { text, html } = officialAppointedEmailContent({ ...base, roleLabel: 'referee' });
+    assert.ok(text.includes('appointed as referee for'));
+    assert.ok(!text.includes('match referee'));
+    assert.ok(text.includes('  Time: time to be confirmed'));
+    assert.ok(text.includes('  Venue: venue to be confirmed'));
+    assert.ok(html.includes('venue to be confirmed'));
+  });
+
+  test('escapes HTML and greets "there" without a name', () => {
+    const { text, html } = officialAppointedEmailContent({
+      ...base,
+      officialName: '',
+      fixtureLabel: 'A & B <CC>',
+      venue: '<script>x</script>',
+    });
+    assert.ok(text.startsWith('Hello there,'));
+    assert.ok(html.includes('A &amp; B &lt;CC&gt;'));
+    assert.ok(!html.includes('<script>'));
   });
 });

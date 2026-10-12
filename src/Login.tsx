@@ -6,6 +6,7 @@
  * resolved tenant config.
  */
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth, IS_LOCAL_AUTH } from './auth';
 import { getActiveTenant } from './api';
 
@@ -234,18 +235,26 @@ function DevLogin({ auth, branding }) {
   const tenant = getActiveTenant() || 'dolphins';
   const [role, setRole] = useState('admin');
   const [clubIds, setClubIds] = useState('ukzn');
+  const navigate = useNavigate();
 
   function go(e) {
     e.preventDefault();
     if (role === 'operator') {
-      // Platform operator is tenant-INDEPENDENT: the identity carries only the
-      // '*' platform membership (and no tenant field), mirroring the cloud token
-      // minted by bootstrap-operator. /platform/* never reads x-tenant.
+      // Platform operator is tenant-INDEPENDENT: the '*' platform membership (and no
+      // tenant field), as the cloud token minted by bootstrap-operator. Like a real
+      // operator (operator auto-admin grants admin on every tenant), it is also admin of
+      // this local tenant, so "Open console" from /platform lands in the console instead
+      // of bouncing back. With a tenant membership "/" would open that console, so go to
+      // the operator's home explicitly. /platform/* never reads x-tenant.
       auth.devSignIn({
         sub: 'dev-operator',
         email: 'operator@platform.local',
-        memberships: [{ tenantId: '*', role: 'operator', clubIds: [] }],
+        memberships: [
+          { tenantId: '*', role: 'operator', clubIds: [] },
+          { tenantId: tenant, role: 'admin', clubIds: [] },
+        ],
       });
+      navigate('/platform', { replace: true });
       return;
     }
     const ids = clubIds

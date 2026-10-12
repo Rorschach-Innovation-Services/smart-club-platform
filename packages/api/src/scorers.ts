@@ -4,7 +4,7 @@
  * The union's scorers, appointed per fixture (a scorer and a backup) on the officials item
  * beside the umpires (FIXOFFICIALS#, see keys.ts). Smart club only for now: medicoach has no
  * per-person fixture assignment (its scorers hold an institution-wide Scorer role), so this is
- * the union's roster of who scores which game. See docs/architecture/0017-match-week-office.md.
+ * the union's roster of who scores which game. See docs/architecture/0021-match-week-office.md.
  */
 import { HttpError } from './auth.js';
 import type { Scorer } from './types.js';

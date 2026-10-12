@@ -1,5 +1,5 @@
 /**
- * Leagues and tournaments created from Fixtures & Venues (ADR 0018) — request parsing and the
+ * Leagues and tournaments created from Fixtures & Venues (ADR 0022) — request parsing and the
  * read-side helpers the /competitions routes in index.ts use. The draw itself is the engine's
  * `planCompetition`; results are the medicoach FIXRESULT# items (ADR 0016).
  *

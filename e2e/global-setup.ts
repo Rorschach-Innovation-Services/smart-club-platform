@@ -1,4 +1,10 @@
+import { realpathSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { API_BASE, adminAuthHeader, apiHeaders } from './helpers';
+
+/** This checkout's root — the stack under test must have been started from it. */
+const REPO_ROOT = realpathSync.native(fileURLToPath(new URL('..', import.meta.url)));
 
 const WEB_BASE = 'http://localhost:3201';
 // Matches playwright.config.ts webServer.timeout — the API (dynalite + demo seed) is the slow part.
@@ -23,6 +29,7 @@ export default async function globalSetup(): Promise<void> {
 
   const probeUrl = `${API_BASE}/clubs/ukzn`;
   const status = await waitForApi(probeUrl, API_BOOT_TIMEOUT_MS);
+  await assertOwnStack();
   if (status !== 200) {
     throw new Error(
       `A web stack is running on ${WEB_BASE} but the API probe failed (GET ${probeUrl} → ${status}). ` +
@@ -60,4 +67,25 @@ async function isListening(url: string): Promise<boolean> {
 function isConnectionRefused(err: unknown): boolean {
   const cause = (err as { cause?: { code?: string } } | undefined)?.cause;
   return cause?.code === 'ECONNREFUSED';
+}
+
+/**
+ * The ports are fixed, so a stack another worktree (or another agent) started would be reused
+ * silently and the suite would test THAT code and write into ITS database. The local API
+ * answers `GET /__local/stack` with the checkout it runs from; anything else fails fast.
+ */
+async function assertOwnStack(): Promise<void> {
+  let root: string | undefined;
+  try {
+    const res = await fetch(`${API_BASE}/__local/stack`);
+    if (res.ok) root = ((await res.json()) as { root?: string }).root;
+  } catch {
+    /* reported below */
+  }
+  if (root && path.resolve(root) === REPO_ROOT) return; // both sides are realpath'd
+  throw new Error(
+    `The stack on :3201/:3333 was not started from this checkout (${REPO_ROOT}); it reports ` +
+      `${root ? `"${root}"` : 'no /__local/stack marker (an older or foreign build)'}. ` +
+      'Stop it (or wait for the other run to finish) and re-run, so the suite boots its own stack.',
+  );
 }

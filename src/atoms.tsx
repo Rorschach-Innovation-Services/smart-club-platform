@@ -372,6 +372,35 @@ export function EmptyState({ icon: I, title, sub, action }: EmptyStateProps) {
   );
 }
 
+// One-line notice for a `?clearance=<id>` notification deep link whose clearance is not in the
+// loaded list (resolved long ago, or the player was erased). Shared by the admin and club
+// clearances pages so a dead link says so instead of silently landing on the plain list.
+export function ClearanceLinkMissingNotice({ onDismiss }: { onDismiss: () => void }) {
+  return (
+    <div
+      role="status"
+      style={{
+        marginTop: 14,
+        padding: '8px 12px',
+        borderRadius: 8,
+        fontSize: 12.5,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 12,
+        background: 'var(--coral-pale)',
+        border: '1px solid var(--line)',
+        color: 'var(--ink)',
+      }}
+    >
+      <span>No clearance matches this link — it may have been removed.</span>
+      <Btn tone="ghost" size="sm" onClick={onDismiss}>
+        Dismiss
+      </Btn>
+    </div>
+  );
+}
+
 interface KPIProps {
   label?: ReactNode;
   num?: ReactNode;

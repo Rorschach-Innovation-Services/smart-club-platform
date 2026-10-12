@@ -22,6 +22,8 @@ venue-merge-backup-*.json
 venue-normalise-backup-*.json
 venue-clash-resolve-backup-*.json
 packages/api/*-backup-*.json
+# shift-fixture-dates --confirm snapshots (fixture state) — same rule, different name shape
+shift-fixture-dates-*.json
 
 # Prod data snapshots (chair name/email/cell, docMeta) written by
 # import-titans-compliance --confirm — never commit; also covers the
@@ -29,6 +31,7 @@ packages/api/*-backup-*.json
 # but lives alongside the backups and is equally not repo content.
 titans-import-backup-*.json
 titans-import-created-clubs.json
+titans-import-created-clubs.*.json
 
 # Prod data snapshots (chair/office-bearer name/email/cell) written by
 # import-titans-contacts --confirm — never commit. The revert manifest carries PII
@@ -42,6 +45,41 @@ titans-contacts-import-manifest.json
 tuskers-import-backup-*.json
 tuskers-import-created-clubs.json
 tuskers-import-created-clubs.*.json
+
+# import-lions-affiliation --confirm backups (club records incl. officer contacts — PII) and
+# its created-clubs revert manifests (legacy unsuffixed + stage-scoped .<stage>.json).
+lions-affiliation-backup-*.json
+lions-affiliation-created-clubs.json
+lions-affiliation-created-clubs.*.json
+
+# import-lions-fixtures --confirm / --revert --confirm series snapshots.
+lions-fixtures-backup-*.json
+
+# import-lions-compliance --confirm club snapshots and its created-clubs revert manifests
+# (legacy unsuffixed + stage-scoped .<stage>.json).
+lions-import-backup-*.json
+lions-import-created-clubs.json
+lions-import-created-clubs.*.json
+
+# import-lions-contacts --confirm club snapshots and its revert manifests (per-person
+# pre-image memberships — PII; legacy unsuffixed + stage-scoped .<stage>.json).
+lions-contacts-import-backup-*.json
+lions-contacts-import-manifest.json
+lions-contacts-import-manifest.*.json
+
+# send-dolphins-welcome-broadcast run manifests (dry-run + --confirm): every recipient's name,
+# email, cell and message ids — PII, never commit.
+dolphins-welcome-broadcast-*.json
+# …and its delivery reports (report-dolphins-welcome-broadcast.ts) — names, contacts, statuses.
+dolphins-welcome-broadcast-report-*.html
+dolphins-welcome-broadcast-report-*.pdf
+# send-emcu-scorer-broadcast run manifests + reports (names, contacts, statuses — never
+# credentials, but still PII).
+emcu-scorer-broadcast-*.json
+emcu-scorer-broadcast-report-*.html
+emcu-scorer-broadcast-report-*.pdf
+# MediCoach scorer credentials (passwords) — belongs outside both repos; belt and braces.
+emcu-scorer-credentials*.json
 
 # generated cohort exports (contain PII)
 cohort-export-*.xlsx

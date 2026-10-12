@@ -38,13 +38,21 @@ export const qk = {
   captainsReports: () => ['captains-reports', t()],
   captainsReportContactGaps: () => ['captains-report-contact-gaps', t()],
   medicoachSync: () => ['medicoach-sync', t()],
+  medicoachPlayerReviews: () => ['medicoach-sync', t(), 'player-reviews'],
   clubCaptainsReports: (clubId: string) => ['club-captains-reports', t(), clubId],
+  clubCaptainsReport: (id: string) => ['club-captains-report', t(), id],
+  // Every clubCaptainsReport entry, for invalidation; must match its first element.
+  clubCaptainsReportPrefix: () => ['club-captains-report'],
   // Global: the token names its own tenant.
   linkedCaptainsReport: (token: string) => ['captains-report-link', token],
   tenantConfig: () => ['tenant-config', t()],
   users: () => ['users', t()],
   players: (clubId: string) => ['players', t(), clubId],
+  // Prefix of every club's roster query — invalidates them all at once (tenant-wide erasure).
+  playersAll: () => ['players', t()],
   clearances: (clubId: string) => ['clearances', t(), clubId],
+  // Prefix of every club's clearance query.
+  clearancesAllClubs: () => ['clearances', t()],
   allClearances: () => ['clearances-all', t()],
   allRegistrationReviews: () => ['registration-reviews-all', t()],
   demographics: () => ['demographics', t()],
@@ -56,6 +64,19 @@ export const qk = {
   allVeteransRequests: () => ['veterans-requests-all', t()],
   // The finder search is keyed on the (debounced) query so each term caches independently.
   veteransCandidates: (clubId: string, q: string) => ['veterans-candidates', t(), clubId, q],
+  // Fixture postponements (ADR 0015): a club's inbound + outbound requests; the admin list;
+  // and the date picker's clash hints, keyed on the candidate move.
+  postponements: (clubId: string) => ['postponements', t(), clubId],
+  allPostponements: () => ['postponements-all', t()],
+  clashHints: (clubId: string, seriesId: string, fixtureId: string, date: string, time: string) => [
+    'clash-hints',
+    t(),
+    clubId,
+    seriesId,
+    fixtureId,
+    date,
+    time,
+  ],
   signupLink: () => ['signup-link', t()],
   // Operator portal keys are deliberately NOT tenant-scoped: /platform/* is
   // tenant-independent (the slug in the key names the MANAGED tenant, not the host's).
@@ -63,4 +84,13 @@ export const qk = {
   platformTenant: (slug: string) => ['platform-tenant', slug],
   platformTenantOverview: (slug: string) => ['platform-tenant-overview', slug],
   platformTenantReps: (slug: string) => ['platform-tenant-reps', slug],
+  platformMedicoachConnection: (slug: string) => ['platform-medicoach-connection', slug],
+  platformMedicoachOverview: () => ['platform-medicoach-overview'],
+  // Cross-tenant.
+  platformCaptainsReportScorecards: (days: number, status: string, tenant: string) => [
+    'platform-captains-report-scorecards',
+    days,
+    status,
+    tenant,
+  ],
 };

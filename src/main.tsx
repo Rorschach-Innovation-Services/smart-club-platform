@@ -104,6 +104,7 @@ import {
   ClubClearancesView,
   ClubVeteransSquadView,
 } from './club';
+import { AdminPostponements, postponementAttentionCount } from './club-postponements';
 import { Onboarding } from './onboarding';
 import { AdminUmpiresView, mergeErrorMessage } from './umpires';
 import { UmpireAppointmentsUpload } from './UmpireAppointmentsUpload';
@@ -112,7 +113,9 @@ import { ResyncDialog, isResyncRequired } from './ResyncDialog';
 import { CaptainsReportView, CaptainsReportLinkPage } from './CaptainsReport';
 import { AdminCaptainsReportsView } from './AdminCaptainsReports';
 import { AdminMedicoachSyncView } from './AdminMedicoachSync';
-import { useFeature, useModule, useSeasonLabel, useVertical } from './branding';
+import { erasureSummary } from './PlayerDetailModal';
+import { clearanceRemindToast } from './clearance-remind-copy';
+import { tenantQueryOptions, useFeature, useModule, useSeasonLabel, useVertical } from './branding';
 
 /** The admin cancelled the medicoach-resync confirmation: the request is simply not sent. */
 class ResyncCancelled extends Error {
@@ -363,7 +366,7 @@ function AppRoutes() {
   // certificate's own tenant. So neither the host's /tenant theme nor its 404 screen applies.
   const { pathname } = useLocation();
   // The captain's-report link page (/r/<token>) is tenant-independent the same way: the token
-  // names its tenant, and the page themes itself from the report's tenant.
+  // names its tenant, and the page themes itself from that tenant.
   const onVerify =
     pathname === '/verify' || pathname.startsWith('/verify/') || pathname.startsWith('/r/');
 
@@ -371,14 +374,9 @@ function AppRoutes() {
   // retry the tenant config: it carries the league/district catalogue the authed app
   // derives everything from, so a transient failure here (previously retry:0) would
   // otherwise leave `tenantConfig` undefined and silently zero the leagues/teams breakdown.
-  // A 404 is NOT transient (the slug names no tenant — common on the wildcard host for an
-  // unclaimed subdomain): don't retry it (also stops subdomain-scanning bots tripling the
-  // DynamoDB reads), and show the dedicated "unknown club" screen below.
-  const tenantQuery = useQuery({
-    queryKey: qk.tenant(),
-    queryFn: api.getTenant,
-    retry: (count, err) => !(err instanceof ApiError && err.status === 404) && count < 2,
-  });
+  // A 404 is NOT transient: tenantQueryOptions doesn't retry it, and we show the dedicated
+  // "unknown club" screen below.
+  const tenantQuery = useQuery(tenantQueryOptions());
   useEffect(() => {
     if (tenantQuery.data?.branding && !onVerify) applyTheme(tenantQuery.data.branding);
   }, [tenantQuery.data, onVerify]);
@@ -695,6 +693,22 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
     return withToast(
       () => api.patchSeries(seriesId, { ...rest, version: cur.version }),
       'Could not save fixtures',
+      { rawConflict: true },
+    ).then(() => invalidate(qk.series()));
+  }
+  // Knockout Set team / revert (ADR 0018): one server action on one fixture side, pinned to
+  // the cached version. Resolves once the series list has refetched, so the editor's next
+  // Save already carries the new side and version; rejects (after the toast) on a 409.
+  function setFixtureSide(seriesId, fixtureId, side, teamId) {
+    const cur = allSeries.find((s) => s.id === seriesId);
+    if (!cur) return Promise.reject(new Error('That series is no longer loaded — refresh.'));
+    return withToast(
+      () =>
+        api.patchSeries(seriesId, {
+          setSide: { fixtureId, side, teamId },
+          version: cur.version,
+        }),
+      teamId ? 'Could not set the team' : 'Could not revert to the placeholder',
       { rawConflict: true },
     ).then(() => invalidate(qk.series()));
   }
@@ -1083,6 +1097,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   setSupportContact,
                   saveOrgName,
                   updateSeries,
+                  setFixtureSide,
                   deleteSeries,
                   duplicateSeries,
                   setReleased,
@@ -1242,6 +1257,7 @@ function Shell({
   setSupportContact,
   saveOrgName,
   updateSeries,
+  setFixtureSide = undefined,
   deleteSeries,
   duplicateSeries,
   setReleased,
@@ -1318,7 +1334,7 @@ function Shell({
   // Override button reads "Issuing…". (approveClearance is the club-rep view — it
   // sets only busyClearanceId and needs no action kind.)
   const [busyClearanceAction, setBusyClearanceAction] = useStateApp<
-    'reject' | 'override' | 'reassign' | 'reopen' | 'revoke' | null
+    'reject' | 'override' | 'reassign' | 'reopen' | 'revoke' | 'remind' | null
   >(null);
   const [busyReviewId, setBusyReviewId] = useStateApp(null);
   // Which veterans request (id) is mid-action, and which action, so the admin table can label
@@ -1356,6 +1372,26 @@ function Shell({
     queryKey: qk.veteransRequests(clubId),
     queryFn: () => api.getVeteransRequests(clubId),
     enabled: role === 'club' && !!clubId && veteransOn,
+  });
+  // Fixture postponements (ADR 0015): the club's inbound + outbound requests (Fixtures inbox +
+  // nav badge) and the admin's tenant-wide list (nav badge; the view reads the same key).
+  const postponementsQuery = useQuery({
+    queryKey: qk.postponements(clubId),
+    queryFn: () => api.getPostponements(clubId),
+    enabled: role === 'club' && !!clubId,
+  });
+  // Medicoach sync (ADR 0016/0018): the nav badge counts what waits on an admin — held schedule
+  // changes, player reviews, players waiting for a team. Same query (and cache) as the page.
+  const medicoachStatusQuery = useQuery({
+    queryKey: qk.medicoachSync(),
+    queryFn: api.getMedicoachSyncStatus,
+    enabled: role === 'admin' && medicoachSyncOn,
+  });
+  const medicoachAttention = medicoachStatusQuery.data?.attention?.total ?? 0;
+  const allPostponementsQuery = useQuery({
+    queryKey: qk.allPostponements(),
+    queryFn: () => api.getAllPostponements(),
+    enabled: role === 'admin',
   });
   const allClearancesQuery = useQuery({
     queryKey: qk.allClearances(),
@@ -1825,8 +1861,8 @@ function Shell({
   }
   // ── Player roster + clearances (club role) ──
   // Players self-register via the shared Registration link (RegLinkModal → public RegisterPage),
-  // which captures the full Union field set + ID document — no in-portal chair form.
-  // Destination club initiates a clearance request for a player at another club.
+  // or the chair registers them from the Players page (single form, quick-add grid, spreadsheet
+  // upload — see club-register.tsx, which owns those calls). Destination club initiates a clearance request for a player at another club.
   // busyClearanceId === 'new' disables the request form's submit so a double-click
   // can't fire two POSTs (which would race the duplicate-pending guard).
   function requestClearance({ fromClubId, idNumber, note }) {
@@ -2089,7 +2125,9 @@ function Shell({
                 ? `${req.playerName}'s clearance rejected — their registration moved back to ${req.fromClubName}`
                 : outcome === 'stays-at-destination'
                   ? `${req.playerName}'s clearance rejected — ${req.fromClubName} is not on the system, so they stay at ${req.toClubName}`
-                  : `${req.playerName}'s clearance rejected`,
+                  : outcome === 'not-registered'
+                    ? `${req.playerName}'s clearance rejected — they are not registered at ${req.toClubName}`
+                    : `${req.playerName}'s clearance rejected`,
           );
           return 'ok';
         })
@@ -2103,6 +2141,30 @@ function Shell({
           setBusyClearanceAction(null);
         })
     );
+  }
+  // Admin nudges a pending clearance's source chair. At most once per clearance per day (shared
+  // with the daily reminders cron): the server's 409/422 copy is shown as-is.
+  function remindClearanceReq(req) {
+    setBusyClearanceId(req.id);
+    setBusyClearanceAction('remind');
+    return withToast(
+      () => api.remindClearance(req.id, req.fromClubId),
+      'Could not send the reminder',
+      // `invalidate` here is withToast's 409-only refetch list; the success path below refetches
+      // clubs itself (for the new comm-log rows) — the two never both run for one call.
+      { rawClientError: true, invalidate: [qk.allClearances(), qk.clubs()] },
+    )
+      .then((res) => {
+        invalidate(qk.clubs());
+        const { message, tone } = clearanceRemindToast(req.fromClubName, res?.results);
+        toastShow(message, tone);
+        return 'ok';
+      })
+      .catch(() => 'failed')
+      .finally(() => {
+        setBusyClearanceId(null);
+        setBusyClearanceAction(null);
+      });
   }
   // Admin reopens a rejected clearance (rejected → pending) — restores the pre-reject rows from
   // the snapshot the reject stored, and the source club gets to decide again. Reversible: a
@@ -2364,6 +2426,24 @@ function Shell({
       })
       .catch(() => {});
   }
+  // Union admin erases a person from EVERY club in the organisation (POPIA). Rows at any club,
+  // clearances, reviews and veterans requests may all have changed, so refetch every roster, the
+  // club list (playerCount), demographics and every clearance/review/request list. Resolves on
+  // success (the modal closes); rejects after withToast has toasted the failure (it stays open).
+  function erasePlayerEverywhere(naturalKey, playerName) {
+    return withToast(() => api.adminErasePlayer(naturalKey), 'Could not erase player').then(
+      (res) => {
+        invalidate(qk.playersAll());
+        invalidate(qk.clubs());
+        invalidate(qk.demographics());
+        invalidate(qk.allClearances());
+        invalidate(qk.clearancesAllClubs());
+        invalidate(qk.allRegistrationReviews());
+        invalidate(qk.allVeteransRequests());
+        toastShow(`${playerName} erased — ${erasureSummary(res?.counts)}`);
+      },
+    );
+  }
   // Mint (or replace) the tenant-wide club signup link. The server revokes any
   // prior token in the same call, so the old link dies the moment this resolves.
   function generateSignupLink() {
@@ -2422,6 +2502,12 @@ function Shell({
   // Registration-review badge: admin sees every open review (off-system alerts) cohort-wide.
   const adminOpenReviews = allReviews.filter((r) => r.status === 'open').length;
   const adminPendingVetRequests = allVeteransRequests.filter((r) => r.status === 'pending').length;
+  // Postponements: the admin badge counts open negotiations; the club badge counts requests
+  // awaiting this club's answer plus union rulings it hasn't acknowledged.
+  const adminOpenPostponements = (allPostponementsQuery.data ?? []).filter(
+    (r) => r.status === 'open',
+  ).length;
+  const myPostponementAttention = postponementAttentionCount(postponementsQuery.data, clubId);
 
   // Nav items are listed in their natural journey order here, then sorted alphabetically
   // by label for display (see the `.sort` below) — same for clubNav.
@@ -2463,6 +2549,13 @@ function Shell({
     { v: 'leagues', label: 'Leagues', icon: Icon.Shield, num: allLeagues.length },
     { v: 'insights', label: 'Insights', icon: Icon.Chart },
     { v: 'fixtures', label: 'Fixtures & Venues', icon: Icon.Field, dot: 'teal' },
+    {
+      v: 'postponements',
+      label: 'Postponements',
+      icon: Icon.Clock,
+      num: adminOpenPostponements || undefined,
+      dot: adminOpenPostponements ? 'gold' : 'teal',
+    },
     // Umpires and captain's reports are cricket modules (the union's umpire panel).
     ...(vertical.sport === 'cricket'
       ? [
@@ -2509,7 +2602,17 @@ function Shell({
           },
         ]
       : []),
-    ...(medicoachSyncOn ? [{ v: 'medicoach_sync', label: 'Medicoach sync', icon: Icon.Live }] : []),
+    ...(medicoachSyncOn
+      ? [
+          {
+            v: 'medicoach_sync',
+            label: 'Medicoach sync',
+            icon: Icon.Live,
+            num: medicoachAttention || undefined,
+            dot: medicoachAttention ? 'gold' : 'teal',
+          },
+        ]
+      : []),
     { v: 'team', label: 'Team & Access', icon: Icon.Users, num: users.length || undefined },
   ].sort((a, b) => a.label.localeCompare(b.label));
 
@@ -2592,8 +2695,15 @@ function Shell({
             v: 'fixtures',
             label: 'Fixtures',
             icon: Icon.Field,
-            dot: hasReleased ? 'teal' : affiliationSubmitted(activeClub) ? 'gold' : 'muted',
-            num: hasReleased ? 'NEW' : undefined,
+            // A postponement awaiting this club's answer outranks the "NEW" release badge.
+            dot: myPostponementAttention
+              ? 'gold'
+              : hasReleased
+                ? 'teal'
+                : affiliationSubmitted(activeClub)
+                  ? 'gold'
+                  : 'muted',
+            num: myPostponementAttention || (hasReleased ? 'NEW' : undefined),
           },
           // Post-match umpire ratings (the union's Captain's Report on Umpires).
           ...(vertical.sport === 'cricket'
@@ -2794,7 +2904,14 @@ function Shell({
           />
         );
       if (view === 'players')
-        return <AdminPlayersView clubs={clubs} leagues={allLeagues} toast={toastShow} />;
+        return (
+          <AdminPlayersView
+            clubs={clubs}
+            leagues={allLeagues}
+            toast={toastShow}
+            onErasePlayer={erasePlayerEverywhere}
+          />
+        );
       if (view === 'fixtures')
         return (
           <AdminFixtures
@@ -2813,6 +2930,7 @@ function Shell({
             // effect, and an inline lambda here would re-fire that request on every App
             // re-render (toast, refetch) with an unchanged draft.
             onCheckClashes={api.checkSeriesClashes}
+            onSetSide={setFixtureSide}
             toast={toastShow}
             allCalendars={allCalendars}
             allSeasonRuns={allSeasonRuns}
@@ -2840,7 +2958,9 @@ function Shell({
             onCreateUmpire={(displayName) => createUmpire({ displayName })}
             scorers={allScorers}
             onSaveScorers={saveScorers}
-            onCreateScorer={(displayName) => createScorer({ displayName })}
+            onCreateScorer={(displayName: string, contacts?: { phone?: string; email?: string }) =>
+              createScorer({ displayName, ...contacts })
+            }
             onConfirmResult={confirmResult}
             onUnconfirmResult={unconfirmResult}
           />
@@ -2910,10 +3030,13 @@ function Shell({
             onReject={rejectClearanceReq}
             onReassign={reassignClearanceReq}
             onReopen={reopenClearanceReq}
+            onRemind={remindClearanceReq}
             onRevokeCertificate={revokeClearanceCertificateReq}
             onCertificateViewed={() => invalidate(qk.allClearances())}
+            transferWindowStatus={tenantConfig?.transferWindowStatus}
             busyId={busyClearanceId}
             busyAction={busyClearanceAction}
+            clearancesLoaded={allClearancesQuery.isSuccess}
           />
         );
       if (view === 'reg_reviews')
@@ -2935,6 +3058,8 @@ function Shell({
             busyAction={busyVetReqAction}
           />
         );
+      if (view === 'postponements')
+        return <AdminPostponements allSeries={allSeries} clubs={clubs} toast={toastShow} />;
       if (view === 'team')
         return (
           <AdminTeamAccessView
@@ -2978,6 +3103,7 @@ function Shell({
             requiredDocs={requiredDocs}
             onRenameClub={(name) => updateClub({ name })}
             onSaveExco={saveExco}
+            onSetRemindersOptIn={(remindersOptIn) => updateClub({ remindersOptIn })}
           />
         );
       if (view === 'cqi')
@@ -3009,6 +3135,7 @@ function Shell({
             toast={toastShow}
             onSendFixtures={sendFixtures}
             travel={travel}
+            postponements={postponementsQuery.data}
           />
         );
       }
@@ -3026,6 +3153,7 @@ function Shell({
             onAcceptVeteransRequest={acceptVeteransRequest}
             onDeclineVeteransRequest={declineVeteransRequest}
             busyVeteransId={busyVeteransId}
+            districts={allDistricts}
           />
         );
       }
@@ -3065,6 +3193,7 @@ function Shell({
             onOpenRequest={() => setShowRequestPlayer(true)}
             busyId={busyClearanceId}
             onCertificateViewed={() => invalidate(qk.clearances(clubId))}
+            clearancesLoaded={clearancesQuery.isSuccess}
           />
         );
       }
@@ -3314,7 +3443,8 @@ function Shell({
             setShowOnboarding(false);
             toastShow('Welcome, ' + activeClub.chair.split(' ')[0] + " · let's get started");
             // Persist just the reminders opt-in (a non-affiliation field, so it's never
-            // locked). No scheduled reminders yet — this only stops dropping the choice.
+            // locked). The FixtureReminders cron reads it (only an explicit false opts out);
+            // the club-home toggle edits it afterwards.
             // Best-effort: a stale-version 409 here just means the flag didn't persist, so
             // log it (don't swallow) rather than surfacing an error toast over the welcome.
             if (contact && !!contact.notify !== !!activeClub.remindersOptIn) {

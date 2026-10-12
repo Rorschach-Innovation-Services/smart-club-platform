@@ -87,6 +87,26 @@ export function avgRating(u: Pick<ReportUmpireEntry, 'ratings'>): number | null 
 export const umpireEntryComplete = (u: ReportUmpireEntry): boolean =>
   !!u.name.trim() && RATING_CRITERIA.every((c) => typeof u.ratings?.[c.key] === 'number');
 
+/** A card the captain never touched: no umpire, no substitute pick, no ratings or notes. */
+export const umpireEntryUntouched = (u: ReportUmpireEntry): boolean =>
+  !u.name?.trim() &&
+  !u.umpireId &&
+  !u.substitute &&
+  !RATING_CRITERIA.some((c) => typeof u.ratings?.[c.key] === 'number') &&
+  !Object.values(u.concerns ?? {}).some(Boolean) &&
+  !u.otherConcern?.trim() &&
+  !u.comments?.trim();
+
+/**
+ * The cards a report actually rates: card 1 always; an optional card 2 only once the captain
+ * has touched it. A completely untouched trailing card 2 is left out (so it never blocks
+ * Submit); a half-filled one stays in and is validated in full.
+ */
+export function keptUmpireEntries(cards: ReportUmpireEntry[]): ReportUmpireEntry[] {
+  if (cards.length === 2 && umpireEntryUntouched(cards[1])) return cards.slice(0, 1);
+  return cards;
+}
+
 /** Any criterion rated `LOW_RATING` or below. */
 export const hasLowRating = (u: Pick<ReportUmpireEntry, 'ratings'>): boolean =>
   RATING_CRITERIA.some((c) => {
@@ -165,14 +185,28 @@ export function pickSubstitute(
   });
 }
 
+/** The captain's answer on the match scorecard (only asked when a scorecard is attached). */
+export interface ReportScorecardAnswer {
+  action: 'confirmed' | 'correction';
+  /** What needs correcting — required (non-blank) for a correction. */
+  feedback?: string;
+}
+
+export const SCORECARD_ANSWER_PROBLEM = 'Confirm the scorecard or request a correction.';
+export const SCORECARD_FEEDBACK_PROBLEM = 'Tell us what needs correcting.';
+
 /**
  * Problems with a report as submitted, as user-facing sentences (empty ⇒ valid). The same
  * rule set runs in the browser (to enable Submit) and on the server (to accept it).
+ * `scorecardRequired`: an available scorecard is attached, so the scorecard must be answered.
+ * A correction always needs its text, required or not.
  */
 export function submissionProblems(input: {
   captainName?: string;
   umpires?: ReportUmpireEntry[];
   declaration?: boolean;
+  scorecard?: ReportScorecardAnswer | null;
+  scorecardRequired?: boolean;
 }): string[] {
   const problems: string[] = [];
   if (!input.captainName?.trim()) problems.push("Enter the captain's name.");
@@ -189,6 +223,10 @@ export function submissionProblems(input: {
   });
   const ids = umpires.map((u) => u.umpireId).filter(Boolean);
   if (new Set(ids).size !== ids.length) problems.push('The same umpire is rated twice.');
+  const sc = input.scorecard;
+  if (input.scorecardRequired && !sc) problems.push(SCORECARD_ANSWER_PROBLEM);
+  if (sc?.action === 'correction' && !sc.feedback?.trim())
+    problems.push(SCORECARD_FEEDBACK_PROBLEM);
   if (!input.declaration) problems.push('Confirm the declaration.');
   return problems;
 }

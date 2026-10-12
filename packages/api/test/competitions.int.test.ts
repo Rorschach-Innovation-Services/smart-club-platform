@@ -1,5 +1,5 @@
 /**
- * Leagues & tournaments (ADR 0018) — /competitions end to end against the REAL Hono app on
+ * Leagues & tournaments (ADR 0022) — /competitions end to end against the REAL Hono app on
  * in-process dynalite: server-generated draws (preview = create), drafts through the normal
  * series path, league tables from medicoach results, the knockout filled from the group
  * tables, rename/points, regenerate and delete — with the refusals first-class:
@@ -379,5 +379,96 @@ describe('regenerate a draft', () => {
     );
     assert.equal(await repo.getFixtureOfficials(T, c.id, 'f1'), null);
     assert.equal((await call('POST', '/competitions/c-nope/regenerate', spec())).status, 404);
+  });
+});
+
+describe('advance onto a stacked finals ground (ADR 0022 §7, clash-gate asymmetry)', () => {
+  // ADR 0022: advance fills a knockout side the way the medicoach puller does, so a slot fill
+  // is judged like the puller's (which writes without the in-season gate): resolving a
+  // placeholder on an unchanged date/time/ground never counts as an INTRODUCED clash. A
+  // finals day the union stacked on one ground must not block advance; manual Set team and
+  // any date/time/venue edit stay gated.
+  test('a released knockout advances even when the semi lands on an already-booked ground', async () => {
+    const c = await json<{ id: string }>(
+      await call(
+        'POST',
+        '/competitions',
+        spec({
+          type: 'tournament',
+          name: 'Stack Cup',
+          teams: [1, 2, 3, 4, 5, 6, 7, 8].map(team),
+          format: { kind: 'groups-knockout', groups: 2, qualifiers: 2, legs: 1 },
+          schedule: { startDate: '2027-03-06', everyDays: 7, times: ['10:00'] },
+        }),
+      ),
+    );
+    for (const g of ['g1', 'g2']) {
+      const s = (await repo.getSeries(T, `${c.id}-${g}`)) as unknown as S;
+      for (const f of s.fixtures)
+        await repo.putFixtureResultIfNewer(
+          T,
+          result(s.id as string, f.id, '2027-04-20T15:00:00.000Z', {
+            homeScore: '150/5 (20)',
+            awayScore: '140/8 (20)',
+            winner: 'home',
+          }),
+        );
+    }
+    // Release the knockout in place (its placeholders resolve to no ground: no clash yet).
+    const ko = (await repo.getSeries(T, `${c.id}-ko`)) as unknown as S;
+    await repo.updateSeries(
+      T,
+      ko.id as string,
+      {
+        released: true,
+        approved: true,
+        releasedAt: '2027-03-01T00:00:00.000Z',
+        version: ko.version,
+      } as never,
+    );
+    // Another released series already books EVERY club ground at the semis' slot.
+    const sf = ko.fixtures[0];
+    await repo.putSeries(T, {
+      id: 's-stack',
+      name: 'Stacked finals day',
+      leagueKey: 'other',
+      startDate: sf.date,
+      teams: [],
+      fixtures: [1, 2, 3, 4, 5, 6, 7, 8].map((i) => ({
+        id: `f${i}`,
+        round: 1,
+        date: sf.date,
+        time: sf.time,
+        home: `x${i}`,
+        away: `y${i}`,
+        venueName: `Ground ${i}`,
+      })),
+      kind: 'series',
+      approved: true,
+      released: true,
+      releasedAt: '2027-03-01T00:00:00.000Z',
+      version: 1,
+    } as unknown as Series);
+    try {
+      const res = await call('POST', `/competitions/${c.id}/advance`, {});
+      assert.equal(res.status, 200, await res.clone().text());
+      assert.equal((await json<{ filled: number }>(res)).filled, 4);
+      const after = (await repo.getSeries(T, `${c.id}-ko`)) as unknown as S;
+      assert.ok(!/^pos:/.test(after.fixtures[0].home), 'the semi is filled');
+
+      // A schedule change on the same write path is still gated: moving the final onto a
+      // booked ground at the stacked slot is refused.
+      const fin = after.fixtures[2];
+      const moved = await call('PATCH', `/series/${c.id}-ko`, {
+        fixtures: after.fixtures.map((f) =>
+          f.id === fin.id ? { ...f, date: sf.date, time: sf.time, venueName: 'Ground 1' } : f,
+        ),
+        version: after.version,
+      });
+      assert.equal(moved.status, 409);
+      assert.equal((await json<{ code: string }>(moved)).code, 'venue_clash');
+    } finally {
+      await repo.deleteSeries(T, 's-stack');
+    }
   });
 });

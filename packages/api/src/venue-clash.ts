@@ -12,6 +12,7 @@
  */
 import type { Club, Series, TenantConfig, Venue } from './types.js';
 import { DEFAULT_VENUE_ALIASES } from '../../engine/src/venue-aliases.js';
+import { isSlotRef, tbdLabel } from '../../engine/src/formats.js';
 
 /** Lowercase, strip punctuation, drop generic suffix/roster words. Keeps
  * distinguishing words ("sporting", "united") — Chatsworth Sporting must not collide
@@ -195,7 +196,8 @@ function resolveSide(
   if (!ref) return undefined;
   const p = s.participants?.find((x) => x.teamId === ref);
   if (p) return p.name;
-  return clubsById.get(ref)?.name ?? ref;
+  // A `tbd:` placeholder's id is URI-encoded; show its words.
+  return clubsById.get(ref)?.name ?? tbdLabel(ref) ?? ref;
 }
 
 /**
@@ -319,6 +321,38 @@ export function findReleaseClashes(
   aliases: Record<string, string> = DEFAULT_VENUE_ALIASES,
 ): string[] {
   return findClashes(subject, allSeries, clubs, venues, aliases).map(formatClash);
+}
+
+/**
+ * The in-season gate's baseline for a knockout slot fill (ADR 0022 §7): `current` with every
+ * side that `subject` fills from a placeholder — `current[side]` a slot ref, `subject.slots[side]`
+ * that same ref, and the fixture's date, time and venue fields unchanged — replaced by the
+ * filled team. Judged against this baseline, a fill (knockout advance) introduces no clash,
+ * exactly like the medicoach puller's fills, which bypass the gate; a moved date/time/ground
+ * or a side written without its placeholder in `slots` is still judged in full.
+ */
+export function withSlotFillsResolved(current: Series, subject: Series): Series {
+  type F = StoredFixture & { venueId?: string; slots?: { home?: string; away?: string } };
+  const next = new Map<string, F>();
+  for (const f of (subject.fixtures as F[]) ?? []) if (f?.id) next.set(f.id, f);
+  let changed = false;
+  const fixtures = ((current.fixtures as F[]) ?? []).map((f) => {
+    const n = f?.id ? next.get(f.id) : undefined;
+    if (!n) return f;
+    const same = (['date', 'time', 'venueId', 'venueName', 'venueOverride'] as const).every(
+      (k) => (f[k] ?? '') === (n[k] ?? ''),
+    );
+    if (!same) return f;
+    let out: F = f;
+    for (const side of ['home', 'away'] as const) {
+      const v = f[side];
+      if (!v || !isSlotRef(v) || n.slots?.[side] !== v || !n[side] || isSlotRef(n[side]!)) continue;
+      out = { ...out, [side]: n[side] };
+    }
+    if (out !== f) changed = true;
+    return out;
+  });
+  return changed ? ({ ...current, fixtures } as Series) : current;
 }
 
 /**

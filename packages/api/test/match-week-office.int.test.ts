@@ -1,5 +1,5 @@
 /**
- * Match-week office (ADR 0017): scorers, result confirmations, ground time/balls, and the
+ * Match-week office (ADR 0021): scorers, result confirmations, ground time/balls, and the
  * guard on removing fixtures medicoach already holds — end to end against the REAL Hono app
  * and the REAL sync puller on in-process dynalite, with the FAILURE MODES first-class:
  *

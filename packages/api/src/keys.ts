@@ -17,6 +17,7 @@ export type EntityType =
   | 'REGREVIEW'
   | 'VETAFFIL'
   | 'VETREQ'
+  | 'POSTPONE'
   | 'UMPIRE'
   | 'SCORER';
 
@@ -59,6 +60,24 @@ export const exportLogKey = (tenant: string, iso: string, id: string) => ({
 export const exportLogsListKey = (tenant: string) => ({
   pk: tenantPrefix(tenant),
   skPrefix: 'EXPORT#',
+});
+
+/**
+ * Player-erasure audit item (admin `DELETE /admin/players/:nk`). Same layout and rationale as
+ * the EXPORT# items: pk `TENANT#<t>`, a fresh `PLAYERERASE#<iso>#<id>` sk per erasure. It
+ * carries NO player PII (actor + per-category counts only — never the name, natural key or
+ * contact), and sits ABOVE the `tenantErasurePrefix` sweep, so tenant erasure enumerates it
+ * explicitly (see listPlayerEraseLogKeys).
+ */
+export const playerEraseLogKey = (tenant: string, iso: string, id: string) => ({
+  pk: tenantPrefix(tenant),
+  sk: `PLAYERERASE#${iso}#${id}`,
+});
+
+/** pk + sk-prefix to query a tenant's player-erasure audit rows (and to enumerate for erasure). */
+export const playerEraseLogsListKey = (tenant: string) => ({
+  pk: tenantPrefix(tenant),
+  skPrefix: 'PLAYERERASE#',
 });
 
 /** A single club. */
@@ -194,6 +213,29 @@ export const fixtureOfficialsListKey = (tenant: string) => ({
   skPrefix: 'FIXOFFICIALS#',
 });
 
+/**
+ * The appointment-notice ledger: one row per (fixture, role, official), in the officials
+ * partition under a `NOTIFY#officials#` prefix (every FIXOFFICIALS read uses
+ * `begins_with(sk,'FIXOFFICIALS#')`, so these never surface as appointments). The two
+ * appointment routes enqueue rows; the OfficialNotices cron drains them.
+ */
+export const officialsNotifyKey = (
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+  role: string,
+  umpireId: string,
+) => ({
+  pk: `${tenantPrefix(tenant)}#OFFICIALS`,
+  sk: `NOTIFY#officials#${seriesId}#${fixtureId}#${role}#${umpireId}`,
+});
+
+/** pk + sk-prefix to query a tenant's officials-notice ledger (optionally one series'). */
+export const officialsNotifyListKey = (tenant: string, seriesId?: string) => ({
+  pk: `${tenantPrefix(tenant)}#OFFICIALS`,
+  skPrefix: seriesId ? `NOTIFY#officials#${seriesId}#` : 'NOTIFY#officials#',
+});
+
 /** A player registration, partitioned under its club; naturalKey gives dedup. */
 export const playerKey = (tenant: string, clubId: string, naturalKey: string) => ({
   pk: `${tenantPrefix(tenant)}#CLUB#${clubId}`,
@@ -270,6 +312,48 @@ export const veteransRequestGsi1 = (tenant: string, requestedAt: string) => ({
 
 /** gsi1pk used to query every veterans request in a tenant (admin console). */
 export const veteransRequestsListGsi1pk = (tenant: string) => `${tenantPrefix(tenant)}#TYPE#VETREQ`;
+
+/**
+ * A fixture POSTPONEMENT request (ADR 0015). Stored as two items, mirroring the veterans-request
+ * layout:
+ *  - CANONICAL, under the OPPOSING club (the one asked to agree): carries the gsi1 entry
+ *    (admin-wide listing).
+ *  - MIRROR, under the REQUESTING club (`OUTBOUND_POSTPONE#`): NO gsi1, so the admin lists each
+ *    request once.
+ * Every transition rewrites BOTH rows in one transaction conditioned on the canonical, so the
+ * requesting club's view never goes stale. Neither row has a META listing, so tenant/cohort/club
+ * erasure enumerates both prefixes.
+ */
+export const postponementKey = (tenant: string, opposingClubId: string, id: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${opposingClubId}`,
+  sk: `POSTPONE#${id}`,
+});
+
+export const outboundPostponementKey = (tenant: string, requestingClubId: string, id: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${requestingClubId}`,
+  sk: `OUTBOUND_POSTPONE#${id}`,
+});
+
+/** pk + sk-prefix to query the postponement requests a club was asked to agree (it is opposing). */
+export const postponementsListKey = (tenant: string, opposingClubId: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${opposingClubId}`,
+  skPrefix: 'POSTPONE#',
+});
+
+/** pk + sk-prefix to query the postponement requests a club opened (it is requesting). */
+export const outboundPostponementsListKey = (tenant: string, requestingClubId: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${requestingClubId}`,
+  skPrefix: 'OUTBOUND_POSTPONE#',
+});
+
+/** gsi1 attributes that make the canonical postponement request listable tenant-wide (admin). */
+export const postponementGsi1 = (tenant: string, requestedAt: string) => ({
+  gsi1pk: `${tenantPrefix(tenant)}#TYPE#POSTPONE`,
+  gsi1sk: requestedAt,
+});
+
+/** gsi1pk used to query every postponement request in a tenant (admin console). */
+export const postponementsListGsi1pk = (tenant: string) => `${tenantPrefix(tenant)}#TYPE#POSTPONE`;
 
 /**
  * Player clearance (inter-club transfer). Stored as two items:
@@ -439,6 +523,22 @@ export const resultConfirmationsListKey = (tenant: string) => ({
   skPrefix: 'RESULTCONF#',
 });
 
+/**
+ * A medicoach SCORECARD for one fixture (FIXSCORECARD#), next to its FIXRESULT#. Its own
+ * partition so the sweep lists a tenant's scorecards with one Query. Holds player names
+ * (personal data): erased explicitly with the tenant / cohort / series.
+ */
+export const fixtureScorecardKey = (tenant: string, seriesId: string, fixtureId: string) => ({
+  pk: `${tenantPrefix(tenant)}#FIXSCORECARD`,
+  sk: `FIXSCORECARD#${seriesId}#${fixtureId}`,
+});
+
+/** pk + sk-prefix to query every scorecard in a tenant. */
+export const fixtureScorecardsListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#FIXSCORECARD`,
+  skPrefix: 'FIXSCORECARD#',
+});
+
 /** The medicoach sync puller's cursor (the last `nextCursor` it fully processed). */
 export const syncCursorKey = (tenant: string) => ({
   pk: `${tenantPrefix(tenant)}#SYNC`,
@@ -464,6 +564,37 @@ export const syncLogKey = (tenant: string, iso: string, id: string) => ({
 export const syncLogsListKey = (tenant: string) => ({
   pk: `${tenantPrefix(tenant)}#SYNC`,
   skPrefix: 'SYNCLOG#',
+});
+
+/**
+ * Fixtures awaiting a medicoach carry (Connection Console, ADR 0020): one row per series
+ * holding the fixture refs medicoach does not have. Written by the write path (new fixtures,
+ * `unmapped` push answers) and replaced by the reconciliation against medicoach's check-refs.
+ */
+export const mcAwaitKey = (tenant: string, seriesId: string) => ({
+  pk: tenantPrefix(tenant),
+  sk: `MCAWAIT#${seriesId}`,
+});
+
+export const mcAwaitListKey = (tenant: string) => ({
+  pk: tenantPrefix(tenant),
+  skPrefix: 'MCAWAIT#',
+});
+
+/** The tenant's last awaiting-carry reconciliation against medicoach (when, reachable, totals). */
+export const mcReconKey = (tenant: string) => ({
+  pk: tenantPrefix(tenant),
+  sk: 'MCRECON#',
+});
+
+/**
+ * The per-tenant lease that serialises reconciliations (cron vs the console's "Check now"):
+ * `{token, acquiredAt, expiresAt}`, taken by conditional put, released by a delete conditioned
+ * on the holder's random `token`. `expiresAt` (epoch seconds) is also the table TTL attribute.
+ */
+export const mcReconLockKey = (tenant: string) => ({
+  pk: tenantPrefix(tenant),
+  sk: 'MCRECONLOCK#',
 });
 
 /** pk of the whole SYNC partition (cursor, logs, conflicts, outbox, report markers), for
@@ -497,6 +628,66 @@ export const pendingSyncKey = (tenant: string, ref: string) => ({
 export const pendingSyncListKey = (tenant: string) => ({
   pk: `${tenantPrefix(tenant)}#SYNC`,
   skPrefix: 'PENDINGSYNC#',
+});
+
+/**
+ * The PLAYER outbox (ADR 0019): one row per natural key (one person, tenant-wide) saying "this
+ * player changed since `changedAt`". The row holds the key + timing only — the payload is
+ * rebuilt from live data at flush — except an `erase` tombstone, whose source rows are gone.
+ */
+export const pendingPlayerSyncKey = (tenant: string, naturalKey: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `PENDINGPLAYERSYNC#${naturalKey}`,
+});
+
+export const pendingPlayerSyncListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  skPrefix: 'PENDINGPLAYERSYNC#',
+});
+
+/**
+ * A player push held for admin review (ADR 0019): medicoach answered `needs-review`, or the
+ * flush found another smart-club person with the same name + dob. Holds medicoach candidates'
+ * personal data, so it self-expires (`expiresAt`) and is deleted by resolve and by erasure.
+ */
+export const playerReviewKey = (tenant: string, naturalKey: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `PLAYERREVIEW#${naturalKey}`,
+});
+
+export const playerReviewsListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  skPrefix: 'PLAYERREVIEW#',
+});
+
+/**
+ * An admin's "these are different people" answer to a possible-duplicate review: the two
+ * natural keys in sorted order. The flush-time guard never flags that pair again.
+ */
+export const playerDistinctKey = (tenant: string, a: string, b: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `PLAYERDISTINCT#${a < b ? `${a}#${b}` : `${b}#${a}`}`,
+});
+
+export const playerDistinctListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  skPrefix: 'PLAYERDISTINCT#',
+});
+
+/**
+ * A person the player sync must never send to medicoach (ADR 0019) — e.g. they deleted their
+ * Match Centre account, a data-subject request the sync must not undo. Per natural key, so it
+ * covers every club registration; their club registration in smart club is untouched. Erasure
+ * deletes it (it names the person).
+ */
+export const playerSyncOptOutKey = (tenant: string, naturalKey: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `PLAYERSYNCOPTOUT#${naturalKey}`,
+});
+
+export const playerSyncOptOutListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  skPrefix: 'PLAYERSYNCOPTOUT#',
 });
 
 /**
@@ -561,6 +752,20 @@ export const captainsReportNotifyKey = (tenant: string, reportId: string, audien
 export const whatsappMessageKey = (wamid: string) => ({
   pk: `WAMSG#${wamid}`,
   sk: 'WAMSG',
+});
+
+/**
+ * One-off broadcast delivery records (send-dolphins-welcome-broadcast.ts): one partition per run
+ * (`<tenant>#BCAST#<runId>`), one `WA#<wamid>` row per WhatsApp message sent, updated by the
+ * status webhook via a `WAMSG#<wamid>` lookup of kind 'broadcast'. Tenant-prefixed, so tenant
+ * erasure removes them; they also self-expire (`expiresAt`).
+ */
+export const broadcastPartitionPk = (tenant: string, runId: string) =>
+  `${tenantPrefix(tenant)}#BCAST#${runId}`;
+
+export const broadcastDeliveryKey = (tenant: string, runId: string, wamid: string) => ({
+  pk: broadcastPartitionPk(tenant, runId),
+  sk: `WA#${wamid}`,
 });
 
 /** Prefix used to erase an entire tenant's non-user items. */

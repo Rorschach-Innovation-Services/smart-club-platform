@@ -60,7 +60,7 @@ describe('resolveVertical', () => {
         ['chair', 'Principal', true],
         ['sec', 'Director of Sport', true],
         ['tre', 'Director of Football', true],
-        ['vc', 'Director of Academics', false],
+        ['vc', 'Director of Academics', true],
       ],
     );
     assert.equal(v.playerProfile, 'positions');

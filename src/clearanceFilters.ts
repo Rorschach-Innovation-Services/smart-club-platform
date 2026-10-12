@@ -34,3 +34,25 @@ export function filterClearances<T extends PlayerClearance>(
     return hay.includes(needle);
   });
 }
+
+/**
+ * The clearance id a notification deep link points at (`?clearance=<id>`), or null when the
+ * URL carries none. Clearance emails link the admin to `/admin/clearances?clearance=<id>` and
+ * each chair to `/club/<clubId>/clearances?clearance=<id>`; both pages read it on mount.
+ */
+export function readClearanceLinkId(search: string): string | null {
+  const id = new URLSearchParams(search).get('clearance')?.trim();
+  return id || null;
+}
+
+/**
+ * Whether a deep-linked clearance id is missing from the loaded list — the "resolved long ago
+ * or erased" case the pages surface as a one-line notice instead of a silent no-op. False when
+ * there is no link id, so callers can gate the notice on this alone.
+ */
+export function clearanceLinkMissing(
+  linkId: string | null,
+  list: ReadonlyArray<{ id: string }>,
+): boolean {
+  return !!linkId && !list.some((r) => r.id === linkId);
+}

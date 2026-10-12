@@ -14,8 +14,8 @@ import * as Sentry from '@sentry/aws-serverless';
 
 /**
  * A captain's-report link token is a bearer capability (ADR 0016): it must never reach Sentry.
- * Replaces the token in `/captains-report-link/<token>` and `/r/<token>` paths with
- * `[token]`. Exported for tests.
+ * Replaces the token in `/captains-report-link/<token>` and `/r/<token>` paths with `[token]`.
+ * Exported for tests.
  */
 export function scrubReportTokens(value: string): string {
   return value.replace(/(\/(?:captains-report-link|r)\/)[^/?#\s"']+/g, '$1[token]');

@@ -239,6 +239,9 @@ async function resetTable() {
 before(async () => {
   ddb = await startDynalite(DDB_PORT, TABLE);
   app = (await import('../src/index.js')).app;
+  // Dates here follow the real clock: hold the 18:00 SAST notice window open (the gate has
+  // its own tests in captains-report-1800-gate.int.test.ts).
+  (await import('../src/captains-reports.js')).setReportNoticeWindowOverride(() => true);
   repo = await import('../src/repo.js');
   puller = await import('../src/medicoach-sync/puller.js');
   contract = await import('../src/medicoach-sync-contract.js');
@@ -478,6 +481,81 @@ describe('medicoach sync puller', () => {
       'smartclub:dolphins:fixture:recipe:premier:t20:sf1',
       'smartclub:dolphins:fixture:s-planb-veterans-premier-t20-1:f2',
     ]);
+  });
+
+  test('a manual Set team owns its side (slotsManual): never filled; filled again after revert', async () => {
+    // ADR 0022 §7. The admin set the home side by hand before medicoach resolved it.
+    const KO = 's-mc-ko-premier-t20';
+    const HOME_SLOT = 'pos:s-planb-premier-men-t20-1:1';
+    const stored = (await repo.getSeries('dolphins', KO))!;
+    const f = (stored.fixtures as Array<Record<string, unknown>>)[0];
+    await repo.updateSeries('dolphins', KO, {
+      fixtures: [
+        { ...f, home: 'umzinto', slots: { home: HOME_SLOT }, slotsManual: { home: true } },
+      ],
+      version: stored.version,
+    });
+    pages = [example('changes-knockout-reschedule')];
+    let summary = await run({ onScheduleDiffers: puller.recordScheduleDiffers });
+    assert.equal(summary.counts.slotsFilled, 1, 'only the away side');
+    let f1 = (await repo.getSeries('dolphins', KO))!.fixtures![0] as Record<string, unknown>;
+    assert.equal(f1.home, 'umzinto', 'the manual fill stands');
+    assert.equal(f1.away, 'harlequins');
+    assert.deepEqual(f1.slotsManual, { home: true });
+
+    // Revert (what setSide teamId:null writes): the side goes back to automation.
+    const cur = (await repo.getSeries('dolphins', KO))!;
+    const { slotsManual: _m, ...rest } = f1;
+    await repo.updateSeries('dolphins', KO, {
+      fixtures: [
+        { ...rest, home: HOME_SLOT, slots: { away: (f1.slots as { away: string }).away } },
+      ],
+      version: cur.version,
+    });
+    pages = [example('changes-knockout-reschedule')];
+    summary = await run({ onScheduleDiffers: puller.recordScheduleDiffers });
+    assert.equal(summary.counts.slotsFilled, 1);
+    f1 = (await repo.getSeries('dolphins', KO))!.fixtures![0] as Record<string, unknown>;
+    assert.equal(f1.home, 'crusaders');
+    assert.equal(f1.slotsManual, undefined);
+  });
+
+  test('applySlotFills re-checks slotsManual on its fresh read (a Set team racing the pull)', async () => {
+    const KO = 's-mc-ko-premier-t20';
+    // The pull plans its fills from the unflagged list; a manual Set team lands before the
+    // version-checked write re-reads the series. The fresh read must win.
+    let raced = false;
+    const racing = new Proxy(repo, {
+      get(target, prop, receiver) {
+        const v = Reflect.get(target, prop, receiver);
+        if (prop !== 'getSeries') return v;
+        return async (tenant: string, id: string) => {
+          if (id === KO && !raced) {
+            raced = true;
+            const s = (await repo.getSeries(tenant, id))!;
+            const f = (s.fixtures as Array<Record<string, unknown>>)[0];
+            await repo.updateSeries(tenant, id, {
+              fixtures: [
+                {
+                  ...f,
+                  home: 'umzinto',
+                  slots: { home: f.home as string },
+                  slotsManual: { home: true },
+                },
+              ],
+              version: s.version,
+            });
+          }
+          return repo.getSeries(tenant, id);
+        };
+      },
+    });
+    pages = [example('changes-knockout-reschedule')];
+    await run({ repo: racing, onScheduleDiffers: puller.recordScheduleDiffers });
+    assert.ok(raced, 'the fresh read happened');
+    const f1 = (await repo.getSeries('dolphins', KO))!.fixtures![0] as Record<string, unknown>;
+    assert.equal(f1.home, 'umzinto', 'the racing manual fill stands');
+    assert.equal(f1.away, 'harlequins');
   });
 
   test('a team ref outside the series is never written into a slot', async () => {

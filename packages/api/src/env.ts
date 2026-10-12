@@ -73,8 +73,32 @@ export function medicoachSyncUrl(): string {
   ).replace(/\/+$/, '');
 }
 
+/**
+ * The per-request timeout of the review-decision push (ADR 0019), default 10 s. Overridable
+ * via MEDICOACH_RESOLVE_TIMEOUT_MS (tests, and ops tuning without a code change).
+ */
+export function medicoachResolveTimeoutMs(fallback: number): number {
+  const v = Number(process.env.MEDICOACH_RESOLVE_TIMEOUT_MS);
+  return Number.isFinite(v) && v > 0 ? v : fallback;
+}
+
 export function medicoachSyncSecret(): string {
   return process.env.MEDICOACH_SYNC_SECRET ?? fromSstResource('MedicoachSyncSecret', 'value') ?? '';
+}
+
+/** True while the sync URL or secret is empty: every medicoach call is a logged no-op. */
+export function medicoachSyncDryRun(): boolean {
+  return !medicoachSyncUrl() || !medicoachSyncSecret();
+}
+
+/**
+ * The union-admin cell that receives the captain's-report ops digest after a sync run with
+ * report activity. Lambda: OPS_DIGEST_CELL from the `OpsDigestCell` secret; CLI under
+ * `sst shell`: the linked secret. Empty/unset ⇒ null ⇒ the digest is off (never throws).
+ */
+export function opsDigestCell(): string | null {
+  const v = (process.env.OPS_DIGEST_CELL ?? fromSstResource('OpsDigestCell', 'value') ?? '').trim();
+  return v || null;
 }
 
 /**

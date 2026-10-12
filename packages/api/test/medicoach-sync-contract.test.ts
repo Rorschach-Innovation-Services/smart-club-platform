@@ -6,20 +6,25 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ChangesResponseSchema,
   MEDICOACH_SYNC_VERSION,
+  PLAYER_PUSH_MAX,
+  PlayerPushRequestSchema,
+  PlayerPushResponseSchema,
   SchedulePushRequestSchema,
   SchedulePushResponseSchema,
+  ScorecardResponseSchema,
   VENUE_MAX_LENGTH,
   capVenue,
   changesPathAndQuery,
   parseFixtureRef,
   parseTeamRef,
+  scorecardPathAndQuery,
   signRequest,
   signingString,
   verifySignature,
@@ -37,19 +42,28 @@ const schemaFor = (file: string) =>
       ? SchedulePushRequestSchema
       : file === 'schedule-push-response.json'
         ? SchedulePushResponseSchema
-        : null;
+        : file === 'player-push-request.json'
+          ? PlayerPushRequestSchema
+          : file === 'player-push-response.json'
+            ? PlayerPushResponseSchema
+            : file.startsWith('scorecard-')
+              ? ScorecardResponseSchema
+              : null;
 
 describe('contract examples', () => {
   const files = readdirSync(EXAMPLES).filter((f) => f.endsWith('.json'));
 
-  test('all six shared examples are present', () => {
+  test('all nine shared examples are present', () => {
     assert.deepEqual(files.sort(), [
       'changes-knockout-reschedule.json',
       'changes-live-result.json',
       'changes-manual-and-cleared.json',
       'changes-result-with-play.json',
+      'player-push-request.json',
+      'player-push-response.json',
       'schedule-push-request.json',
       'schedule-push-response.json',
+      'scorecard-live-match.json',
     ]);
   });
 
@@ -60,7 +74,8 @@ describe('contract examples', () => {
       assert.ok(schema, `no schema mapped for ${file}`);
       const parsed = schema.parse(raw);
       assert.deepEqual(parsed, raw);
-      assert.equal(raw.version, MEDICOACH_SYNC_VERSION);
+      // The scorecard response is pinned without a `version` field (contract §3).
+      if (!file.startsWith('scorecard-')) assert.equal(raw.version, MEDICOACH_SYNC_VERSION);
     });
   }
 
@@ -121,6 +136,78 @@ describe('contract examples', () => {
     assert.ok(capped.length <= VENUE_MAX_LENGTH);
     assert.equal(capped, 'a'.repeat(199));
   });
+});
+
+describe('player push (contract §4)', () => {
+  const read = (file: string) => JSON.parse(readFileSync(path.join(EXAMPLES, file), 'utf8'));
+
+  test('remove/erase carry no details; upsert needs its core fields', () => {
+    const raw = read('player-push-request.json');
+    const remove = structuredClone(raw);
+    remove.players[2].firstName = 'Leaked';
+    assert.equal(PlayerPushRequestSchema.safeParse(remove).success, false);
+    const upsert = structuredClone(raw);
+    delete upsert.players[0].teamRefs;
+    assert.equal(PlayerPushRequestSchema.safeParse(upsert).success, false);
+  });
+
+  test('a dob that is not YYYY-MM-DD, an unknown op or a 51-player batch is rejected', () => {
+    const raw = read('player-push-request.json');
+    const dob = structuredClone(raw);
+    dob.players[0].dob = '14/03/2008';
+    assert.equal(PlayerPushRequestSchema.safeParse(dob).success, false);
+    const op = structuredClone(raw);
+    op.players[2].op = 'delete';
+    assert.equal(PlayerPushRequestSchema.safeParse(op).success, false);
+    const big = structuredClone(raw);
+    big.players = Array.from({ length: PLAYER_PUSH_MAX + 1 }, () => raw.players[2]);
+    assert.equal(PlayerPushRequestSchema.safeParse(big).success, false);
+  });
+
+  test('an unknown result status fails the response contract', () => {
+    const raw = read('player-push-response.json');
+    raw.results[1].status = 'merged';
+    assert.equal(PlayerPushResponseSchema.safeParse(raw).success, false);
+  });
+});
+
+/**
+ * The contract doc and ALL eight examples are copied byte-for-byte into the medicoach repo
+ * (contract v1 + §3 scorecard + §4 player push). Pinning every file here means editing any
+ * copy without the other fails CI; change both copies and both pins together.
+ */
+describe('shared contract checksum', () => {
+  const DOCS = path.resolve(EXAMPLES, '..');
+  const PINNED: Record<string, string> = {
+    'medicoach-sync-contract.md':
+      'a2ff351e05c8c4015b21197bb66e3a7455c94557ba6535ce32293e5250c68f7b',
+    'medicoach-sync-examples/changes-knockout-reschedule.json':
+      '7040b5a70f49a4adcefe173659126e383c1d0813c5ab0581748fb6e4e8634aa4',
+    'medicoach-sync-examples/changes-live-result.json':
+      'b235212fcf773fd31f51668fc86466ff0f9246ba62c562b770addf50a219cc11',
+    'medicoach-sync-examples/changes-manual-and-cleared.json':
+      'ffcf0b6c4542402fc6a996328740828244b5fcf1ac6977d5aaedd30935e96ac4',
+    'medicoach-sync-examples/changes-result-with-play.json':
+      'ba73c381b800d6f62013551120b7e990726fbeee2078351fafdf6562e8103ed1',
+    'medicoach-sync-examples/player-push-request.json':
+      '27effdde2b8883acd4f1e8017bf038da84c55b866b206fe78c401722c02eb01c',
+    'medicoach-sync-examples/player-push-response.json':
+      'b2bfb563d61e6b1f1d777e0f968968678aad5fc55cd42c5e0b154d87bf9112ad',
+    'medicoach-sync-examples/schedule-push-request.json':
+      '449cb674ff66463c265628bedd98e7c8553a061d090950ab97db8e389e54d91f',
+    'medicoach-sync-examples/schedule-push-response.json':
+      '866e6f3d00ba1f2de54d7f0e56f201d53d62f1dd51d5ccf6892a3baf583713aa',
+    'medicoach-sync-examples/scorecard-live-match.json':
+      'a65e2ae06a10de53a59b33a441a297d568ceb51a00e81e98e00c6c2e93d311af',
+  };
+  for (const [file, sha] of Object.entries(PINNED)) {
+    test(`${file} is byte-identical to the pinned shared copy`, () => {
+      const actual = createHash('sha256')
+        .update(readFileSync(path.join(DOCS, file)))
+        .digest('hex');
+      assert.equal(actual, sha);
+    });
+  }
 });
 
 describe('request signing', () => {
@@ -273,5 +360,134 @@ describe('result play block (ground time and balls)', () => {
       assert.equal(parsed.fixtures[0].result?.play, null, JSON.stringify(bad));
       assert.equal(parsed.fixtures[0].result?.homeScore, '184/6 (20)');
     }
+  });
+});
+
+describe('scorecard contract', () => {
+  /** The pinned wire example for GET /integrations/smartclub/matches/:matchId/scorecard. */
+  const pinned = {
+    available: true,
+    matchId: 'pma-123',
+    matchState: 'Umzinto won by 23 runs',
+    innings: [
+      {
+        battingTeamName: 'Umzinto',
+        totalRuns: 184,
+        wickets: 6,
+        overs: '20.0',
+        extras: { byes: 1, legByes: 2, wides: 5, noBalls: 1, penalties: 0, total: 9 },
+        batters: [
+          {
+            order: 1,
+            name: 'A Batter',
+            runs: 64,
+            ballsFaced: 41,
+            fours: 6,
+            sixes: 3,
+            strikeRate: 156.1,
+            howOut: 'c Fielder b Bowler',
+            dismissal: 'caught',
+          },
+          {
+            order: 2,
+            name: 'B Batter',
+            runs: 12,
+            ballsFaced: 10,
+            fours: 1,
+            sixes: 0,
+            strikeRate: 120,
+            howOut: 'not out',
+          },
+        ],
+        bowlers: [
+          {
+            order: 1,
+            name: 'C Bowler',
+            overs: '4.0',
+            maidens: 0,
+            runsConceded: 31,
+            wickets: 2,
+            economy: 7.75,
+            wides: 2,
+            noBalls: 0,
+          },
+        ],
+        fallOfWickets: [{ wicket: 1, runs: 22, overs: '2.6', batterName: 'A Batter' }],
+      },
+    ],
+  };
+
+  test('the pinned example round-trips with no field lost', () => {
+    assert.deepEqual(ScorecardResponseSchema.parse(pinned), pinned);
+  });
+
+  test('available:false needs no innings or match state', () => {
+    const bare = { available: false, matchId: 'pma-123' };
+    assert.deepEqual(ScorecardResponseSchema.parse(bare), bare);
+  });
+
+  test('a batter missing a required field fails the schema', () => {
+    const bad = structuredClone(pinned) as Record<string, any>;
+    delete bad.innings[0].batters[0].ballsFaced;
+    assert.equal(ScorecardResponseSchema.safeParse(bad).success, false);
+    assert.equal(ScorecardResponseSchema.safeParse({ available: true }).success, false);
+  });
+
+  test('a result carries the optional medicoach match + tournament ids through the schema', () => {
+    const raw = JSON.parse(readFileSync(path.join(EXAMPLES, 'changes-live-result.json'), 'utf8'));
+    raw.fixtures[0].result.medicoachMatchId = 'pma-123';
+    raw.fixtures[0].result.medicoachTournamentId = 'tour-9';
+    const parsed = ChangesResponseSchema.parse(raw);
+    assert.equal(parsed.fixtures[0].result!.medicoachMatchId, 'pma-123');
+    assert.equal(parsed.fixtures[0].result!.medicoachTournamentId, 'tour-9');
+  });
+
+  test('a malformed medicoach match or tournament id fails the contract', () => {
+    const raw = JSON.parse(readFileSync(path.join(EXAMPLES, 'changes-live-result.json'), 'utf8'));
+    for (const [field, bad] of [
+      ['medicoachMatchId', 'pma 1/2'],
+      ['medicoachTournamentId', 'x'.repeat(129)],
+      ['medicoachTournamentId', 'tour?9'],
+    ] as const) {
+      const copy = structuredClone(raw);
+      copy.fixtures[0].result.medicoachMatchId = 'pma-123';
+      copy.fixtures[0].result.medicoachTournamentId = 'tour-9';
+      copy.fixtures[0].result[field] = bad;
+      assert.equal(ChangesResponseSchema.safeParse(copy).success, false, `${field}=${bad}`);
+    }
+    // An empty id is another spelling of "absent" (the puller drops it), not malformed.
+    const empty = structuredClone(raw);
+    empty.fixtures[0].result.medicoachMatchId = '';
+    empty.fixtures[0].result.medicoachTournamentId = 'x'.repeat(128);
+    assert.equal(ChangesResponseSchema.safeParse(empty).success, true);
+  });
+
+  test('scorecard path: match id encoded, tournamentId then tenant always in the query', () => {
+    assert.equal(
+      scorecardPathAndQuery('pma 1/2', 'tour-9', 'dolphins'),
+      '/integrations/smartclub/matches/pma%201%2F2/scorecard?tournamentId=tour-9&tenant=dolphins',
+    );
+    // Values are URL-encoded; the order never changes (it is part of the signed string).
+    assert.equal(
+      scorecardPathAndQuery('pma-1', 'tour 9&x', 'a b'),
+      '/integrations/smartclub/matches/pma-1/scorecard?tournamentId=tour+9%26x&tenant=a+b',
+    );
+  });
+
+  test('scorecard path signs and verifies with the tenant in the signed query', () => {
+    const pathAndQuery = scorecardPathAndQuery('pma-1', 'tour-9', 'dolphins');
+    const headers = signRequest({ secret: 's3cret', method: 'GET', pathAndQuery });
+    const verify = (pq: string) =>
+      verifySignature({
+        secret: 's3cret',
+        method: 'GET',
+        pathAndQuery: pq,
+        body: '',
+        timestampHeader: headers['X-Sync-Timestamp'],
+        signatureHeader: headers['X-Sync-Signature'],
+      }).ok;
+    assert.equal(verify(pathAndQuery), true);
+    // Swapping the tenant breaks the signature.
+    assert.equal(verify(pathAndQuery.replace('tenant=dolphins', 'tenant=titans')), false);
   });
 });

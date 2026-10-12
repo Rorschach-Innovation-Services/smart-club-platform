@@ -11,7 +11,11 @@
  *   - the outbox (PENDINGSYNC#): smart-club changes medicoach has not accepted yet. A row that
  *     failed 5+ times is "stuck" (still retried) and offers Retry now / Drop;
  *   - changes held until a draft or withheld series is released/revealed, each linked to it;
- *   - recent activity, and "Sync now": flush the outbox, then pull, right away.
+ *   - recent activity, and "Sync now": flush the outbox, then pull, right away;
+ *   - Players (ADR 0019, when the player sync is on): registrations waiting to reach medicoach
+ *     rosters, parked ones (medicoach lacks a team — retry after a bundle top-up), stuck ones,
+ *     and the players held for a decision: link to a medicoach candidate, create a new one,
+ *     confirm two smart-club registrations are different people, or dismiss.
  */
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState, type ReactNode } from 'react';
@@ -57,7 +61,45 @@ const STATUS_LABEL: Record<string, string> = {
   cancelled: 'Cancelled',
 };
 
+/**
+ * A push whose request never reached medicoach (connection, HTTP or contract failure) is not
+ * a rejection: nothing was decided there and the rows are still queued — say so apart from
+ * per-item "not accepted".
+ */
+function withUnreached(
+  sent: number | undefined,
+  unreached: number | undefined,
+  noun: string,
+  delivered: string,
+): string {
+  if (!unreached) return delivered;
+  const queued = `Couldn't reach medicoach — ${unreached} ${noun} still queued.`;
+  return unreached >= (sent ?? 0) ? queued : `${delivered} ${queued}`;
+}
+
 function logSummary(l: api.MedicoachSyncLog): string {
+  if (l.kind === 'player-push' && l.playerPush) {
+    const p = l.playerPush;
+    const bits = [
+      p.created ? `${p.created} added` : '',
+      p.linked ? `${p.linked} matched to existing players` : '',
+      p.updated ? `${p.updated} updated` : '',
+      p.unchanged ? `${p.unchanged} already up to date` : '',
+      p.removed ? `${p.removed} taken off teams` : '',
+      p.erased ? `${p.erased} erased` : '',
+      p.stale ? `${p.stale} already newer in medicoach` : '',
+      p.needsReview ? `${p.needsReview} held for your review` : '',
+      p.possibleDuplicates ? `${p.possibleDuplicates} possible duplicate(s) held` : '',
+      p.parked ? `${p.parked} waiting for a team` : '',
+      p.errors ? `${p.errors} not accepted` : '',
+    ].filter(Boolean);
+    return withUnreached(
+      p.sent,
+      p.unreached,
+      'player(s)',
+      `Sent ${(p.sent ?? 0) - (p.unreached ?? 0)} player(s) to medicoach${bits.length ? `: ${bits.join(', ')}` : ''}.`,
+    );
+  }
   if (l.kind === 'new-fixtures')
     return `${l.fixtures} new fixture(s) not in medicoach yet — they need a bundle top-up from your operator.`;
   if (l.kind === 'push' && l.push) {
@@ -69,7 +111,12 @@ function logSummary(l: api.MedicoachSyncLog): string {
       p.unmapped ? `${p.unmapped} unknown to medicoach` : '',
       p.errors ? `${p.errors} not accepted` : '',
     ].filter(Boolean);
-    return `Sent ${p.sent} change(s) to medicoach${bits.length ? `: ${bits.join(', ')}` : ''}.`;
+    return withUnreached(
+      p.sent,
+      p.unreached,
+      'change(s)',
+      `Sent ${(p.sent ?? 0) - (p.unreached ?? 0)} change(s) to medicoach${bits.length ? `: ${bits.join(', ')}` : ''}.`,
+    );
   }
   const c = l.counts;
   const bits = [
@@ -302,6 +349,304 @@ function OutboxCard({
   );
 }
 
+const REVIEW_REASON: Record<api.MedicoachPlayerReview['reason'], string> = {
+  'medicoach-needs-review': 'medicoach found a possible match',
+  'smartclub-possible-duplicate': 'Same name and date of birth under another ID here',
+};
+
+/**
+ * The toast after "Sync now". A large player backlog (a fresh backfill) goes out in slices —
+ * "Sync now" sends the first; the 15-minute sync continues with the rest automatically.
+ */
+export function syncNowToast(
+  r: Awaited<ReturnType<typeof api.medicoachSyncNow>> | undefined,
+): [string, string?] {
+  if (r?.status === 'dry-run')
+    return ['Dry run — the sync connection isn’t configured, so nothing was sent.'];
+  const reports = r?.reportsMessage ? ` ${r.reportsMessage}.` : '';
+  const deferred = r?.playerPush?.deferred ?? 0;
+  if (!deferred) return [reports ? `Sync finished.${reports}` : 'Sync finished'];
+  const sent = r?.playerPush?.counts?.sent ?? 0;
+  return [
+    `Sync finished — sent ${sent} player(s), ${deferred} remaining; the next sync continues automatically${reports ? `.${reports}` : ''}`,
+  ];
+}
+
+/** The toast after a review decision: what was decided, and whether it reached medicoach. */
+export function resolveToast(label: string, res: api.MedicoachResolveResult): [string, string?] {
+  if (res.status === 'dismissed') return [`${label} — nothing was sent`];
+  if (res.status === 'sent') return [`${label} — sent to medicoach`];
+  if (res.status === 'review')
+    return [`${label} — medicoach needs another decision (see the review below)`, 'warn'];
+  return [`${label} — queued, will send on the next sync`];
+}
+
+/**
+ * Linking a medicoach player at ANOTHER club to this registration applies smart club's desired
+ * state: they are taken off that club's synced team. Compared by name (case/space tolerant).
+ */
+function movesClub(candidateClub: string | null, ourClub: string | null): boolean {
+  const norm = (v: string | null) => (v ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+  return !!norm(candidateClub) && !!norm(ourClub) && norm(candidateClub) !== norm(ourClub);
+}
+
+/** One held player: who, why, the candidates, and the decisions that apply. */
+function PlayerReviewCard({
+  r,
+  busy,
+  onResolve,
+}: {
+  r: api.MedicoachPlayerReview;
+  busy: string | null;
+  onResolve: (resolution: api.MedicoachPlayerResolution, label: string) => void;
+}) {
+  const headingId = `mcs-p-${r.naturalKey.slice(0, 16).replace(/[^a-z0-9]/gi, '-')}`;
+  const medicoach = r.reason === 'medicoach-needs-review';
+  const ids = r.candidates.map((c) => c.playerId).filter((x): x is string => !!x);
+  // No candidates at all (e.g. `out-of-tenant-identity-conflict`): medicoach can neither link
+  // nor create — the fix is manual on the medicoach side, so only Dismiss is offered.
+  const blocked = medicoach && r.candidates.length === 0;
+  const isBusy = busy?.startsWith(`player:${r.naturalKey}`) ?? false;
+  return (
+    <article className="mcs-card" aria-labelledby={headingId}>
+      <div className="mcs-card-head">
+        <div>
+          <div className="mcs-card-title" id={headingId}>
+            {r.playerName || 'Unnamed player'}
+          </div>
+          <div className="ump-sub">{[r.clubName, r.dob].filter(Boolean).join(' · ') || '—'}</div>
+        </div>
+        <Pill tone="gold">{REVIEW_REASON[r.reason]}</Pill>
+      </div>
+      {blocked && (
+        <p className="mcs-error-text" role="note">
+          {r.message || 'medicoach cannot add this player'} — medicoach can&apos;t link or create
+          this player from here. Ask the medicoach team to fix it on their side, then dismiss.
+        </p>
+      )}
+      <p className="mcs-note" hidden={blocked}>
+        {medicoach
+          ? 'Not sent until you choose: link this registration to one of these medicoach players, or create a new one.'
+          : 'Not sent until you decide: if these are different people, confirm it; if it is the same person, fix the ID on smart club first, then dismiss.'}
+      </p>
+      <ul className="mcs-list" aria-label="Candidates">
+        {r.candidates.map((c, i) => (
+          <li key={c.playerId ?? i}>
+            <div>
+              <div className="mcs-card-title">{c.name || '—'}</div>
+              <div className="ump-sub">
+                {[c.institutionName, c.dob].filter(Boolean).join(' · ') || '—'}
+              </div>
+              {medicoach && c.playerId && movesClub(c.institutionName, r.clubName) && (
+                <div className="mcs-error-text" role="note">
+                  Linking moves them: they will leave {c.institutionName}&apos;s synced team.
+                </div>
+              )}
+            </div>
+            {medicoach && c.playerId && (
+              <Btn
+                tone="outline"
+                size="sm"
+                disabled={busy !== null}
+                onClick={() =>
+                  onResolve({ action: 'link', medicoachPlayerId: c.playerId! }, 'Linked')
+                }
+              >
+                Link to this player
+              </Btn>
+            )}
+          </li>
+        ))}
+      </ul>
+      {r.message && (
+        <Details>
+          <code>{r.message}</code>
+        </Details>
+      )}
+      <div className="mcs-card-actions">
+        {blocked ? null : medicoach ? (
+          <Btn
+            tone="ink"
+            size="sm"
+            disabled={busy !== null}
+            onClick={() =>
+              onResolve({ action: 'create', acknowledgedCandidates: ids }, 'New player')
+            }
+          >
+            {isBusy ? 'Saving…' : 'None of these — create new'}
+          </Btn>
+        ) : (
+          <Btn
+            tone="ink"
+            size="sm"
+            disabled={busy !== null}
+            onClick={() => onResolve({ action: 'distinct' }, 'Marked as different people')}
+          >
+            {isBusy ? 'Saving…' : 'They are different people'}
+          </Btn>
+        )}
+        <Btn
+          tone="outline"
+          size="sm"
+          disabled={busy !== null}
+          onClick={() => onResolve({ action: 'dismiss' }, 'Dismissed')}
+        >
+          Dismiss
+        </Btn>
+      </div>
+    </article>
+  );
+}
+
+/** The Players panel (ADR 0019): counts, retry for parked/stuck, and the review list. */
+function PlayersPanel({
+  players,
+  busy,
+  run,
+}: {
+  players: Extract<api.MedicoachPlayerSyncStatus, { enabled: true }>;
+  busy: string | null;
+  run: (
+    key: string,
+    fn: () => Promise<unknown>,
+    ok: string | ((r: unknown) => [string, string?]),
+    fail: string,
+  ) => Promise<void>;
+}) {
+  const reviews = useQuery({
+    queryKey: qk.medicoachPlayerReviews(),
+    queryFn: api.getMedicoachPlayerReviews,
+  });
+  const retry = (scope: 'parked' | 'stuck') =>
+    run(
+      `players-retry:${scope}`,
+      () => api.retryMedicoachPlayers(scope),
+      (r) => [`${(r as { requeued: number }).requeued} player(s) will be sent on the next sync`],
+      "Couldn't retry",
+    );
+  return (
+    <section data-testid="mcs-players" aria-labelledby="mcs-players-h">
+      <h2 className="mcs-heading" id="mcs-players-h">
+        Players
+      </h2>
+      <p className="mcs-note">
+        New and changed registrations go to medicoach team rosters on every sync. Players who are
+        deactivated leave their teams; erased players are anonymised in medicoach.
+      </p>
+      <div className="mcs-stats">
+        <div className="mcs-stat">
+          <div className="mcs-stat-label">Waiting to send</div>
+          <div className="mcs-stat-value">{players.pending}</div>
+          <div className="ump-sub">
+            {[
+              players.queued ? `${players.queued} queued by you` : '',
+              players.stuck ? `${players.stuck} stuck` : '',
+            ]
+              .filter(Boolean)
+              .join(' · ') || 'nothing stuck'}
+          </div>
+        </div>
+        <div className="mcs-stat">
+          <div className="mcs-stat-label">Waiting for a team</div>
+          <div className="mcs-stat-value">{players.parked}</div>
+          <div className="ump-sub">
+            {players.parked ? 'medicoach is missing their team' : 'every team is in medicoach'}
+          </div>
+        </div>
+        <div className="mcs-stat">
+          <div className="mcs-stat-label">For your review</div>
+          <div className="mcs-stat-value">{players.reviews}</div>
+          <div className="ump-sub">players held</div>
+        </div>
+      </div>
+      {(players.queued ?? 0) > 0 && (
+        <div className="mcs-note" role="status" data-testid="mcs-players-queued">
+          <Pill tone="navy" dot>
+            Queued
+          </Pill>{' '}
+          {players.queued} player(s) you retried or decided on are queued — they go out on the next
+          sync and leave this list once medicoach accepts them.
+        </div>
+      )}
+      {(players.optedOut ?? 0) > 0 && (
+        <div className="mcs-note" data-testid="mcs-players-opted-out">
+          {players.optedOut} player(s) are not sent to the Match Centre at their request — for
+          example, they deleted their Match Centre account. Their registration here is unchanged.
+        </div>
+      )}
+      {players.parked > 0 && (
+        <div className="insights-callout warn" role="note" style={{ marginBottom: 12 }}>
+          <div>
+            <strong>{players.parked} player(s) wait for a team medicoach doesn&apos;t have.</strong>{' '}
+            Ask your platform operator for a bundle top-up, then retry.
+          </div>
+          {players.missingTeamRefs.length > 0 && (
+            <Details>
+              <div className="mcs-wrap">
+                <code>{players.missingTeamRefs.join(', ')}</code>
+              </div>
+            </Details>
+          )}
+          <div className="mcs-card-actions">
+            <Btn tone="outline" size="sm" disabled={busy !== null} onClick={() => retry('parked')}>
+              {busy === 'players-retry:parked' ? 'Retrying…' : 'Retry waiting players'}
+            </Btn>
+          </div>
+        </div>
+      )}
+      {players.stuck > 0 && (
+        <div className="insights-callout alert mcs-alert" role="alert">
+          <div>
+            <strong>{players.stuck} player(s) keep failing.</strong> {players.lastErrorText}
+          </div>
+          {players.lastError && (
+            <Details>
+              <code>{players.lastError}</code>
+            </Details>
+          )}
+          <div className="mcs-card-actions">
+            <Btn tone="outline" size="sm" disabled={busy !== null} onClick={() => retry('stuck')}>
+              {busy === 'players-retry:stuck' ? 'Retrying…' : 'Retry now'}
+            </Btn>
+          </div>
+        </div>
+      )}
+      {reviews.isLoading ? (
+        <div className="mcs-empty" role="status">
+          Loading players for review…
+        </div>
+      ) : reviews.isError ? (
+        <div className="mcs-empty" role="alert">
+          Couldn&apos;t load the players for review.{' '}
+          <Btn tone="outline" size="sm" onClick={() => reviews.refetch()}>
+            Try again
+          </Btn>
+        </div>
+      ) : !reviews.data?.length ? (
+        <div className="mcs-empty">No players waiting for a decision.</div>
+      ) : (
+        <div className="mcs-cards" data-testid="mcs-player-reviews">
+          {reviews.data.map((r) => (
+            <PlayerReviewCard
+              key={r.naturalKey}
+              r={r}
+              busy={busy}
+              onResolve={(resolution, label) =>
+                run(
+                  `player:${r.naturalKey}:${resolution.action}`,
+                  () => api.resolveMedicoachPlayerReview(r.naturalKey, resolution),
+                  (res) => resolveToast(label, res as api.MedicoachResolveResult),
+                  "Couldn't save the decision",
+                )
+              }
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function AdminMedicoachSyncView({
   allSeries = [],
   onEditFixture,
@@ -350,6 +695,8 @@ export function AdminMedicoachSyncView({
   const failures = data?.outbox?.failures ?? [];
   const stuck = failures.filter((f) => f.stuck);
   const held = data?.outbox?.held ?? [];
+  const playerReviews = data?.attention?.playerReviews ?? 0;
+  const playersParked = data?.attention?.playersParked ?? 0;
   const lastFailed =
     !!health?.lastErrorAt &&
     (!health.lastSuccessAt || Date.parse(health.lastErrorAt) > Date.parse(health.lastSuccessAt));
@@ -377,10 +724,7 @@ export function AdminMedicoachSyncView({
               run(
                 'sync',
                 api.medicoachSyncNow,
-                (r) =>
-                  (r as { status?: string })?.status === 'dry-run'
-                    ? ['Dry run — the sync connection isn’t configured, so nothing was sent.']
-                    : ['Sync finished'],
+                (r) => syncNowToast(r as Awaited<ReturnType<typeof api.medicoachSyncNow>>),
                 'The sync did not finish',
               )
             }
@@ -446,8 +790,18 @@ export function AdminMedicoachSyncView({
           <div className="mcs-stats" data-testid="mcs-stats">
             <div className="mcs-stat">
               <div className="mcs-stat-label">For your review</div>
-              <div className="mcs-stat-value">{conflicts.length}</div>
-              <div className="ump-sub">medicoach changes held</div>
+              <div className="mcs-stat-value">{conflicts.length + playerReviews}</div>
+              <div className="ump-sub">
+                {playerReviews || playersParked
+                  ? [
+                      `${conflicts.length} medicoach change(s)`,
+                      playerReviews ? `${playerReviews} player(s)` : '',
+                      playersParked ? `${playersParked} waiting for a team` : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')
+                  : 'medicoach changes held'}
+              </div>
             </div>
             <div className="mcs-stat">
               <div className="mcs-stat-label">Waiting to send</div>
@@ -579,6 +933,8 @@ export function AdminMedicoachSyncView({
               </ul>
             </>
           )}
+
+          {data.players?.enabled && <PlayersPanel players={data.players} busy={busy} run={run} />}
 
           <h2 className="mcs-heading">Recent activity</h2>
           {!data.logs?.length ? (

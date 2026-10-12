@@ -75,6 +75,7 @@ export type {
 } from '../../engine/src/umpires.js';
 export type { ReportUmpireEntry, AppointedUmpire } from '../../engine/src/captainsReport.js';
 import type { ReportUmpireEntry, AppointedUmpire } from '../../engine/src/captainsReport.js';
+import type { InningsScorecardWire } from './medicoach-sync-contract.js';
 
 export type Role = 'admin' | 'rep' | 'operator';
 
@@ -158,6 +159,8 @@ export type DocFormat =
   | 'xls'
   | 'xlsx'
   | 'ods'
+  | 'ppt'
+  | 'pptx'
   | 'jpg'
   | 'jpeg'
   | 'png';
@@ -336,9 +339,11 @@ export interface TenantConfig {
    * it, only PUT /platform/tenants/:slug writes it.
    *  - medicoach.goLiveDate (YYYY-MM-DD): results for matches before this date never open
    *    captain's reports (Slice 2.3); stored now, read by the result hook.
+   *  - medicoach.playerSync (default false): push registrations to medicoach team rosters
+   *    (ADR 0019). Requires features.medicoachSync.
    */
   integrations?: {
-    medicoach?: { goLiveDate?: string };
+    medicoach?: { goLiveDate?: string; playerSync?: boolean };
   };
   /**
    * Operator "setup complete" milestone (D6) — informational only (the client is
@@ -366,6 +371,54 @@ export interface TenantConfig {
    * Operator-only: PUT /tenant/config strips it.
    */
   orgContact?: OrgContact;
+  /**
+   * Scheduled fixture reminders to club chairs (the FixtureReminders cron). Absent or
+   * `enabled: false` ⇒ no reminders for this tenant. `leadDays` (1..30, ≤4 entries, deduped
+   * + sorted on write) are the days-before-match a reminder goes out. Operator-only:
+   * PUT /tenant/config strips it, only PUT /platform/tenants/:slug writes it (validated by
+   * validateFixtureReminders), and GET /tenant/config does not project it.
+   */
+  fixtureReminders?: FixtureRemindersConfig;
+  /**
+   * Transfer windows: inclusive tenant wall-clock date ranges (ADR 0008) in which a clearance may
+   * be opened. Absent OR empty ⇒ no restriction (an empty list must never lock a tenant out).
+   * Outside every window a rep-initiated request 409s and a public registration that would open
+   * a clearance records it auto-rejected instead (see transfer-windows.ts). Operator-only:
+   * PUT /tenant/config strips it, only PUT /platform/tenants/:slug writes it (validated by
+   * validateTransferWindows, sorted by start). Served on GET /tenant and GET /tenant/config
+   * together with a server-computed `transferWindowStatus`.
+   */
+  transferWindows?: TransferWindow[];
+}
+
+/** `rejectedBy` on a clearance created already rejected because no transfer window was open. */
+export const TRANSFER_WINDOW_REJECTOR = 'system:transfer-window';
+
+/** One transfer window (see TenantConfig.transferWindows). Dates are YYYY-MM-DD, inclusive. */
+export interface TransferWindow {
+  label: string;
+  start: string;
+  end: string;
+}
+
+/**
+ * Whether transfers are open on a given tenant day: `current` is the window containing it,
+ * `next` the earliest window starting after it. Served only when windows are configured.
+ */
+export interface TransferWindowStatus {
+  open: boolean;
+  current?: TransferWindow;
+  next?: TransferWindow;
+}
+
+/** Channels a fixture reminder may go out on. */
+export type FixtureReminderChannel = 'email' | 'whatsapp';
+
+/** Per-tenant fixture-reminder settings (see TenantConfig.fixtureReminders). */
+export interface FixtureRemindersConfig {
+  enabled: boolean;
+  leadDays: number[];
+  channels: FixtureReminderChannel[];
 }
 
 /** Stored club record. Catalogue-derived fields stay client-side. */
@@ -445,7 +498,13 @@ export interface Club {
   notes?: { id: string; text: string; author: string; at: string }[];
   /** Real onboarding-invite send events (email/WhatsApp), appended via list_append. */
   commLog?: ClubCommEvent[];
-  /** Whether the chair opted into deadline reminders during onboarding (no cron yet). */
+  /**
+   * The chair's reminders choice: set by the onboarding modal and the club-home toggle.
+   * The FixtureReminders cron skips a club only when this is explicitly `false` — absent
+   * counts as opted in, because CLI-imported clubs never pass through the onboarding modal
+   * and would otherwise silently never get reminders (the tenant's `fixtureReminders.enabled`
+   * is the master switch).
+   */
   remindersOptIn?: boolean;
   playerRegLink?: { token: string; createdAt: string };
   /** Marks a club loaded from the demo snapshot; gates illustrative-only UI (e.g. seeded comm-log events). */
@@ -521,7 +580,27 @@ export interface ClubCommEvent {
     // club (both clubs when the union office resolves as an override). Email-only, uncapped.
     | 'veterans-request'
     | 'veterans-request-accepted'
-    | 'veterans-request-declined';
+    | 'veterans-request-declined'
+    // Fixture postponement negotiation (ADR 0015). `postponement-request` is the opposing
+    // chair's heads-up when a request opens; `postponement-counter` the other chair's when a
+    // side counter-proposes; `postponement-agreed` / `postponement-admin-final` are recorded on
+    // BOTH clubs when the new date applies (chair agreement / union override);
+    // `postponement-declined` / `postponement-withdrawn` on the counterpart club. Email-only.
+    | 'postponement-request'
+    | 'postponement-counter'
+    | 'postponement-agreed'
+    | 'postponement-admin-final'
+    | 'postponement-declined'
+    | 'postponement-withdrawn'
+    // Scheduled fixture reminder to the chair (FixtureReminders cron), one row per channel,
+    // idempotency-keyed `fixture-reminder-<targetDate>-<channel>`.
+    | 'fixture-reminder'
+    // Destination chair's heads-up that a clearance opened INTO the club (recorded on the
+    // destination). A separate kind so it never counts toward the source-club daily cap.
+    | 'clearance-inbound'
+    // Pending-clearance nudge to the source chair (admin "Send reminder" or the ClearanceReminders
+    // cron), keyed `clearance-<id>-reminder-<date>-<channel>`. Bypasses the daily cap.
+    | 'clearance-reminder';
   /** Aggregate, PII-free outcome for a broadcast send, e.g. "8 sent · 2 skipped" (sent · skipped · failed; zero parts omitted). */
   summary?: string;
 }
@@ -562,6 +641,53 @@ export interface ExportLogEntry {
   counts?: Record<string, number>;
   /** League keys the export covered (medicoach-export only). */
   leagues?: string[];
+}
+
+/**
+ * What one tenant-wide player erasure (`DELETE /admin/players/:nk`) removed, per category.
+ * Counts only — returned to the admin and stored on the audit row; never names the person.
+ */
+export interface PlayerErasureCounts {
+  /** PLAYER# rows deleted (one per club the person was registered at). */
+  playerRows: number;
+  /** Clearances deleted outright (canonical + mirror each count once). */
+  clearances: number;
+  /** Registration reviews (REGREVIEW#) deleted. */
+  registrationReviews: number;
+  /** Veterans squad-selection requests deleted (canonical + mirror each count once). */
+  veteransRequests: number;
+  /** Uploaded objects purged: ID documents (rows, snapshots, held reviews) + certificate PDFs. */
+  documents: number;
+  /** CERT# certificate-registry items deleted (their /verify lookups now 404). */
+  certificates: number;
+  /** Captain's reports that named the person and were scrubbed in place (not deleted). */
+  captainsReportsScrubbed: number;
+  /** Cached medicoach scorecards (FIXSCORECARD#) that named the person: scrubbed and marked terminal. */
+  scorecardsScrubbed: number;
+  /**
+   * Captain's reports whose scorecard correction `feedback` named the person and was scrubbed
+   * in place (also counted in `captainsReportsScrubbed`). Absent on audit rows written before.
+   */
+  reportScorecardFeedbackScrubbed: number;
+  /**
+   * Pending REPORTOPEN# markers whose captain ref was this person: the ref is scrubbed, the
+   * marker kept (its retry then addresses the scoring side's chair instead).
+   */
+  reportOpenMarkers: number;
+}
+
+/**
+ * Audit row for one player erasure (`PLAYERERASE#<iso>#<id>` under the tenant pk). PII-free by
+ * design: the actor and the per-category counts only — the erased person is not identifiable
+ * from it (no name, natural key or contact).
+ */
+export interface PlayerEraseLogEntry {
+  id: string;
+  kind: 'player-erasure';
+  /** Human-readable actor (caller email), mirroring ExportLogEntry.by. */
+  by: string;
+  at: string;
+  counts: PlayerErasureCounts;
 }
 
 /** Onboard payload: a Club plus the flat chair contact fields the admin form sends. */
@@ -782,6 +908,69 @@ export interface VeteransRequest {
 export type VeteransRequestPublic = Omit<VeteransRequest, 'playerNaturalKey'>;
 
 /**
+ * One proposed new date in a fixture postponement negotiation (ADR 0015). `by` names the side
+ * that proposed it. `time` is carried only while the fixture's kick-off time is revealed to
+ * clubs (ADR 0011); a proposal without `time` keeps the fixture's current kick-off. `venueId` /
+ * `venueName` are set by an admin override only — chairs negotiate the date, not the ground.
+ */
+export interface PostponementProposal {
+  by: 'requesting' | 'opposing' | 'admin';
+  date: string;
+  time?: string;
+  /** Admin only. */
+  venueId?: string;
+  /** Admin only. */
+  venueName?: string;
+  note?: string;
+  at: string;
+  byUser: string;
+}
+
+/** Lifecycle of a postponement request (ADR 0015). `applied` / `admin-final` moved the fixture. */
+export type PostponementStatus = 'open' | 'applied' | 'admin-final' | 'declined' | 'withdrawn';
+
+/**
+ * A fixture postponement request (ADR 0015): one club asks to move a released fixture to a new
+ * date; the clubs negotiate by counter-proposal and the agreed date auto-applies to the fixture.
+ * The union admin may override with a final date/time/venue at any point (even after a chair
+ * agreement applied), which the chairs then acknowledge.
+ *
+ * Stored as a CANONICAL row under the OPPOSING club (`POSTPONE#<id>`, gsi1 for the admin listing)
+ * + a MIRROR under the REQUESTING club (`OUTBOUND_POSTPONE#<id>`, no gsi1). Every transition
+ * rewrites both rows in one transaction conditioned on the canonical, so the two never drift.
+ */
+export interface PostponementRequest {
+  id: string;
+  seriesId: string;
+  fixtureId: string;
+  /** The club that opened the request — partition owner of the mirror row. */
+  requestingClubId: string;
+  /** The fixture's other club — partition owner of the canonical row. Derived server-side. */
+  opposingClubId: string;
+  /** Snapshot of the fixture's date when the request opened — the accept-time baseline. */
+  originalDate: string;
+  /** Snapshot of the kick-off time at open; absent when the time was withheld (or unset). */
+  originalTime?: string;
+  reason?: string;
+  /** Every proposal in order; the LAST one is the current proposal on the table. */
+  proposals: PostponementProposal[];
+  /** Whose move it is while `open`; `none` once terminal. */
+  awaiting: 'requesting' | 'opposing' | 'none';
+  status: PostponementStatus;
+  /** clubId → acknowledgement of an admin-final ruling. Reset on every new admin ruling. */
+  acknowledgements?: Record<string, { at: string; byUser: string }>;
+  requestedAt: string;
+  requestedBy: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  resolvedVia?: 'portal' | 'admin';
+  declineReason?: string;
+  /** TTL (epoch seconds): set on a terminal row so it self-expires after 90 days. */
+  expiresAt?: number;
+  version: number;
+}
+
+/**
  * The finder response row (GET /clubs/:id/veterans-candidates): everything a requesting club may
  * see about a tenant-wide player. NEVER carries the natural key / ID number / dob / contact — the
  * `candidateId` HMAC handle is the only identifier that leaves the API.
@@ -801,8 +990,14 @@ export type ClearanceStatus = 'pending' | 'approved' | 'admin-override' | 'rejec
  *   request/dest-deleted → 'source-reactivated' (the move is cancelled; player at the source club)
  *   moved-over-placeholder/moved-to-source → 'moved-to-source' (the registration moved to the source club)
  *   dest-activated → 'stays-at-destination' (source is off-system; player stays at the destination)
+ *   window-closed → 'not-registered' (registration outside a transfer window; no row was ever
+ *     written, so the player remains unregistered / at their current club)
  */
-export type RejectOutcome = 'source-reactivated' | 'moved-to-source' | 'stays-at-destination';
+export type RejectOutcome =
+  | 'source-reactivated'
+  | 'moved-to-source'
+  | 'stays-at-destination'
+  | 'not-registered';
 
 /**
  * How a reject was actually applied, derived from the LIVE row state at reject time (never from
@@ -813,13 +1008,16 @@ export type RejectOutcome = 'source-reactivated' | 'moved-to-source' | 'stays-at
  *   moved-over-placeholder— the source held only a placeholder; the real registration replaces it (B″)
  *   moved-to-source      — the source club exists but held no row; the registration is moved there (C)
  *   dest-activated       — the source is an off-system directory entry; the player stays at the destination (D)
+ *   window-closed        — a registration outside every transfer window, created ALREADY rejected
+ *                          (repo.createAutoRejectedClearance); never produced by detectRejectCase
  */
 export type RejectCase =
   | 'request'
   | 'dest-deleted'
   | 'moved-over-placeholder'
   | 'moved-to-source'
-  | 'dest-activated';
+  | 'dest-activated'
+  | 'window-closed';
 
 /**
  * The pre-reject row state a Reopen restores. CANONICAL ONLY — never mirrored, never returned
@@ -835,6 +1033,12 @@ export interface RejectSnapshot {
   destRow?: PlayerRegistration;
   placeholderRow?: PlayerRegistration;
   sourceReactivated?: boolean;
+  /**
+   * window-closed only: the destination row the registration WOULD have written (status
+   * 'clearance-pending', incl. idDocMeta). Never written as a player row; Reopen puts it at the
+   * destination. Its ID-doc keys are collected by repo.clearanceDocObjectKeys (POPIA).
+   */
+  pendingPlayer?: PlayerRegistration;
 }
 
 /**
@@ -1104,6 +1308,10 @@ export interface StoredFixtureResult {
   medicoachMatchUrl?: string | null;
   /** Time on the ground and balls bowled, from the medicoach scorecard (contract `play`). */
   play?: ResultPlay | null;
+  /** The medicoach match (PostMatchAnalysis) id, when the sender gave one — scorecard key. */
+  medicoachMatchId?: string;
+  /** The medicoach tournament id of that match — required alongside it for the scorecard. */
+  medicoachTournamentId?: string;
   storedAt: string;
 }
 
@@ -1135,6 +1343,38 @@ export interface ResultConfirmation {
   confirmedAt: string;
   confirmedBy: string;
   note?: string;
+}
+
+/**
+ * A medicoach scorecard for one fixture (FIXSCORECARD#), fetched by the sync after a result
+ * is stored and re-fetched by the sweep while it may still change. Written by the sync
+ * (medicoach-sync/scorecard-fetch.ts) and, to scrub names, by player erasure. Holds player
+ * names — personal data, erased with the tenant / cohort / series like FIXRESULT#.
+ *
+ * `terminal: true` = this fixture can never have a scorecard (medicoach answered 404, or kept
+ * answering `available: false` for 3 days — until then such a stub is re-checked, with
+ * `fetchedAt` the first `available: false` and `lastCheckedAt` the latest): the sweep stops
+ * retrying. A newly stored result still re-fetches.
+ * Player erasure also sets it on an AVAILABLE card it scrubbed, so the sweep never re-fetches
+ * the card (and with it the erased name) from medicoach.
+ */
+export interface StoredFixtureScorecard {
+  seriesId: string;
+  fixtureId: string;
+  medicoachMatchId: string;
+  medicoachTournamentId: string;
+  schemaVersion: 1;
+  /** ISO instant of the fetch that produced this row. */
+  fetchedAt: string;
+  available: boolean;
+  matchState?: string;
+  innings?: InningsScorecardWire[];
+  terminal?: boolean;
+  /**
+   * ISO instant of the last fetch that found no card while this AVAILABLE one was kept (a
+   * 404 / `available: false` never overwrites an available card).
+   */
+  lastCheckedAt?: string;
 }
 
 /** The read-only result joined onto a fixture in GET /series (no captain/player data). */
@@ -1186,11 +1426,13 @@ export interface SyncLogEntry {
    * `push` rows record an outbox flush (Slice 4); `new-fixtures` a write that added fixtures
    * to a mapped series which medicoach does not have (needs a bundle top-up); absent ⇒ a pull.
    */
-  kind?: 'pull' | 'push' | 'new-fixtures';
+  kind?: 'pull' | 'push' | 'new-fixtures' | 'player-push';
   /** Refs of the new fixtures (`new-fixtures` rows only). Fixture refs carry no PII. */
   newFixtureRefs?: string[];
   /** Outbox flush outcome counts (push rows only). */
   push?: SchedulePushCounts;
+  /** Player-outbox flush outcome counts (`player-push` rows only, ADR 0019). */
+  playerPush?: PlayerPushCounts;
   /** Technical failure text (field paths and statuses only — never a payload value). */
   error?: string;
   /** `error` in plain language for the admin page (medicoach-sync/explain.ts). */
@@ -1207,6 +1449,44 @@ export interface SyncHealth {
   lastError?: string;
 }
 
+/**
+ * MCAWAIT#<seriesId> — fixtures of one series medicoach does not have yet (they need a bundle
+ * carry/top-up). Fixture refs carry no PII.
+ */
+export interface McAwaitRow {
+  seriesId: string;
+  seriesName?: string;
+  leagueKey?: string;
+  /** One list attribute: the ~400 KB item cap ≈ 3,500+ fixtures per series, far above any real series. */
+  refs: string[];
+  count: number;
+  /** When the series first had a fixture awaiting carry (kept across updates). */
+  firstSeen: string;
+  lastSeen: string;
+}
+
+/** MCRECON# — the tenant's last awaiting-carry reconciliation against medicoach. */
+export interface McReconcileStamp {
+  lastReconcileAt: string;
+  mcReachable: boolean;
+  /** Refs checked against medicoach (reachable runs only). */
+  checkedRefs?: number;
+  /** Refs medicoach answered `unmapped` (reachable runs only). */
+  unmappedTotal?: number;
+  /** Why medicoach could not be asked (unreachable runs only). */
+  reason?: string;
+}
+
+/** MCRECONLOCK# — the lease a running reconciliation holds (one per tenant at a time). */
+export interface McReconcileLease {
+  /** Random per-acquire id (crypto.randomUUID); renew and release are conditioned on this. */
+  token: string;
+  /** ISO time the holder took the lease (observability only). */
+  acquiredAt: string;
+  /** Epoch seconds after which another run may take the lease (also the table TTL). */
+  expiresAt: number;
+}
+
 /** What one outbox flush did (Slice 4). */
 export interface SchedulePushCounts {
   sent: number;
@@ -1215,6 +1495,8 @@ export interface SchedulePushCounts {
   unchanged: number;
   unmapped: number;
   errors: number;
+  /** Changes whose request never reached medicoach (still queued). Absent on older rows. */
+  unreached?: number;
 }
 
 /** A smart-club fixture schedule in the wire shape (`SyncSchedule`, contract v1). */
@@ -1251,8 +1533,111 @@ export interface PendingScheduleSync {
   heldUntilReveal?: boolean;
 }
 
+/** The admin's answer to a medicoach `needs-review`, sent with the next push (contract §4). */
+export type PlayerSyncResolution =
+  | { action: 'link'; playerId: string }
+  | { action: 'create'; acknowledgedCandidates: string[] };
+
+/**
+ * PENDINGPLAYERSYNC#<naturalKey> — one person changed and medicoach must get their current
+ * desired state (ADR 0019). Collapsed per person: a newer change overwrites `changedAt` and
+ * resets the attempts; the row is deleted only while it still holds the `changedAt` that was
+ * sent. No personal data is stored — the payload is rebuilt at flush — except `op: 'erase'`.
+ */
+export interface PendingPlayerSync {
+  naturalKey: string;
+  /** When the latest smart-club change happened (the push's `changedAt`). */
+  changedAt: string;
+  enqueuedAt: string;
+  attempts: number;
+  lastError?: string;
+  lastAttemptAt?: string;
+  /** POPIA erasure tombstone (erasePlayerData only): push `erase`, never rebuild. */
+  op?: 'erase';
+  /**
+   * The person was erased and has registered again before the erase went out: push the
+   * `erase` first (anonymising the old medicoach player), then the upsert creates a new one.
+   */
+  eraseFirst?: boolean;
+  /** Medicoach lacks one of the player's teams: not resent every run (admin retry / top-up). */
+  parked?: boolean;
+  parkedAt?: string;
+  /** The team refs medicoach did not know (team refs carry no personal data). */
+  missingTeamRefs?: string[];
+  /** An admin review resolution riding on the next push. */
+  resolution?: PlayerSyncResolution;
+  /**
+   * An admin re-queued this row (retry, or a review resolution): the Players panel shows it as
+   * "queued" until the push succeeds (the row is deleted) or it parks again.
+   */
+  requeuedAt?: string;
+}
+
+/** One candidate an admin must decide about. PERSONAL DATA. */
+export interface PlayerReviewCandidate {
+  /** Medicoach player id (`medicoach-needs-review`). */
+  playerId?: string;
+  /** The other smart-club person's natural key (`smartclub-possible-duplicate`). */
+  naturalKey?: string;
+  name: string;
+  dob: string | null;
+  /** The medicoach institution, or the smart-club club, the candidate belongs to. */
+  institutionName: string | null;
+}
+
+/**
+ * PLAYERREVIEW#<naturalKey> — a player not pushed until an admin decides (ADR 0019). Holds
+ * candidates' personal data: TTL'd (`expiresAt`), deleted on resolve and by erasePlayerData.
+ */
+export interface PlayerSyncReview {
+  naturalKey: string;
+  reason: 'medicoach-needs-review' | 'smartclub-possible-duplicate';
+  /** Medicoach's own reason (field paths / plain text, never a payload value). */
+  message?: string;
+  detectedAt: string;
+  playerName: string;
+  dob: string | null;
+  clubName: string | null;
+  candidates: PlayerReviewCandidate[];
+}
+
+/**
+ * PLAYERSYNCOPTOUT#<naturalKey> — a person the player sync never sends to medicoach, except an
+ * erase (which only removes data). Deleted by erasePlayerData.
+ */
+export interface PlayerSyncOptOut {
+  naturalKey: string;
+  /** `medicoach-account-deleted`: the person deleted their Match Centre account themselves. */
+  reason: 'medicoach-account-deleted' | 'other';
+  /** Operator's note (plain text, never personal data). */
+  note?: string;
+  by: string;
+  at: string;
+}
+
+/** What one player-outbox flush did (ADR 0019). Counts only. */
+export interface PlayerPushCounts {
+  sent: number;
+  created: number;
+  linked: number;
+  updated: number;
+  unchanged: number;
+  removed: number;
+  erased: number;
+  stale: number;
+  needsReview: number;
+  possibleDuplicates: number;
+  parked: number;
+  errors: number;
+  /** Players whose request never reached medicoach (still queued). Absent on older rows. */
+  unreached?: number;
+  /** Queued changes dropped unsent because the person opted out. Absent on older rows. */
+  optedOut?: number;
+}
+
 /** Who changed a fixture's schedule. `medicoach` = the Slice 3 inbound apply (never echoed). */
-export type ScheduleChangeOrigin = 'admin' | 'generate' | 'cli' | 'medicoach';
+/** `operator-upload` = the operator console's reminder-fixtures upload (writes like a CLI). */
+export type ScheduleChangeOrigin = 'admin' | 'generate' | 'cli' | 'medicoach' | 'operator-upload';
 
 /**
  * SYNCCONFLICT#<ref> — a medicoach schedule change held for admin review instead of applied.
@@ -1345,6 +1730,14 @@ export interface CaptainsReportDelivery {
   providerError?: string;
 }
 
+/** A captain's report's answer on the match scorecard (see `CaptainsReport.scorecard`). */
+export interface CaptainsReportScorecardAnswer {
+  action: 'confirmed' | 'correction';
+  feedback?: string;
+  againstFetchedAt?: string;
+  stale?: true;
+}
+
 /**
  * A captain's report: `CAPREPORT#<seriesId>#<fixtureId>#<clubId>`, one per fixture side.
  * Opened `pending` when medicoach reports a result (or created by hand from the portal),
@@ -1382,6 +1775,14 @@ export interface CaptainsReport {
   umpires: ReportUmpireEntry[];
   general: string;
   declaration?: boolean;
+  /**
+   * The answer on the match scorecard (FIXSCORECARD#): asked — and required to submit —
+   * whenever an available scorecard is attached. `feedback` (≤ 2,000 chars) is required for a
+   * correction, which emails the platform operators. `againstFetchedAt` is the card version
+   * answered against (server-clamped, set at submission). `stale`: a newer card arrived after
+   * that version — server-only, set at submission or by the scorecard sweep.
+   */
+  scorecard?: CaptainsReportScorecardAnswer;
   /** `CR-YYYY-NNNN`, assigned from the per-tenant counter at submission. */
   ref?: string;
   submittedBy?: string;

@@ -7,3 +7,8 @@
  * wall-clock and never converted. Shared by the API routes and the certificate renderer.
  */
 export const TENANT_UTC_OFFSET_MINUTES = 120;
+
+/** The tenant's wall-clock calendar date (YYYY-MM-DD) at `now`. */
+export function tenantDate(now: Date = new Date()): string {
+  return new Date(now.getTime() + TENANT_UTC_OFFSET_MINUTES * 60_000).toISOString().slice(0, 10);
+}

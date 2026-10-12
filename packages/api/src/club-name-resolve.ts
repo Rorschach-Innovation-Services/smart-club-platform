@@ -81,13 +81,18 @@ export function resolveClub(
   clubs: Club[],
   byNorm: Map<string, Club>,
 ): Club | undefined {
-  const n = redirectedNormalise(name);
+  const original = normalise(name);
+  const n = NAME_REDIRECTS[original] ?? original;
   const aliased = NAME_ALIASES[n];
   // The alias names a prod club id; in a tenant without that club (another union, dev, a
   // renamed record such as "Chatsworth Sporting CC") fall back to the plain lookup, which
   // already ignores generic suffixes ("CC", "Cricket Club").
   const viaAlias = aliased ? clubs.find((c) => c.id === aliased) : undefined;
-  return viaAlias ?? byNorm.get(n);
+  // A redirect rewrites the name toward PROD's record ("Rhythm DHSOB" → "rhythmdhs" → the
+  // prod id). A tenant that has neither but holds a club under the sheet's own spelling
+  // ("Rhythm DHSOB CC", "Silver Saints") is matched on that original name last, so the
+  // redirect never hides an exact club. Tenants the redirect already resolves are unchanged.
+  return viaAlias ?? byNorm.get(n) ?? (original !== n ? byNorm.get(original) : undefined);
 }
 
 /** Reserved teamId namespace for synthesised multi-team sides — mirrors

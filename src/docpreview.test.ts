@@ -104,4 +104,15 @@ describe('docPreviewKind', () => {
     expect(docPreviewKind({})).toBe('unknown');
     expect(docPreviewKind(undefined)).toBe('unknown');
   });
+
+  it('ppt/pptx are accepted formats but have no renderer — unknown, so download-only', () => {
+    expect(docPreviewKind({ contentType: DOC_FORMAT_MIME.pptx })).toBe('unknown');
+    expect(docPreviewKind({ contentType: DOC_FORMAT_MIME.ppt })).toBe('unknown');
+    expect(docPreviewKind({ objectKey: 't/c/financials.pptx' })).toBe('unknown');
+    expect(docPreviewKind({ objectKey: 't/c/financials.ppt' })).toBe('unknown');
+    // Never misrouted to the docx/sheet renderers by a shared "openxmlformats" prefix.
+    expect(
+      docPreviewKind({ contentType: DOC_FORMAT_MIME.pptx, objectKey: 't/c/financials.pptx' }),
+    ).toBe('unknown');
+  });
 });

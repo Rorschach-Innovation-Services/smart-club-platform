@@ -64,6 +64,9 @@ function startStub(): Promise<void> {
         signatureHeader: req.headers['x-sync-signature'] as string | undefined,
       });
       if (!check.ok) return void res.writeHead(401).end('{}');
+      // The cron's awaiting-carry reconciliation (ADR 0020): this stub predates the endpoint.
+      if (req.url === contract.IMPORT_CHECK_REFS_PATH)
+        return void res.writeHead(404).end('{"error":"not found"}');
       if (req.method === 'POST') {
         const body = JSON.parse(raw) as {
           changes: Array<{ ref: string; schedule: Record<string, unknown> }>;

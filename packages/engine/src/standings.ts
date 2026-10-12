@@ -1,5 +1,5 @@
 /**
- * League tables from results (ADR 0018). Pure: no repo, no clock.
+ * League tables from results (ADR 0022). Pure: no repo, no clock.
  *
  * Results reach smart club from medicoach as display strings ("184/6 (20)") with a winner;
  * this ranks a series' teams from them: points by outcome, then net run rate, then wins.

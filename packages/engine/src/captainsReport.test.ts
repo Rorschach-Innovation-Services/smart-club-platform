@@ -3,10 +3,12 @@ import {
   appointedChoices,
   emptyUmpireEntry,
   initialUmpireCards,
+  keptUmpireEntries,
   pickAppointed,
   pickSubstitute,
   submissionProblems,
   umpireCardMode,
+  umpireEntryUntouched,
   umpireRatingAverages,
   type ReportUmpireEntry,
 } from './captainsReport';
@@ -85,6 +87,96 @@ describe('submissionProblems', () => {
     expect(
       submissionProblems({ captainName: 'C', declaration: true, umpires: [u, { ...u }] }),
     ).toContain('The same umpire is rated twice.');
+  });
+
+  it('accepts one complete umpire and refuses none', () => {
+    const base = { captainName: 'C', declaration: true };
+    const one = emptyUmpireEntry({ ...NGUBANE, ratings: allFives });
+    expect(submissionProblems({ ...base, umpires: [one] })).toEqual([]);
+    expect(submissionProblems({ ...base, umpires: [] })).toContain('Rate at least one umpire.');
+  });
+
+  it('still validates a second card in full when it is passed', () => {
+    const one = emptyUmpireEntry({ ...NGUBANE, ratings: allFives });
+    const problems = submissionProblems({
+      captainName: 'C',
+      declaration: true,
+      umpires: [one, emptyUmpireEntry()],
+    });
+    expect(problems).toContain('Name umpire 2.');
+  });
+});
+
+describe('keptUmpireEntries', () => {
+  const one = emptyUmpireEntry({ ...NGUBANE, ratings: allFives });
+
+  it('drops an untouched trailing card 2', () => {
+    expect(keptUmpireEntries([one, emptyUmpireEntry()])).toEqual([one]);
+    expect(umpireEntryUntouched(emptyUmpireEntry())).toBe(true);
+  });
+
+  it('keeps a half-filled card 2 (it is validated, never silently dropped)', () => {
+    for (const two of [
+      emptyUmpireEntry({ name: 'B.Sub' }),
+      emptyUmpireEntry({ ratings: { decisions: 3 } }),
+      emptyUmpireEntry({ substitute: true }),
+      emptyUmpireEntry({ comments: 'late' }),
+      emptyUmpireEntry({ concerns: { other: true } }),
+    ]) {
+      expect(keptUmpireEntries([one, two])).toHaveLength(2);
+    }
+  });
+
+  it('never drops card 1, even untouched', () => {
+    const blank = emptyUmpireEntry();
+    expect(keptUmpireEntries([blank])).toEqual([blank]);
+    expect(keptUmpireEntries([blank, one])).toHaveLength(2);
+  });
+});
+
+describe('submissionProblems — the scorecard answer', () => {
+  const base = {
+    captainName: 'S. Mthembu',
+    declaration: true,
+    umpires: [emptyUmpireEntry({ ...NGUBANE, ratings: allFives })],
+  };
+  const ANSWER = 'Confirm the scorecard or request a correction.';
+  const FEEDBACK = 'Tell us what needs correcting.';
+
+  it.each([
+    ['required, unanswered', { scorecardRequired: true }, [ANSWER]],
+    ['required, confirmed', { scorecardRequired: true, scorecard: { action: 'confirmed' } }, []],
+    [
+      'required, correction with text',
+      { scorecardRequired: true, scorecard: { action: 'correction', feedback: 'Total is 156' } },
+      [],
+    ],
+    [
+      'required, correction without text',
+      { scorecardRequired: true, scorecard: { action: 'correction' } },
+      [FEEDBACK],
+    ],
+    [
+      'required, correction with blank text',
+      { scorecardRequired: true, scorecard: { action: 'correction', feedback: '   ' } },
+      [FEEDBACK],
+    ],
+    ['not required, unanswered', { scorecardRequired: false }, []],
+    ['not required (omitted), unanswered', {}, []],
+    ['not required, confirmed anyway', { scorecard: { action: 'confirmed' } }, []],
+    [
+      'not required, correction still needs its text',
+      { scorecardRequired: false, scorecard: { action: 'correction', feedback: '' } },
+      [FEEDBACK],
+    ],
+    ['required, null answer', { scorecardRequired: true, scorecard: null }, [ANSWER]],
+  ] as const)('%s', (_label, extra, expected) => {
+    expect(submissionProblems({ ...base, ...extra })).toEqual(expected);
+  });
+
+  it('lists the scorecard problem with the others, before the declaration', () => {
+    const problems = submissionProblems({ ...base, declaration: false, scorecardRequired: true });
+    expect(problems).toEqual([ANSWER, 'Confirm the declaration.']);
   });
 });
 

@@ -1,0 +1,264 @@
+{
+  "tenant": "dolphins",
+  "venueReason": "KZNCU 10–11 Oct reminder sheet",
+  "entries": [
+    {
+      "seriesId": "s-planb-premier-men-t20-2",
+      "fixtureId": "f10",
+      "expect": {
+        "home": "harlequins-cricket-club",
+        "away": "amanzimtoti-cricket-club",
+        "date": "2026-10-11",
+        "time": "21:00",
+        "venue": "Harlequins 1"
+      },
+      "set": {
+        "time": "09:00"
+      }
+    },
+    {
+      "seriesId": "s-planb-premier-men-t20-2",
+      "fixtureId": "f7",
+      "expect": {
+        "home": "harlequins-cricket-club",
+        "away": "amanzimtoti-cricket-club",
+        "date": "2026-10-11",
+        "time": "09:00",
+        "venue": "Danville 1"
+      },
+      "set": {
+        "home": "rhythm-dhsob-cricket-club",
+        "time": "13:30"
+      }
+    },
+    {
+      "seriesId": "s-planb-premier-men-t20-2",
+      "fixtureId": "f8",
+      "expect": {
+        "home": "hollywoodbets-chatsworth-sporting",
+        "away": "southern-natal",
+        "date": "2026-10-11",
+        "time": "09:00",
+        "venue": "Tills Crescent Ground"
+      },
+      "set": {
+        "time": "13:30",
+        "venueId": "v-chatsworth-oval"
+      }
+    },
+    {
+      "seriesId": "s-planb-premier-men-t20-2",
+      "fixtureId": "f9",
+      "expect": {
+        "home": "crusaders",
+        "away": "harlequins-cricket-club",
+        "date": "2026-10-11",
+        "time": "09:00",
+        "venue": "Crusaders 1"
+      },
+      "set": {
+        "time": "13:30"
+      }
+    },
+    {
+      "seriesId": "s-planb-premier-men-t20-2",
+      "fixtureId": "f12",
+      "expect": {
+        "home": "crusaders",
+        "away": "hollywoodbets-chatsworth-sporting",
+        "date": "2026-10-11",
+        "time": "13:30",
+        "venue": "Crusaders 1"
+      },
+      "set": {
+        "time": "09:00"
+      }
+    },
+    {
+      "seriesId": "s-planb-veterans-premier-t20-1",
+      "fixtureId": "f6",
+      "expect": {
+        "home": "hollywoodbets-chatsworth-sporting",
+        "away": "railways-cricket-club",
+        "date": "2026-10-10",
+        "time": "13:00",
+        "venue": "Crawford North Coast"
+      },
+      "set": {
+        "venueId": "v-chatsworth-oval"
+      }
+    },
+    {
+      "seriesId": "s-planb-promotion-men-t20-g1",
+      "fixtureId": "f6",
+      "expect": {
+        "home": "dawnheights-cricket-club",
+        "away": "spartan-sporting",
+        "date": "2026-10-11",
+        "time": "09:00",
+        "venue": "PENGUIN STREET GROUND"
+      },
+      "set": {
+        "venueId": "v-lahee-park-cricket-oval"
+      }
+    },
+    {
+      "seriesId": "s-planb-premier-women-t20-g1",
+      "fixtureId": "f4",
+      "expect": {
+        "home": "kwamashu-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting",
+        "date": "2026-10-11",
+        "time": "08:30",
+        "venue": "Commons 1"
+      },
+      "set": {
+        "time": "09:00"
+      }
+    },
+    {
+      "seriesId": "s-planb-premier-women-t20-g2",
+      "fixtureId": "f4",
+      "expect": {
+        "home": "african-warriors-cc",
+        "away": "kccd",
+        "date": "2026-10-11",
+        "time": "08:30",
+        "venue": "Commons 2"
+      },
+      "set": {
+        "time": "09:00"
+      }
+    },
+    {
+      "seriesId": "s-planb-veterans-promotion-t20-1",
+      "fixtureId": "f5",
+      "expect": {
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "hillary-malvern-cricket-club",
+        "date": "2026-10-10",
+        "time": "13:00",
+        "venue": "Fairfield Park"
+      },
+      "set": {
+        "venueId": "v-fairfield-park"
+      }
+    },
+    {
+      "seriesId": "s-planb-veterans-promotion-t20-2",
+      "fixtureId": "f7",
+      "expect": {
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+        "date": "2026-10-10",
+        "time": "13:00",
+        "venue": "Siripat 1"
+      },
+      "set": {
+        "venueId": "v-siripat-road-grounds"
+      }
+    },
+    {
+      "seriesId": "s-planb-veterans-promotion-t20-2",
+      "fixtureId": "f8",
+      "expect": {
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1",
+        "away": "southern-natal",
+        "date": "2026-10-10",
+        "time": "13:00",
+        "venue": "Chatsworth 114"
+      },
+      "set": {
+        "venueId": "v-chatsworth-114"
+      }
+    },
+    {
+      "seriesId": "s-planb-veterans-premier-t20-2",
+      "fixtureId": "f6",
+      "expect": {
+        "home": "dawnheights-cricket-club",
+        "away": "delta-cricket-club",
+        "date": "2026-10-10",
+        "time": "13:00",
+        "venue": "Tills"
+      },
+      "set": {
+        "venueId": "v-tills-crescent-ground"
+      }
+    },
+    {
+      "seriesId": "s-planb-premier-men-t20-1",
+      "fixtureId": "f7",
+      "expect": {
+        "home": "delta-cricket-club",
+        "away": "african-warriors-cc",
+        "date": "2026-10-11",
+        "time": "09:00",
+        "venue": "Kloof Country Club"
+      },
+      "set": {
+        "venueId": "v-kloof-cc"
+      }
+    },
+    {
+      "seriesId": "s-planb-premier-men-t20-1",
+      "fixtureId": "f10",
+      "expect": {
+        "home": "hillary-malvern-cricket-club",
+        "away": "african-warriors-cc",
+        "date": "2026-10-11",
+        "time": "13:30",
+        "venue": "Kloof Country Club"
+      },
+      "set": {
+        "venueId": "v-kloof-cc"
+      }
+    },
+    {
+      "seriesId": "s-run-1790446110087-season-g1",
+      "fixtureId": "f7",
+      "expect": {
+        "home": "ptcc",
+        "away": "railways-cricket-club",
+        "date": "2026-10-11",
+        "time": "",
+        "venue": ""
+      },
+      "set": {
+        "dateTbc": true
+      }
+    },
+    {
+      "seriesId": "s-run-1790455881102-season-g1",
+      "fixtureId": "f2",
+      "expect": {
+        "home": "crusaders",
+        "away": "tm_simplex-reservoir-hills-crimson_emcuD3_s1_1",
+        "date": "2026-10-11",
+        "time": "",
+        "venue": ""
+      },
+      "set": {
+        "dateTbc": true
+      }
+    },
+    {
+      "seriesId": "s-run-1790455881102-season-g1",
+      "fixtureId": "f3",
+      "expect": {
+        "home": "delta-cricket-club",
+        "away": "tm_simplex-reservoir-hills-crimson_emcuD3_s1_0",
+        "date": "2026-10-11",
+        "time": "",
+        "venue": ""
+      },
+      "set": {
+        "dateTbc": true
+      }
+    }
+  ],
+  "relocateDraftClashes": {
+    "dates": ["2026-10-10", "2026-10-11"],
+    "takenBy": "KZNCU sheet fixture 10–11 Oct"
+  }
+}

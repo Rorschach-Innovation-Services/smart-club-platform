@@ -1,4 +1,4 @@
-# ADR 0017 — The match-week office: fixtures, officials, result confirmation, ground use
+# ADR 0021 — The match-week office: fixtures, officials, result confirmation, ground use
 
 **Status:** Proposed (October 2026) — built on `feature/fixtures-venues-ui`, not yet reviewed.
 Builds on ADR 0011 (progressive release), ADR 0014 (seasons) and ADR 0016 (medicoach sync).
@@ -29,7 +29,7 @@ needed.
 into one list with names, ground and **checks**: result missing, result to confirm, result
 changed since confirmed, ground double-booked, no/one umpire, no scorer (upcoming games only),
 no ground, start time TBC, not released. Fixtures & Venues has tabs **This week · All fixtures
-· Results · Venues · Seasons & series**; the last is the unchanged editor. (ADR 0018 renames
+· Results · Venues · Seasons & series**; the last is the unchanged editor. (ADR 0022 renames
 it **Leagues & tournaments** and turns it into a table of competitions.)
 
 Managing a fixture from those views (`src/FixtureManage.tsx`) goes through **the same writes
@@ -162,7 +162,8 @@ new suite is `test/match-week-office.int.test.ts`, port 4693).
    manual/no-result fixtures. Add `play` to the **strict** `SmartClubResultSchema`
    (`packages/types/src/smartclub-sync.ts`) and copy the new shared example
    `changes-result-with-play.json`. Because smart club stores a result only when `recordedAt`
-   is newer, back-filling `play` onto old results needs a `resultRecordedAt` bump.
+   is newer, back-filling `play` onto old results needs a `resultRecordedAt` bump: MC-side
+   population of `play` must bump `resultRecordedAt` so it backfills onto already-synced results.
 2. **Scorers (later):** a fixture-level scorer assignment in medicoach plus a push endpoint, so
    the union's roster reaches the scorer's match list. Not needed for the roster itself.
 
@@ -171,7 +172,12 @@ new suite is `test/match-week-office.int.test.ts`, port 4693).
 - Confirmation is per fixture and per result version; there is no bulk "confirm all" on
   purpose (it would defeat checking). A union sign-off of the whole day (the SOP's 19:00
   sign-off) can be built on top of these items later.
-- Scorers are names and contacts only; no notifications are sent to them (as with umpires).
+- Scorers receive appointment notices exactly like umpires and referees (the role-keyed
+  officials-notice ledger and cron extend to the scorer registry; the `official_appointed`
+  template is role-parameterized, so no new Meta template). A scorer with no stored
+  phone/email simply has nothing sent — the register accepts name-only entries.
+- POPIA: The scorer register is a new named-individual contact registry actively messaged by
+  appointment notices; like umpires, records are deactivated (active:false), never deleted.
 - Ground-use thresholds are a starting proxy, not agronomy; tune `HEAVY_WEEK_*` /
   `RESTED_DAYS` with the union.
 - Known, unchanged: approving a series can toast success on a failed save; "Series

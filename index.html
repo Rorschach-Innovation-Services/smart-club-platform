@@ -1873,6 +1873,7 @@
   .fix-row-venue{display:flex;flex-direction:column;gap:1px}
   .fix-row-venue-name{font-weight:600;font-size:12px;color:var(--ink)}
   .fix-row-venue-suburb{font-size:10.5px;color:var(--muted);font-weight:500}
+  .fix-row-venue-note{font-size:10px;color:var(--muted);font-style:italic;margin-top:1px}
   .fix-venue-reason{margin-left:5px;padding:0 5px;border-radius:4px;font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:0.3px;color:var(--muted);background:var(--wash, rgba(0,0,0,0.05));white-space:nowrap;cursor:help}
   .fix-row-dist{
     font-family:'Montserrat',sans-serif;font-weight:700;font-size:13px;color:var(--ink);
@@ -1900,6 +1901,17 @@
   }
   .fix-status::before{
     content:'';width:5px;height:5px;border-radius:50%;
+  }
+  /* Never let the status badge wrap or shrink: it is the column people scan for. */
+  .fix-status{white-space:nowrap}
+  /* Laptop widths (the console content area is ~960px at a 1280px viewport): tighten the
+     cell padding so the whole row — Status and the row actions included — fits without a
+     sideways scroll. Wider screens keep the roomier padding. */
+  @media (max-width: 1440px){
+    .fix-table thead th{padding:14px 10px}
+    .fix-table td{padding:15px 10px}
+    .fix-table th:first-child,.fix-table td:first-child{padding-left:16px}
+    .fix-table th:last-child,.fix-table td:last-child{padding-right:16px}
   }
   .fix-status.scheduled{background:var(--paper2);color:var(--ink);border-color:var(--line)}
   .fix-status.scheduled::before{background:var(--ink3)}
@@ -2253,7 +2265,7 @@
     .fm-grid{grid-template-columns:1fr}
     .fm-actions .btn{flex:1 1 auto;justify-content:center}
   }
-  /* ─── Fixtures & Venues → Leagues & tournaments (ADR 0018) ─── */
+  /* ─── Fixtures & Venues → Leagues & tournaments (ADR 0022) ─── */
   .cmp-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px}
   .cmp-seg{display:inline-flex;flex-wrap:wrap;gap:2px;padding:3px;background:var(--paper2);border-radius:10px}
   .cmp-seg button{font:inherit;font-size:13px;font-weight:600;color:var(--muted);background:none;border:0;border-radius:8px;
@@ -3502,6 +3514,33 @@
         background: var(--green-pale);
         border-color: rgba(15, 77, 46, 0.2);
       }
+      /* The card a ?clearance=<id> notification link points at: a brand ring that holds, then
+         fades out before ClubClearancesView drops the class (CLEARANCE_LINK_HIGHLIGHT_MS).
+         fadeUp is kept in the list so adding/removing the class doesn't replay the entrance. */
+      .clr-card.linked {
+        animation:
+          fadeUp 0.35s cubic-bezier(0.16, 1, 0.3, 1) both,
+          clrLinked 4s ease-out both;
+      }
+      @keyframes clrLinked {
+        0%,
+        65% {
+          border-color: var(--green-bright);
+          box-shadow: 0 0 0 3px var(--green-bright);
+        }
+        100% {
+          box-shadow: 0 0 0 3px transparent;
+        }
+      }
+      /* Reduced motion collapses animations to their end frame (the faded-out ring), so show
+         a static ring for as long as the class is on instead. */
+      @media (prefers-reduced-motion: reduce) {
+        .clr-card.linked {
+          animation: none;
+          border-color: var(--green-bright);
+          box-shadow: 0 0 0 3px var(--green-bright);
+        }
+      }
       .clr-card-head {
         display: flex;
         align-items: flex-start;
@@ -4432,6 +4471,512 @@
         margin: 0 auto;
         padding: 20px 16px 40px;
       }
+      /* Match scorecard (ScorecardView.tsx, in the captain's report). Phone-first: each
+         scorecard table scrolls sideways inside its own wrapper, never the page. */
+      .sc-main {
+        max-width: 860px;
+      }
+      .sc-progress {
+        font-size: 12.5px;
+        color: var(--muted);
+        margin: -4px 0 12px;
+      }
+      .sc-matches {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .sc-match {
+        min-width: 0;
+      }
+      .sc-match-void {
+        background: var(--paper2, #f1f3f6);
+        color: var(--muted);
+      }
+      .sc-match-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 10px;
+        margin-bottom: 10px;
+      }
+      .sc-match-title {
+        font-family: 'Montserrat', sans-serif;
+        font-size: 15px;
+        color: var(--ink);
+        line-height: 1.35;
+      }
+      .sc-match-title strong {
+        font-weight: 800;
+      }
+      .sc-vs {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .sc-side-tag {
+        display: inline-block;
+        margin-left: 8px;
+        padding: 1px 6px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        font-size: 10.5px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--muted);
+        vertical-align: middle;
+      }
+      .sc-scorecard {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-top: 16px;
+      }
+      /* One innings: a bordered disclosure. The summary is the toggle (≥ 56px tall); the
+         tables open beneath it inside the same card. */
+      .sc-innings {
+        min-width: 0;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--white);
+      }
+      .sc-innings-own {
+        border-color: var(--muted-3);
+      }
+      .sc-innings-head {
+        margin: 0;
+        font: inherit;
+      }
+      .sc-innings-toggle {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        width: 100%;
+        min-height: 56px;
+        padding: 12px 16px;
+        border: 0;
+        border-radius: 10px;
+        background: none;
+        text-align: left;
+        color: var(--ink);
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .sc-innings-toggle:hover {
+        background: var(--paper);
+      }
+      .sc-innings-toggle:focus-visible {
+        outline: 2px solid var(--green);
+        outline-offset: -2px;
+      }
+      .sc-innings.open .sc-innings-toggle {
+        border-radius: 10px 10px 0 0;
+      }
+      .sc-innings-sum {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .sc-innings-title {
+        font-family: 'Montserrat', sans-serif;
+        font-size: 15px;
+        font-weight: 800;
+        letter-spacing: -0.01em;
+        line-height: 1.3;
+        font-variant-numeric: tabular-nums;
+      }
+      .sc-innings-hint {
+        font-size: 12.5px;
+        color: var(--muted);
+        line-height: 1.4;
+        overflow-wrap: anywhere;
+      }
+      .sc-chevron {
+        flex: none;
+        width: 16px;
+        height: 16px;
+        color: var(--muted);
+        transition: transform 0.18s ease-in-out;
+      }
+      .sc-innings.open .sc-chevron {
+        transform: rotate(180deg);
+      }
+      .sc-innings-body {
+        min-width: 0;
+        padding: 4px 16px 16px;
+        border-top: 1px solid var(--line2);
+      }
+      .sc-sub {
+        margin: 16px 0 8px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .sc-table-wrap {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--white);
+        max-width: 100%;
+      }
+      .sc-table {
+        border-collapse: collapse;
+        width: 100%;
+        min-width: 480px;
+        font-size: 12.5px;
+      }
+      .sc-table th {
+        text-align: left;
+        font-size: 10.5px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--muted);
+        background: var(--paper, #f6f8fb);
+        padding: 7px 10px;
+        white-space: nowrap;
+      }
+      .sc-table td,
+      .sc-table tfoot th {
+        padding: 8px 12px;
+        border-top: 1px solid var(--line2, #eef1f5);
+        white-space: nowrap;
+      }
+      .sc-table tfoot th {
+        text-align: left;
+        font-weight: 600;
+        font-size: 12.5px;
+        letter-spacing: 0;
+        text-transform: none;
+        background: none;
+      }
+      /* Extras: a quiet line; Total: the row the eye lands on. */
+      .sc-table .sc-extras-row th,
+      .sc-table .sc-extras-row td {
+        color: var(--muted);
+      }
+      .sc-table .sc-total-row th,
+      .sc-table .sc-total-row td {
+        border-top: 1px solid var(--line);
+        background: var(--paper, #f6f8fb);
+        color: var(--ink);
+        font-weight: 700;
+      }
+      .sc-total-row .num {
+        font-family: 'Montserrat', sans-serif;
+        font-size: 14px;
+        font-weight: 800;
+      }
+      /* Touch: rows tall enough to read and scroll by thumb. */
+      @media (pointer: coarse), (max-width: 640px) {
+        .sc-table td,
+        .sc-table tfoot th {
+          padding: 11px 12px;
+        }
+      }
+      .sc-table .num {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      .sc-table .sc-name {
+        font-weight: 600;
+        color: var(--ink);
+      }
+      .sc-table .sc-howout {
+        color: var(--muted);
+      }
+      .sc-line {
+        font-size: 12.5px;
+        color: var(--ink);
+        margin: 0;
+        line-height: 1.6;
+        overflow-wrap: anywhere;
+      }
+      .sc-line-label {
+        font-weight: 700;
+      }
+      .sc-headline {
+        margin-top: 10px;
+      }
+      .sc-headline-score {
+        font-family: 'Montserrat', sans-serif;
+        font-size: 15px;
+        font-weight: 800;
+        color: var(--ink);
+      }
+      .sc-headline-summary {
+        font-size: 13px;
+        margin-top: 2px;
+      }
+      .sc-external {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 10px;
+        font-size: 13px;
+        font-weight: 700;
+        color: var(--green);
+      }
+      .sc-external svg {
+        width: 12px;
+        height: 12px;
+      }
+      .sc-void {
+        font-size: 13px;
+        margin-top: 6px;
+      }
+      .sc-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 16px;
+      }
+      .sc-correction {
+        margin-top: 12px;
+      }
+      .sc-correction .field-textarea {
+        width: 100%;
+        min-height: 96px;
+      }
+      .sc-counter {
+        text-align: right;
+        font-size: 11.5px;
+        color: #5f6368;
+        margin-top: 4px;
+      }
+      .sc-counter.over {
+        color: var(--coral, #c0392b);
+      }
+      /* A given answer, locked: the same icon + text shape as the choice buttons. */
+      .sc-locked {
+        display: flex;
+        gap: 12px;
+        align-items: flex-start;
+        margin-top: 16px;
+        padding: 12px 16px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--paper, #f6f8fb);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      .sc-locked-body {
+        flex: 1;
+        min-width: 0;
+      }
+      .sc-tick {
+        flex: none;
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        background: var(--green);
+        color: #fff;
+        display: grid;
+        place-items: center;
+      }
+      .sc-locked-wrong .sc-tick {
+        background: var(--ink);
+      }
+      .sc-tick svg {
+        width: 12px;
+        height: 12px;
+      }
+      .sc-feedback {
+        margin: 8px 0;
+        padding: 8px 12px;
+        border-left: 3px solid var(--line);
+        background: var(--white);
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      /* The captain's report's "Match scorecard" section (CaptainsReport.tsx). */
+      .sc-report {
+        min-width: 0;
+      }
+      .sc-report:focus {
+        outline: 2px solid var(--green);
+        outline-offset: 2px;
+      }
+      /* The answer: never collapses, sits right under the innings. Two large choices — the
+         radio fills the whole button (invisible), so the tap target is the button. */
+      .sc-answer {
+        margin-top: 16px;
+        padding-top: 16px;
+        border-top: 1px solid var(--line);
+      }
+      .sc-ask {
+        margin: 0 0 12px;
+        font-family: 'Montserrat', sans-serif;
+        font-size: 15px;
+        font-weight: 800;
+        letter-spacing: -0.01em;
+        color: var(--ink);
+      }
+      .sc-choices {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+      @media (max-width: 560px) {
+        .sc-choices {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+      .sc-choice {
+        position: relative;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-height: 56px;
+        padding: 12px 16px;
+        border: 1px solid var(--muted-3);
+        border-radius: 10px;
+        background: var(--white);
+        color: var(--ink);
+        font-size: 15px;
+        font-weight: 600;
+        line-height: 1.3;
+        cursor: pointer;
+        transition:
+          background 0.15s ease-out,
+          border-color 0.15s ease-out,
+          color 0.15s ease-out;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .sc-choice:hover {
+        border-color: var(--ink);
+      }
+      .sc-choice input {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        opacity: 0;
+        cursor: pointer;
+      }
+      .sc-choice:has(input:focus-visible) {
+        outline: 2px solid var(--green);
+        outline-offset: 2px;
+      }
+      .sc-choice:has(input:disabled) {
+        opacity: 0.6;
+        cursor: default;
+      }
+      .sc-choice-icon {
+        flex: none;
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        border: 1px solid var(--muted-3);
+        display: grid;
+        place-items: center;
+        color: var(--muted);
+        transition: inherit;
+      }
+      .sc-choice-icon svg {
+        width: 14px;
+        height: 14px;
+      }
+      .sc-choice.on {
+        background: var(--green);
+        border-color: var(--green);
+        color: #fff;
+      }
+      .sc-choice.on .sc-choice-icon {
+        background: #fff;
+        border-color: #fff;
+        color: var(--green);
+      }
+      /* Operator scorecard console (platform-captains-report-scorecards.tsx). */
+      .scc-toolbar {
+        display: grid;
+        grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr));
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      @media (max-width: 900px) {
+        .scc-toolbar {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+        .scc-search {
+          grid-column: 1 / -1;
+        }
+      }
+      @media (max-width: 560px) {
+        .scc-toolbar {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+      .scc-chipbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 16px;
+      }
+      .scc-chip-dot {
+        opacity: 0.5;
+      }
+      .scc-chip-n {
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+      .scc-clear {
+        font-size: 12.5px;
+        padding: 8px 0;
+      }
+      .scc-sides {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 14px;
+      }
+      .scc-side {
+        display: inline-flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        font-size: 12.5px;
+      }
+      /* The table sizes to max-content (ScrollX), so two sides on one line push Date / Match
+         off-canvas below ~1400px — stack them, and cap each side (its ref / status / feedback
+         toggle wrap under the pill) and the opened feedback. */
+      @media (max-width: 1400px) {
+        .scc-sides {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+        .scc-side,
+        .scc-feedback {
+          max-width: 420px;
+        }
+      }
+      .scc-feedback {
+        margin: 6px 0 0;
+        padding: 8px 12px;
+        border-left: 3px solid var(--line);
+        background: var(--paper, #f6f8fb);
+        font-size: 12.5px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        max-width: 640px;
+      }
+      .scc-link {
+        background: none;
+        border: none;
+        padding: 0;
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--green);
+        cursor: pointer;
+        text-decoration: underline;
+      }
       @media print {
         .sidebar,
         .topbar,
@@ -4447,7 +4992,9 @@
       }
       @media (max-width: 1100px) {
         .cr-layout {
-          grid-template-columns: 1fr;
+          /* minmax(0, …): a bare 1fr never shrinks below its content's min width, so the
+             scorecard tables would widen the page instead of scrolling in their wrappers. */
+          grid-template-columns: minmax(0, 1fr);
         }
         /* The side panel's job moves to a sticky bottom bar on smaller screens. */
         .cr-aside {

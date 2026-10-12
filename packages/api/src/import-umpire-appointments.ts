@@ -48,6 +48,7 @@ import {
   type UmpireBooking,
 } from '../../engine/src/umpires.js';
 import { applyUmpireInput, umpireIdFor } from './umpires.js';
+import { cellText, cellTime as sharedCellTime, unwrapCell } from './xlsx-cells.js';
 
 // `./repo.js` (and its AWS SDK deps) is imported dynamically inside `main()` so the pure
 // parser/matcher and their unit tests load without a table configured.
@@ -142,44 +143,15 @@ const headerKey = (v: unknown) =>
     .toLowerCase()
     .replace(/[^a-z]+/g, '');
 
-/** Text of a cell: rich text joined, formula results unwrapped, always trimmed. */
-export function cellText(v: unknown): string {
-  if (v == null || v instanceof Date) return '';
-  if (typeof v === 'object') {
-    const o = v as Record<string, unknown>;
-    if (Array.isArray(o.richText))
-      return (o.richText as Array<{ text: string }>)
-        .map((r) => r.text)
-        .join('')
-        .trim();
-    if ('result' in o) return cellText(o.result);
-    if (typeof o.text === 'string') return o.text.trim();
-    return '';
-  }
-  return String(v).replace(/\s+/g, ' ').trim();
-}
-
-const unwrap = (v: unknown): unknown =>
-  v && typeof v === 'object' && !(v instanceof Date) && 'result' in (v as object)
-    ? (v as { result: unknown }).result
-    : v;
-
+// Cell readers live in xlsx-cells.ts (shared with the reminder and EMCU importers).
+export { cellText };
+const unwrap = unwrapCell;
 const pad = (n: number) => String(n).padStart(2, '0');
 
 /** A time cell: a 1899-epoch Date (exceljs, wall clock in UTC fields), a fraction of a
- * day, or "HH:MM" text. */
+ * day, or "HH:MM" text — leniently (trailing text tolerated, as this sheet writes it). */
 export function cellTime(raw: unknown): string | undefined {
-  const v = unwrap(raw);
-  if (v instanceof Date) {
-    if (v.getUTCFullYear() >= 1970) return undefined;
-    return `${pad(v.getUTCHours())}:${pad(v.getUTCMinutes())}`;
-  }
-  if (typeof v === 'number' && v >= 0 && v < 1) {
-    const mins = Math.round(v * 24 * 60);
-    return `${pad(Math.floor(mins / 60) % 24)}:${pad(mins % 60)}`;
-  }
-  const m = cellText(v).match(/^(\d{1,2})[:h.](\d{2})/i);
-  return m ? `${pad(Number(m[1]))}:${m[2]}` : undefined;
+  return sharedCellTime(raw, { lenient: true });
 }
 
 /** Year + month from the Month cell: a Date on the 1st (or any day) of the month. */
@@ -310,7 +282,7 @@ export function resolveSheetTeam(
 }
 
 /** A fixture side's club + lettered index (`tm_<club>_<league>_<i>`), from the series. */
-function sideOf(series: Series, teamId: unknown): ResolvedTeam | undefined {
+export function sideOf(series: Series, teamId: unknown): ResolvedTeam | undefined {
   if (typeof teamId !== 'string' || !teamId) return undefined;
   const p = (series.participants ?? []).find((x) => x.teamId === teamId);
   const clubId = p?.clubId ?? teamId;
@@ -319,7 +291,7 @@ function sideOf(series: Series, teamId: unknown): ResolvedTeam | undefined {
 }
 
 /** A plain sheet name matches the club's plain or A side; "X A" matches A or plain. */
-function sameTeam(sheet: ResolvedTeam, fixtureSide: ResolvedTeam | undefined): boolean {
+export function sameTeam(sheet: ResolvedTeam, fixtureSide: ResolvedTeam | undefined): boolean {
   if (!fixtureSide || sheet.clubId !== fixtureSide.clubId) return false;
   const a = sheet.side ?? 0;
   const b = fixtureSide.side ?? 0;
@@ -547,7 +519,42 @@ export interface WritePlan {
 const sameOfficials = (a: FixtureOfficials | null | undefined, b: FixtureOfficials): boolean =>
   !!a &&
   a.umpires.map((u) => u.umpireId).join('|') === b.umpires.map((u) => u.umpireId).join('|') &&
-  (a.referee?.umpireId ?? '') === (b.referee?.umpireId ?? '');
+  (a.referee?.umpireId ?? '') === (b.referee?.umpireId ?? '') &&
+  (a.scorers ?? []).map((x) => x.scorerId).join('|') ===
+    (b.scorers ?? []).map((x) => x.scorerId).join('|');
+
+/** One appointed official on a fixture, as the notice ledger keys it. */
+export interface OfficialPair {
+  /** The registry id for the role: an umpire id for umpire/referee, a scorer id for scorer. */
+  umpireId: string;
+  role: 'umpire' | 'referee' | 'scorer';
+}
+
+/** Every (registry id, role) pair in an appointment (deduped; empty for null). */
+export function officialPairs(officials: FixtureOfficials | null | undefined): OfficialPair[] {
+  if (!officials) return [];
+  const out: OfficialPair[] = [];
+  const seen = new Set<string>();
+  const add = (umpireId: string, role: OfficialPair['role']) => {
+    const k = `${role}#${umpireId}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push({ umpireId, role });
+  };
+  for (const u of officials.umpires ?? []) add(u.umpireId, 'umpire');
+  if (officials.referee) add(officials.referee.umpireId, 'referee');
+  for (const x of officials.scorers ?? []) add(x.scorerId, 'scorer');
+  return out;
+}
+
+/** The pairs in `previous` that are no longer in `next` (removed or changed role). */
+export function diffOfficials(
+  previous: FixtureOfficials | null | undefined,
+  next: FixtureOfficials | null | undefined,
+): OfficialPair[] {
+  const keep = new Set(officialPairs(next).map((p) => `${p.role}#${p.umpireId}`));
+  return officialPairs(previous).filter((p) => !keep.has(`${p.role}#${p.umpireId}`));
+}
 
 /**
  * Turn matched rows into FIXOFFICIALS writes. `existing` is the stored appointment per
@@ -584,11 +591,14 @@ export function planWrites(
       .filter((u) => (ids.includes(u.id) ? false : (ids.push(u.id), true)))
       .map((u) => ({ umpireId: u.id, name: u.displayName }));
     const ref = m.row.referee ? byName.get(m.row.referee) : undefined;
+    const prev = existing.get(`${m.seriesId}#${m.fixtureId}`);
+    // The sheet names umpires only: carry the stored scorers through, or the whole-item write
+    // would wipe them (and the notice diff would drop their ledger rows).
     const officials: FixtureOfficials = {
       umpires,
       ...(ref ? { referee: { umpireId: ref.id, name: ref.displayName } } : {}),
+      ...(prev?.scorers?.length ? { scorers: prev.scorers } : {}),
     };
-    const prev = existing.get(`${m.seriesId}#${m.fixtureId}`);
     const action: WriteAction = sameOfficials(prev, officials)
       ? 'unchanged'
       : prev && (prev.umpires.length || prev.referee)

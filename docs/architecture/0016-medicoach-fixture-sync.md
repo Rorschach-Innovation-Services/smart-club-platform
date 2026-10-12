@@ -114,6 +114,24 @@ importer's `putSeries`) would overwrite them or lose them to a version conflict.
   that reached nobody (every channel tried failed) releases its claim and is retried; one
   delivered channel is done. The admin sync page shows "notices failed" for retries waiting
   on that.
+- **Notices go out from 18:00 SAST** (user decision, 10–11 Oct 2026) — nothing is sent
+  before `REPORT_NOTICE_HOUR` (18:00 SAST, a global gate: every tenant is South African, one
+  fixed offset). A result stored earlier in the day is stored as usual, but the puller does
+  NOT call the hook and does NOT delete its `REPORTOPEN#` marker: the marker is the queue.
+  The first run at or after 18:00 drains it (the puller cron runs on fixed quarter hours,
+  `cron(0/15 * * * ? *)`, so one lands at 16:00 UTC); a result stored after 18:00 sends at
+  once, and one arriving after midnight waits for 18:00 that day. A deferral is never an
+  attempt (it does not count toward `REPORT_OPEN_MAX_ATTEMPTS`). Because the opening itself
+  is deferred, a corrected result's summary update on pending reports also waits until 18:00.
+  "Sync now" follows the same rule and says the reports are queued; the one reminder is held
+  until 18:00 too (it stays due — the window runs to midnight). Each invocation drains within
+  a deadline (cron ~4 min, "Sync now" ~20 s), checked before each marker and each `NOTIFY#`
+  claim; leftovers stay queued. Never sent twice: every automatic send claims `NOTIFY#`
+  first, a delivered channel (e.g. email-only) completes the claim, and nothing re-queues
+  or re-sends an already notified report. A claim seen stuck `in_progress` for more than
+  10 minutes is reported to Sentry, never re-sent. The gate covers the AUTOMATIC paths only:
+  a chair's manual "Send to captain" forward is a deliberate human action and sends at any
+  hour (still claim-protected, so never twice).
 - **Honest delivery** — every notice (the opening, a chair's forward, the reminder) records
   one `deliveries[]` entry per channel on the report: `sent | failed | skipped` with a reason
   (`no-contact`, `no-email`, `no-cell`, `dry-run`, `template-pending`, `send-failed`), the
@@ -294,3 +312,32 @@ number — effectively the ID number. So:
   exported league's results come only from medicoach.
 - Push (smart club → medicoach schedule changes, Slice 4) reuses the same contract, secret
   and cron.
+
+## Addendum (October 2026): scorecards and the match address
+
+- **Two new optional result fields.** A `/changes` result for a fixture with a linked live
+  match now carries `medicoachMatchId` (the match's own id, not the fixture's stored
+  `postMatchId`, which can be out of date) and `medicoachTournamentId` (the medicoach
+  competition). Both are omitted, never null, for manual or imported results. They are
+  medicoach ids, not refs: smart club stores them as given and never needs to understand them.
+- **A third endpoint.** `GET /integrations/smartclub/matches/:matchId/scorecard?tournamentId=`
+  returns the full batting and bowling card (contract §3, example
+  `scorecard-live-match.json`). It is HMAC-signed like the other two, and the signed
+  `pathAndQuery` includes the `?tournamentId=` query. `tournamentId` is required because a
+  medicoach match row cannot be looked up by its id alone. Medicoach finds it through that
+  competition's fixtures, and only through SYNCED fixtures, so smart club can only read
+  scorecards for its own fixtures (anything else is a 404). A match with no ball bowled yet
+  answers `{ available: false, matchId }`.
+- **Computed, never stored on medicoach.** Medicoach folds the card from the ball-by-ball
+  record on every call (Time Cricket reads its paged ball log), so smart club should cache what
+  it pulls rather than fetch on every page view.
+- **Names only.** The card names players and nothing else: no player ids, emails or refs. A
+  player with no usable name reads `"Unknown"`. Nothing in the scorecard is personal data
+  beyond a display name.
+- **Player erasure scrubs cached cards.** A tenant-wide player erasure replaces the person's
+  batter, bowler and fall-of-wicket names in every cached scorecard with `[removed]` and marks
+  that card `terminal`, so the sweep never re-fetches the name from medicoach. Cards outside the
+  sweep window were already stable (never re-fetched), so the scrub holds for them as well.
+  Residual, accepted: a NEW result push from medicoach for the same fixture still re-fetches
+  the scorecard, overwriting the scrubbed card and clearing `terminal`; a result push after an
+  erasure is considered unlikely.

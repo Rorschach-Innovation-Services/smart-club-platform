@@ -22,6 +22,7 @@ import {
   type ManageSeries,
   type ManageVenue,
   type Person,
+  type PersonContacts,
 } from './FixtureManage';
 import {
   HEAVY_WEEK_BALLS,
@@ -82,7 +83,7 @@ export interface HubManage {
   onSaveUmpires?: (seriesId: string, fixtureId: string, ids: string[]) => Promise<unknown>;
   onSaveScorers?: (seriesId: string, fixtureId: string, ids: string[]) => Promise<unknown>;
   onCreateUmpire?: (displayName: string) => Promise<Person>;
-  onCreateScorer?: (displayName: string) => Promise<Person>;
+  onCreateScorer?: (displayName: string, contacts?: PersonContacts) => Promise<Person>;
   onConfirmResult?: (seriesId: string, fixtureId: string, recordedAt: string) => Promise<unknown>;
   onUnconfirmResult?: (seriesId: string, fixtureId: string) => Promise<unknown>;
   toast?: (message: string, tone?: string) => void;

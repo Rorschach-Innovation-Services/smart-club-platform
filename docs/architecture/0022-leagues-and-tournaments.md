@@ -1,7 +1,7 @@
-# ADR 0018 — Leagues & tournaments: create, draw, table and knockout in Fixtures & Venues
+# ADR 0022 — Leagues & tournaments: create, draw, table and knockout in Fixtures & Venues
 
 **Status:** Proposed (October 2026). Built on `feature/fixtures-venues-ui`, not yet reviewed.
-Builds on ADR 0014 (seasons), ADR 0016 (medicoach sync) and ADR 0017 (match-week office).
+Builds on ADR 0014 (seasons), ADR 0016 (medicoach sync) and ADR 0021 (match-week office).
 
 ## Context
 
@@ -61,7 +61,7 @@ working unchanged:
 - approve and release, including progressive release (ADR 0011);
 - the version check, the approval recall and both clash gates on `PATCH /series/:id`;
 - venue allocation;
-- officials (umpires and scorers, ADR 0017);
+- officials (umpires and scorers, ADR 0021);
 - results and confirmation;
 - the medicoach outbox and sync (ADR 0016), as long as `leagueKey` maps.
 
@@ -179,6 +179,25 @@ The tab key stays `series`, so old `?tab=series` links still work. The tab is no
   Leagues nav page still works.
 - **Operator seasons** (`SeasonRunsPanel`) sit under the table. The section opens on its own
   while a season is running.
+
+### 7. Knockout slot ownership: a manual fill owns the side
+
+Lands in this same integration (Delta 2): the `slotsManual` mechanics described here ship with
+the merge of this branch, not later.
+
+- Any placeholder side (`pos:`, `win:`, `lose:`, `tbd:`) may be set manually via `setSide`.
+- A manual fill owns the side: the sync puller and `/competitions/:id/advance` fill only sides
+  that still hold a slot ref, and never a side flagged `slotsManual`.
+- Revert (blocked with 409 `result_attached` while a result is stored) restores the
+  placeholder, clears the flag, and returns the side to automation.
+- `slotsManual` is carried through importer rewrites (`SYNC_OWNED_FIXTURE_FIELDS`) and stripped
+  when a series is duplicated.
+- Automation writers converge on stored results and resolve races via version-checked writes.
+- After a manual override on a synced series, the Match Centre may show a different team until
+  revert (schedule pushes never carry teams); the admin UI shows a divergence badge.
+
+This builds on ADR 0018 (named knockout placeholders, [0018](0018-named-knockout-placeholders.md))
+and supersedes its "sync-owned side" refusal: a synced side is no longer refused for Set team.
 
 ## Failure modes and where they are tested
 

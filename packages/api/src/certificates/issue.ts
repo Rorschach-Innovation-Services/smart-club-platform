@@ -40,6 +40,7 @@ import {
 } from './render-common.js';
 import { renderClassic } from './render-classic.js';
 import { renderConfirmation } from './render-confirmation.js';
+import { isCertifiable } from './certifiable.js';
 
 const PDF = 'application/pdf';
 const s3 = new S3Client({});
@@ -52,8 +53,7 @@ export class CertificateNotIssuableError extends Error {
   }
 }
 
-export const isCertifiable = (c: Pick<PlayerClearance, 'status'>): boolean =>
-  c.status === 'approved' || c.status === 'admin-override';
+export { isCertifiable };
 
 /**
  * The origin printed in every QR (`${base}/verify/<serial>`). A platform host set per stage in

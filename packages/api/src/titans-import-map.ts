@@ -76,6 +76,27 @@ export const CLUB_MAP: ClubMapEntry[] = [
 ];
 
 /**
+ * Partial-pack scoping. The August import shipped the full 21-folder pack; later drops
+ * (the Oct 2026 TUT + Pretoria East top-up) carry only the clubs that sent new paperwork.
+ * A club is IN SCOPE iff its exact CLUB_MAP folder is present in the pack; every other
+ * club is OUT OF SCOPE — never parsed, never coverage-checked, never written or merged.
+ * Both CLIs print the out-of-scope list on every run so a missing folder is visible, and
+ * refuse an empty scope outright. A full pack scopes to all 21, so the full-pack
+ * fail-closed checks (every club must have docs / a memberDatabase) are unchanged.
+ * Pure (no fs) — callers pass the top-level folder names they found.
+ */
+export function scopeClubs(presentFolders: Iterable<string>): {
+  inScope: ClubMapEntry[];
+  outOfScope: ClubMapEntry[];
+} {
+  const present = new Set(presentFolders);
+  return {
+    inScope: CLUB_MAP.filter((c) => present.has(c.folder)),
+    outOfScope: CLUB_MAP.filter((c) => !present.has(c.folder)),
+  };
+}
+
+/**
  * Sheet TYPOS/variants that must resolve to a different base token before the
  * sheetTokens lookup runs. Kept separate from CLUB_MAP (which never carries an
  * unverifiable spelling) — mirrors NAME_REDIRECTS in import-planb-fixtures.ts.
@@ -129,6 +150,13 @@ export const DOC_RULES: Array<[RegExp, string]> = [
   [/agm|annual\s*general/i, 'agm'],
   [/chairman/i, 'chairmansReport'],
   [/financial/i, 'financials'],
+  // Safeguarding/coaching certificates (Oct 2026 top-up). MUST sit before the
+  // facilityAgreement rule, whose broad `agreement` term would otherwise be the only
+  // thing standing between these and "unclassified" — and must never be the thing that
+  // claims them. `coach(ing)?\s*(certificate|evidence)` covers "Coaching Certificate - …"
+  // and TUT's "Safe guarding and Leve II Coach Evidence" (the "Leve II" typo never
+  // matters: "safe guarding" already matches first).
+  [/safe\s*guard(ing)?|coach(ing)?\s*(certificate|evidence)/i, 'safeguardingCoaching'],
   // "fields?\.pdf$" catches "Excellentiam Fields.pdf", which names neither "facility"
   // nor "agreement"/"lease"/"mou"/"field agreement"/"field use" — every other
   // facility-doc naming convention observed in the pack is covered by the other terms.
@@ -158,6 +186,14 @@ export const FILE_OVERRIDES: Record<string, string | 'skip'> = {
   // source used by import-titans-roster.ts, so the contact list is skipped explicitly
   // rather than left to abort the run as unclassified.
   'Sinoville Cricket Club/Sinoville Contact list 2025-2026.docx': 'skip',
+  // Oct 2026 top-up: TUT sent two committee workbooks. This 31 Jul one is superseded by
+  // "Club Committee-  2026 - 2027 _ Updated _ 300926.xls" (adds the women's coach row);
+  // committee is single-file, so keeping both would abort as a clash. Note the DOUBLE
+  // space after "Committee-" — it is exactly how the file is named.
+  'TUT/Club Committee-  2026 - 2027 _ TUT 310726.xls': 'skip',
+  // PECC's annual financial statements are titled "AFS and Transactions" — no
+  // "financial" wording for the regex to find, so it would otherwise abort unclassified.
+  'Pretoria East/PECC AFS and Transactions 2025-2026.pdf': 'financials',
 };
 
 /**
@@ -166,7 +202,7 @@ export const FILE_OVERRIDES: Record<string, string | 'skip'> = {
  * classifier and importer agree on which keys may hold >1 file without importing
  * catalogue.ts's runtime resolution logic into this pure module.
  */
-export const MULTI_FILE_DOC_KEYS = new Set(['agm', 'facilityAgreement']);
+export const MULTI_FILE_DOC_KEYS = new Set(['agm', 'facilityAgreement', 'safeguardingCoaching']);
 
 /** Every doc key this import ever writes — must equal the tenant's configured catalogue
  * (asserted at dry-run against resolveRequiredDocs(config) — see import-titans-compliance.ts). */
@@ -181,6 +217,10 @@ export const TITANS_DOC_KEYS = [
   'chairmansReport',
   'financials',
   'facilityAgreement',
+  // Oct 2026 top-up. Listing it here makes the dry-run's catalogue-coverage assertion
+  // refuse to run until configure-tenant-docs has added it to the tenant — the
+  // catalogue-before-import ordering is enforced, not just documented.
+  'safeguardingCoaching',
 ];
 
 export type ClassifyResult =
@@ -311,6 +351,69 @@ export function isKnownStructureAnomaly(sheet: string, header: string, raw: stri
 export function leagueKeyForSection(headerText: string): string | null | undefined {
   const h = headerText.trim().replace(/\s+/g, ' ').toUpperCase();
   const hit = SECTION_LEAGUE_MAP.find(([re]) => re.test(h));
+  return hit ? hit[1] : undefined;
+}
+
+// ───────────────────────── League entry forms ─────────────────────────
+
+/**
+ * Sentinel for the entry form's single "Womens' League" row. The tenant has TWO women's
+ * leagues (womens-premier-league, womens-promotion-league) and the form doesn't say
+ * which one a side is entered into — placement is the union's call. So this row is
+ * diffed against the SUM of the club's stored `womens-*` counts and a mismatch is
+ * report-only (manual union follow-up), never written.
+ */
+export const WOMENS_AGGREGATE = '__womens-aggregate__';
+
+/**
+ * Entry-form league label → titans league key. Matched against the label AFTER any
+ * parenthetical ("(45 Overs)") is stripped and whitespace is collapsed + uppercased. A
+ * sibling of SECTION_LEAGUE_MAP for the clubs' own league-entry forms (the structure
+ * workbook speaks in divisions/pools; the form speaks in leagues and age groups).
+ *
+ * `null` = RECOGNISED label with no tenant league: a non-zero request is printed as a
+ * manual union follow-up and is never written and never minted as a new league key.
+ * `WOMENS_AGGREGATE` = see its own comment. An unmatched label is `undefined` and fails
+ * the run closed — a new form row must be added here deliberately.
+ */
+export const ENTRY_LEAGUE_MAP: Array<[RegExp, string | null]> = [
+  [/^PREMIER LEAGUE$/, 'premier-league'],
+  [/^PROMOTION LEAGUE$/, 'promotion-league'],
+  // The union runs no "Reserve" or "President" competition on the tenant — the form
+  // template carries them, the tenant's leagues do not (TUT and PECC both enter one).
+  [/^RESERVE LEAGUE$/, null],
+  [/^PRESIDENT LEAGUE$/, null],
+  [/^2ND LEAGUE$/, 'second-league'],
+  [/^3RD LEAGUE$/, 'third-league'],
+  [/^4TH LEAGUE$/, 'fourth-league'],
+  [/^5TH LEAGUE$/, 'fifth-league'],
+  // Spelled "Womens' League (35 Overs)" on the 2026-27 template; tolerate the
+  // apostrophe moving or vanishing.
+  [/^WOMEN'?S'? LEAGUE$/, WOMENS_AGGREGATE],
+  // Spelled "Veterans " (trailing space, no "League") on the template.
+  [/^VETERANS( LEAGUE)?$/, 'veterans-league'],
+  [/^UNDER 9$/, 'u9'],
+  [/^UNDER 11$/, 'u11'],
+  [/^UNDER 13$/, 'u13'],
+  [/^UNDER 15$/, 'u15'],
+  // No girls' junior league on the tenant — manual follow-up if requested.
+  [/^JUNIOR GIRLS$/, null],
+];
+
+/** Normalise an entry-form label for ENTRY_LEAGUE_MAP matching. */
+export function normalizeEntryLabel(label: string): string {
+  return label
+    .replace(/\([^)]*\)/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toUpperCase();
+}
+
+/** Resolve an entry-form label: a league key, `WOMENS_AGGREGATE`, `null` (recognised,
+ * no tenant league), or `undefined` (unknown label — callers fail closed). */
+export function leagueKeyForEntryLabel(label: string): string | null | undefined {
+  const l = normalizeEntryLabel(label);
+  const hit = ENTRY_LEAGUE_MAP.find(([re]) => re.test(l));
   return hit ? hit[1] : undefined;
 }
 

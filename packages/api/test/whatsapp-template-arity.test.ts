@@ -14,9 +14,27 @@ const {
   staffInviteParams,
   regLinkParams,
   fixturesParams,
-  clearanceParams,
+  clearanceV2Params,
+  clearanceTemplateFor,
+  fixtureReminderParams,
+  officialAppointedParams,
   captainsReportDueParams,
+  captainsReportOpsDigestParams,
+  sendCaptainsReportOpsDigestWhatsApp,
   urlButtonComponent,
+  videoHeaderComponent,
+  dolphinsStaffWelcomeParams,
+  dolphinsPlayerWelcomeParams,
+  dolphinsPlayerFyiParams,
+  sendDolphinsStaffWelcomeWhatsApp,
+  sendDolphinsPlayerWelcomeWhatsApp,
+  sendDolphinsPlayerFyiWhatsApp,
+  WhatsAppTemplatePendingError,
+  assertTemplateSendable,
+  emcuScorerAccountsNoticeParams,
+  emcuPlayerScoringParams,
+  sendEmcuScorerAccountsNoticeWhatsApp,
+  sendEmcuPlayerScoringWhatsApp,
 } = await import('../src/notify/whatsapp.js');
 const { WHATSAPP_TEMPLATES } = await import('../src/notify/whatsapp-templates.js');
 
@@ -59,13 +77,64 @@ const BUILDERS = [
     }),
   },
   {
-    key: 'clearancePending' as const,
-    params: clearanceParams({
+    key: 'captainsReportOpsDigest' as const,
+    params: captainsReportOpsDigestParams({
+      recipientName: 'Union admin',
+      summary: 'Dolphins: 3 new results, 6 reports opened, 6 notices sent, 0 failed',
+    }),
+  },
+  {
+    key: 'clearancePendingV2' as const,
+    params: clearanceV2Params({
       chairName: 'Thandi Nkosi',
       fromClubName: 'Adelaar CC',
       playerName: 'A Player',
       toClubName: 'Centurion Kavaliers',
+      portalLink: 'https://club.example.com/club/c1/clearances?clearance=clr-1',
     }),
+  },
+  {
+    key: 'fixtureReminder' as const,
+    params: fixtureReminderParams({
+      chairName: 'Thandi Nkosi',
+      clubName: 'Adelaar CC',
+      dateLabel: 'Sat 2026-11-07',
+      portalLink: LINK,
+    }),
+  },
+  {
+    key: 'officialAppointed' as const,
+    params: officialAppointedParams({
+      officialName: 'Andile Ngubane',
+      roleLabel: 'umpire',
+      orgName: 'KZN Cricket Union',
+      matchLine: 'Umzinto CC v African Warriors · Premier League',
+      whenWhere: 'Sat 2026-11-15, 09:00 at Kingsmead',
+    }),
+  },
+  {
+    key: 'dolphinsStaffWelcome' as const,
+    params: dolphinsStaffWelcomeParams({ name: 'Thandi Nkosi' }),
+  },
+  {
+    key: 'dolphinsPlayerWelcome' as const,
+    params: dolphinsPlayerWelcomeParams({ firstName: 'Sipho' }),
+  },
+  {
+    key: 'dolphinsPlayerFyi' as const,
+    params: dolphinsPlayerFyiParams(),
+  },
+  {
+    key: 'emcuScorerAccountsNotice' as const,
+    params: emcuScorerAccountsNoticeParams({
+      chairName: 'Thandi Nkosi',
+      clubName: 'Umhlali Cricket Club',
+      chairEmail: 'chairperson@umhlalicc.co.za',
+    }),
+  },
+  {
+    key: 'emcuPlayerScoring' as const,
+    params: emcuPlayerScoringParams({ firstName: 'Sipho' }),
   },
 ];
 
@@ -155,10 +224,323 @@ describe("captain's report template (v2 copy, edited in place in Meta 4 Oct 2026
     assert.doesNotMatch(due.bodyText, /'s captain's report/);
   });
 
-  test("there is exactly one captain's-report template in the registry", () => {
+  test("there is exactly one captain's-report LINK template in the registry", () => {
+    // The ops digest (below) is a separate, button-less status template.
     const names = Object.values(WHATSAPP_TEMPLATES)
       .map((d) => d.name)
       .filter((n) => n.startsWith('captains_report'));
-    assert.deepEqual(names, ['captains_report_due']);
+    assert.deepEqual(names, ['captains_report_due', 'captains_report_ops_digest_v2']);
+    const linked = Object.values(WHATSAPP_TEMPLATES).filter(
+      (d) => d.name.startsWith('captains_report') && 'urlButton' in d,
+    );
+    assert.deepEqual(
+      linked.map((d) => d.name),
+      ['captains_report_due'],
+    );
+  });
+});
+
+describe("captain's report ops digest template", () => {
+  const digest = WHATSAPP_TEMPLATES.captainsReportOpsDigest;
+
+  test('two body params, no URL button, registered in Meta as UTILITY (v2, 7 Oct 2026)', () => {
+    // v1 (captains_report_ops_digest) was approved as MARKETING; category is immutable
+    // once approved, so v2 was created fresh as Utility with transaction-anchored copy.
+    assert.equal(digest.name, 'captains_report_ops_digest_v2');
+    assert.equal(digest.lang, 'en');
+    assert.equal(digest.status, 'registered');
+    assert.equal(digest.paramCount, 2);
+    assert.deepEqual(digest.params, ['recipient name', 'run summary']);
+    assert.ok(!('urlButton' in digest));
+    assert.equal(
+      digest.bodyText,
+      'Hello {{1}},\n\n' +
+        'Account status notification for your union administrator account.\n\n' +
+        "Latest captain's report processing run: {{2}}.\n\n" +
+        'This is an automated service message. No action is required.',
+    );
+  });
+
+  test('the summary is bounded at 300 chars and collapsed to one line', () => {
+    const [name, summary] = captainsReportOpsDigestParams({
+      recipientName: '',
+      summary: `Dolphins:\n${'x'.repeat(400)}`,
+    });
+    assert.equal(name.text, 'there');
+    assert.equal(summary.text.length, 300);
+    assert.doesNotMatch(summary.text, /\n/);
+  });
+
+  test('the sender sends once registered (dry-run without credentials)', async () => {
+    const { messageId } = await sendCaptainsReportOpsDigestWhatsApp({
+      to: '+27000000000',
+      recipientName: 'Union admin',
+      summary: 'x',
+    });
+    assert.match(messageId, /^dry-run-/);
+  });
+});
+
+describe('clearance-pending template (v2 only; v1 retired in code 7 Oct 2026)', () => {
+  const v2 = WHATSAPP_TEMPLATES.clearancePendingV2;
+  const copy = {
+    chairName: 'Thandi  Nkosi',
+    fromClubName: 'Adelaar CC',
+    playerName: 'A\nPlayer',
+    toClubName: 'Centurion Kavaliers',
+  };
+  const LONG_LINK = `https://club.example.com/club/c1/clearances?clearance=${'x'.repeat(120)}`;
+
+  test('v2 is the only clearance template: the retired v1 name has no registry entry', () => {
+    assert.equal(v2.name, 'club_clearance_pending_v2');
+    assert.equal(v2.status, 'registered');
+    assert.equal(v2.paramCount, 5);
+    const names = Object.values(WHATSAPP_TEMPLATES)
+      .map((d) => d.name)
+      .filter((n) => n.startsWith('club_clearance'));
+    assert.deepEqual(names, ['club_clearance_pending_v2']);
+  });
+
+  test('a linked notice picks v2 with the link passed through whole (never truncated)', () => {
+    const pick = clearanceTemplateFor({ ...copy, portalLink: LONG_LINK });
+    assert.ok(pick);
+    assert.equal(pick.key, 'clearancePendingV2');
+    assert.equal(pick.params.length, v2.paramCount);
+    // Text params are cleaned; the link is not.
+    assert.deepEqual(
+      pick.params.map((p) => p.text),
+      ['Thandi Nkosi', 'Adelaar CC', 'A Player', 'Centurion Kavaliers', LONG_LINK],
+    );
+  });
+
+  test('a notice with no link picks no template — the caller skips WhatsApp', () => {
+    assert.equal(clearanceTemplateFor(copy), null);
+    assert.equal(clearanceTemplateFor({ ...copy, portalLink: '' }), null);
+  });
+
+  test('the v2 body keeps the union-office fallback and does not end on the link variable', () => {
+    assert.match(v2.bodyText, /Review it here: \{\{5\}\}/);
+    assert.match(v2.bodyText, /contact your union office/);
+    assert.doesNotMatch(v2.bodyText, /\{\{\d+\}\}\s*$/);
+  });
+});
+
+describe('Dolphins welcome broadcast templates (VIDEO header; all three approved 8 Oct 2026)', () => {
+  const VIDEO = 'https://bucket.s3.af-south-1.amazonaws.com/tutorials/dolphins/x.mp4';
+  const entries = [
+    ['dolphinsStaffWelcome', 'dolphins_staff_welcome', 1],
+    ['dolphinsPlayerWelcome', 'dolphins_player_welcome', 1],
+    ['dolphinsPlayerFyi', 'dolphins_player_fyi', 0],
+  ] as const;
+
+  for (const [key, name, arity] of entries) {
+    test(`${name}: en, ${arity} body param(s), VIDEO header, no URL button`, () => {
+      const def = WHATSAPP_TEMPLATES[key];
+      assert.equal(def.name, name);
+      assert.equal(def.lang, 'en');
+      assert.equal(def.paramCount, arity);
+      assert.deepEqual(def.header, { format: 'VIDEO' });
+      assert.ok(!('urlButton' in def));
+      assert.ok(def.bodyText.length <= 1024, 'Meta caps a template body at 1024 chars');
+      assert.doesNotMatch(
+        def.bodyText,
+        /^\{\{|\{\{\d+\}\}\s*$/,
+        'Meta rejects a body starting/ending on a variable',
+      );
+    });
+  }
+
+  test('only the broadcast templates declare a media header', () => {
+    const withHeader = Object.values(WHATSAPP_TEMPLATES)
+      .filter((d) => 'header' in d)
+      .map((d) => d.name);
+    assert.deepEqual(withHeader, [
+      'dolphins_staff_welcome',
+      'dolphins_player_welcome',
+      'dolphins_player_fyi',
+      'emcu_scorer_accounts_notice',
+      'emcu_player_scoring',
+    ]);
+  });
+
+  test('the WhatsApp copy points at the video above, not a link', () => {
+    for (const [key] of entries) {
+      assert.match(WHATSAPP_TEMPLATES[key].bodyText, /video above/);
+      assert.doesNotMatch(WHATSAPP_TEMPLATES[key].bodyText, /https?:\/\//);
+    }
+  });
+
+  test('the player and FYI bodies are the Meta-approved wording (8 Oct 2026)', () => {
+    const player = WHATSAPP_TEMPLATES.dolphinsPlayerWelcome;
+    assert.equal(player.status, 'registered');
+    assert.equal(
+      player.bodyText,
+      'Dear {{1}} 🏏\n\n' +
+        'You are registered on the Dolphins scouting pipeline, part of the Medicoach Athlete Management System. The video above shows how it works for you this season.\n\n' +
+        '📊 Every ball of your matches is scored live and builds your player profile\n' +
+        '⭐ Standout performances are flagged and shortlisted\n' +
+        '🤝 Players are matched to teams that need them: franchises, tournaments and county teams overseas\n\n' +
+        'Your season counts, not just one good day. Keep showing up, keep performing, and make sure your name is spelled correctly on the team sheet so your stats land on your record.\n\n' +
+        'Good luck this season! 💚',
+    );
+    // The approved FYI is a trimmed third-person variant, not the player body minus its greeting.
+    const fyi = WHATSAPP_TEMPLATES.dolphinsPlayerFyi;
+    assert.equal(fyi.status, 'registered');
+    assert.equal(
+      fyi.bodyText,
+      'For your information, this is the message every registered player has received:\n\n' +
+        'Players are registered on the Dolphins scouting pipeline, part of the Medicoach Athlete Management System. The video above shows how it works for them this season.\n\n' +
+        '📊 Every ball of their matches is scored live and builds their player profile\n' +
+        '⭐ Standout performances are flagged and shortlisted\n' +
+        '🤝 Players are matched to teams that need them: franchises, tournaments and county teams overseas',
+    );
+  });
+
+  test('the video header carries the link whole (never cleaned or truncated)', () => {
+    const long = `${VIDEO}?${'x'.repeat(200)}`;
+    assert.deepEqual(videoHeaderComponent({ link: long }), {
+      type: 'header',
+      parameters: [{ type: 'video', video: { link: long } }],
+    });
+  });
+
+  test('the video header carries a Meta media id as video.id (no link)', () => {
+    assert.deepEqual(videoHeaderComponent({ id: '1234567890' }), {
+      type: 'header',
+      parameters: [{ type: 'video', video: { id: '1234567890' } }],
+    });
+  });
+
+  test('name params are cleaned, with neutral fallbacks', () => {
+    assert.deepEqual(
+      dolphinsStaffWelcomeParams({ name: ' Thandi\n Nkosi ' }).map((p) => p.text),
+      ['Thandi Nkosi'],
+    );
+    assert.deepEqual(
+      dolphinsStaffWelcomeParams({ name: '' }).map((p) => p.text),
+      ['Club Representative'],
+    );
+    assert.deepEqual(
+      dolphinsPlayerWelcomeParams({ firstName: '' }).map((p) => p.text),
+      ['player'],
+    );
+  });
+
+  test('all three are approved in Meta (8 Oct 2026) and their senders pass the gate', async () => {
+    for (const [key] of entries) assert.equal(WHATSAPP_TEMPLATES[key].status, 'registered');
+    // Registered: they reach sendTemplate (dry-run without credentials).
+    const staff = await sendDolphinsStaffWelcomeWhatsApp('27820000000', 'A', { link: VIDEO });
+    assert.match(staff.messageId, /^dry-run-/);
+    const player = await sendDolphinsPlayerWelcomeWhatsApp('27820000000', 'A', { id: 'media-1' });
+    assert.match(player.messageId, /^dry-run-/);
+    const fyi = await sendDolphinsPlayerFyiWhatsApp('27820000000', { id: 'media-1' });
+    assert.match(fyi.messageId, /^dry-run-/);
+  });
+
+  test('the gate refuses a pending template unless allowPending (experiment CLI only)', () => {
+    const pending = { ...WHATSAPP_TEMPLATES.dolphinsStaffWelcome, status: 'pending' as const };
+    assert.throws(() => assertTemplateSendable(pending), WhatsAppTemplatePendingError);
+    assert.throws(() => assertTemplateSendable(pending), /dolphins_staff_welcome/);
+    assert.doesNotThrow(() => assertTemplateSendable(pending, { allowPending: true }));
+    assert.doesNotThrow(() => assertTemplateSendable(WHATSAPP_TEMPLATES.dolphinsStaffWelcome));
+  });
+
+  test('the staff body is the Meta-approved Utility wording (8 Oct 2026)', () => {
+    const staff = WHATSAPP_TEMPLATES.dolphinsStaffWelcome.bodyText;
+    assert.ok(
+      staff.startsWith(
+        'Dear {{1}}\n\nYour club is set up on the Dolphins live scoring system, powered by Medicoach. ' +
+          'Please watch the video above to see how match-day scoring works for your club.\n\n' +
+          '✅ Setup: scoring system setup instructions will be sent to you separately\n',
+      ),
+    );
+    assert.ok(
+      staff.endsWith(
+        'Live-scored matches also feed the Dolphins scouting pipeline, where players from clubs, schools and universities are visible to teams looking for them.',
+      ),
+    );
+    assert.doesNotMatch(staff, /login details/i);
+  });
+});
+
+describe('EMCU scorer broadcast templates (VIDEO header, static app buttons; approved as Marketing 10 Oct 2026)', () => {
+  const entries = [
+    ['emcuScorerAccountsNotice', 'emcu_scorer_accounts_notice', 3],
+    ['emcuPlayerScoring', 'emcu_player_scoring', 1],
+  ] as const;
+
+  for (const [key, name, arity] of entries) {
+    test(`${name}: en, ${arity} body params, VIDEO header, no dynamic URL button, registered`, () => {
+      const def = WHATSAPP_TEMPLATES[key];
+      assert.equal(def.name, name);
+      assert.equal(def.lang, 'en');
+      assert.equal(def.paramCount, arity);
+      assert.deepEqual(def.header, { format: 'VIDEO' });
+      // The two app buttons are STATIC in Meta: no urlButton (no send-time button component).
+      assert.ok(!('urlButton' in def));
+      assert.equal(def.status, 'registered');
+      assert.ok(def.bodyText.length <= 1024, 'Meta caps a template body at 1024 chars');
+      assert.doesNotMatch(def.bodyText, /^\{\{|\{\{\d+\}\}\s*$/);
+      assert.match(def.bodyText, /video above/);
+      assert.match(def.bodyText, /info@medicoach\.co\.za/);
+      assert.doesNotMatch(def.bodyText, /password/i, 'no credentials on WhatsApp');
+    });
+  }
+
+  test('the chair notice body is exactly the Meta-approved copy (10 Oct 2026)', () => {
+    assert.equal(
+      WHATSAPP_TEMPLATES.emcuScorerAccountsNotice.bodyText,
+      'Dear {{1}}\n\n' +
+        "EMCU matches for {{2}} are scored live on the MediCoach app this season. Your club's 4 scorer accounts have been emailed to {{3}}. Please check your spam folder if you can't see it.\n\n" +
+        'Give each scorer their own account, one account per match. Watch the video above to see how scoring works, and download the app using the buttons below or sign in at https://www.medicoach.co.za/\n\n' +
+        'Need help? Email info@medicoach.co.za',
+    );
+  });
+
+  test('the player body is exactly the edited copy (10 Oct 2026, one variable)', () => {
+    assert.equal(
+      WHATSAPP_TEMPLATES.emcuPlayerScoring.bodyText,
+      'Dear {{1}} 🏏\n\n' +
+        "We're proud to be professionalising the KZN cricket ecosystem — and you're part of it.\n\n" +
+        'Your matches are now being scored live on the MediCoach app, which means your performances are actively being scouted into the provincial pipeline. Every run, wicket and catch counts. 📊\n\n' +
+        '✅ To get started, watch the how-to video above, request your scorer login details from your club chairperson, and score your games on the app.\n\n' +
+        'So bring your best today — the system is watching, and this is your chance to put your name forward.\n\n' +
+        'Best of luck out there. 💚🏆\n\n' +
+        'Dolphins × MediCoach\n\n' +
+        'Questions? Email info@medicoach.co.za',
+    );
+  });
+
+  test('params are cleaned with neutral fallbacks; the chair email passes cleanParam unchanged', () => {
+    assert.deepEqual(
+      emcuScorerAccountsNoticeParams({
+        chairName: '',
+        clubName: ' Umhlali\n Cricket  Club ',
+        chairEmail: 'chairperson@umhlalicc.co.za',
+      }).map((p) => p.text),
+      ['Chairperson', 'Umhlali Cricket Club', 'chairperson@umhlalicc.co.za'],
+    );
+    assert.deepEqual(
+      emcuPlayerScoringParams({ firstName: '' }).map((p) => p.text),
+      ['player'],
+    );
+  });
+
+  test('both are approved (registered) and their senders pass the gate (dry-run)', async () => {
+    const sent = await sendEmcuScorerAccountsNoticeWhatsApp(
+      '27820000000',
+      { chairName: 'A', clubName: 'B', chairEmail: 'a@b.co' },
+      { id: 'media-1' },
+    );
+    assert.match(sent.messageId, /^dry-run-/);
+    const player = await sendEmcuPlayerScoringWhatsApp(
+      '27820000000',
+      { firstName: 'A' },
+      { id: 'media-1' },
+    );
+    assert.match(player.messageId, /^dry-run-/);
+    // The gate still refuses them if ever flipped back to pending.
+    const pending = { ...WHATSAPP_TEMPLATES.emcuPlayerScoring, status: 'pending' as const };
+    assert.throws(() => assertTemplateSendable(pending), WhatsAppTemplatePendingError);
   });
 });

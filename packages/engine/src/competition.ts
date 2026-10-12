@@ -1,5 +1,5 @@
 /**
- * Leagues and tournaments created straight from Fixtures & Venues (ADR 0018). Pure: no
+ * Leagues and tournaments created straight from Fixtures & Venues (ADR 0022). Pure: no
  * repo, no clock, no randomness other than the seed the caller passes.
  *
  * A competition is one or more series sharing a `competition` block:

@@ -50,6 +50,8 @@ const FORMAT_OPTIONS: Array<{ value: DocFormat; label: string }> = [
   { value: 'xlsx', label: 'Excel (.xlsx)' },
   { value: 'ods', label: 'OpenDocument (.ods)' },
   { value: 'odt', label: 'OpenDocument text (.odt)' },
+  { value: 'ppt', label: 'PowerPoint (.ppt)' },
+  { value: 'pptx', label: 'PowerPoint (.pptx)' },
   { value: 'jpg', label: 'JPEG image (.jpg)' },
   { value: 'jpeg', label: 'JPEG image (.jpeg)' },
   { value: 'png', label: 'PNG image (.png)' },
@@ -103,6 +105,7 @@ function formatSummary(accepts?: DocFormat[]): string {
   if (list.includes('doc') || list.includes('docx')) parts.push('Word');
   if (list.includes('odt')) parts.push('OpenDocument text');
   if (list.includes('xls') || list.includes('xlsx') || list.includes('ods')) parts.push('Excel');
+  if (list.includes('ppt') || list.includes('pptx')) parts.push('PowerPoint');
   if (list.includes('jpg') || list.includes('jpeg') || list.includes('png')) parts.push('Image');
   return parts.join(', ') || '—';
 }

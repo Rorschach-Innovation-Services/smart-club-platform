@@ -1,5 +1,5 @@
 /**
- * Leagues & tournaments as the office sees them (ADR 0018). Pure.
+ * Leagues & tournaments as the office sees them (ADR 0022). Pure.
  *
  * Every series belongs to one row of the competitions table:
  *   - a league/tournament created here  → all series sharing `competition.id`;

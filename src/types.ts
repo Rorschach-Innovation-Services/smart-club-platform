@@ -117,6 +117,8 @@ export interface CaptainsReport {
   umpires: _ReportUmpireEntry[];
   general: string;
   declaration?: boolean;
+  /** The answer on the match scorecard (MIRRORS the API's CaptainsReportScorecardAnswer). */
+  scorecard?: CaptainsReportScorecardAnswer;
   ref?: string;
   submittedBy?: string;
   submittedVia?: 'portal' | 'link';
@@ -145,15 +147,101 @@ export interface CaptainsReportDelivery {
   providerAt?: string;
   providerError?: string;
 }
+/**
+ * A report's answer on the match scorecard. `againstFetchedAt` is the card version answered
+ * against (the form echoes the `fetchedAt` it rendered; the server clamps it); `stale` is
+ * server-only — a newer card arrived after the answer.
+ */
+export interface CaptainsReportScorecardAnswer {
+  action: 'confirmed' | 'correction';
+  feedback?: string;
+  againstFetchedAt?: string;
+  stale?: true;
+}
 /** The editable part of a report, as PUT/POST bodies carry it. */
 export interface CaptainsReportFields {
   captainName: string;
   umpires: _ReportUmpireEntry[];
   general: string;
   declaration: boolean;
+  scorecard?: CaptainsReportScorecardAnswer;
+}
+/**
+ * The match scorecard a report's form shows (MIRRORS the API's ScorecardContext): an
+ * available card (its `fetchedAt` is echoed back with the answer), else the headline result
+ * and medicoach's link. Empty for an unlisted match or before the result is in.
+ */
+export interface ScorecardContext {
+  scorecard?: { matchState?: string; innings: InningsScorecard[]; fetchedAt: string };
+  result?: {
+    homeScore: string | null;
+    awayScore: string | null;
+    summary?: string;
+    winner?: 'home' | 'away' | 'tie' | 'none';
+  };
+  medicoachMatchUrl?: string;
+}
+/**
+ * Operator console: GET /platform/captains-report-scorecards (MIRRORS the API's
+ * ScorecardConsole* types). `n/a` = no available card; `pending` = report open + card;
+ * `not-asked` = report closed without an answer while a card exists; `stale` = a submitted
+ * answer against a card that has since changed (wins over confirmed / correction).
+ */
+export type ScorecardConsoleStatus =
+  | 'n/a'
+  | 'pending'
+  | 'not-asked'
+  | 'confirmed'
+  | 'correction'
+  | 'stale';
+export type ScorecardConsoleFilter =
+  | 'all'
+  | 'pending'
+  | 'confirmed'
+  | 'correction'
+  | 'stale'
+  | 'not-asked';
+export interface ScorecardConsoleCell {
+  reportId: string;
+  reportRef?: string;
+  clubId: string;
+  clubName: string;
+  reportStatus: CaptainsReport['status'];
+  scorecardStatus: ScorecardConsoleStatus;
+  answeredAction?: CaptainsReportScorecardAnswer['action'];
+  feedback?: string;
+  submittedAt?: string;
+}
+export interface ScorecardConsoleRow {
+  seriesId: string;
+  fixtureId: string;
+  matchDate: string;
+  competition: string;
+  homeTeamName: string;
+  awayTeamName: string;
+  home?: ScorecardConsoleCell;
+  away?: ScorecardConsoleCell;
+}
+export interface ScorecardConsolePayload {
+  days: number;
+  status: ScorecardConsoleFilter;
+  /** The one tenant the response is scoped to (`?tenant=`), when it is. */
+  tenant?: string;
+  since: string;
+  total: number;
+  truncated: boolean;
+  /** Rows per status filter in the window + tenant scope, before the status filter. */
+  counts: Record<ScorecardConsoleFilter, number>;
+  /** Every tenant on the platform, by name — the client picker's options. */
+  tenantOptions: Array<{ tenant: string; tenantName: string }>;
+  tenants: Array<{ tenant: string; tenantName: string; rows: ScorecardConsoleRow[] }>;
+}
+/** GET /club/captains-reports/:id — one report plus its match scorecard context. */
+export interface ClubCaptainsReportDetail extends CaptainsReport {
+  scorecardContext?: ScorecardContext;
 }
 /** GET /captains-report-link/:token — one report, the registry names, the tenant's look. */
-export interface LinkedCaptainsReport {
+export interface LinkedCaptainsReport extends ScorecardContext {
   report: CaptainsReport;
   /** The chair's link: may "Send to captain". */
   canForward?: boolean;
@@ -251,6 +339,8 @@ export type DocFormat =
   | 'xls'
   | 'xlsx'
   | 'ods'
+  | 'ppt'
+  | 'pptx'
   | 'jpg'
   | 'jpeg'
   | 'png';
@@ -306,6 +396,8 @@ export interface TenantConfig {
   seasonLabel?: string;
   /** Per-tenant feature flags (e.g. whatsappInvites). Absent key ⇒ caller default. */
   features?: Record<string, boolean>;
+  /** Third-party integrations (operator-only). `medicoach.playerSync`: ADR 0019. */
+  integrations?: { medicoach?: { goLiveDate?: string; playerSync?: boolean } };
   submissionDeadline: string;
   /**
    * Operator-managed directory of clubs not yet on the system — feeds the
@@ -362,6 +454,101 @@ export interface TenantConfig {
   clearanceCertTemplate?: ClearanceCertTemplate;
   /** Union contact details for the certificate footer. Operator-only; missing fields omitted. */
   orgContact?: OrgContact;
+  /**
+   * Scheduled fixture reminders to club chairs. Operator-only (PUT /platform/tenants/:slug);
+   * not projected by GET /tenant/config, so only the operator portal sees it.
+   */
+  fixtureReminders?: FixtureRemindersConfig;
+  /**
+   * Transfer windows (inclusive YYYY-MM-DD ranges). Absent or empty ⇒ no restriction.
+   * Operator-only to write; served on GET /tenant and GET /tenant/config.
+   */
+  transferWindows?: TransferWindow[];
+  /**
+   * Server-computed status for TODAY (tenant wall-clock) — present only when windows are
+   * configured. Read-only; UI copy must use this, never the device clock.
+   */
+  transferWindowStatus?: TransferWindowStatus;
+}
+
+/** Mirror of the API's TransferWindow. */
+export interface TransferWindow {
+  label: string;
+  start: string;
+  end: string;
+}
+
+/** Mirror of the API's TransferWindowStatus. */
+export interface TransferWindowStatus {
+  open: boolean;
+  current?: TransferWindow;
+  next?: TransferWindow;
+}
+
+/** `rejectedBy` on a clearance auto-rejected because it arrived outside every transfer window. */
+export const TRANSFER_WINDOW_REJECTOR = 'system:transfer-window';
+
+/**
+ * What one tenant-wide player erasure (`DELETE /admin/players/:nk`) removed, per category.
+ * Mirrors packages/api/src/types.ts — counts only, never the person's identity.
+ */
+export interface PlayerErasureCounts {
+  playerRows: number;
+  clearances: number;
+  registrationReviews: number;
+  veteransRequests: number;
+  documents: number;
+  certificates: number;
+  captainsReportsScrubbed: number;
+  reportOpenMarkers: number;
+}
+
+export type FixtureReminderChannel = 'email' | 'whatsapp';
+
+/** Mirror of the API's FixtureRemindersConfig (leadDays 1..30, ≤4 entries). */
+export interface FixtureRemindersConfig {
+  enabled: boolean;
+  leadDays: number[];
+  channels: FixtureReminderChannel[];
+}
+
+/** One innings of a medicoach scorecard (MIRRORS InningsScorecardWire in the sync contract). */
+export interface InningsScorecard {
+  battingTeamName: string;
+  totalRuns: number;
+  wickets: number;
+  overs: string;
+  extras: {
+    byes: number;
+    legByes: number;
+    wides: number;
+    noBalls: number;
+    penalties: number;
+    total: number;
+  };
+  batters: Array<{
+    order: number;
+    name: string;
+    runs: number;
+    ballsFaced: number;
+    fours: number;
+    sixes: number;
+    strikeRate: number;
+    howOut: string;
+    dismissal?: string;
+  }>;
+  bowlers: Array<{
+    order: number;
+    name: string;
+    overs: string;
+    maidens: number;
+    runsConceded: number;
+    wickets: number;
+    economy: number;
+    wides: number;
+    noBalls: number;
+  }>;
+  fallOfWickets: Array<{ wicket: number; runs: number; overs: string; batterName: string }>;
 }
 
 export type ClearanceCertTemplate = 'classic' | 'confirmation';
@@ -389,6 +576,55 @@ export interface TenantSummary {
   clubCount?: number;
   teamCount?: number;
   playerCount?: number;
+}
+
+/**
+ * One series with released fixtures Smart Club holds but the Match Centre (medicoach) has
+ * no mapping for — they need a one-off carry (bundle top-up); the automatic sync cannot
+ * create fixtures. `count` is fixtures; `firstSeen`/`lastSeen` are ISO timestamps.
+ */
+export interface MedicoachAwaitingSeries {
+  seriesId: string;
+  seriesName: string;
+  leagueKey: string;
+  count: number;
+  firstSeen: string;
+  lastSeen: string;
+}
+
+/**
+ * GET /platform/tenants/:slug/medicoach/connection (ADR 0020 phase 1, read-only). `stage`
+ * is INFERRED from config until the Match Centre connection summary exists — `inferred` is
+ * always true today and the UI must label it so. `mcReachable` is null when never probed.
+ */
+export interface MedicoachConnection {
+  stage: 'not_connected' | 'live';
+  inferred: true;
+  syncEnabled: boolean;
+  playerSync: boolean;
+  goLiveDate: string | null;
+  /** Sync secrets missing ⇒ every sync run is a silent dry-run. */
+  dryRun: boolean;
+  mcReachable: boolean | null;
+  lastReconcileAt: string | null;
+  health: {
+    status: 'ok' | 'failing' | 'dry-run' | 'never';
+    lastSuccessAt: string | null;
+    lastError: string | null;
+  };
+  awaitingTotal: number;
+  awaiting: MedicoachAwaitingSeries[];
+}
+
+/** One row of GET /platform/medicoach/overview — the client list's per-tenant badge. */
+export interface MedicoachOverviewRow {
+  tenant: string;
+  name: string;
+  syncEnabled: boolean;
+  dryRun: boolean;
+  healthStatus: MedicoachConnection['health']['status'];
+  awaitingTotal: number;
+  lastReconcileAt: string | null;
 }
 
 /** Chair contact fields the league drill-down renders. All optional (legacy clubs). */
@@ -595,6 +831,7 @@ export interface Club {
   previousName?: string;
   notes?: ClubNote[];
   commLog?: ClubCommEvent[];
+  /** Chair's reminders choice. Absent counts as opted in; only `false` stops fixture reminders. */
   remindersOptIn?: boolean;
   playerRegLink?: { token: string; createdAt: string };
   /** Marks a club loaded from the demo snapshot; gates illustrative-only UI. */
@@ -652,7 +889,19 @@ export interface ClubCommEvent {
     // two stop drifting (packages/api/src/types.ts).
     | 'veterans-request'
     | 'veterans-request-accepted'
-    | 'veterans-request-declined';
+    | 'veterans-request-declined'
+    // Fixture postponement negotiation (ADR 0015) — kept in sync with the API union.
+    | 'postponement-request'
+    | 'postponement-counter'
+    | 'postponement-agreed'
+    | 'postponement-admin-final'
+    | 'postponement-declined'
+    | 'postponement-withdrawn'
+    // Scheduled fixture reminder to the chair (FixtureReminders cron).
+    | 'fixture-reminder'
+    // Destination chair's clearance heads-up, and the pending-clearance reminder (manual or cron).
+    | 'clearance-inbound'
+    | 'clearance-reminder';
   summary?: string;
 }
 
@@ -820,6 +1069,54 @@ export interface VeteransRequestPublic {
 }
 
 /**
+ * MIRRORS the API's `PostponementProposal` (packages/api/src/types.ts) — one proposed new date
+ * in a fixture postponement negotiation (ADR 0015). `time` only while the fixture's kick-off is
+ * revealed; `venueId`/`venueName` only on an admin override.
+ */
+export interface PostponementProposal {
+  by: 'requesting' | 'opposing' | 'admin';
+  date: string;
+  time?: string;
+  venueId?: string;
+  venueName?: string;
+  note?: string;
+  at: string;
+  byUser: string;
+}
+
+export type PostponementStatus = 'open' | 'applied' | 'admin-final' | 'declined' | 'withdrawn';
+
+/**
+ * MIRRORS the API's `PostponementRequest` — a fixture postponement request (ADR 0015) as the
+ * club and admin routes return it. Club-facing responses strip withheld time/venue fields
+ * (ADR 0011) from the snapshot and proposals.
+ */
+export interface PostponementRequest {
+  id: string;
+  seriesId: string;
+  fixtureId: string;
+  requestingClubId: string;
+  opposingClubId: string;
+  originalDate: string;
+  originalTime?: string;
+  reason?: string;
+  /** Every proposal in order; the LAST one is the current proposal. */
+  proposals: PostponementProposal[];
+  awaiting: 'requesting' | 'opposing' | 'none';
+  status: PostponementStatus;
+  /** clubId → acknowledgement of an admin-final ruling. */
+  acknowledgements?: Record<string, { at: string; byUser: string }>;
+  requestedAt: string;
+  requestedBy: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  resolvedVia?: 'portal' | 'admin';
+  declineReason?: string;
+  expiresAt?: number;
+  version: number;
+}
+
+/**
  * MIRRORS the API's `VeteransCandidate` — one finder result row (GET
  * /clubs/:id/veterans-candidates). Everything a requesting club may see about a tenant-wide
  * player; NEVER the natural key / ID number / dob / contact — `candidateId` (an HMAC handle) is
@@ -840,8 +1137,14 @@ export type ClearanceStatus = 'pending' | 'approved' | 'admin-override' | 'rejec
  *   source-reactivated  — the move is cancelled; the player is (or returns to) active at the source.
  *   moved-to-source     — the registration (details + ID doc) is moved to the source club.
  *   stays-at-destination — the source is not on the system, so the player stays at the destination.
+ *   not-registered      — auto-rejected outside a transfer window; the registration was never
+ *                         completed, so the player remains unregistered / at their current club.
  */
-export type RejectOutcome = 'source-reactivated' | 'moved-to-source' | 'stays-at-destination';
+export type RejectOutcome =
+  | 'source-reactivated'
+  | 'moved-to-source'
+  | 'stays-at-destination'
+  | 'not-registered';
 
 /** An inter-club transfer/clearance request. */
 export interface PlayerClearance {

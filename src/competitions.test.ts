@@ -1,5 +1,5 @@
 /**
- * The competitions table and one series' views (ADR 0018): grouping every series into one
+ * The competitions table and one series' views (ADR 0022): grouping every series into one
  * row, the league table from joined results, the results matrix and home/away balance.
  */
 import { describe, it, expect } from 'vitest';

@@ -42,18 +42,24 @@ import { captainsReportLinkBase, captainsReportLinkSecret } from './env.js';
 import { hasFeature } from './features.js';
 import { toE164 } from './notify/e164.js';
 import { isWithheld } from './series-projection.js';
-import { TENANT_UTC_OFFSET_MINUTES } from './tenant-time.js';
+import { TENANT_UTC_OFFSET_MINUTES, tenantDate } from './tenant-time.js';
 import type {
   CaptainsReport,
   CaptainsReportDelivery,
   CaptainsReportDeliveryReason,
   CaptainsReportRecipient,
+  CaptainsReportScorecardAnswer,
   Club,
   Series,
   StoredFixtureResult,
+  StoredFixtureScorecard,
   TenantConfig,
 } from './types.js';
-import type { SyncResult } from './medicoach-sync-contract.js';
+import {
+  httpUrlOrNull,
+  type InningsScorecardWire,
+  type SyncResult,
+} from './medicoach-sync-contract.js';
 
 type RepoModule = typeof import('./repo.js');
 
@@ -75,6 +81,46 @@ export const REPORT_OPEN_MAX_ATTEMPTS = 5;
  * admin sync page counts these as "notices failed"). Carries no address or channel error.
  */
 export const NOTICE_FAILED_ERROR = 'report notice failed on every channel';
+
+/**
+ * Captain's report notices (opening notices and reminders) go out only from this hour, SAST
+ * wall clock, until midnight: results stored earlier keep their REPORTOPEN# marker and are
+ * drained by the first sync run at/after 18:00 (the cron fires on the quarter hour, so one
+ * lands at 16:00 UTC). A result arriving after midnight waits for 18:00 that day.
+ *
+ * The gate is GLOBAL, not per tenant: every tenant is a South African union, so one fixed
+ * offset (TENANT_UTC_OFFSET_MINUTES, no DST) is exact for all of them.
+ */
+export const REPORT_NOTICE_HOUR = 18;
+
+/** True from 18:00:00 to 23:59:59 SAST (pure). */
+export function isReportNoticeWindowOpen(now: Date): boolean {
+  const local = new Date(now.getTime() + TENANT_UTC_OFFSET_MINUTES * 60_000);
+  return local.getUTCHours() >= REPORT_NOTICE_HOUR;
+}
+
+let windowOverride: ((now: Date) => boolean) | undefined;
+
+/**
+ * Force the notice window open/closed regardless of the clock. For tests whose dates follow
+ * the real clock only; `undefined` restores `isReportNoticeWindowOpen`.
+ */
+export function setReportNoticeWindowOverride(fn: ((now: Date) => boolean) | undefined): void {
+  windowOverride = fn;
+}
+
+/** The gate every automatic send path checks (honours the test override). */
+export function reportNoticeWindowOpen(now: Date): boolean {
+  return (windowOverride ?? isReportNoticeWindowOpen)(now);
+}
+
+/** A NOTIFY# claim still `in_progress` after this long is reported to Sentry (never resent). */
+export const STUCK_CLAIM_MS = 10 * 60_000;
+
+/** True once this invocation's wall-clock budget is spent (`deadlineMs` is epoch ms). */
+export function pastDeadline(deadlineMs: number | undefined): boolean {
+  return deadlineMs !== undefined && Date.now() >= deadlineMs;
+}
 
 const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/;
 const DAY_MS = 24 * 3600 * 1000;
@@ -300,12 +346,41 @@ const str = (v: unknown, max: number, field: string): string => {
 const RATING_KEYS = new Set<string>(RATING_CRITERIA.map((c) => c.key));
 const CONCERN_KEYS = new Set<string>(CONCERN_AREAS.map((c) => c.key));
 
+/**
+ * The scorecard answer from a request body: `{action: 'confirmed' | 'correction', feedback?,
+ * againstFetchedAt?}` (the `fetchedAt` of the card the form rendered, echoed back). `stale` is
+ * server-only and dropped. Feedback is kept for a correction only; whether a correction has
+ * its text is a submission rule (drafts save partial answers).
+ */
+function parseScorecardField(v: unknown): CaptainsReportScorecardAnswer | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== 'object' || Array.isArray(v))
+    throw new ReportInputError('scorecard must be an object');
+  const x = v as Record<string, unknown>;
+  if (x.action !== 'confirmed' && x.action !== 'correction')
+    throw new ReportInputError("scorecard action must be 'confirmed' or 'correction'");
+  const feedback = str(x.feedback, SCORECARD_FEEDBACK_MAX, 'the scorecard correction');
+  const fa = x.againstFetchedAt;
+  if (
+    fa !== undefined &&
+    fa !== null &&
+    (typeof fa !== 'string' || fa.length > 40 || !Number.isFinite(Date.parse(fa)))
+  )
+    throw new ReportInputError('scorecard againstFetchedAt must be an ISO timestamp');
+  return {
+    action: x.action,
+    ...(x.action === 'correction' && feedback ? { feedback } : {}),
+    ...(typeof fa === 'string' ? { againstFetchedAt: fa } : {}),
+  };
+}
+
 /** The editable fields of a report from a request body (unknown keys are dropped). */
 export function parseReportFields(raw: unknown): {
   captainName: string;
   umpires: ReportUmpireEntry[];
   general: string;
   declaration: boolean;
+  scorecard?: CaptainsReportScorecardAnswer;
 } {
   if (!raw || typeof raw !== 'object') throw new ReportInputError('body must be an object');
   const b = raw as Record<string, unknown>;
@@ -340,11 +415,13 @@ export function parseReportFields(raw: unknown): {
       comments: str(x.comments, 2000, 'comments'),
     };
   });
+  const scorecard = parseScorecardField(b.scorecard);
   return {
     captainName: str(b.captainName, 120, "captain's name"),
     umpires,
     general: str(b.general, 4000, 'general comments'),
     declaration: b.declaration === true,
+    ...(scorecard ? { scorecard } : {}),
   };
 }
 
@@ -436,6 +513,18 @@ export interface CaptainsReportDeps {
   linkSecret?: () => string;
   linkBase?: () => string;
   log?: (line: string) => void;
+  /**
+   * Told the report ids of every opening that got as far as the notices (pull hook and
+   * retry alike), just before it returns or throws — the sync run tallies these for its ops
+   * digest. Observation only: it never changes the outcome or the retry.
+   */
+  onOpenOutcome?: (o: { opened: string[]; notified: string[]; failed: string[] }) => void;
+  /**
+   * This invocation's wall-clock deadline (epoch ms, `Date.now()` based — not `now`). Checked
+   * before each REPORTOPEN# marker and each NOTIFY# claim; what is left stays queued for the
+   * next run. Unset = no deadline.
+   */
+  deadlineMs?: number;
 }
 
 export interface OpenOutcome {
@@ -443,6 +532,8 @@ export interface OpenOutcome {
   opened: string[];
   /** Reports whose notice actually reached someone (a channel sent). */
   notified: string[];
+  /** Reports whose notice was not claimed because the deadline passed (marker must stay). */
+  deferred?: string[];
 }
 
 type StoredFixture = Record<string, unknown> & {
@@ -618,13 +709,18 @@ export async function openCaptainReports(
       const captainContact = existing.recipientContact
         ? { name: existing.recipient.name, ...existing.recipientContact }
         : captain;
+      // No captain contact left (e.g. the captain was erased: report contact + marker ref both
+      // scrubbed) → the chair gets the notice, as the chair, with the chair's wording.
+      const reachCaptain = toCaptain && !!captainContact;
       const sent = await notifyRecipient(deps, tenant, config, existing, {
-        contact: toCaptain && captainContact ? captainContact : chair,
-        ccChair: toCaptain && captainContact ? chair : null,
+        contact: reachCaptain && captainContact ? captainContact : chair,
+        ccChair: reachCaptain ? chair : null,
         purpose: existing.recipient.forwardedBy ? 'forwarded' : 'opened',
+        recipientKind: reachCaptain ? 'captain' : 'chair',
       });
       if (sent === 'sent') out.notified.push(existing.id);
       else if (sent === 'failed') failedNotices.push(existing.id);
+      else if (sent === 'deferred') (out.deferred ??= []).push(existing.id);
       continue;
     }
     out.opened.push(report.id);
@@ -636,11 +732,13 @@ export async function openCaptainReports(
     });
     if (sent === 'sent') out.notified.push(report.id);
     else if (sent === 'failed') failedNotices.push(report.id);
+    else if (sent === 'deferred') (out.deferred ??= []).push(report.id);
   }
   // A notice that reached nobody (every channel tried failed) released its ledger claim;
   // throwing keeps the REPORTOPEN# marker, so the next run re-sends it (bounded by
   // REPORT_OPEN_MAX_ATTEMPTS). Both sides were handled first, so one side's failure never
   // stops the other side's report from opening.
+  deps.onOpenOutcome?.({ opened: out.opened, notified: out.notified, failed: failedNotices });
   if (failedNotices.length)
     throw new Error(`${NOTICE_FAILED_ERROR} (${failedNotices.length} report(s))`);
   return out;
@@ -684,6 +782,8 @@ function deliveryOf(
  *  - 'failed': nothing went out and a channel FAILED. For the opening/forward audience
  *    (`recipient#<memberId>`) the claim is released so the REPORTOPEN# retry can send again;
  *    a reminder is best-effort and keeps its claim (at most one).
+ *  - 'deferred': this invocation's deadline passed before the claim — nothing claimed or
+ *    sent; the caller keeps the work queued for the next run.
  */
 async function notifyRecipient(
   deps: CaptainsReportDeps,
@@ -695,8 +795,10 @@ async function notifyRecipient(
     ccChair: { email?: string } | null;
     purpose: CaptainsReportDelivery['purpose'];
     forwardedBy?: string;
+    /** Who is actually being reached, when it differs from the report's recipient kind. */
+    recipientKind?: 'captain' | 'chair';
   },
-): Promise<'sent' | 'undelivered' | 'already' | 'failed'> {
+): Promise<'sent' | 'undelivered' | 'already' | 'failed' | 'deferred'> {
   const { repo } = deps;
   const now = deps.now ?? (() => new Date());
   const { contact, ccChair, purpose } = opts;
@@ -711,9 +813,13 @@ async function notifyRecipient(
   // reminder has its own audience.
   const reminder = purpose === 'reminder';
   const audience = `${reminder ? 'reminder' : 'recipient'}#${report.recipient.memberId}`;
-  if (!(await repo.claimCaptainsReportNotify(tenant, report.id, audience))) return 'already';
+  if (pastDeadline(deps.deadlineMs)) return 'deferred';
+  if (!(await repo.claimCaptainsReportNotify(tenant, report.id, audience))) {
+    await warnIfClaimStuck(deps, tenant, report, audience);
+    return 'already';
+  }
   const recipientKind: 'captain' | 'chair' =
-    report.recipient.kind === 'captain' ? 'captain' : 'chair';
+    opts.recipientKind ?? (report.recipient.kind === 'captain' ? 'captain' : 'chair');
   const home = report.side === 'home' ? report.clubName : report.opponentName;
   const away = report.side === 'home' ? report.opponentName : report.clubName;
   const cc =
@@ -792,6 +898,36 @@ async function notifyRecipient(
   return delivered ? 'sent' : 'undelivered';
 }
 
+/**
+ * A claim this run hit that is still `in_progress` after STUCK_CLAIM_MS means a send crashed
+ * between claim and completion: tell Sentry (ids only). It is NEVER re-sent automatically.
+ * One GetItem for a report this run touched — no scans. Never throws.
+ */
+async function warnIfClaimStuck(
+  deps: CaptainsReportDeps,
+  tenant: string,
+  report: CaptainsReport,
+  audience: string,
+): Promise<void> {
+  try {
+    const row = await deps.repo.getCaptainsReportNotify(tenant, report.id, audience);
+    if (!row || row.status !== 'in_progress' || !row.startedAt) return;
+    const age = Date.now() - Date.parse(row.startedAt);
+    if (!(age > STUCK_CLAIM_MS)) return;
+    console.warn(
+      `[captains-report] ${tenant} ${report.id}: notice claim stuck in_progress for ${Math.round(age / 60_000)} min (not resent)`,
+    );
+    const { Sentry } = await import('./instrument.js');
+    Sentry.captureMessage("captain's report notice claim stuck in_progress", {
+      level: 'warning',
+      tags: { tenant, job: 'captains-report' },
+      extra: { reportId: report.id, audience: audience.split('#')[0], startedAt: row.startedAt },
+    });
+  } catch {
+    // Visibility only: never affects the send path.
+  }
+}
+
 let defaultSender: (n: ReportNotice) => Promise<NoticeResult[]> = (n) => sendReportNotice(n);
 
 /**
@@ -868,9 +1004,11 @@ export async function sendReportNotice(n: ReportNotice): Promise<NoticeResult[]>
  */
 export function captainsReportResultHook(deps: CaptainsReportDeps) {
   const log = deps.log ?? ((line: string) => console.log(line));
-  return async (event: ResultEventLike): Promise<void> => {
+  return async (event: ResultEventLike): Promise<void | 'deferred'> => {
     try {
       const outcome = await openCaptainReports(event, deps);
+      // The deadline passed before a notice was claimed: keep the marker for the next run.
+      if (outcome.deferred?.length) return 'deferred';
       if (outcome.opened.length || outcome.skipped)
         log(
           `[captains-report] ${event.tenant} ${event.seriesId}/${event.fixtureId}: ` +
@@ -914,6 +1052,8 @@ export interface ReportRetrySummary {
   done: number;
   failed: number;
   gaveUp: number;
+  /** Markers left queued: the 18:00 window is closed, or the run's deadline passed. */
+  deferred: number;
 }
 
 /**
@@ -929,11 +1069,18 @@ export async function retryPendingReportOpens(
 ): Promise<ReportRetrySummary> {
   const { repo } = deps;
   const now = deps.now ?? (() => new Date());
-  const out: ReportRetrySummary = { retried: 0, done: 0, failed: 0, gaveUp: 0 };
+  const out: ReportRetrySummary = { retried: 0, done: 0, failed: 0, gaveUp: 0, deferred: 0 };
   const markers = await repo.listReportOpenMarkers(tenant);
   if (!markers.length) return out;
+  // Before 18:00 SAST nothing is sent: every marker stays queued, untouched (a deferral is
+  // never an attempt — it must not count toward REPORT_OPEN_MAX_ATTEMPTS).
+  if (!reportNoticeWindowOpen(now())) return { ...out, deferred: markers.length };
   const config = await repo.getTenantConfig(tenant);
-  for (const m of markers) {
+  for (const [i, m] of markers.entries()) {
+    if (pastDeadline(deps.deadlineMs)) {
+      out.deferred += markers.length - i;
+      break;
+    }
     const stored = await repo.getFixtureResult(tenant, m.seriesId, m.fixtureId);
     if (
       !config ||
@@ -947,7 +1094,7 @@ export async function retryPendingReportOpens(
     }
     out.retried++;
     try {
-      await openCaptainReports(
+      const outcome = await openCaptainReports(
         {
           tenant,
           seriesId: m.seriesId,
@@ -959,11 +1106,17 @@ export async function retryPendingReportOpens(
         },
         deps,
       );
+      if (outcome.deferred?.length) {
+        out.deferred++; // deadline hit mid-opening: the marker stays for the next run
+        continue;
+      }
       await repo.deleteReportOpenMarker(tenant, m.ref);
       out.done++;
     } catch (err) {
       const message = err instanceof Error ? err.message : 'report open failed';
       const attempts = await repo.markReportOpenFailed(tenant, m.ref, message, now().toISOString());
+      // 0 = the marker was already gone (a concurrent run finished it): nothing to give up on.
+      if (attempts === 0) continue;
       if (attempts >= REPORT_OPEN_MAX_ATTEMPTS) {
         out.gaveUp++;
         await repo.deleteReportOpenMarker(tenant, m.ref);
@@ -1189,12 +1342,15 @@ export interface ReminderSummary {
   sent: number;
   /** Reminders recorded but not delivered (no contact, dry run, every channel failed). */
   undelivered: number;
+  /** Due reminders held back: before 18:00 SAST, or the run's deadline passed. */
+  deferred?: number;
 }
 
 /**
  * Remind the current recipient of every PENDING report whose link expires within
  * REMINDER_LEAD_DAYS — once, at most (NOTIFY# audience `reminder#<memberId>`), on the same
- * channels with the same link. Runs in the 15-minute sync run (sync-enabled tenants only).
+ * channels with the same link. Runs in the 15-minute sync run (sync-enabled tenants only),
+ * from 18:00 SAST only (REPORT_NOTICE_HOUR).
  * A captain recipient is reached through the contact stored when the report was addressed
  * to them; a chair through the club's current chair contact.
  */
@@ -1205,6 +1361,9 @@ export async function sendReportReminders(
   const { repo } = deps;
   const now = deps.now ?? (() => new Date());
   const out: ReminderSummary = { due: 0, sent: 0, undelivered: 0 };
+  // Reminders follow the 18:00 SAST rule too: before it nothing is read or sent, and due
+  // reminders stay due (the window runs to midnight, so none is lost to the gate alone).
+  if (!reportNoticeWindowOpen(now())) return out;
   const nowMs = now().getTime();
   const due = (await repo.listCaptainsReports(tenant)).filter((r) => {
     if (r.status !== 'pending' || r.reminderSentAt) return false;
@@ -1230,8 +1389,434 @@ export async function sendReportReminders(
       ccChair: toCaptain ? chair : null,
       purpose: 'reminder',
     });
+    if (sent === 'deferred') {
+      out.deferred = (out.deferred ?? 0) + 1;
+      continue;
+    }
     if (sent === 'sent') out.sent++;
     else if (sent !== 'already') out.undelivered++;
   }
   return out;
+}
+
+// ───────────────────────── Scorecard confirmation ─────────────────────────
+
+/** A correction request is capped at this many characters. */
+export const SCORECARD_FEEDBACK_MAX = 2000;
+
+/**
+ * The card version an answer (confirm OR correction) was given against, stored as the entry's
+ * `confirmedAgainstFetchedAt`. The page echoes the `scorecardFetchedAt` it rendered; that echo
+ * is client-supplied, so it is trusted only as a plausible PAST value no later than the card
+ * stored now — a forged future echo would otherwise defeat every later stale check. Anything
+ * else (later than the stored card, in the future, or no echo) falls back to the stored
+ * card's `fetchedAt`. No available card stored ⇒ undefined (the stale check then uses
+ * `submittedAt`). Returned in `toISOString()` form so DynamoDB's string compare stays sound.
+ */
+export function answeredAgainstFetchedAt(
+  echo: string | undefined,
+  card: { available: boolean; fetchedAt?: string } | null,
+  now: Date,
+): string | undefined {
+  const stored = card?.available && card.fetchedAt ? card.fetchedAt : undefined;
+  if (!stored) return undefined;
+  if (echo === undefined) return stored;
+  const ms = Date.parse(echo);
+  if (!Number.isFinite(ms) || ms > Date.parse(stored) || ms > now.getTime()) return stored;
+  return new Date(ms).toISOString();
+}
+
+// ───────────────────────── Scorecard correction → operators ─────────────────────────
+
+export interface ScorecardCorrectionNotice {
+  to: string;
+  tenantName: string;
+  clubName: string;
+  ref: string;
+  fixtureLine: string;
+  feedback: string;
+  consoleLink?: string;
+}
+
+let defaultCorrectionSender: (
+  n: ScorecardCorrectionNotice,
+) => Promise<{ messageId: string }> = async (n) =>
+  (await import('./notify/email.js')).sendScorecardCorrectionEmail(n);
+
+/** The operator-email sender for correction requests. Tests/local only; `undefined` restores. */
+export function setDefaultScorecardCorrectionSender(
+  fn: ((n: ScorecardCorrectionNotice) => Promise<{ messageId: string }>) | undefined,
+): void {
+  defaultCorrectionSender =
+    fn ?? (async (n) => (await import('./notify/email.js')).sendScorecardCorrectionEmail(n));
+}
+
+/**
+ * Email every platform operator about a scorecard correction request. Best-effort: the caller
+ * never fails the submit on it; failures are counted and logged (no address, no feedback).
+ */
+export async function notifyOperatorsOfCorrection(
+  deps: {
+    repo: Pick<RepoModule, 'listOperators'>;
+    send?: (n: ScorecardCorrectionNotice) => Promise<{ messageId: string }>;
+    log?: (line: string) => void;
+  },
+  input: Omit<ScorecardCorrectionNotice, 'to'>,
+): Promise<{ sent: number; failed: number }> {
+  const { listOperatorEmails } = await import('./notify/operator-emails.js');
+  const log = deps.log ?? ((l: string) => console.warn(l));
+  const send = deps.send ?? defaultCorrectionSender;
+  const out = { sent: 0, failed: 0 };
+  for (const to of await listOperatorEmails({ repo: deps.repo })) {
+    try {
+      await send({ ...input, to });
+      out.sent++;
+    } catch (err) {
+      out.failed++;
+      log(
+        `[scorecard-correction] correction notice ${input.ref}: an operator email failed — ${
+          err instanceof Error ? err.name : 'error'
+        }`,
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * A submitted scorecard answer, stamped by the server: `againstFetchedAt` is the card version
+ * answered against, from the client's echo clamped by {@link answeredAgainstFetchedAt} (an
+ * echo later than the stored card or in the future, or no echo ⇒ the stored card's
+ * `fetchedAt`). An echo OLDER than the stored card means the captain answered a card that has
+ * since been replaced, so the answer is stored `stale` straight away. No available card ⇒ no
+ * `againstFetchedAt` (the answer is kept as given). `stale` from the client never survives.
+ */
+export function stampScorecardAnswer(
+  answer: CaptainsReportScorecardAnswer,
+  card: Pick<StoredFixtureScorecard, 'available' | 'fetchedAt'> | null,
+  now: Date,
+): CaptainsReportScorecardAnswer {
+  const { againstFetchedAt: echo, stale: _s, ...rest } = answer;
+  const against = answeredAgainstFetchedAt(echo, card, now);
+  if (!against) return rest;
+  const stale = !!card?.available && Date.parse(against) < Date.parse(card.fetchedAt);
+  return { ...rest, againstFetchedAt: against, ...(stale ? { stale: true as const } : {}) };
+}
+
+/** A draft's scorecard answer: as given, without the submission-only stamps. */
+export function draftScorecardAnswer(
+  answer: CaptainsReportScorecardAnswer | undefined,
+): CaptainsReportScorecardAnswer | undefined {
+  if (!answer) return undefined;
+  const { againstFetchedAt: _a, stale: _s, ...rest } = answer;
+  return rest;
+}
+
+/** The match scorecard a report's form shows, and what to show when there is none. */
+export interface ScorecardContext {
+  /** An AVAILABLE stored card only; `fetchedAt` is echoed back with the answer. */
+  scorecard?: { matchState?: string; innings: InningsScorecardWire[]; fetchedAt: string };
+  /** The headline result — only a recorded result that was not cleared. */
+  result?: {
+    homeScore: string | null;
+    awayScore: string | null;
+    summary?: string;
+    winner?: 'home' | 'away' | 'tie' | 'none';
+  };
+  /** Medicoach's own match page (http(s) only). */
+  medicoachMatchUrl?: string;
+}
+
+/**
+ * The scorecard context for ONE report's detail view (the `/r/` link and the portal's report
+ * route — never lists): two GetItems, or one when the caller already holds the card
+ * (`preloaded.card`, `null` meaning "fetched, none stored"). Empty for an unlisted match (it
+ * has no fixture).
+ */
+export async function attachScorecardContext(
+  repo: Pick<RepoModule, 'getFixtureScorecard' | 'getFixtureResult'>,
+  tenant: string,
+  report: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'source'>,
+  preloaded?: { card: StoredFixtureScorecard | null },
+): Promise<ScorecardContext> {
+  if (report.seriesId === UNLISTED_SERIES_ID || report.source === 'manual-unlisted') return {};
+  const [card, res] = await Promise.all([
+    preloaded
+      ? preloaded.card
+      : repo.getFixtureScorecard(tenant, report.seriesId, report.fixtureId),
+    repo.getFixtureResult(tenant, report.seriesId, report.fixtureId),
+  ]);
+  const live = res && !res.cleared && res.recordedAt ? res : null;
+  const url = live ? httpUrlOrNull(live.medicoachMatchUrl) : null;
+  return {
+    ...(card?.available
+      ? {
+          scorecard: {
+            ...(card.matchState !== undefined ? { matchState: card.matchState } : {}),
+            innings: card.innings ?? [],
+            fetchedAt: card.fetchedAt,
+          },
+        }
+      : {}),
+    ...(live
+      ? {
+          result: {
+            homeScore: live.homeScore ?? null,
+            awayScore: live.awayScore ?? null,
+            ...(live.summary ? { summary: live.summary } : {}),
+            ...(live.winner ? { winner: live.winner } : {}),
+          },
+        }
+      : {}),
+    ...(url ? { medicoachMatchUrl: url } : {}),
+  };
+}
+
+/** "Umzinto CC v African Warriors (Premier T20), Sun 4 Oct 2026" — home side first. */
+export function reportFixtureLine(
+  r: Pick<CaptainsReport, 'side' | 'clubName' | 'opponentName' | 'competition' | 'matchDate'>,
+): string {
+  const home = r.side === 'home' ? r.clubName : r.opponentName;
+  const away = r.side === 'home' ? r.opponentName : r.clubName;
+  return (
+    `${home} v ${away}` +
+    (r.competition ? ` (${r.competition})` : '') +
+    `, ${formatWeekdayDayYear(r.matchDate)}`
+  );
+}
+
+// ───────────────────────── Operator console ─────────────────────────
+
+/** The console's window: `days` back from the tenant's today (default 14, capped at 60). */
+export const CONSOLE_DAYS_DEFAULT = 14;
+export const CONSOLE_DAYS_MAX = 60;
+/** At most this many fixture rows per response (newest first); `truncated` says when cut. */
+export const CONSOLE_ROW_CAP = 500;
+
+export const CONSOLE_STATUSES = [
+  'all',
+  'pending',
+  'confirmed',
+  'correction',
+  'stale',
+  'not-asked',
+] as const;
+export type ConsoleStatusFilter = (typeof CONSOLE_STATUSES)[number];
+
+/**
+ * One side's scorecard state:
+ * - `n/a` — no available card for the match (nothing to confirm against);
+ * - `pending` — the report is still open and a card is there to answer;
+ * - `not-asked` — the report closed (submitted / void) without an answer while a card exists
+ *   (incl. reports submitted before the card arrived, and pre-pivot submissions);
+ * - `confirmed` / `correction` — the SUBMITTED answer;
+ * - `stale` — a submitted answer against a card that has since changed, or whose result was
+ *   withdrawn (the report is `flagged`, or no available card is left) — wins over both.
+ * A draft answer on an open report does not count — only a submitted one does.
+ */
+export type ScorecardConsoleStatus =
+  | 'n/a'
+  | 'pending'
+  | 'not-asked'
+  | 'confirmed'
+  | 'correction'
+  | 'stale';
+
+export interface ScorecardConsoleCell {
+  reportId: string;
+  /** `CR-YYYY-NNNN` — only once submitted. */
+  reportRef?: string;
+  clubId: string;
+  clubName: string;
+  reportStatus: CaptainsReport['status'];
+  scorecardStatus: ScorecardConsoleStatus;
+  /** The submitted answer behind a `stale` status. */
+  answeredAction?: CaptainsReportScorecardAnswer['action'];
+  /** A submitted correction's text. */
+  feedback?: string;
+  submittedAt?: string;
+}
+
+export interface ScorecardConsoleRow {
+  seriesId: string;
+  fixtureId: string;
+  matchDate: string;
+  competition: string;
+  homeTeamName: string;
+  awayTeamName: string;
+  home?: ScorecardConsoleCell;
+  away?: ScorecardConsoleCell;
+}
+
+export interface ScorecardConsoleTenant {
+  tenant: string;
+  tenantName: string;
+  rows: ScorecardConsoleRow[];
+}
+
+export interface ScorecardConsolePayload {
+  days: number;
+  status: ConsoleStatusFilter;
+  /** The one tenant the response is scoped to (`?tenant=`), when it is. */
+  tenant?: string;
+  /** The first match date in the window (YYYY-MM-DD, tenant time). */
+  since: string;
+  /** Fixture rows matching the filter before the cap. */
+  total: number;
+  truncated: boolean;
+  /**
+   * Rows per status filter in the window and tenant scope, BEFORE the status filter and the
+   * cap — so every chip can show its count whichever one is active. `all` = every row.
+   */
+  counts: Record<ConsoleStatusFilter, number>;
+  /** Every tenant on the platform (id + display name, by name), for the client picker. */
+  tenantOptions: Array<{ tenant: string; tenantName: string }>;
+  tenants: ScorecardConsoleTenant[];
+}
+
+export function scorecardConsoleStatus(
+  r: Pick<CaptainsReport, 'status' | 'scorecard' | 'flagged'>,
+  cardAvailable: boolean,
+): ScorecardConsoleStatus {
+  if (r.status === 'submitted' && r.scorecard) {
+    // A cleared result (report flagged, card gone) leaves the answer about nothing current.
+    return r.scorecard.stale || r.flagged || !cardAvailable ? 'stale' : r.scorecard.action;
+  }
+  if (!cardAvailable) return 'n/a';
+  return r.status === 'pending' ? 'pending' : 'not-asked';
+}
+
+export function scorecardConsoleCell(
+  r: CaptainsReport,
+  cardAvailable: boolean,
+): ScorecardConsoleCell {
+  const scorecardStatus = scorecardConsoleStatus(r, cardAvailable);
+  const answered = r.status === 'submitted' ? r.scorecard : undefined;
+  return {
+    reportId: r.id,
+    ...(r.ref ? { reportRef: r.ref } : {}),
+    clubId: r.clubId,
+    clubName: r.clubName,
+    reportStatus: r.status,
+    scorecardStatus,
+    ...(scorecardStatus === 'stale' && answered ? { answeredAction: answered.action } : {}),
+    ...(answered?.action === 'correction' && answered.feedback
+      ? { feedback: answered.feedback }
+      : {}),
+    ...(r.submittedAt ? { submittedAt: r.submittedAt } : {}),
+  };
+}
+
+/** The first match date a `days` window covers, in tenant time. */
+export function consoleSince(days: number, now: Date): string {
+  return tenantDate(new Date(now.getTime() - days * 24 * 3600 * 1000));
+}
+
+/**
+ * One tenant's reports → fixture rows pairing both sides (home / away), newest first. Pairs
+ * what it is given: the caller ({@link loadScorecardConsole}) has already dropped reports
+ * outside the window and unlisted matches (no fixture, never a card).
+ */
+export function pairScorecardConsoleRows(
+  reports: CaptainsReport[],
+  cards: Map<string, { available: boolean }>,
+): ScorecardConsoleRow[] {
+  const rows = new Map<string, ScorecardConsoleRow>();
+  for (const r of reports) {
+    const key = `${r.seriesId}#${r.fixtureId}`;
+    let row = rows.get(key);
+    if (!row) {
+      row = {
+        seriesId: r.seriesId,
+        fixtureId: r.fixtureId,
+        matchDate: r.matchDate,
+        competition: r.competition,
+        homeTeamName: r.side === 'home' ? r.clubName : r.opponentName,
+        awayTeamName: r.side === 'home' ? r.opponentName : r.clubName,
+      };
+      rows.set(key, row);
+    }
+    row[r.side] = scorecardConsoleCell(r, cards.get(key)?.available === true);
+  }
+  return [...rows.values()].sort(
+    (a, b) =>
+      b.matchDate.localeCompare(a.matchDate) ||
+      `${a.seriesId}#${a.fixtureId}`.localeCompare(`${b.seriesId}#${b.fixtureId}`),
+  );
+}
+
+/** A row matches a status filter when EITHER side has that status. */
+export function consoleRowMatches(row: ScorecardConsoleRow, status: ConsoleStatusFilter) {
+  if (status === 'all') return true;
+  return row.home?.scorecardStatus === status || row.away?.scorecardStatus === status;
+}
+
+/**
+ * Cross-tenant scorecard status of captains reports, for the operator console. Tenants are
+ * read one at a time (one CAPREPORT Query each — the partition is not date-keyed, so the
+ * window is applied here); scorecards via a projected BatchGet over the window's fixtures.
+ * `tenant` scopes the read to that one tenant (the caller has checked it exists). Per-status
+ * counts are taken before the status filter; rows are capped at `rowCap` across tenants,
+ * newest match first.
+ */
+export async function loadScorecardConsole(
+  repo: Pick<RepoModule, 'listTenants' | 'listCaptainsReports' | 'getFixtureScorecardAvailability'>,
+  opts: {
+    days: number;
+    status: ConsoleStatusFilter;
+    now: Date;
+    tenant?: string;
+    rowCap?: number;
+  },
+): Promise<ScorecardConsolePayload> {
+  const since = consoleSince(opts.days, opts.now);
+  const rowCap = opts.rowCap ?? CONSOLE_ROW_CAP;
+  const counts = Object.fromEntries(CONSOLE_STATUSES.map((s) => [s, 0])) as Record<
+    ConsoleStatusFilter,
+    number
+  >;
+  const configs = await repo.listTenants();
+  const tenantOptions = configs
+    .map((cfg) => ({ tenant: cfg.tenant, tenantName: orgCopy(cfg).name }))
+    .sort((a, b) => a.tenantName.localeCompare(b.tenantName));
+  const all: Array<{ tenant: string; tenantName: string; row: ScorecardConsoleRow }> = [];
+  for (const cfg of configs) {
+    if (opts.tenant && cfg.tenant !== opts.tenant) continue;
+    const reports = (await repo.listCaptainsReports(cfg.tenant)).filter(
+      (r) =>
+        r.matchDate >= since && r.seriesId !== UNLISTED_SERIES_ID && r.source !== 'manual-unlisted',
+    );
+    if (!reports.length) continue;
+    const cards = await repo.getFixtureScorecardAvailability(
+      cfg.tenant,
+      reports.map((r) => ({ seriesId: r.seriesId, fixtureId: r.fixtureId })),
+    );
+    const tenantName = orgCopy(cfg).name;
+    for (const row of pairScorecardConsoleRows(reports, cards)) {
+      for (const s of CONSOLE_STATUSES) if (consoleRowMatches(row, s)) counts[s]++;
+      if (consoleRowMatches(row, opts.status)) all.push({ tenant: cfg.tenant, tenantName, row });
+    }
+  }
+  all.sort(
+    (a, b) =>
+      b.row.matchDate.localeCompare(a.row.matchDate) || a.tenantName.localeCompare(b.tenantName),
+  );
+  const kept = all.slice(0, rowCap);
+  const byTenant = new Map<string, ScorecardConsoleTenant>();
+  for (const { tenant, tenantName, row } of kept) {
+    let t = byTenant.get(tenant);
+    if (!t) byTenant.set(tenant, (t = { tenant, tenantName, rows: [] }));
+    t.rows.push(row);
+  }
+  return {
+    days: opts.days,
+    status: opts.status,
+    ...(opts.tenant ? { tenant: opts.tenant } : {}),
+    since,
+    total: all.length,
+    truncated: all.length > kept.length,
+    counts,
+    tenantOptions,
+    tenants: [...byTenant.values()].sort((a, b) => a.tenantName.localeCompare(b.tenantName)),
+  };
 }

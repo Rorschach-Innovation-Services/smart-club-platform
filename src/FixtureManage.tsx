@@ -482,6 +482,12 @@ export function RemoveFixtureDialog({
 
 /* ─── Appoint umpires or scorers ─── */
 
+/** Optional contacts captured when a new official is added from the picker (notice delivery). */
+export interface PersonContacts {
+  phone?: string;
+  email?: string;
+}
+
 const matchName = (p: Person, q: string) => {
   const k = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
   const w = k(q);
@@ -496,6 +502,7 @@ function PersonSlot({
   noun,
   onChange,
   onCreate,
+  captureContacts,
 }: {
   label: string;
   value: string | null;
@@ -503,10 +510,13 @@ function PersonSlot({
   people: Person[];
   noun: string;
   onChange: (id: string | null) => void;
-  onCreate?: (displayName: string) => Promise<Person>;
+  onCreate?: (displayName: string, contacts?: PersonContacts) => Promise<Person>;
+  /** Ask for an optional phone/email before creating, so the appointment notice can reach them. */
+  captureContacts?: boolean;
 }) {
   const [q, setQ] = useState('');
   const [busy, setBusy] = useState(false);
+  const [contacts, setContacts] = useState<{ phone: string; email: string } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const listId = useId();
   const chosen = value ? people.find((p) => p.id === value) : undefined;
@@ -533,6 +543,56 @@ function PersonSlot({
     (p) => p.active && p.displayName.toLowerCase().trim() === q.toLowerCase().trim(),
   );
   const canAdd = !!onCreate && q.trim().length > 1 && !exact;
+  async function create(extra?: PersonContacts) {
+    setBusy(true);
+    try {
+      const created = extra ? await onCreate!(q.trim(), extra) : await onCreate!(q.trim());
+      setQ('');
+      setContacts(null);
+      onChange(created.id);
+    } catch {
+      /* the caller toasts the reason */
+    } finally {
+      setBusy(false);
+    }
+  }
+  if (canAdd && contacts)
+    return (
+      <div className="ump-slot">
+        <span className="ump-slot-l">{label}</span>
+        <div className="ump-options" role="group" aria-label={`New ${noun} contacts`}>
+          <div className="ump-option-sub">
+            New {noun} “{q.trim()}”. A phone or email lets them get the appointment notice.
+          </div>
+          {(['phone', 'email'] as const).map((k) => (
+            <label key={k} className="ump-slot-l">
+              {k === 'phone' ? 'Phone (optional)' : 'Email (optional)'}
+              <input
+                type={k === 'email' ? 'email' : 'tel'}
+                value={contacts[k]}
+                onChange={(e) => setContacts({ ...contacts, [k]: e.target.value })}
+              />
+            </label>
+          ))}
+          <button
+            type="button"
+            className="ump-add"
+            disabled={busy}
+            onClick={() =>
+              create({
+                ...(contacts.phone.trim() ? { phone: contacts.phone.trim() } : {}),
+                ...(contacts.email.trim() ? { email: contacts.email.trim() } : {}),
+              })
+            }
+          >
+            Add {noun}
+          </button>
+          <button type="button" disabled={busy} onClick={() => setContacts(null)}>
+            Back
+          </button>
+        </div>
+      </div>
+    );
   const onListKey = (e: KeyboardEvent<HTMLDivElement>) => {
     const all = [...(listRef.current?.querySelectorAll('button') ?? [])];
     const i = all.indexOf(document.activeElement as HTMLButtonElement);
@@ -590,18 +650,7 @@ function PersonSlot({
               type="button"
               className="ump-add"
               disabled={busy}
-              onClick={async () => {
-                setBusy(true);
-                try {
-                  const created = await onCreate!(q.trim());
-                  setQ('');
-                  onChange(created.id);
-                } catch {
-                  /* the caller toasts the reason */
-                } finally {
-                  setBusy(false);
-                }
-              }}
+              onClick={() => (captureContacts ? setContacts({ phone: '', email: '' }) : create())}
             >
               + Add “{q.trim()}” as a new {noun}
             </button>
@@ -634,7 +683,7 @@ export function OfficialsDialog({
    */
   others: Array<{ label: string; ids: string[]; time?: string }>;
   onSave: (ids: string[]) => Promise<unknown>;
-  onCreate?: (displayName: string) => Promise<Person>;
+  onCreate?: (displayName: string, contacts?: PersonContacts) => Promise<Person>;
   onClose: () => void;
   onSaved?: (message: string) => void;
 }) {
@@ -686,6 +735,7 @@ export function OfficialsDialog({
             noun={noun}
             onChange={(id) => setSlots((s) => s.map((v, j) => (j === i ? id : v)))}
             onCreate={onCreate}
+            captureContacts={kind === 'scorers'}
           />
         ))}
       </div>

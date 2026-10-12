@@ -32,6 +32,9 @@
  *   • Key already present with a STORED roster whose ids differ from the series
  *     ids → CONFLICT: log and skip. Coach `teamIds` may point at the stored ids;
  *     the script never rewrites them. Only an absent-roster count is UPGRADEd.
+ *   • A fixtures-only league (League.fixturesOnly — a KO/T20 cup) only ever ADDS its key to
+ *     `club.leagues`: its sides are the club's existing sides (often ids borrowed from
+ *     another league), so no roster and no count is written for it.
  *   • Series whose `leagueKey` is not in the tenant catalogue are logged ORPHAN
  *     and skipped. Every patch is run through `validateClubPatch` (the same guard
  *     the rep PATCH /clubs/:id uses) before writing; `amendmentPending` is never
@@ -117,6 +120,13 @@ export async function syncClubLeaguesFromSeries(
 
   const cfg = await repo.getTenantConfig(tenant);
   const validKeys = new Set((cfg?.leagues ?? []).map((l) => l.key));
+  // Fixtures-only entries (League.fixturesOnly — a KO/T20 cup) are played by the clubs'
+  // EXISTING sides, often under ids borrowed from another league's roster: the cup key goes
+  // on club.leagues (the cup's entrant list) but never a roster or a count, which would
+  // duplicate those ids and double-count the club's teams.
+  const fixturesOnlyKeys = new Set(
+    (cfg?.leagues ?? []).filter((l) => l.fixturesOnly === true).map((l) => l.key),
+  );
 
   const result: ClubLeagueSyncResult = {
     seriesConsidered: 0,
@@ -182,6 +192,15 @@ export async function syncClubLeaguesFromSeries(
       const sides = [...sidesMap.values()];
       const sideCount = sides.length;
       const hasKey = leaguesSet.has(leagueKey);
+      if (fixturesOnlyKeys.has(leagueKey)) {
+        if (!hasKey) {
+          leagues.push(leagueKey);
+          leaguesSet.add(leagueKey);
+          added.push(leagueKey);
+          changed = true;
+        }
+        continue;
+      }
       const storedRoster = Array.isArray(club.teamRosters?.[leagueKey])
         ? (club.teamRosters![leagueKey] as ClubTeam[])
         : undefined;
