@@ -6857,37 +6857,42 @@ async function queueOfficialsNotices(
     next: FixtureOfficials | null | undefined;
   }>,
 ): Promise<void> {
-  const imp = await import('./import-umpire-appointments.js');
-  for (const e of events) {
-    try {
-      for (const p of imp.diffOfficials(e.previous, e.next)) {
-        await repo.deleteOfficialsNotify(tenant, {
-          seriesId: e.seriesId,
-          fixtureId: e.fixtureId,
-          ...p,
+  try {
+    const imp = await import('./import-umpire-appointments.js');
+    for (const e of events) {
+      try {
+        for (const p of imp.diffOfficials(e.previous, e.next)) {
+          await repo.deleteOfficialsNotify(tenant, {
+            seriesId: e.seriesId,
+            fixtureId: e.fixtureId,
+            ...p,
+          });
+        }
+        for (const p of imp.officialPairs(e.next)) {
+          await repo.queueOfficialsNotify(tenant, {
+            seriesId: e.seriesId,
+            fixtureId: e.fixtureId,
+            ...p,
+          });
+        }
+      } catch (err) {
+        console.error(
+          `officials-notify: could not enqueue ${tenant}/${e.seriesId}/${e.fixtureId}`,
+          err,
+        );
+        Sentry.captureException(err, {
+          tags: {
+            tenant,
+            seriesId: e.seriesId,
+            fixtureId: e.fixtureId,
+            op: 'officials-notify-queue',
+          },
         });
       }
-      for (const p of imp.officialPairs(e.next)) {
-        await repo.queueOfficialsNotify(tenant, {
-          seriesId: e.seriesId,
-          fixtureId: e.fixtureId,
-          ...p,
-        });
-      }
-    } catch (err) {
-      console.error(
-        `officials-notify: could not enqueue ${tenant}/${e.seriesId}/${e.fixtureId}`,
-        err,
-      );
-      Sentry.captureException(err, {
-        tags: {
-          tenant,
-          seriesId: e.seriesId,
-          fixtureId: e.fixtureId,
-          op: 'officials-notify-queue',
-        },
-      });
     }
+  } catch (err) {
+    console.error(`officials-notify: could not queue notices for ${tenant}`, err);
+    Sentry.captureException(err, { tags: { tenant, op: 'officials-notify-queue' } });
   }
 }
 

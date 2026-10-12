@@ -215,7 +215,6 @@ export const WHATSAPP_TEMPLATES = {
    * from the drafted "the union office" during creation — so bodyText mirrors Meta verbatim,
    * per the registry convention. Like `fixtureReminder`, this status IS read at runtime: the
    * cron skips the WhatsApp channel unless it is "registered" (email goes out regardless).
-   * Go-live: flip status to "registered" and deploy.
    */
   officialAppointed: {
     name: 'official_appointed',

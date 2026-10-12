@@ -20,6 +20,11 @@ const SES_REGION = process.env.SES_REGION ?? 'eu-west-1';
 const FROM_EMAIL = process.env.FROM_EMAIL;
 export const EMAIL_DRY_RUN = process.env.NOTIFY_DRY_RUN === '1' || !FROM_EMAIL;
 
+/** MediCoach support: in both emails and both WhatsApp bodies, and the emails' SES reply-to. */
+export const MEDICOACH_SUPPORT_EMAIL = 'info@medicoach.co.za';
+/** Default SES Reply-To for every send that doesn't set its own: replies land in the support inbox. */
+const DEFAULT_REPLY_TO = [MEDICOACH_SUPPORT_EMAIL];
+
 // Construct once at module load (matches repo.ts's client lifecycle); skip entirely
 // in dry-run so no credentials/region are required offline.
 const ses = EMAIL_DRY_RUN ? null : new SESClient({ region: SES_REGION });
@@ -81,6 +86,7 @@ export async function sendStaffInviteEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -208,6 +214,7 @@ export async function sendRegLinkEmail(input: RegLinkEmailInput): Promise<{ mess
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -317,6 +324,7 @@ export async function sendClearanceEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -452,6 +460,7 @@ export async function sendClearanceResolvedEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -576,6 +585,7 @@ export async function sendClearanceReopenedSourceEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -602,6 +612,7 @@ export async function sendClearanceReopenedDestEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -990,6 +1001,7 @@ export async function sendFixturesEmail(input: FixturesEmailInput): Promise<{ me
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -1082,6 +1094,7 @@ export async function sendVeteransRequestEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -1167,6 +1180,7 @@ export async function sendVeteransRequestResolvedEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -1489,8 +1503,7 @@ export function officialAppointedEmailContent(input: OfficialAppointedEmailInput
     ['Time', input.time || 'time to be confirmed'],
     ['Venue', input.venue || 'venue to be confirmed'],
   ];
-  const outro =
-    'If you are unavailable for this appointment, please contact the union office as soon as possible.';
+  const outro = `If you are unavailable for this appointment, please contact ${MEDICOACH_SUPPORT_EMAIL} as soon as possible.`;
   const text =
     `Hello ${greetName},\n\n` +
     `${intro}\n\n` +
@@ -1530,6 +1543,7 @@ export async function sendPostponementEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: content.subject, Charset: 'UTF-8' },
@@ -1619,6 +1633,7 @@ export async function sendCaptainsReportDueEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [input.to], ...(input.cc ? { CcAddresses: [input.cc] } : {}) },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -1688,6 +1703,7 @@ export async function sendSyncConflictEmail(
   const res = await ses!.send(
     new SendEmailCommand({
       Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
       Destination: { ToAddresses: [input.to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },
@@ -1924,8 +1940,6 @@ export async function sendPlayerWelcomeEmail(
 
 // ── EMCU scorer broadcast (one-off CLI: send-emcu-scorer-broadcast.ts) ──
 
-/** MediCoach support: in both emails and both WhatsApp bodies, and the emails' SES reply-to. */
-export const MEDICOACH_SUPPORT_EMAIL = 'info@medicoach.co.za';
 export const MEDICOACH_APP_LINKS = {
   ios: 'https://apps.apple.com/us/app/medicoach-ams/id6760149086',
   android: 'https://play.google.com/store/apps/details?id=co.za.medicoach.app',

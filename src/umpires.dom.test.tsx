@@ -338,7 +338,10 @@ describe('appointment notice badges and the no-contact hint', () => {
   it('maps ledger rows to badges; a backfilled row shows none', () => {
     expect(noticeBadge(undefined)).toBeNull();
     expect(noticeBadge({ status: 'queued' })).toEqual({ label: 'Notice queued' });
-    expect(noticeBadge({ status: 'exhausted' })).toEqual({ label: 'Couldn’t reach' });
+    expect(noticeBadge({ status: 'exhausted', attempts: 5 })).toEqual({
+      label: 'Couldn’t reach',
+      title: '5 delivery attempts failed — check their email and cell on the Umpires page',
+    });
     expect(noticeBadge({ status: 'completed', completedAt: '2026-10-12T08:00:00Z' })).toEqual({
       label: 'Notified ✓',
       title: '2026-10-12T08:00:00Z',

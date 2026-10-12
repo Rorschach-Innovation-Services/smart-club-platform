@@ -118,11 +118,19 @@ export function doubleBookingIndex(
 
 /** The editor's notice badge for one ledger row, or null for none (backfilled = never sent). */
 export function noticeBadge(
-  row: Pick<OfficialsNotifyStatusRow, 'status' | 'reason' | 'completedAt'> | undefined,
+  row:
+    | (Pick<OfficialsNotifyStatusRow, 'status' | 'reason' | 'completedAt'> &
+        Partial<Pick<OfficialsNotifyStatusRow, 'attempts'>>)
+    | undefined,
 ): { label: string; title?: string } | null {
   if (!row) return null;
   if (row.status === 'queued') return { label: 'Notice queued' };
-  if (row.status === 'exhausted') return { label: 'Couldn’t reach' };
+  if (row.status === 'exhausted') {
+    return {
+      label: 'Couldn’t reach',
+      title: `${row.attempts ?? 0} delivery attempts failed — check their email and cell on the Umpires page`,
+    };
+  }
   if (row.status === 'completed' && row.reason !== 'backfill') {
     return { label: 'Notified ✓', ...(row.completedAt ? { title: row.completedAt } : {}) };
   }

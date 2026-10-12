@@ -302,6 +302,9 @@ counted) and is notified on the first cron run after their contacts are added on
 Provider failures retry every run and stop after 10 attempts (row marked `exhausted`, reported to
 Sentry).
 
+Scope: replaced or removed officials get NO cancellation notice (deliberate). A swapped-out umpire
+who was already notified is not told; their ledger row is simply deleted.
+
 ---
 
 ## Retired — `club_clearance_pending` (v1)

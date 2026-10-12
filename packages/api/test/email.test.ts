@@ -582,7 +582,11 @@ describe('officialAppointedEmailContent', () => {
     assert.ok(text.includes('  Competition: Premier League'));
     assert.ok(text.includes('  Time: 09:00'));
     assert.ok(text.includes('  Venue: Kingsmead'));
-    assert.ok(text.includes('please contact the union office'));
+    assert.ok(
+      text.includes(
+        'If you are unavailable for this appointment, please contact info@medicoach.co.za as soon as possible.',
+      ),
+    );
     assert.ok(html.includes('<strong>Venue:</strong> Kingsmead'));
   });
 

@@ -160,24 +160,6 @@ export async function runOfficialNotices(
         return seriesCache.get(id)!;
       };
 
-      for (const row of queued) {
-        try {
-          await drainRow(row);
-        } catch (err) {
-          summary.errors++;
-          deps.captureException(err, {
-            tenant,
-            seriesId: row.seriesId,
-            fixtureId: row.fixtureId,
-            cron: 'official-notices',
-          });
-          console.error(
-            `official-notices: row ${tenant}/${row.seriesId}/${row.fixtureId}/${row.role}/${row.umpireId} failed`,
-            err,
-          );
-        }
-      }
-
       async function drainRow(row: OfficialsNotifyRow): Promise<void> {
         const current = await repo.getFixtureOfficials(tenant, row.seriesId, row.fixtureId);
         // Inline rather than import-umpire-appointments' officialPairs: that module pulls
@@ -254,6 +236,24 @@ export async function runOfficialNotices(
               fixtureId: row.fixtureId,
               cron: 'official-notices',
             },
+          );
+        }
+      }
+
+      for (const row of queued) {
+        try {
+          await drainRow(row);
+        } catch (err) {
+          summary.errors++;
+          deps.captureException(err, {
+            tenant,
+            seriesId: row.seriesId,
+            fixtureId: row.fixtureId,
+            cron: 'official-notices',
+          });
+          console.error(
+            `official-notices: row ${tenant}/${row.seriesId}/${row.fixtureId}/${row.role}/${row.umpireId} failed`,
+            err,
           );
         }
       }
