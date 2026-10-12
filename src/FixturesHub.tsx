@@ -12,7 +12,7 @@
  * (FixtureManage.tsx). Seasons, stages, allocation and release stay in Leagues & tournaments.
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ApiError } from './api';
+import { ApiError, type OfficialsNotifyStatusRow } from './api';
 import { Btn } from './atoms';
 import {
   FixtureEditDialog,
@@ -87,6 +87,8 @@ export interface HubManage {
   onConfirmResult?: (seriesId: string, fixtureId: string, recordedAt: string) => Promise<unknown>;
   onUnconfirmResult?: (seriesId: string, fixtureId: string) => Promise<unknown>;
   toast?: (message: string, tone?: string) => void;
+  /** The series' appointment-notice ledger (badges on the officials dialog's chips). */
+  loadNotifyStatus?: (seriesId: string) => Promise<{ rows: OfficialsNotifyStatusRow[] }>;
 }
 
 export interface HubProps {
@@ -212,6 +214,7 @@ function useDialogs(rows: FixtureRow[], manage?: HubManage) {
           onCreate={isUmp ? manage.onCreateUmpire : manage.onCreateScorer}
           onClose={close}
           onSaved={saved}
+          loadNotifyStatus={manage.loadNotifyStatus}
         />
       );
     }

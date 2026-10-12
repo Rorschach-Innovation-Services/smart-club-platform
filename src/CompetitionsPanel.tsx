@@ -10,6 +10,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import * as api from './api';
 import { ApiError } from './api';
 import { Btn, Modal } from './atoms';
+import { useFeature, useVertical } from './branding';
 import { SeriesOriginPill } from './season-run';
 import type { Series } from './types';
 import {
@@ -100,6 +101,10 @@ export function CompetitionsPanel(p: CompetitionsPanelProps) {
     | { mode: 'regenerate'; group: CompetitionGroup }
   >(null);
   const open = groups.find((g) => g.key === openKey) ?? null;
+  // Creation is cricket-only (ADR 0022): the builder, points and standings are cricket rules
+  // (overs, NRR, bowled-out). Absent `sport` resolves to cricket, as everywhere else.
+  // Existing competitions still display for every vertical.
+  const canCreate = useVertical().sport === 'cricket';
 
   // The open competition rides on `?series=` so a reload or a link lands on it.
   const syncUrl = (seriesId: string | null) => {
@@ -155,7 +160,7 @@ export function CompetitionsPanel(p: CompetitionsPanelProps) {
                 </button>
               )}
             </div>
-            {view === 'list' && (
+            {view === 'list' && canCreate && (
               <div className="fh-toolbar-right">
                 <Btn
                   tone="outline"
@@ -178,7 +183,7 @@ export function CompetitionsPanel(p: CompetitionsPanelProps) {
             p.catalogue
           ) : (
             <>
-              <CompetitionsTable groups={groups} onOpen={openGroup} />
+              <CompetitionsTable groups={groups} onOpen={openGroup} canCreate={canCreate} />
               {p.seasons && (
                 // Open whenever a season is running (it is where its stages are worked
                 // through); remounts open the moment the first one starts.
@@ -222,14 +227,18 @@ export function CompetitionsPanel(p: CompetitionsPanelProps) {
 function CompetitionsTable({
   groups,
   onOpen,
+  canCreate = true,
 }: {
   groups: CompetitionGroup[];
   onOpen: (g: CompetitionGroup) => void;
+  canCreate?: boolean;
 }) {
   if (!groups.length)
     return (
       <div className="fh-empty">
-        No leagues or tournaments yet. Create one above — the fixtures are generated for you.
+        {canCreate
+          ? 'No leagues or tournaments yet. Create one above — the fixtures are generated for you.'
+          : 'No leagues or tournaments yet.'}
       </div>
     );
   return (
@@ -456,6 +465,16 @@ function StandingsView({
       ? series.competition.format.qualifiers
       : 0;
   const played = (series.fixtures as CmpFixture[]).filter((f) => f.result).length;
+  // Standings read results only from the Match Centre sync (ADR 0022): without it the table
+  // never fills, so say why instead of showing a bare empty table.
+  const syncOn = useFeature('medicoachSync');
+  if (!syncOn && !played)
+    return (
+      <p className="fh-note">
+        League tables fill from Match Centre results sync, which isn&apos;t switched on for this
+        union. Until it is, results aren&apos;t recorded here and the table stays empty.
+      </p>
+    );
   return (
     <div>
       <div className="tbl-w">

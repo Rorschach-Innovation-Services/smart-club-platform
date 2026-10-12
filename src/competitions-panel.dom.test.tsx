@@ -12,6 +12,7 @@ import * as api from './api';
 import { ApiError } from './api';
 import { CompetitionsPanel } from './CompetitionsPanel';
 import type { CmpSeries } from './competitions';
+import { qk } from './query';
 import { renderWithProviders } from './test-utils';
 
 vi.mock('./api', async () => {
@@ -74,7 +75,11 @@ const setup = (allSeries: CmpSeries[] = [], over: Record<string, unknown> = {}) 
     toast: vi.fn(),
     ...over,
   };
-  renderWithProviders(<CompetitionsPanel {...props} />);
+  const { tenant, ...rest } = props as typeof props & { tenant?: Record<string, unknown> };
+  renderWithProviders(
+    <CompetitionsPanel {...rest} />,
+    tenant ? { seed: [[qk.tenant(), tenant]] } : undefined,
+  );
   return props;
 };
 
@@ -325,5 +330,39 @@ describe('one competition', () => {
     );
     expect(screen.getByRole('button', { name: 'Delete league…' })).toHaveProperty('disabled', true);
     expect(screen.getAllByText(/recall it/i).length).toBe(2);
+  });
+});
+
+describe('vertical and sync gating (ADR 0022)', () => {
+  it('a football tenant sees existing competitions but no creation buttons', () => {
+    setup(planned().series as unknown as CmpSeries[], { tenant: { sport: 'football' } });
+    expect(screen.getByText('Sunday T20')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /create league/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /create tournament/i })).toBeNull();
+  });
+
+  it('a tenant with no sport set is cricket and can create', () => {
+    setup([], { tenant: {} });
+    expect(screen.getByRole('button', { name: /create league/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /create tournament/i })).toBeTruthy();
+  });
+
+  it('without the Match Centre sync the Table tab explains why it is empty', async () => {
+    const user = userEvent.setup();
+    const s = planned().series as unknown as CmpSeries[];
+    window.history.replaceState(null, '', `/admin/fixtures?tab=series&series=${s[0].id}`);
+    setup(s, { tenant: { features: {} } });
+    await user.click(screen.getByRole('tab', { name: 'Table' }));
+    expect(screen.getByText(/league tables fill from match centre results sync/i)).toBeTruthy();
+    expect(screen.queryByRole('table', { name: 'League table' })).toBeNull();
+  });
+
+  it('with the sync on, the empty table renders as before', async () => {
+    const user = userEvent.setup();
+    const s = planned().series as unknown as CmpSeries[];
+    window.history.replaceState(null, '', `/admin/fixtures?tab=series&series=${s[0].id}`);
+    setup(s, { tenant: { features: { medicoachSync: true } } });
+    await user.click(screen.getByRole('tab', { name: 'Table' }));
+    expect(screen.getByRole('table', { name: 'League table' })).toBeTruthy();
   });
 });

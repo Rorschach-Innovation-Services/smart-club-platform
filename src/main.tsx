@@ -712,15 +712,18 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       { rawConflict: true },
     ).then(() => invalidate(qk.series()));
   }
+  // Delete/duplicate/approve return the promise unswallowed (like setReleased): the caller
+  // chains its success toast off success only and mops up the rejection itself — withToast
+  // has already surfaced the error (ADR 0021 "Known, unchanged" toast bugs, fixed).
   function deleteSeries(seriesId) {
-    withToast(() => api.deleteSeriesReq(seriesId), 'Could not delete series')
-      .then(() => invalidate(qk.series()))
-      .catch(() => {});
+    return withToast(() => api.deleteSeriesReq(seriesId), 'Could not delete series').then(() =>
+      invalidate(qk.series()),
+    );
   }
   function duplicateSeries(seriesId) {
-    withToast(() => api.duplicateSeriesReq(seriesId), 'Could not duplicate series')
-      .then(() => invalidate(qk.series()))
-      .catch(() => {});
+    return withToast(() => api.duplicateSeriesReq(seriesId), 'Could not duplicate series').then(
+      () => invalidate(qk.series()),
+    );
   }
   /**
    * Run a generate/rebase; when the server refuses because released fixtures are synced with
@@ -972,9 +975,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
     return withToast(
       () => api.patchSeries(seriesId, { approved: value, version: cur?.version }),
       'Could not update approval',
-    )
-      .then(() => invalidate(qk.series()))
-      .catch(() => {});
+    ).then(() => invalidate(qk.series()));
   }
   function setSubmissionDeadline(iso) {
     // Returned raw (no .catch swallow) so the deadline modal stays open on a failed save.

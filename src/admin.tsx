@@ -379,6 +379,8 @@ interface AdminFixturesProps {
   /** The scorer register; appointments ride on each fixture's `officials.scorers`. */
   scorers?: Scorer[];
   onSaveScorers?: (seriesId: string, fixtureId: string, scorerIds: string[]) => Promise<unknown>;
+  /** The series' appointment-notice ledger, for the officials dialog's per-chip badges. */
+  loadNotifyStatus?: (seriesId: string) => Promise<{ rows: api.OfficialsNotifyStatusRow[] }>;
   onCreateScorer?: (
     displayName: string,
     contacts?: import('./FixtureManage').PersonContacts,
@@ -569,6 +571,7 @@ export function AdminFixtures({
   onCreateScorer,
   onConfirmResult,
   onUnconfirmResult,
+  loadNotifyStatus = api.getOfficialsNotifyStatus,
 }: AdminFixturesProps) {
   const vt = useVertical().terms;
   const copy = useCopy();
@@ -645,6 +648,7 @@ export function AdminFixtures({
       onConfirmResult,
       onUnconfirmResult,
       toast,
+      loadNotifyStatus: onSaveOfficials || onSaveScorers ? loadNotifyStatus : undefined,
     },
   };
   const awaiting = fixtureRows.filter((r) => r.state === 'awaiting-result').length;
@@ -756,11 +760,17 @@ export function AdminFixtures({
       },
     });
   }
+  // Success toasts chain off a resolved write only; a failed save was already toasted by
+  // withToast (main.tsx), so the rejection is just mopped up here.
   function approve(s) {
-    onSetApproved?.(s.id, true)?.then?.(() => toast?.(s.name + ' · approved — ready to release'));
+    Promise.resolve(onSetApproved?.(s.id, true))
+      .then(() => toast?.(s.name + ' · approved — ready to release'))
+      .catch(() => {});
   }
   function unapprove(s) {
-    onSetApproved?.(s.id, false)?.then?.(() => toast?.(s.name + ' · approval withdrawn'));
+    Promise.resolve(onSetApproved?.(s.id, false))
+      .then(() => toast?.(s.name + ' · approval withdrawn'))
+      .catch(() => {});
   }
 
   // The operator's structured seasons (stage by stage) sit under the competitions table.
@@ -1525,8 +1535,9 @@ export function FixtureTable({
             tone="outline"
             size="sm"
             onClick={() => {
-              onDuplicateSeries(series.id);
-              toast?.('Series duplicated');
+              Promise.resolve(onDuplicateSeries(series.id))
+                .then(() => toast?.('Series duplicated'))
+                .catch(() => {});
             }}
           >
             Duplicate
@@ -1539,9 +1550,10 @@ export function FixtureTable({
                 title: 'Delete this series?',
                 body: `Permanently remove "${series.name}" along with all ${series.fixtures.length} fixtures. The ${copy.office} cannot undo this.`,
                 onYes: () => {
-                  onDeleteSeries(series.id);
                   setConfirm(null);
-                  toast?.('Series deleted');
+                  Promise.resolve(onDeleteSeries(series.id))
+                    .then(() => toast?.('Series deleted'))
+                    .catch(() => {});
                 },
                 danger: true,
               })
@@ -1910,8 +1922,7 @@ export function FixtureTable({
  * side in the tenant grouped by club, for a winner from outside the series ("Community Cup
  * winner") — and "Revert to placeholder" once a team has been set. A legacy series (no
  * participant snapshot) takes clubs only, so it lists one option per club (its club id).
- * Without `onSet` (no write path, or a side the medicoach sync fills) it is read-only, with
- * `note` saying why.
+ * Without `onSet` (no write path) it is read-only; `note` carries sync context (ADR 0022 §7).
  */
 function KnockoutSide({
   id,
@@ -1926,6 +1937,7 @@ function KnockoutSide({
   busy,
   onSet,
   note,
+  badge = false,
 }: {
   id: string;
   sideLabel: 'home' | 'away';
@@ -1939,6 +1951,8 @@ function KnockoutSide({
   busy: boolean;
   onSet?: (teamId: string | null) => void;
   note?: string;
+  /** Divergence badge: a manual override on a synced series (ADR 0022 §7). */
+  badge?: boolean;
 }) {
   const [pick, setPick] = useStateA('');
   const shown = isSlotRef(value)
@@ -1958,6 +1972,11 @@ function KnockoutSide({
   return (
     <>
       <input id={id} type="text" value={shown} disabled />
+      {badge && (
+        <div style={{ marginTop: 4 }}>
+          <Pill tone="gold">Manual override</Pill>
+        </div>
+      )}
       {placeholder && (
         <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
           Placeholder: {slotRefLabel(placeholder, fixtures as SlotFixture[]) ?? placeholder}
@@ -2289,14 +2308,28 @@ function EditFixtureRow({
   // placeholder kept in `slots`). Those change through Set team / revert, never the select.
   const isKnockoutSide = (side: 'home' | 'away') =>
     isSlotRef(draft[side]) || isSlotRef(fixture.slots?.[side] ?? '');
-  // On a medicoach-synced series a `win:`/`lose:` side is filled by the sync from the result
-  // (ADR 0016/0018): no Set team / revert there; `pos:`/`tbd:` sides stay settable.
-  const syncOwned = (side: 'home' | 'away') =>
+  // On a medicoach-synced series a `win:`/`lose:` side is filled by the sync from the result,
+  // but a manual Set team owns the side (ADR 0022 §7, superseding ADR 0018's sync-owned
+  // refusal): the sync never overwrites a `slotsManual` side until it is reverted. Set team
+  // stays available everywhere; on a sync-filled side the picker warns what it overrides.
+  const syncFilled = (side: 'home' | 'away') =>
     fixture.syncMapped === true && !!slotSource(fixture.slots?.[side] ?? draft[side] ?? '');
+  // GET /series does not carry Match Centre's own resolution of the side, so a divergence
+  // can't be computed client-side: flag every manually overridden side on a synced series.
+  const manualOnSync = (side: 'home' | 'away') =>
+    fixture.syncMapped === true && fixture.slotsManual?.[side] === true;
+  const sideNote = (side: 'home' | 'away') => {
+    if (manualOnSync(side)) return 'Manual override — Match Centre may differ until you revert.';
+    if (syncFilled(side) && !isSlotRef(draft[side])) {
+      const name = teams.find((t) => t.id === draft[side])?.name ?? draft[side];
+      return `Match Centre resolved this side as ${name}; your choice overrides it until you revert.`;
+    }
+    if (syncFilled(side))
+      return 'Filled by the medicoach sync from the result; a team you set overrides it until you revert.';
+    return undefined;
+  };
   const setterFor = (side: 'home' | 'away') =>
-    onSetSide && seriesId && !syncOwned(side)
-      ? (teamId: string | null) => setSide(side, teamId)
-      : undefined;
+    onSetSide && seriesId ? (teamId: string | null) => setSide(side, teamId) : undefined;
 
   return (
     <tr className="fix-edit-tr">
@@ -2350,9 +2383,8 @@ function EditFixtureRow({
                 legacy={legacy}
                 busy={saving}
                 onSet={setterFor('home')}
-                note={
-                  syncOwned('home') ? 'Filled by the medicoach sync from the result' : undefined
-                }
+                note={sideNote('home')}
+                badge={manualOnSync('home')}
               />
             ) : (
               <select
@@ -2383,9 +2415,8 @@ function EditFixtureRow({
                 legacy={legacy}
                 busy={saving}
                 onSet={setterFor('away')}
-                note={
-                  syncOwned('away') ? 'Filled by the medicoach sync from the result' : undefined
-                }
+                note={sideNote('away')}
+                badge={manualOnSync('away')}
               />
             ) : (
               <select

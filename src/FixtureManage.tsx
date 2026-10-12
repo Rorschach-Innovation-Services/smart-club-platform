@@ -12,10 +12,12 @@
  *   - removing a fixture medicoach already holds (409 synced_fixture_removed) offers
  *     "Mark cancelled" (the supported path) or "Remove here only" (explicit).
  */
-import { useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { ApiError } from './api';
-import { Btn, Modal } from './atoms';
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { ApiError, type OfficialsNotifyStatusRow } from './api';
+import { noticeBadge } from './umpires';
+import { Btn, Modal, Pill } from './atoms';
 import type { FixtureRow } from './fixture-index';
+import { isSlotRef, slotRefLabel, type SlotFixture } from '../packages/engine/src/formats';
 
 /* ─── Shapes this module reads (the series cache is loosely typed) ─── */
 
@@ -97,6 +99,31 @@ function ErrorBox({ err }: { err: ReturnType<typeof explainWriteError> | null })
         </ul>
       )}
     </div>
+  );
+}
+
+/**
+ * A knockout side still holding its placeholder (`pos:`/`win:`/`lose:`/`tbd:`). Typing a team
+ * over it here would drop the slot bookkeeping (`slots`/`slotsManual`, ADR 0022 §7), so it is
+ * read-only: Set team on the fixture row is the one way to name it.
+ */
+function SlotSide({
+  label,
+  value,
+  fixtures,
+}: {
+  label: string;
+  value: string;
+  fixtures: unknown[];
+}) {
+  return (
+    <label className="fm-field">
+      {label}
+      <input type="text" value={slotRefLabel(value, fixtures as SlotFixture[]) ?? value} disabled />
+      <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+        Use Set team on the fixture row to name this side.
+      </span>
+    </label>
   );
 }
 
@@ -290,28 +317,36 @@ export function FixtureEditDialog({
             </option>
           </select>
         </label>
-        <label className="fm-field">
-          Home (host)
-          <select value={draft.home} onChange={(e) => set('home', e.target.value)}>
-            <option value="">Pick a team</option>
-            {teams.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="fm-field">
-          Away (visitors)
-          <select value={draft.away} onChange={(e) => set('away', e.target.value)}>
-            <option value="">Pick a team</option>
-            {teams.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        {isSlotRef(draft.home) ? (
+          <SlotSide label="Home (host)" value={draft.home} fixtures={s?.fixtures ?? []} />
+        ) : (
+          <label className="fm-field">
+            Home (host)
+            <select value={draft.home} onChange={(e) => set('home', e.target.value)}>
+              <option value="">Pick a team</option>
+              {teams.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        {isSlotRef(draft.away) ? (
+          <SlotSide label="Away (visitors)" value={draft.away} fixtures={s?.fixtures ?? []} />
+        ) : (
+          <label className="fm-field">
+            Away (visitors)
+            <select value={draft.away} onChange={(e) => set('away', e.target.value)}>
+              <option value="">Pick a team</option>
+              {teams.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <fieldset className="fm-field fm-wide fm-ground">
           <legend>Ground</legend>
           <label className="fm-radio">
@@ -456,9 +491,17 @@ export function RemoveFixtureDialog({
       </p>
       <p className="fm-note">
         Removing deletes it from the schedule with its umpire and scorer appointments. If the game
-        is simply off, <strong>Mark cancelled</strong> keeps the record (and tells medicoach).
+        is simply off, <strong>Mark cancelled</strong> keeps the record and tells Match Centre.
       </p>
-      <ErrorBox err={err} />
+      {err?.synced ? (
+        <div className="insights-callout alert fm-error" role="alert">
+          Match Centre already holds this fixture and can’t delete it. Marking it cancelled keeps
+          the record and shows it as cancelled there. Removing it here only leaves it listed in
+          Match Centre, with no way to update it from this console.
+        </div>
+      ) : (
+        <ErrorBox err={err} />
+      )}
       <div className="fm-actions">
         <Btn tone="outline" onClick={onClose} disabled={!!busy}>
           Keep it
@@ -503,6 +546,7 @@ function PersonSlot({
   onChange,
   onCreate,
   captureContacts,
+  badge,
 }: {
   label: string;
   value: string | null;
@@ -513,6 +557,8 @@ function PersonSlot({
   onCreate?: (displayName: string, contacts?: PersonContacts) => Promise<Person>;
   /** Ask for an optional phone/email before creating, so the appointment notice can reach them. */
   captureContacts?: boolean;
+  /** The appointment notice's state for the chosen person (as on the Umpires cell). */
+  badge?: { label: string; title?: string } | null;
 }) {
   const [q, setQ] = useState('');
   const [busy, setBusy] = useState(false);
@@ -534,6 +580,11 @@ function PersonSlot({
             ×
           </button>
         </span>
+        {badge && (
+          <span title={badge.title}>
+            <Pill tone="muted">{badge.label}</Pill>
+          </span>
+        )}
       </div>
     );
   const options = people
@@ -671,6 +722,7 @@ export function OfficialsDialog({
   onCreate,
   onClose,
   onSaved,
+  loadNotifyStatus,
 }: {
   kind: 'umpires' | 'scorers';
   row: FixtureRow;
@@ -686,8 +738,31 @@ export function OfficialsDialog({
   onCreate?: (displayName: string, contacts?: PersonContacts) => Promise<Person>;
   onClose: () => void;
   onSaved?: (message: string) => void;
+  /** Loads the series' notice ledger on open; a failed load just shows no badges. */
+  loadNotifyStatus?: (seriesId: string) => Promise<{ rows: OfficialsNotifyStatusRow[] }>;
 }) {
   const [slots, setSlots] = useState<(string | null)[]>([current[0] ?? null, current[1] ?? null]);
+  const [notices, setNotices] = useState<OfficialsNotifyStatusRow[]>([]);
+  useEffect(() => {
+    if (!loadNotifyStatus) return;
+    let live = true;
+    loadNotifyStatus(row.seriesId).then(
+      (r) => live && setNotices(r.rows ?? []),
+      () => {}, // Badges are a nicety: a failed load just shows none.
+    );
+    return () => {
+      live = false;
+    };
+  }, [loadNotifyStatus, row.seriesId]);
+  const role = kind === 'umpires' ? 'umpire' : 'scorer';
+  const badgeFor = (id: string | null) =>
+    id
+      ? noticeBadge(
+          notices.find(
+            (n) => n.fixtureId === row.fixtureId && n.role === role && n.umpireId === id,
+          ),
+        )
+      : null;
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<ReturnType<typeof explainWriteError> | null>(null);
   const labels = kind === 'umpires' ? ['Umpire 1', 'Umpire 2'] : ['Scorer', 'Backup scorer'];
@@ -736,6 +811,7 @@ export function OfficialsDialog({
             onChange={(id) => setSlots((s) => s.map((v, j) => (j === i ? id : v)))}
             onCreate={onCreate}
             captureContacts={kind === 'scorers'}
+            badge={badgeFor(slots[i])}
           />
         ))}
       </div>

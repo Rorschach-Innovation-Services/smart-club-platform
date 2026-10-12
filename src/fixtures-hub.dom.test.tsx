@@ -98,6 +98,7 @@ function renderHub(all: Series[] = [series()], over: Record<string, unknown> = {
     })),
     onConfirmResult: vi.fn().mockResolvedValue({}),
     onUnconfirmResult: vi.fn().mockResolvedValue({}),
+    loadNotifyStatus: vi.fn().mockResolvedValue({ rows: [] }),
     toast: vi.fn(),
     ...over,
   };
@@ -134,6 +135,7 @@ function renderHub(all: Series[] = [series()], over: Record<string, unknown> = {
       onCreateScorer={handlers.onCreateScorer}
       onConfirmResult={handlers.onConfirmResult}
       onUnconfirmResult={handlers.onUnconfirmResult}
+      loadNotifyStatus={handlers.loadNotifyStatus}
     />,
   );
   return handlers;
@@ -285,6 +287,32 @@ describe('This week', () => {
     expect(within(dlg).getByRole('button', { name: /save fixture/i })).toBeEnabled();
   });
 
+  it('a placeholder side is read-only in the editor and keeps its slot ref on save', async () => {
+    const user = userEvent.setup();
+    const base = series();
+    const knockout = {
+      ...base,
+      fixtures: (base.fixtures as Array<Record<string, unknown>>).map((f) =>
+        f.id === 'f2' ? { ...f, away: 'tbd:Best%203rd%20place' } : f,
+      ),
+    } as unknown as Series;
+    const { onUpdateSeries } = renderHub([knockout]);
+    const day = screen.getByRole('region', { name: 'Saturday 3 October' });
+    await user.click(within(day).getByRole('button', { name: /edit ilembe cc v/i }));
+    const dlg = screen.getByRole('dialog', { name: /edit fixture/i });
+    const away = within(dlg).getByLabelText(/away \(visitors\)/i) as HTMLInputElement;
+    expect(away).toBeDisabled();
+    expect(away.value).toBe('Best 3rd place');
+    expect(
+      within(dlg).getByText(/use set team on the fixture row to name this side/i),
+    ).toBeTruthy();
+    // The real home side stays an editable picker.
+    expect(within(dlg).getByLabelText(/home \(host\)/i).tagName).toBe('SELECT');
+    await user.click(within(dlg).getByRole('button', { name: /save fixture/i }));
+    const sent = (onUpdateSeries.mock.calls[0][1] as (s: Series) => Series)(knockout);
+    expect(fx(sent, 'f2')?.away).toBe('tbd:Best%203rd%20place');
+  });
+
   it('removing a fixture medicoach holds is refused; Mark cancelled is the way', async () => {
     const user = userEvent.setup();
     const update = vi
@@ -303,7 +331,10 @@ describe('This week', () => {
     await user.click(screen.getByRole('menuitem', { name: /remove ilembe cc v spartan/i }));
     const dlg = screen.getByRole('dialog', { name: /remove this fixture/i });
     await user.click(within(dlg).getByRole('button', { name: /^remove fixture$/i }));
-    expect(within(dlg).getByRole('alert').textContent).toMatch(/already in medicoach/);
+    expect(within(dlg).getByRole('alert').textContent).toMatch(
+      /Match Centre already holds this fixture and can’t delete it\. Marking it cancelled keeps the record/,
+    );
+    expect(within(dlg).getByRole('alert').textContent).not.toMatch(/!/);
     expect(within(dlg).getByRole('button', { name: /remove here only/i })).toBeTruthy();
     expect((applied(update, 0).fixtures as unknown[]).length).toBe(3);
     await user.click(within(dlg).getByRole('button', { name: /mark cancelled/i }));
@@ -351,6 +382,50 @@ describe('This week', () => {
     expect(
       [...officials.querySelectorAll('[role=group]')].map((g) => g.getAttribute('aria-label')),
     ).toEqual(['Umpires', 'Scorers']);
+  });
+
+  it('scorer and umpire chips carry their appointment-notice badges', async () => {
+    const user = userEvent.setup();
+    const base = series();
+    const withScorer = {
+      ...base,
+      fixtures: (base.fixtures as Array<Record<string, unknown>>).map((f) =>
+        f.id === 'f1'
+          ? {
+              ...f,
+              officials: {
+                ...(f.officials as Record<string, unknown>),
+                scorers: [{ scorerId: 's1', name: 'Lindiwe Khoza' }],
+              },
+            }
+          : f,
+      ),
+    } as unknown as Series;
+    const loadNotifyStatus = vi.fn().mockResolvedValue({
+      rows: [
+        { fixtureId: 'f1', role: 'scorer', umpireId: 's1', status: 'completed', attempts: 1 },
+        { fixtureId: 'f1', role: 'umpire', umpireId: 'u1', status: 'queued', attempts: 0 },
+      ],
+    });
+    renderHub([withScorer], { loadNotifyStatus });
+    const day = screen.getByRole('region', { name: 'Saturday 3 October' });
+    await user.click(
+      within(day).getByRole('button', {
+        name: /change scorers for spartan sporting cc v tongaat/i,
+      }),
+    );
+    let dlg = screen.getByRole('dialog', { name: /appoint scorers/i });
+    expect(await within(dlg).findByText('Notified ✓')).toBeTruthy();
+    expect(loadNotifyStatus).toHaveBeenCalledWith('s1');
+    await user.keyboard('{Escape}');
+    await user.click(
+      within(day).getByRole('button', {
+        name: /change umpires for spartan sporting cc v tongaat/i,
+      }),
+    );
+    dlg = screen.getByRole('dialog', { name: /appoint umpires/i });
+    expect(await within(dlg).findByText('Notice queued')).toBeTruthy();
+    expect(within(dlg).queryByText('Notified ✓')).toBeNull();
   });
 
   it('appoints umpires and scorers (adding a new scorer on the way)', async () => {

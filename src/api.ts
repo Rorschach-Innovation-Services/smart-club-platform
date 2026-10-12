@@ -1032,7 +1032,8 @@ export const advanceCompetition = (id: string, allowIncomplete = false) =>
 // Appointment-notice status per official for one series (admin only; badges in the editor).
 export interface OfficialsNotifyStatusRow {
   fixtureId: string;
-  role: 'umpire' | 'referee';
+  role: 'umpire' | 'referee' | 'scorer';
+  /** The registry id for the role: an umpire id for umpire/referee, a scorer id for scorer. */
   umpireId: string;
   status: 'queued' | 'completed' | 'exhausted';
   attempts: number;

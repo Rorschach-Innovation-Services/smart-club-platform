@@ -740,16 +740,57 @@ describe('knockout Set team / revert (ADR 0018)', () => {
     expect(values).toEqual(['', 'spartan', 'tongaat', 'tm_il_a', 'tm_il_b']);
   });
 
-  it('(14) on a medicoach-synced fixture a win: side has no Set team; a tbd: side keeps it', async () => {
+  it('(14) on a medicoach-synced fixture a win: side keeps Set team, with override copy (ADR 0022 §7)', async () => {
     const onSetSide = vi.fn().mockResolvedValue(undefined);
     const user = renderKo(
       ko({ home: 'win:f1', away: 'tbd:Best%203rd%20place', syncMapped: true }),
       onSetSide,
     );
     await openKo(user, /best 3rd place/i);
-    expect(screen.queryByRole('combobox', { name: /team to set as home/i })).toBeNull();
     expect(screen.getByText(/filled by the medicoach sync/i)).toBeInTheDocument();
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: /team to set as home/i }),
+      'ilembe',
+    );
+    await user.click(screen.getByRole('button', { name: /set home team/i }));
+    expect(onSetSide).toHaveBeenCalledWith('s1', 'f2', 'home', 'ilembe');
     expect(screen.getByRole('combobox', { name: /team to set as away/i })).toBeInTheDocument();
+  });
+
+  it('(14) a sync-resolved side warns that Set team overrides Match Centre', async () => {
+    const user = renderKo(
+      ko({
+        home: 'spartan',
+        away: 'tbd:Best%203rd%20place',
+        slots: { home: 'win:f1' },
+        syncMapped: true,
+      }),
+      vi.fn().mockResolvedValue(undefined),
+    );
+    await openKo(user, /best 3rd place/i);
+    expect(
+      screen.getAllByText(
+        /match centre resolved this side as spartan sporting cc; your choice overrides it until you revert/i,
+      ).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText(/manual override/i)).toBeNull();
+  });
+
+  it('(14) a manually overridden side on a synced series carries the divergence badge', async () => {
+    const user = renderKo(
+      ko({
+        home: 'ilembe',
+        away: 'tbd:x',
+        slots: { home: 'win:f1' },
+        slotsManual: { home: true },
+        syncMapped: true,
+      }),
+      vi.fn().mockResolvedValue(undefined),
+    );
+    await openKo(user, /ilembe/i);
+    expect(screen.getByText('Manual override')).toBeInTheDocument();
+    expect(screen.getByText(/match centre may differ until you revert/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /revert home to placeholder/i })).toBeInTheDocument();
   });
 
   it('(6) a stale-version refusal shows the refresh message inline', async () => {
@@ -1515,5 +1556,85 @@ describe('the venue-reason marker in the fixture table', () => {
     const reason = 'Moved to avoid ground clash — Kingsmead Stadium';
     setup(moved({ venueStatus: 'home', venueReason: reason }));
     expect(screen.queryByText('moved')).toBeNull();
+  });
+});
+
+describe('approve, duplicate and delete toast success only after the write lands', () => {
+  // main.tsx returns these writes unswallowed (withToast surfaces the error), so the page
+  // must chain its success toast off a resolved write — never toast before or on failure.
+  const renderPage = (s: Series, handlers: Record<string, ReturnType<typeof vi.fn>>) => {
+    const toast = vi.fn();
+    openOn(s.id);
+    renderWithProviders(
+      <AdminFixtures
+        clubs={clubs}
+        allSeries={[s]}
+        onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
+        onDeleteSeries={handlers.onDeleteSeries ?? vi.fn().mockResolvedValue(undefined)}
+        onDuplicateSeries={handlers.onDuplicateSeries ?? vi.fn().mockResolvedValue(undefined)}
+        onSetReleased={vi.fn()}
+        onReveal={vi.fn()}
+        onSetApproved={handlers.onSetApproved ?? vi.fn().mockResolvedValue(undefined)}
+        toast={toast}
+        allVenues={[]}
+        allSeasonRuns={[]}
+        allLeagues={[]}
+        tenantConfig={{ structures: [], calendars: [] } as unknown as TenantConfig}
+        onSaveVenue={vi.fn()}
+        onDeleteVenue={vi.fn()}
+        onAllocateVenues={vi.fn()}
+        onCreateSeasonRun={vi.fn()}
+        onPatchSeasonRun={vi.fn()}
+        onDeleteSeasonRun={vi.fn()}
+        onGenerateStageSeries={vi.fn()}
+      />,
+    );
+    return toast;
+  };
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it('a failed approval does not toast "approved"', async () => {
+    const user = userEvent.setup();
+    const onSetApproved = vi.fn().mockRejectedValue(new Error('series changed; refetch'));
+    const toast = renderPage(series({ approved: false } as Partial<Series>), { onSetApproved });
+    await user.click(screen.getByRole('button', { name: /approve fixtures/i }));
+    expect(onSetApproved).toHaveBeenCalledWith('s1', true);
+    await settle();
+    expect(toast).not.toHaveBeenCalledWith(expect.stringMatching(/approved/i));
+  });
+
+  it('a successful approval toasts once it resolves', async () => {
+    const user = userEvent.setup();
+    const toast = renderPage(series({ approved: false } as Partial<Series>), {});
+    await user.click(screen.getByRole('button', { name: /approve fixtures/i }));
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(expect.stringMatching(/approved — ready to release/)),
+    );
+  });
+
+  it('duplicate toasts only after the write resolves, and not on failure', async () => {
+    const user = userEvent.setup();
+    let resolve!: () => void;
+    const onDuplicateSeries = vi.fn(() => new Promise<void>((r) => (resolve = r)));
+    const toast = renderPage(series(), { onDuplicateSeries });
+    await user.click(screen.getByRole('button', { name: /^duplicate$/i }));
+    await settle();
+    expect(toast).not.toHaveBeenCalledWith('Series duplicated');
+    resolve();
+    await waitFor(() => expect(toast).toHaveBeenCalledWith('Series duplicated'));
+  });
+
+  it('a failed duplicate or delete fires no success toast', async () => {
+    const user = userEvent.setup();
+    const onDuplicateSeries = vi.fn().mockRejectedValue(new Error('boom'));
+    const onDeleteSeries = vi.fn().mockRejectedValue(new Error('boom'));
+    const toast = renderPage(series(), { onDuplicateSeries, onDeleteSeries });
+    await user.click(screen.getByRole('button', { name: /^duplicate$/i }));
+    await user.click(screen.getByRole('button', { name: /delete series/i }));
+    await user.click(screen.getByRole('button', { name: /yes, continue/i }));
+    expect(onDeleteSeries).toHaveBeenCalledWith('s1');
+    await settle();
+    expect(toast).not.toHaveBeenCalledWith('Series duplicated');
+    expect(toast).not.toHaveBeenCalledWith('Series deleted');
   });
 });
