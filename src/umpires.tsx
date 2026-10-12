@@ -116,15 +116,28 @@ export function doubleBookingIndex(
 
 /* ─── The picker ─── */
 
-/** The editor's notice badge for one ledger row, or null for none (backfilled = never sent). */
+/**
+ * The editor's notice badge for one ledger row, or null for none (backfilled = never sent).
+ * Pass the registry entry so a queued notice for someone with neither email nor cell reads as
+ * waiting on contact details rather than about to go out (display only).
+ */
 export function noticeBadge(
   row:
     | (Pick<OfficialsNotifyStatusRow, 'status' | 'reason' | 'completedAt'> &
         Partial<Pick<OfficialsNotifyStatusRow, 'attempts'>>)
     | undefined,
+  person?: { phone?: string; email?: string },
 ): { label: string; title?: string } | null {
   if (!row) return null;
-  if (row.status === 'queued') return { label: 'Notice queued' };
+  if (row.status === 'queued') {
+    if (person && !(person.email ?? '').trim() && !(person.phone ?? '').trim()) {
+      return {
+        label: 'Waiting for contact details',
+        title: 'No email or cell on file — add one so the queued notice can go out.',
+      };
+    }
+    return { label: 'Notice queued' };
+  }
   if (row.status === 'exhausted') {
     return {
       label: 'Couldn’t reach',
@@ -179,7 +192,7 @@ function UmpireSlot({
   const listRef = useRef<HTMLDivElement>(null);
   const listId = useId();
   const chosen = value ? umpires.find((u) => u.id === value) : undefined;
-  const badge = noticeBadge(notice);
+  const badge = noticeBadge(notice, chosen);
   // Keyboard: ArrowDown from the box enters the suggestions, arrows move through them (Up
   // from the first returns to the box), Enter picks (a native button click), Escape closes.
   const items = () => [...(listRef.current?.querySelectorAll('button') ?? [])];

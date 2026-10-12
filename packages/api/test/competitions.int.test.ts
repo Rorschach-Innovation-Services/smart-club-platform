@@ -380,6 +380,51 @@ describe('regenerate a draft', () => {
     assert.equal(await repo.getFixtureOfficials(T, c.id, 'f1'), null);
     assert.equal((await call('POST', '/competitions/c-nope/regenerate', spec())).status, 404);
   });
+
+  test('a create that fails mid-way removes the partial new draw and restores the old one', async () => {
+    const c = await json<{ id: string; series: S[] }>(
+      await call('POST', '/competitions', { ...spec({ name: 'Rollback League' }), seed: 1 }),
+    );
+    const before = (await repo.getSeries(T, c.id)) as unknown as S;
+    const redraw = {
+      ...spec({
+        type: 'tournament',
+        name: 'Rollback League',
+        teams: [1, 2, 3, 4, 5, 6, 7, 8].map(team),
+        format: { kind: 'groups-knockout', groups: 2, qualifiers: 2, legs: 1 },
+      }),
+      id: c.id,
+    };
+    const preview = await json<{ series: S[] }>(
+      await call('POST', '/competitions/preview', redraw),
+    );
+    const newIds = preview.series.map((s) => String(s.id));
+    assert.equal(newIds.length, 3);
+    // A stray series (not part of this competition) already holds the knockout's id, so the
+    // third create 409s after the groups were written — a real mid-loop failure.
+    const strayId = newIds[2];
+    await repo.putSeries(T, {
+      id: strayId,
+      name: 'Stray',
+      startDate: '2026-10-10',
+      teams: [],
+      fixtures: [],
+      version: 1,
+    } as unknown as Series);
+    const res = await call('POST', `/competitions/${c.id}/regenerate`, redraw);
+    assert.equal(res.status, 500);
+    const body = await json<{ code: string; restored: boolean }>(res);
+    assert.equal(body.code, 'regenerate_failed');
+    assert.equal(body.restored, true);
+    for (const sid of newIds.slice(0, 2).filter((x) => x !== c.id))
+      assert.equal(await repo.getSeries(T, sid), null);
+    const back = (await repo.getSeries(T, c.id)) as unknown as S;
+    assert.equal(back.version, before.version);
+    assert.deepEqual(back.fixtures, before.fixtures);
+    assert.deepEqual(back.competition, before.competition);
+    // The stray series was never the regenerate's to touch.
+    assert.equal(((await repo.getSeries(T, strayId)) as Series).name, 'Stray');
+  });
 });
 
 describe('advance onto a stacked finals ground (ADR 0022 §7, clash-gate asymmetry)', () => {

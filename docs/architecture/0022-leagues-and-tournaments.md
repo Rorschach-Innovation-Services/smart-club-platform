@@ -190,11 +190,18 @@ the merge of this branch, not later.
   that still hold a slot ref, and never a side flagged `slotsManual`.
 - Revert (blocked with 409 `result_attached` while a result is stored) restores the
   placeholder, clears the flag, and returns the side to automation.
+- The asymmetry is deliberate: replacing the team on a side whose fixture already has a stored
+  result stays allowed — it is the ratified admin override for a disputed result, and
+  `advanceKnockout` then reads the replacement as that side — while revert with a stored
+  result 409s `result_attached`.
 - `slotsManual` is carried through importer rewrites (`SYNC_OWNED_FIXTURE_FIELDS`) and stripped
   when a series is duplicated.
 - Automation writers converge on stored results and resolve races via version-checked writes.
 - After a manual override on a synced series, the Match Centre may show a different team until
-  revert (schedule pushes never carry teams); the admin UI shows a divergence badge.
+  revert (schedule pushes never carry teams). GET /series does not carry Match Centre's own
+  resolution of the side, so the admin UI flags every manually overridden (`slotsManual`) side
+  on a synced series as "Manual override — Match Centre may differ"; a badge computed from an
+  actual divergence is future work.
 
 This builds on ADR 0018 (named knockout placeholders, [0018](0018-named-knockout-placeholders.md))
 and supersedes its "sync-owned side" refusal: a synced side is no longer refused for Set team.

@@ -2260,7 +2260,8 @@
   .fm-error ul{margin:6px 0 0;padding-left:18px}
   .fm-warn{margin-top:12px;font-size:12.5px}
   .fm-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:16px}
-  .fm-picker{margin-top:4px}
+  /* In a modal the picker sits in the flow, not as the table cell's floating popover. */
+  .fm-picker{position:static;width:auto;box-shadow:none;border:0;padding:0;margin-top:4px}
   @media (max-width:560px){
     .fm-grid{grid-template-columns:1fr}
     .fm-actions .btn{flex:1 1 auto;justify-content:center}

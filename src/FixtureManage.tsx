@@ -45,6 +45,8 @@ export interface Person {
   id: string;
   displayName: string;
   fullName?: string;
+  phone?: string;
+  email?: string;
   active: boolean;
 }
 
@@ -103,23 +105,31 @@ function ErrorBox({ err }: { err: ReturnType<typeof explainWriteError> | null })
 }
 
 /**
- * A knockout side still holding its placeholder (`pos:`/`win:`/`lose:`/`tbd:`). Typing a team
- * over it here would drop the slot bookkeeping (`slots`/`slotsManual`, ADR 0022 §7), so it is
- * read-only: Set team on the fixture row is the one way to name it.
+ * A knockout side: still holding its placeholder (`pos:`/`win:`/`lose:`/`tbd:`), or filled from
+ * one (the placeholder kept in `slots`). Typing a team over it here would drop the slot
+ * bookkeeping (`slots`/`slotsManual`, ADR 0022 §7) — and a sync would revert an unflagged
+ * edit — so it is read-only: Set team on the fixture row is the one way to name it.
  */
 function SlotSide({
   label,
   value,
   fixtures,
+  teamName,
 }: {
   label: string;
   value: string;
   fixtures: unknown[];
+  /** Display name for a side already filled with a real team. */
+  teamName?: string;
 }) {
   return (
     <label className="fm-field">
       {label}
-      <input type="text" value={slotRefLabel(value, fixtures as SlotFixture[]) ?? value} disabled />
+      <input
+        type="text"
+        value={slotRefLabel(value, fixtures as SlotFixture[]) ?? teamName ?? value}
+        disabled
+      />
       <span style={{ fontSize: 12, color: 'var(--muted)' }}>
         Use Set team on the fixture row to name this side.
       </span>
@@ -192,6 +202,11 @@ export function FixtureEditDialog({
   const home = homeGroundOf(s ?? { id: '', name: '', fixtures: [] }, clubs, draft.home);
   const allocatedName = (existing?.venueName as string) || '';
   const syncMapped = existing?.syncMapped === true;
+  // Same predicate as admin.tsx EditFixtureRow: a side still a slot ref, or filled from one
+  // (placeholder kept in `slots`). Both change only through Set team / revert.
+  const existingSlots = existing?.slots as Record<string, string | undefined> | undefined;
+  const isKnockoutSide = (side: 'home' | 'away') =>
+    isSlotRef(draft[side]) || isSlotRef(existingSlots?.[side] ?? '');
 
   const problems = [
     !s && 'Pick a series.',
@@ -317,8 +332,13 @@ export function FixtureEditDialog({
             </option>
           </select>
         </label>
-        {isSlotRef(draft.home) ? (
-          <SlotSide label="Home (host)" value={draft.home} fixtures={s?.fixtures ?? []} />
+        {isKnockoutSide('home') ? (
+          <SlotSide
+            label="Home (host)"
+            value={draft.home}
+            fixtures={s?.fixtures ?? []}
+            teamName={teams.find((t) => t.id === draft.home)?.name}
+          />
         ) : (
           <label className="fm-field">
             Home (host)
@@ -332,8 +352,13 @@ export function FixtureEditDialog({
             </select>
           </label>
         )}
-        {isSlotRef(draft.away) ? (
-          <SlotSide label="Away (visitors)" value={draft.away} fixtures={s?.fixtures ?? []} />
+        {isKnockoutSide('away') ? (
+          <SlotSide
+            label="Away (visitors)"
+            value={draft.away}
+            fixtures={s?.fixtures ?? []}
+            teamName={teams.find((t) => t.id === draft.away)?.name}
+          />
         ) : (
           <label className="fm-field">
             Away (visitors)
@@ -761,6 +786,7 @@ export function OfficialsDialog({
           notices.find(
             (n) => n.fixtureId === row.fixtureId && n.role === role && n.umpireId === id,
           ),
+          people.find((p) => p.id === id),
         )
       : null;
   const [saving, setSaving] = useState(false);

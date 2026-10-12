@@ -7022,7 +7022,11 @@ const competitionOr404 = (all: Series[], id: string) => {
   return series;
 };
 
-/** Rename, or change the points: every series of the competition, version-checked. */
+/**
+ * Rename, or change the points: every series of the competition, version-checked. The series
+ * are patched one at a time, so a 409 on a later one leaves the earlier ones renamed; the 409
+ * is surfaced and a retry (fresh versions) completes the rename, healing the partial state.
+ */
 app.patch('/competitions/:id', async (c) => {
   const ra = c.get('requestAuth')!;
   const body = (await c.req.json().catch(() => null)) as {
@@ -7106,7 +7110,43 @@ app.post('/competitions/:id/regenerate', async (c) => {
     await repo.deleteFixtureOfficialsForSeries(tenant, sid);
     await repo.deleteSeriesSyncState(tenant, sid);
   }
-  for (const s of plan.series) await createSeries(tenant, s as unknown as Series);
+  // Best-effort rollback, as POST /competitions does: a failed create must not lose the old
+  // draw. Remove whatever new series landed (ids can coincide with the old ones), then put the
+  // old series back from the in-memory `current` list with their original ids and versions.
+  // Limitation: the old series' fixture officials and sync state were already deleted above
+  // and are NOT restored — only drafts reach here, so that is appointments at worst.
+  const written: string[] = [];
+  try {
+    for (const s of plan.series) {
+      await createSeries(tenant, s as unknown as Series);
+      written.push(s.id);
+    }
+  } catch (err) {
+    await Promise.all(written.map((sid) => repo.deleteSeries(tenant, sid).catch(() => {})));
+    const restored = await Promise.all(
+      current.map((s) =>
+        repo.putSeries(tenant, s).then(
+          () => true,
+          () => false,
+        ),
+      ),
+    );
+    console.error('competition regenerate failed; old draw restored best-effort', {
+      tenant,
+      id,
+      restored: restored.filter(Boolean).length,
+      of: current.length,
+      err,
+    });
+    const allBack = restored.every(Boolean);
+    throw new HttpError(
+      500,
+      allBack
+        ? 'the new draw could not be saved — the previous draw was restored'
+        : 'the new draw could not be saved and the previous draw could not be fully restored',
+      { code: 'regenerate_failed', restored: allBack },
+    );
+  }
   return c.json({
     id,
     series: await Promise.all(plan.series.map((s) => repo.getSeries(tenant, s.id))),

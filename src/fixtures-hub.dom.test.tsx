@@ -126,7 +126,13 @@ function renderHub(all: Series[] = [series()], over: Record<string, unknown> = {
       onDeleteSeasonRun={vi.fn()}
       onGenerateStageSeries={vi.fn()}
       umpires={[
-        { id: 'u1', displayName: 'Sipho Mkhize', aliases: [], active: true },
+        {
+          id: 'u1',
+          displayName: 'Sipho Mkhize',
+          aliases: [],
+          active: true,
+          email: 'sipho@example.org',
+        },
         { id: 'u2', displayName: 'Riaan Botes', aliases: [], active: true },
       ]}
       onSaveOfficials={handlers.onSaveOfficials}
@@ -313,6 +319,34 @@ describe('This week', () => {
     expect(fx(sent, 'f2')?.away).toBe('tbd:Best%203rd%20place');
   });
 
+  it('a side filled from its placeholder is read-only too, so a sync cannot revert an edit', async () => {
+    const user = userEvent.setup();
+    const base = series();
+    // The puller filled the away side from `win:` — real team stored, placeholder kept in slots.
+    const filled = {
+      ...base,
+      fixtures: (base.fixtures as Array<Record<string, unknown>>).map((f) =>
+        f.id === 'f2' ? { ...f, slots: { away: 'win:f1' } } : f,
+      ),
+    } as unknown as Series;
+    const { onUpdateSeries } = renderHub([filled]);
+    const day = screen.getByRole('region', { name: 'Saturday 3 October' });
+    await user.click(within(day).getByRole('button', { name: /edit ilembe cc v/i }));
+    const dlg = screen.getByRole('dialog', { name: /edit fixture/i });
+    const away = within(dlg).getByLabelText(/away \(visitors\)/i) as HTMLInputElement;
+    expect(away.tagName).toBe('INPUT');
+    expect(away).toBeDisabled();
+    expect(away.value).toBe('Spartan Sporting CC');
+    expect(
+      within(dlg).getByText(/use set team on the fixture row to name this side/i),
+    ).toBeTruthy();
+    expect(within(dlg).getByLabelText(/home \(host\)/i).tagName).toBe('SELECT');
+    await user.click(within(dlg).getByRole('button', { name: /save fixture/i }));
+    const sent = (onUpdateSeries.mock.calls[0][1] as (s: Series) => Series)(filled);
+    expect(fx(sent, 'f2')?.away).toBe('spartan');
+    expect(fx(sent, 'f2')?.slots).toEqual({ away: 'win:f1' });
+  });
+
   it('removing a fixture medicoach holds is refused; Mark cancelled is the way', async () => {
     const user = userEvent.setup();
     const update = vi
@@ -426,6 +460,38 @@ describe('This week', () => {
     dlg = screen.getByRole('dialog', { name: /appoint umpires/i });
     expect(await within(dlg).findByText('Notice queued')).toBeTruthy();
     expect(within(dlg).queryByText('Notified ✓')).toBeNull();
+  });
+
+  it('a queued notice for a scorer with no email or cell reads as waiting for contacts', async () => {
+    const user = userEvent.setup();
+    const base = series();
+    const withScorer = {
+      ...base,
+      fixtures: (base.fixtures as Array<Record<string, unknown>>).map((f) =>
+        f.id === 'f1'
+          ? {
+              ...f,
+              officials: {
+                ...(f.officials as Record<string, unknown>),
+                scorers: [{ scorerId: 's1', name: 'Lindiwe Khoza' }],
+              },
+            }
+          : f,
+      ),
+    } as unknown as Series;
+    const loadNotifyStatus = vi.fn().mockResolvedValue({
+      rows: [{ fixtureId: 'f1', role: 'scorer', umpireId: 's1', status: 'queued', attempts: 0 }],
+    });
+    renderHub([withScorer], { loadNotifyStatus });
+    const day = screen.getByRole('region', { name: 'Saturday 3 October' });
+    await user.click(
+      within(day).getByRole('button', {
+        name: /change scorers for spartan sporting cc v tongaat/i,
+      }),
+    );
+    const dlg = screen.getByRole('dialog', { name: /appoint scorers/i });
+    expect(await within(dlg).findByText('Waiting for contact details')).toBeTruthy();
+    expect(within(dlg).queryByText('Notice queued')).toBeNull();
   });
 
   it('appoints umpires and scorers (adding a new scorer on the way)', async () => {

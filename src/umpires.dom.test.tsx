@@ -338,6 +338,12 @@ describe('appointment notice badges and the no-contact hint', () => {
   it('maps ledger rows to badges; a backfilled row shows none', () => {
     expect(noticeBadge(undefined)).toBeNull();
     expect(noticeBadge({ status: 'queued' })).toEqual({ label: 'Notice queued' });
+    expect(noticeBadge({ status: 'queued' }, { phone: '0821234567' })).toEqual({
+      label: 'Notice queued',
+    });
+    expect(noticeBadge({ status: 'queued' }, { email: ' ', phone: '' })?.label).toBe(
+      'Waiting for contact details',
+    );
     expect(noticeBadge({ status: 'exhausted', attempts: 5 })).toEqual({
       label: 'Couldn’t reach',
       title: '5 delivery attempts failed — check their email and cell on the Umpires page',
@@ -386,7 +392,9 @@ describe('appointment notice badges and the no-contact hint', () => {
     await user.click(screen.getByRole('button', { name: 'Assign umpires' }));
     expect(loadNotifyStatus).toHaveBeenCalledWith('s1');
     expect(await screen.findByText('Notified ✓')).toBeTruthy();
-    expect(screen.getByText('Notice queued')).toBeTruthy();
+    // B.Tyali's notice is queued but there is nowhere to send it.
+    expect(screen.getByText('Waiting for contact details')).toBeTruthy();
+    expect(screen.queryByText('Notice queued')).toBeNull();
     // A.Ngubane has a cell; B.Tyali has nothing on file.
     expect(screen.getAllByText(/No email or cell on file/)).toHaveLength(1);
     // Saving stays allowed.
