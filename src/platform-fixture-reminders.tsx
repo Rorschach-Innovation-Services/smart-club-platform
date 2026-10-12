@@ -78,6 +78,8 @@ export function FixtureRemindersCard({
   const [channels, setChannels] = useState<FixtureReminderChannel[]>(initial.channels);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  // Set on any edit, so a value that normalises back to the saved one can say so.
+  const [touched, setTouched] = useState(false);
   const leadId = useId();
 
   const parsed = parseLeadDays(leadText);
@@ -89,7 +91,13 @@ export function FixtureRemindersCard({
     !('leadDays' in parsed) ||
     JSON.stringify(parsed.leadDays) !== JSON.stringify(initial.leadDays);
 
+  function edited() {
+    setTouched(true);
+    setErr('');
+  }
+
   function toggleChannel(key: FixtureReminderChannel, on: boolean) {
+    edited();
     setChannels((cur) =>
       on ? [...cur.filter((c) => c !== key), key] : cur.filter((c) => c !== key),
     );
@@ -115,6 +123,7 @@ export function FixtureRemindersCard({
         fixtureReminders: { enabled, leadDays: parsed.leadDays, channels: orderedChannels },
       });
       setLeadText(parsed.leadDays.join(', '));
+      setTouched(false);
       toast('Fixture reminder settings saved');
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Could not save — try again');
@@ -129,7 +138,14 @@ export function FixtureRemindersCard({
       sub="A morning reminder (07:00) to each club chair before their match days. Chairs can switch reminders off from their club home."
     >
       <label style={{ ...CHECK_ROW, marginBottom: 12 }}>
-        <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => {
+            edited();
+            setEnabled(e.target.checked);
+          }}
+        />
         Send fixture reminders
       </label>
       <div className="field" style={{ marginBottom: 12 }}>
@@ -141,7 +157,13 @@ export function FixtureRemindersCard({
           className="field-input"
           value={leadText}
           placeholder="e.g. 3, 1"
-          onChange={(e) => setLeadText(e.target.value)}
+          onChange={(e) => {
+            edited();
+            setLeadText(e.target.value);
+          }}
+          onBlur={() => {
+            if ('leadDays' in parsed) setLeadText(parsed.leadDays.join(', '));
+          }}
         />
         <p style={HINT}>
           {`Days before the match to send a reminder, comma-separated (${LEAD_DAYS_MIN}–${LEAD_DAYS_MAX}, up to ${LEAD_DAYS_MAX_ENTRIES}).`}{' '}
@@ -171,6 +193,9 @@ export function FixtureRemindersCard({
       <Btn tone="teal" size="sm" onClick={saveIt} disabled={!dirty || busy}>
         {busy ? 'Saving…' : 'Save reminder settings'}
       </Btn>
+      {touched && !dirty && !('error' in parsed) && !busy && (
+        <p style={HINT}>These match the saved settings — nothing to save.</p>
+      )}
     </Card>
   );
 }
