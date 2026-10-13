@@ -8,6 +8,7 @@ import {
   adminAuthHeader,
   apiHeaders,
   operatorAuth,
+  setReportNoticeWindow,
   signInAsAdmin,
 } from './helpers';
 
@@ -201,6 +202,8 @@ const keys: Record<string, string> = {};
 test.describe.configure({ mode: 'serial' });
 
 test.beforeAll(async ({ request }) => {
+  // Pinned closed: an evening run must not fire the match-day captain's report pass here.
+  await setReportNoticeWindow(request, 'closed');
   await startStub();
   const cfg = await request.get(`${API_BASE}/platform/tenants/${TENANT}`, { headers: operator() });
   expect(cfg.ok()).toBeTruthy();
@@ -221,6 +224,7 @@ test.beforeAll(async ({ request }) => {
 });
 
 test.afterAll(async ({ request }) => {
+  await setReportNoticeWindow(request, 'real');
   await new Promise<void>((r) => stub.close(() => r()));
   await request.put(`${API_BASE}/platform/tenants/${TENANT}`, {
     headers: operator(),

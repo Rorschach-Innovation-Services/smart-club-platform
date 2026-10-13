@@ -524,9 +524,11 @@ function MatchFacts({ report, hasScorecard }: { report: ReportShell; hasScorecar
         n={1}
         title="Match details"
         sub={
-          hasScorecard
-            ? 'From the fixture list and the result. Check the full scorecard below.'
-            : 'From the fixture list and the result.'
+          !report.resultSummary
+            ? 'From the fixture list.'
+            : hasScorecard
+              ? 'From the fixture list and the result. Check the full scorecard below.'
+              : 'From the fixture list and the result.'
         }
       />
       <div className="cr-fixture-line" style={{ marginTop: 0 }}>

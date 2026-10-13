@@ -8,6 +8,7 @@ import {
   adminAuthHeader,
   apiHeaders,
   operatorAuth,
+  setReportNoticeWindow,
   signInAsAdmin,
 } from './helpers';
 import { approveAndRelease, createSeries, fixture, getSeries, ground } from './fixtures-helpers';
@@ -163,6 +164,8 @@ async function pick(dialog: ReturnType<Page['getByRole']>, slot: string, name: s
 test.describe.configure({ mode: 'serial' });
 
 test.beforeAll(async ({ request }) => {
+  // Pinned closed: an evening run must not fire the match-day captain's report pass here.
+  await setReportNoticeWindow(request, 'closed');
   await startStub();
   const cfg = await request.get(`${API_BASE}/platform/tenants/${TENANT}`, { headers: operator() });
   expect(cfg.ok()).toBeTruthy();
@@ -180,6 +183,7 @@ test.beforeAll(async ({ request }) => {
 });
 
 test.afterAll(async ({ request }) => {
+  await setReportNoticeWindow(request, 'real');
   await new Promise<void>((r) => stub.close(() => r()));
   if (!priorFeatures) return;
   await request.put(`${API_BASE}/platform/tenants/${TENANT}`, {

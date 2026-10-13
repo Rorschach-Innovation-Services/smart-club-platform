@@ -10,6 +10,10 @@
  *   2. pull and apply changes (`runMedicoachSync`) — throws on an HTTP/contract failure;
  *   3. retry captain's reports whose opening failed earlier (REPORTOPEN# markers) — always,
  *      even when the pull failed, since it needs nothing from medicoach;
+ *   3b. open the reports of every fixture played today/yesterday, result or not
+ *      (`openMatchDayReports`; both sides to the chair when there is no result) — after the
+ *      retry, so a result pulled in this run keeps its captain recipient. Inside the 18:00
+ *      window only; never fails the run; counted apart from the result tally (`matchDay`);
  *   4. send the one reminder for pending reports whose link expires within 2 days.
  *
  * Captain's report notices (steps 2–4) go out only from 18:00 SAST (REPORT_NOTICE_HOUR):
@@ -31,7 +35,9 @@
  */
 import {
   REPORT_NOTICE_HOUR,
+  openMatchDayReports,
   reportNoticeWindowOpen,
+  type MatchDayOpenSummary,
   retryPendingReportOpens,
   sendReportReminders,
   type ReminderSummary,
@@ -60,6 +66,8 @@ export interface TenantSyncSummary extends SyncRunSummary {
   playerPush?: PlayerFlushSummary;
   reports?: ReportRetrySummary;
   reminders?: ReminderSummary;
+  /** The match-day opener's counts — never part of `reportNotices`. */
+  matchDay?: MatchDayOpenSummary;
   scorecards?: ScorecardSweepSummary;
   /** This run's captain's-report notice tally (pull + retry). */
   reportNotices?: { deferred: number; opened: number; notified: number; failed: number };
@@ -81,6 +89,8 @@ interface DigestCounts {
   opened: number;
   notified: number;
   failed: number;
+  /** The match-day opener's own counts (opened / notices sent / failed). */
+  matchDay?: { opened: number; notified: number; failed: number };
   /** Player-sync items waiting on an admin (ADR 0019) — ride along, never trigger a digest. */
   playerReviews?: number;
   playersParked?: number;
@@ -97,7 +107,9 @@ async function sendOpsDigest(
   c: DigestCounts,
   deps: TenantSyncDeps,
 ): Promise<void> {
-  if (c.opened + c.notified + c.failed === 0) return; // a quiet run sends nothing
+  const md = c.matchDay ?? { opened: 0, notified: 0, failed: 0 };
+  // A quiet run sends nothing.
+  if (c.opened + c.notified + c.failed + md.opened + md.notified + md.failed === 0) return;
   let wa: typeof import('../notify/whatsapp.js') | undefined;
   try {
     const cell = (deps.opsDigestCell ?? opsDigestCell)();
@@ -115,6 +127,9 @@ async function sendOpsDigest(
     const summary =
       `${orgCopy(config).name}: ${c.resultsPulled} new results, ${c.opened} reports opened, ` +
       `${c.notified} notices sent, ${c.failed} failed` +
+      (md.opened + md.notified + md.failed
+        ? `; match day: ${md.opened} reports opened, ${md.notified} notices sent, ${md.failed} failed`
+        : '') +
       (playerBits.length ? `; ${playerBits.join(', ')}` : '');
     await (deps.sendOpsDigest ?? wa.sendCaptainsReportOpsDigestWhatsApp)({
       to,
@@ -248,6 +263,21 @@ export async function runTenantSync(
     await stamp({ lastAttemptAt: at, lastSuccessAt: at });
   }
   const reports = await retryReports();
+  let matchDay: MatchDayOpenSummary | undefined;
+  try {
+    // Without the run's onOpenOutcome tally: match-day counts live under `matchDay` only.
+    matchDay = await openMatchDayReports(tenant, config, {
+      repo,
+      ...(deps.now ? { now: deps.now } : {}),
+      ...(deps.captainsReports ?? {}),
+      ...(deps.deadlineMs !== undefined ? { deadlineMs: deps.deadlineMs } : {}),
+    });
+  } catch (err) {
+    // A match-day failure never fails the sync run; the next run (and the lookback) resumes.
+    console.error(
+      `[medicoach-sync] ${tenant}: match-day report open failed — ${err instanceof Error ? err.message : 'error'}`,
+    );
+  }
   await sendOpsDigest(
     tenant,
     config,
@@ -256,6 +286,15 @@ export async function runTenantSync(
       opened: opened.size,
       notified: noticeCount('sent'),
       failed: noticeCount('failed'),
+      ...(matchDay
+        ? {
+            matchDay: {
+              opened: matchDay.opened,
+              notified: matchDay.notified,
+              failed: matchDay.failed,
+            },
+          }
+        : {}),
       ...(await playerAttention(tenant, config, repo)),
     },
     deps,
@@ -341,6 +380,7 @@ export async function runTenantSync(
     ...(playerPush ? { playerPush } : {}),
     reports,
     ...(reminders ? { reminders } : {}),
+    ...(matchDay ? { matchDay } : {}),
     ...(scorecards ? { scorecards } : {}),
   };
 }
