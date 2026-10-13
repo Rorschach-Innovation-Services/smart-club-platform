@@ -327,4 +327,38 @@ describe('ground usage', () => {
     ]);
     expect(usage[1]).toMatchObject({ played: 1, withPlay: 0, legalBalls: 0, upcoming: 1 });
   });
+
+  it('counts a stored result as played even when its schedule date is still in the future', () => {
+    const [u] = groundUsage(
+      rowsOf([g('early', '2026-10-09', 'Early Oval', play('2026-10-04', 200, 240))]),
+      TODAY,
+      2,
+    );
+    expect(u).toMatchObject({
+      played: 1,
+      withPlay: 1,
+      legalBalls: 240,
+      upcoming: 0,
+      lastPlayed: TODAY,
+      weekGames: 1,
+      weekBalls: 240,
+    });
+    expect(u.load).not.toBe('unused');
+    expect(u.weekly).toEqual([
+      { monday: '2026-09-28', games: 0, balls: 0 },
+      { monday: '2026-10-05', games: 1, balls: 240 },
+    ]);
+  });
+
+  it('counts a stored result on a TBC date as played on today', () => {
+    const [u] = groundUsage(
+      rowsOf([
+        { ...g('tbc', '2026-10-09', 'Tbc Park', play('2026-10-04', 200, 240)), dateTbc: true },
+      ]),
+      TODAY,
+      2,
+    );
+    expect(u).toMatchObject({ played: 1, withPlay: 1, legalBalls: 240, lastPlayed: TODAY });
+    expect(u.load).not.toBe('unused');
+  });
 });

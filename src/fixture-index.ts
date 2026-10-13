@@ -466,7 +466,7 @@ export const RESTED_DAYS = 14;
 
 export interface GroundUsage {
   venue: string;
-  /** Played games (a result is in) on this ground. */
+  /** Played games (a result is in, whatever the schedule date says) on this ground. */
   played: number;
   /** Of those, how many came with ground time and balls from the scorecard. */
   withPlay: number;
@@ -501,32 +501,34 @@ export function groundUsage(rows: FixtureRow[], today: string, weeks = 6): Groun
   }
   const out: GroundUsage[] = [];
   for (const games of byVenue.values()) {
-    const played = games.filter(
-      (r) => (r.state === 'result' || r.state === 'no-result') && r.date && r.date <= today,
-    );
-    const balls = (r: FixtureRow) => r.result?.play?.legalBalls ?? 0;
-    const week = played.filter((r) => r.date! >= weekFrom);
+    // A stored result means the game has happened, whatever the schedule says: a future
+    // (stale) or TBC date clamps to today for the date-based views.
+    const played = games
+      .filter((r) => r.state === 'result' || r.state === 'no-result')
+      .map((r) => ({ r, on: r.date && r.date <= today ? r.date : today }));
+    const balls = ({ r }: { r: FixtureRow }) => r.result?.play?.legalBalls ?? 0;
+    const week = played.filter((p) => p.on >= weekFrom);
     const lastPlayed =
       played
-        .map((r) => r.date!)
+        .map((p) => p.on)
         .sort()
         .pop() ?? null;
-    const weekBalls = week.reduce((n, r) => n + balls(r), 0);
+    const weekBalls = week.reduce((n, p) => n + balls(p), 0);
     const upcoming = games.filter((r) => r.state === 'upcoming' || r.state === 'today').length;
     out.push({
       venue: games[0].venue!,
       played: played.length,
-      withPlay: played.filter((r) => r.result?.play).length,
-      minutes: played.reduce((n, r) => n + minutesOf(r.result?.play), 0),
-      legalBalls: played.reduce((n, r) => n + balls(r), 0),
-      deliveries: played.reduce((n, r) => n + (r.result?.play?.deliveries ?? 0), 0),
+      withPlay: played.filter(({ r }) => r.result?.play).length,
+      minutes: played.reduce((n, { r }) => n + minutesOf(r.result?.play), 0),
+      legalBalls: played.reduce((n, p) => n + balls(p), 0),
+      deliveries: played.reduce((n, { r }) => n + (r.result?.play?.deliveries ?? 0), 0),
       upcoming,
       lastPlayed,
       weekGames: week.length,
       weekBalls,
       weekly: mondays.map((m) => {
-        const inW = played.filter((r) => inWeek(r, m));
-        return { monday: m, games: inW.length, balls: inW.reduce((n, r) => n + balls(r), 0) };
+        const inW = played.filter((p) => p.on >= m && p.on <= addDays(m, 6));
+        return { monday: m, games: inW.length, balls: inW.reduce((n, p) => n + balls(p), 0) };
       }),
       load:
         !played.length && !upcoming
