@@ -502,10 +502,23 @@ export function groundUsage(rows: FixtureRow[], today: string, weeks = 6): Groun
   const out: GroundUsage[] = [];
   for (const games of byVenue.values()) {
     // A stored result means the game has happened, whatever the schedule says: a future
-    // (stale) or TBC date clamps to today for the date-based views.
+    // (stale) or TBC date falls back to the scorecard's play date, else today, for the
+    // date-based views (never later than today).
+    const playedOn = (r: FixtureRow): string => {
+      if (r.date && r.date <= today) return r.date;
+      const startedAt = r.result?.play?.startedAt;
+      const ms = startedAt ? Date.parse(startedAt) : NaN;
+      if (!Number.isNaN(ms)) {
+        // Play timestamps are UTC ISO; index dates are SAST local YYYY-MM-DD. SAST is a
+        // fixed UTC+2 (no DST), so shift by two hours before taking the date.
+        const sast = new Date(ms + 2 * 3600_000).toISOString().slice(0, 10);
+        return sast <= today ? sast : today;
+      }
+      return today;
+    };
     const played = games
       .filter((r) => r.state === 'result' || r.state === 'no-result')
-      .map((r) => ({ r, on: r.date && r.date <= today ? r.date : today }));
+      .map((r) => ({ r, on: playedOn(r) }));
     const balls = ({ r }: { r: FixtureRow }) => r.result?.play?.legalBalls ?? 0;
     const week = played.filter((p) => p.on >= weekFrom);
     const lastPlayed =

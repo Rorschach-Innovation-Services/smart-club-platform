@@ -328,7 +328,7 @@ describe('ground usage', () => {
     expect(usage[1]).toMatchObject({ played: 1, withPlay: 0, legalBalls: 0, upcoming: 1 });
   });
 
-  it('counts a stored result as played even when its schedule date is still in the future', () => {
+  it('attributes a future-dated result to its scorecard play date', () => {
     const [u] = groundUsage(
       rowsOf([g('early', '2026-10-09', 'Early Oval', play('2026-10-04', 200, 240))]),
       TODAY,
@@ -339,18 +339,38 @@ describe('ground usage', () => {
       withPlay: 1,
       legalBalls: 240,
       upcoming: 0,
-      lastPlayed: TODAY,
+      lastPlayed: '2026-10-04',
       weekGames: 1,
       weekBalls: 240,
     });
     expect(u.load).not.toBe('unused');
     expect(u.weekly).toEqual([
-      { monday: '2026-09-28', games: 0, balls: 0 },
-      { monday: '2026-10-05', games: 1, balls: 240 },
+      { monday: '2026-09-28', games: 1, balls: 240 },
+      { monday: '2026-10-05', games: 0, balls: 0 },
     ]);
   });
 
-  it('counts a stored result on a TBC date as played on today', () => {
+  it('reads the play date in SAST when a UTC start crosses midnight', () => {
+    const late = {
+      startedAt: '2026-10-03T22:30:00.000Z',
+      endedAt: '2026-10-04T01:30:00.000Z',
+      legalBalls: 240,
+      deliveries: 250,
+    };
+    const [u] = groundUsage(rowsOf([g('late', '2026-10-09', 'Night Oval', late)]), TODAY, 2);
+    expect(u.lastPlayed).toBe('2026-10-04');
+  });
+
+  it('clamps a future-dated result without play timestamps to today', () => {
+    const [u] = groundUsage(rowsOf([g('bare', '2026-10-09', 'Bare Oval', null)]), TODAY, 2);
+    expect(u).toMatchObject({ played: 1, withPlay: 0, lastPlayed: TODAY, weekGames: 1 });
+    expect(u.weekly).toEqual([
+      { monday: '2026-09-28', games: 0, balls: 0 },
+      { monday: '2026-10-05', games: 1, balls: 0 },
+    ]);
+  });
+
+  it('counts a stored result on a TBC date as played on its scorecard date', () => {
     const [u] = groundUsage(
       rowsOf([
         { ...g('tbc', '2026-10-09', 'Tbc Park', play('2026-10-04', 200, 240)), dateTbc: true },
@@ -358,7 +378,7 @@ describe('ground usage', () => {
       TODAY,
       2,
     );
-    expect(u).toMatchObject({ played: 1, withPlay: 1, legalBalls: 240, lastPlayed: TODAY });
+    expect(u).toMatchObject({ played: 1, withPlay: 1, legalBalls: 240, lastPlayed: '2026-10-04' });
     expect(u.load).not.toBe('unused');
   });
 });
