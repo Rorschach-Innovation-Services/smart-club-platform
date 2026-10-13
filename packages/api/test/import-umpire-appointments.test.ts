@@ -674,6 +674,33 @@ describe('umpire resolution and the write plan', () => {
     assert.equal(doubles.length, 1);
     assert.equal(doubles[0].umpireId, 'u-s-gasa');
   });
+  test('stored scorers survive a re-run: same umpires stay "unchanged", an edit keeps them', () => {
+    const registry = [
+      umpire('u-s-gasa', 'S.Gasa', ['sgasa']),
+      umpire('u-b-tyali', 'B.Tyali', ['btyali']),
+    ];
+    const { matched } = matchAppointments(
+      [row({ sheetRow: 1, home: 'Dawnheights', away: 'Amazimtoti', umpires: ['S.Gasa'] })],
+      ALL,
+      CLUBS,
+    );
+    const { byName } = resolveUmpireNames(['S.Gasa'], registry);
+    const key = `${matched[0].seriesId}#${matched[0].fixtureId}`;
+    const scorers = [{ scorerId: 'sc-1', name: 'Scorer One' }];
+    const same = planWrites(
+      matched,
+      byName,
+      new Map([[key, { umpires: [{ umpireId: 'u-s-gasa', name: 'S.Gasa' }], scorers }]]),
+    );
+    assert.equal(same.writes[0].action, 'unchanged');
+    const edited = planWrites(
+      matched,
+      byName,
+      new Map([[key, { umpires: [{ umpireId: 'u-b-tyali', name: 'B.Tyali' }], scorers }]]),
+    );
+    assert.equal(edited.writes[0].action, 'changed');
+    assert.deepEqual(edited.writes[0].officials.scorers, scorers);
+  });
 });
 
 describe('planAppointmentImport', () => {
@@ -786,6 +813,42 @@ describe('officialPairs / diffOfficials', () => {
   test('a swap lists the outgoing official only', () => {
     assert.deepEqual(diffOfficials(app(['a', 'b']), app(['a', 'x'])), [
       { umpireId: 'b', role: 'umpire' },
+    ]);
+  });
+
+  const withScorers = (o: FixtureOfficials, ...ids: string[]): FixtureOfficials => ({
+    ...o,
+    scorers: ids.map((scorerId) => ({ scorerId, name: scorerId })),
+  });
+
+  test('officialPairs lists appointed scorers after the umpires and referee', () => {
+    assert.deepEqual(officialPairs(withScorers(app(['a'], 'c'), 's1', 's2')), [
+      { umpireId: 'a', role: 'umpire' },
+      { umpireId: 'c', role: 'referee' },
+      { umpireId: 's1', role: 'scorer' },
+      { umpireId: 's2', role: 'scorer' },
+    ]);
+  });
+
+  test('an umpire-only change leaves the scorers out of the diff', () => {
+    assert.deepEqual(diffOfficials(withScorers(app(['a']), 's1'), withScorers(app(['b']), 's1')), [
+      { umpireId: 'a', role: 'umpire' },
+    ]);
+  });
+
+  test('a removed or swapped scorer is listed by role', () => {
+    assert.deepEqual(
+      diffOfficials(withScorers(app(['a']), 's1', 's2'), withScorers(app(['a']), 's3')),
+      [
+        { umpireId: 's1', role: 'scorer' },
+        { umpireId: 's2', role: 'scorer' },
+      ],
+    );
+  });
+
+  test('the same id as umpire and scorer is two distinct pairs', () => {
+    assert.deepEqual(diffOfficials(withScorers(app(['x']), 'x'), app(['x'])), [
+      { umpireId: 'x', role: 'scorer' },
     ]);
   });
 

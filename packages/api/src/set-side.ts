@@ -9,11 +9,17 @@
  * series' `participants` snapshot and `teams[]`, so every display path resolves it and the
  * operator roster-overwrite guard sees the reference (risk R7).
  *
- * Pure: the route loads the series and clubs, calls this, runs the clash gate on the result
- * and writes it through the normal PATCH path.
+ * A manual fill owns the side (ADR 0022 §7): it is flagged `slotsManual[side]`, and the
+ * medicoach puller and knockout advance never fill a flagged side. Any placeholder may be set,
+ * including a `win:`/`lose:` side of a medicoach-synced series (this supersedes ADR 0018's
+ * `sync_owned_side` refusal). A revert clears the flag and returns the side to automation;
+ * it is refused (409 `result_attached`) while the fixture has a stored result.
+ *
+ * Pure: the route loads the series, clubs and the fixture's result, calls this, runs the clash
+ * gate on the result and writes it through the normal PATCH path.
  */
 import { HttpError } from './auth.js';
-import { isSlotRef, slotSource } from '../../engine/src/formats.js';
+import { isSlotRef } from '../../engine/src/formats.js';
 import { clubSides } from '../../engine/src/leagues.js';
 import type { Club, Series } from './types.js';
 
@@ -33,6 +39,8 @@ interface SlottedFixture {
   home?: string;
   away?: string;
   slots?: { home?: string; away?: string };
+  /** Sides an admin filled by hand (ADR 0022 §7): automation never overwrites them. */
+  slotsManual?: { home?: true; away?: true };
   [key: string]: unknown;
 }
 
@@ -77,15 +85,15 @@ export type SetSideWrite = Pick<Series, 'fixtures' | 'teams'> &
   Partial<Pick<Series, 'participants'>> & { setTeamAdded: string[] };
 
 export interface SetSideOptions {
-  /** The series is synced with medicoach: it fills `win:`/`lose:` sides itself (ADR 0016). */
-  syncMapped?: boolean;
+  /** The fixture has a stored result: a revert would leave a result on a placeholder. */
+  hasResult?: boolean;
 }
 
 /**
  * The series fields a set-side writes: `fixtures`, `teams`, `setTeamAdded`, plus
  * `participants` when they change. Throws an HttpError (404 unknown fixture; 400 bad team;
- * 409 nothing to set or revert, the same team again (`no_change`), or a `win:`/`lose:` side of
- * a medicoach-synced series (`sync_owned_side`)).
+ * 409 nothing to set or revert, the same team again (`no_change`), or a revert while the
+ * fixture has a stored result (`result_attached`)).
  *
  * A team Set team brought in (listed in `setTeamAdded`) leaves `teams`/`participants` again
  * when a revert or a replacement leaves no fixture side or `slots` value naming it. Teams the
@@ -112,12 +120,6 @@ export function applySetSide(
   let added = Array.isArray(current.setTeamAdded)
     ? (current.setTeamAdded as unknown[]).filter((x): x is string => typeof x === 'string')
     : [];
-  if (opts.syncMapped && placeholder && slotSource(placeholder))
-    throw new HttpError(
-      409,
-      `medicoach decides this side: the ${side} side of ${op.fixtureId} is filled by the medicoach sync from the result of the match it depends on`,
-      { code: 'sync_owned_side' },
-    );
   // The team the side holds now, when it was set from a placeholder (revert/replace drops it).
   const previous = stored && isSlotRef(stored) ? f[side] : undefined;
   let next: SlottedFixture;
@@ -128,11 +130,21 @@ export function applySetSide(
         409,
         `the ${side} side of ${op.fixtureId} has no placeholder to revert to`,
       );
+    if (opts.hasResult)
+      throw new HttpError(
+        409,
+        `${op.fixtureId} has a result — clear or withdraw the result before putting the placeholder back`,
+        { code: 'result_attached' },
+      );
     const slots = { ...(f.slots ?? {}) };
     delete slots[side];
+    const manual = { ...(f.slotsManual ?? {}) };
+    delete manual[side];
     next = { ...f, [side]: stored };
     if (Object.keys(slots).length) next.slots = slots;
     else delete next.slots;
+    if (Object.keys(manual).length) next.slotsManual = manual;
+    else delete next.slotsManual;
   } else {
     const teamId = op.teamId;
     if (!placeholder || !isSlotRef(placeholder))
@@ -161,7 +173,12 @@ export function applySetSide(
     }
     if (!teams.includes(teamId)) teams.push(teamId);
     // Never overwrite a stored placeholder: re-setting a set side keeps the original.
-    next = { ...f, [side]: teamId, slots: { ...(f.slots ?? {}), [side]: placeholder } };
+    next = {
+      ...f,
+      [side]: teamId,
+      slots: { ...(f.slots ?? {}), [side]: placeholder },
+      slotsManual: { ...(f.slotsManual ?? {}), [side]: true },
+    };
   }
   const nextFixtures = [...fixtures];
   nextFixtures[idx] = next;

@@ -84,6 +84,10 @@ emcu-scorer-credentials*.json
 # generated cohort exports (contain PII)
 cohort-export-*.xlsx
 
+# Broadcast run reports (recipient name/email/cell per send) written by the
+# welcome/scorer broadcast CLIs — never commit.
+packages/api/*-broadcast-*.json
+
 # Playwright E2E (browser-driven admin tests)
 test-results/
 playwright-report/

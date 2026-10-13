@@ -145,7 +145,13 @@ if (scenario === 'main') {
     }),
   );
   // The stale row's veterans affiliation through the real path (writes VETAFFIL#).
-  await repo.setPlayerVeteransClub(T, 'durban-hc', SLUG_A, { id: 'vets-kzn', name: 'KZN Veterans' }, 'admin');
+  await repo.setPlayerVeteransClub(
+    T,
+    'durban-hc',
+    SLUG_A,
+    { id: 'vets-kzn', name: 'KZN Veterans' },
+    'admin',
+  );
   // B — cross-club pair (sha at Northwood, slug at Crusaders).
   const B = { firstName: 'Thabo', lastName: 'Nkosi', dob: '1999-05-06' };
   const SHA_B = said('9905065000082');
@@ -343,8 +349,20 @@ if (scenario === 'main') {
     }),
   );
   await repo.createPlayer(T, player({ ...V, naturalKey: SLUG_V, clubId: 'crusaders' }));
-  await repo.setPlayerVeteransClub(T, 'crusaders', SHA_V, { id: 'vets-coast', name: 'Coast Veterans' }, 'admin');
-  await repo.setPlayerVeteransClub(T, 'crusaders', SLUG_V, { id: 'vets-kzn', name: 'KZN Veterans' }, 'admin');
+  await repo.setPlayerVeteransClub(
+    T,
+    'crusaders',
+    SHA_V,
+    { id: 'vets-coast', name: 'Coast Veterans' },
+    'admin',
+  );
+  await repo.setPlayerVeteransClub(
+    T,
+    'crusaders',
+    SLUG_V,
+    { id: 'vets-kzn', name: 'KZN Veterans' },
+    'admin',
+  );
   // A singleton bystander that must never be touched.
   const SHA_Z = said('8801015000094');
   await repo.createPlayer(
@@ -394,7 +412,10 @@ if (scenario === 'main') {
   const pairs: Array<{ sha: string; slug: string; clubId: string; doc: string }> = [];
   for (let i = 0; i < n; i++) {
     const clubId = CLUBS[i % 6][0];
-    const id = `85${String(i).padStart(4, '0')}5000${String(i % 100).padStart(3, '0')}`.slice(0, 13);
+    const id = `85${String(i).padStart(4, '0')}5000${String(i % 100).padStart(3, '0')}`.slice(
+      0,
+      13,
+    );
     const who = { firstName: `Bulk${i}`, lastName: 'Player', dob: '1985-01-01' };
     const s = said(id);
     const slug = `bulk${i}-player-1985-01-01`;

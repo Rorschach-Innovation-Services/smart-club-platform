@@ -82,6 +82,11 @@ import {
   OPERATORS_GSI1PK,
   fixtureResultKey,
   fixtureResultsListKey,
+  resultConfirmationKey,
+  resultConfirmationsListKey,
+  scorerKey,
+  scorerGsi1,
+  scorersListGsi1pk,
   fixtureScorecardKey,
   fixtureScorecardsListKey,
   syncCursorKey,
@@ -169,6 +174,8 @@ import type {
   Umpire,
   FixtureOfficials,
   FixtureOfficialsRecord,
+  Scorer,
+  ResultConfirmation,
   CaptainsReport,
   CaptainsReportDelivery,
 } from './types.js';
@@ -1204,15 +1211,66 @@ export async function removeFixtureResultCaptainRef(
   }
 }
 
+/** Every key in the results partition: the results AND the office's confirmations of them. */
 async function listFixtureResultKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
-  const { pk, skPrefix } = fixtureResultsListKey(tenant);
+  const { pk } = fixtureResultsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p',
+    ExpressionAttributeValues: { ':p': pk },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+// ── Result confirmations (the union office's "checked and validated") ──
+
+export async function listResultConfirmations(tenant: string): Promise<ResultConfirmation[]> {
+  const { pk, skPrefix } = resultConfirmationsListKey(tenant);
   const items = await queryAll({
     TableName: TABLE,
     KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
     ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
-    ProjectionExpression: 'pk, sk',
   });
-  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+  return items.map((i) => stripKeys<ResultConfirmation>(i)!);
+}
+
+export async function getResultConfirmation(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+): Promise<ResultConfirmation | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: resultConfirmationKey(tenant, seriesId, fixtureId) }),
+  );
+  return stripKeys<ResultConfirmation>(res.Item);
+}
+
+/** Replace a fixture's confirmation (one per fixture; the newest confirmation wins). */
+export async function putResultConfirmation(
+  tenant: string,
+  conf: ResultConfirmation,
+): Promise<ResultConfirmation> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...resultConfirmationKey(tenant, conf.seriesId, conf.fixtureId), ...conf },
+    }),
+  );
+  return conf;
+}
+
+export async function deleteResultConfirmation(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+): Promise<void> {
+  await ddb.send(
+    new DeleteCommand({
+      TableName: TABLE,
+      Key: resultConfirmationKey(tenant, seriesId, fixtureId),
+    }),
+  );
 }
 
 // ── Medicoach sync: fixture scorecards (FIXSCORECARD#) ──
@@ -2534,7 +2592,7 @@ export async function putFixtureOfficials(
   officials: FixtureOfficials,
 ): Promise<void> {
   const key = fixtureOfficialsKey(tenant, seriesId, fixtureId);
-  if (!officials.umpires.length && !officials.referee) {
+  if (!officials.umpires.length && !officials.referee && !officials.scorers?.length) {
     await ddb.send(new DeleteCommand({ TableName: TABLE, Key: key }));
     return;
   }
@@ -2561,11 +2619,87 @@ export async function deleteFixtureOfficialsForSeries(
   return keys.length;
 }
 
-/** pk/sk pairs for every umpire + officials item — the erasure sweep needs keys. */
+/**
+ * Drop the officials of specific fixtures (they were removed from their series). Without this
+ * the appointments outlive the fixture — invisible, since the join is by fixture id, but kept.
+ */
+export async function deleteFixtureOfficialsFor(
+  tenant: string,
+  seriesId: string,
+  fixtureIds: string[],
+): Promise<void> {
+  if (fixtureIds.length)
+    await batchDelete(fixtureIds.map((f) => fixtureOfficialsKey(tenant, seriesId, f)));
+}
+
+export class ScorerExistsError extends Error {
+  constructor() {
+    super('scorer id already exists');
+    this.name = 'ScorerExistsError';
+  }
+}
+
+export async function listScorers(tenant: string): Promise<Scorer[]> {
+  const items = await queryAll({
+    TableName: TABLE,
+    IndexName: 'gsi1',
+    KeyConditionExpression: 'gsi1pk = :p',
+    ExpressionAttributeValues: { ':p': scorersListGsi1pk(tenant) },
+  });
+  return items.map((i) => stripKeys<Scorer>(i)!);
+}
+
+export async function getScorer(tenant: string, scorerId: string): Promise<Scorer | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: scorerKey(tenant, scorerId) }),
+  );
+  return stripKeys<Scorer>(res.Item);
+}
+
+/** Insert a NEW scorer; throws ScorerExistsError if the id is taken. */
+export async function createScorer(tenant: string, scorer: Scorer): Promise<Scorer> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: {
+          ...scorerKey(tenant, scorer.id),
+          ...scorerGsi1(tenant, scorer.displayName),
+          ...scorer,
+        },
+        ConditionExpression: 'attribute_not_exists(pk)',
+      }),
+    );
+  } catch (err) {
+    if (isCcf(err)) throw new ScorerExistsError();
+    throw err;
+  }
+  return scorer;
+}
+
+/** Replace a scorer record (last write wins, like umpires). */
+export async function putScorer(tenant: string, scorer: Scorer): Promise<Scorer> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...scorerKey(tenant, scorer.id),
+        ...scorerGsi1(tenant, scorer.displayName),
+        ...scorer,
+      },
+    }),
+  );
+  return scorer;
+}
+
+/** pk/sk pairs for every umpire, scorer + officials item — the erasure sweep needs keys. */
 async function listUmpireAndOfficialsKeys(
   tenant: string,
 ): Promise<Array<{ pk: string; sk: string }>> {
-  const umpires = (await listUmpires(tenant)).map((u) => umpireKey(tenant, u.id));
+  const umpires = [
+    ...(await listUmpires(tenant)).map((u) => umpireKey(tenant, u.id)),
+    ...(await listScorers(tenant)).map((x) => scorerKey(tenant, x.id)),
+  ];
   const officials = (await listFixtureOfficials(tenant)).map((o) =>
     fixtureOfficialsKey(tenant, o.seriesId, o.fixtureId),
   );
@@ -2580,7 +2714,8 @@ async function listUmpireAndOfficialsKeys(
 // completed or exhausted) absorbs a re-save, so an identical re-appointment never re-sends;
 // removing an official deletes the row, so a later re-appointment sends again.
 
-export type OfficialRole = 'umpire' | 'referee';
+/** `umpireId` on a ledger row is the registry id for the role (a scorer id for 'scorer'). */
+export type OfficialRole = 'umpire' | 'referee' | 'scorer';
 export type OfficialsNotifyStatus = 'queued' | 'completed' | 'exhausted';
 
 export interface OfficialsNotifyRow {
@@ -3639,6 +3774,9 @@ export async function deleteSeriesSyncState(
       ProjectionExpression: 'pk, sk',
     })
   ).map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+  // The office's confirmations of those results go with them.
+  for (const c of await listResultConfirmations(tenant))
+    if (c.seriesId === seriesId) keys.push(resultConfirmationKey(tenant, c.seriesId, c.fixtureId));
   const scorecards = fixtureScorecardsListKey(tenant);
   for (const i of await queryAll({
     TableName: TABLE,

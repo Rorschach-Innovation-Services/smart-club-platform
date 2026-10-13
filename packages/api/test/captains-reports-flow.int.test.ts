@@ -52,6 +52,9 @@ const isoDay = (offsetDays: number) =>
 /** Yesterday: always inside the 7-day window, so the link is live. */
 const MATCH_DATE = isoDay(-1);
 const GO_LIVE = isoDay(-30);
+/** Fixtures nobody pulls a result for: dated outside the match-day opener's lookback, so the
+ * 18:00 run does not open (and notify) them on its own. */
+const BYSTANDER = { date: isoDay(-4) };
 const CAPTAIN_KEY = '0'.repeat(64); // the example's captainRef natural key
 
 let ddb: Server;
@@ -171,11 +174,16 @@ async function seed(goLive: string | null = GO_LIVE) {
   );
   await repo.putSeries(
     'dolphins',
-    series('s-planb-promotion-men-t20-g2', 'promotion', ['c', 'd'], [fx('f7', 'c', 'd')]),
+    series(
+      's-planb-promotion-men-t20-g2',
+      'promotion',
+      ['c', 'd'],
+      [fx('f7', 'c', 'd', BYSTANDER)],
+    ),
   );
   await repo.putSeries(
     'dolphins',
-    series('s-planb-premier-men-t20-g2', 'premier', ['c', 'd'], [fx('f1', 'c', 'd')]),
+    series('s-planb-premier-men-t20-g2', 'premier', ['c', 'd'], [fx('f1', 'c', 'd', BYSTANDER)]),
   );
   await repo.createUmpire('dolphins', {
     id: 'u-ngubane',

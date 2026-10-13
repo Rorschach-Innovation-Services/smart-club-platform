@@ -1475,7 +1475,7 @@ export function sendFixtureReminderEmail(
 
 export interface OfficialAppointedEmailInput {
   officialName: string;
-  roleLabel: 'umpire' | 'referee';
+  roleLabel: 'umpire' | 'referee' | 'scorer';
   /** The union's display name. */
   orgName: string;
   seriesName: string;
@@ -1487,7 +1487,7 @@ export interface OfficialAppointedEmailInput {
   venue?: string;
 }
 
-/** The appointment notice to one umpire/referee for one fixture. */
+/** The appointment notice to one umpire/referee/scorer for one fixture. */
 export function officialAppointedEmailContent(input: OfficialAppointedEmailInput): {
   subject: string;
   text: string;
@@ -1525,7 +1525,7 @@ export function officialAppointedEmailContent(input: OfficialAppointedEmailInput
 export function sendOfficialAppointedEmail(
   to: string,
   content: { subject: string; text: string; html: string },
-  role: 'umpire' | 'referee',
+  role: 'umpire' | 'referee' | 'scorer',
 ): Promise<{ messageId: string }> {
   return sendPostponementEmail(to, content, `official-appointed-${role}`);
 }

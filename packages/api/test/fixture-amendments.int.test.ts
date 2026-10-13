@@ -318,6 +318,30 @@ describe('fixture amendments upload — confirm', () => {
     assert.equal(((await noop.json()) as { code: string }).code, 'nothing_to_apply');
   });
 
+  test('a manual Set team marker (slots + slotsManual) survives an amendments rewrite', async () => {
+    // ADR 0022 §7: if the upload dropped the marker, the medicoach puller would resume
+    // overwriting the admin's choice.
+    await seedTenant('fa-manual');
+    const s = (await repo.getSeries('fa-manual', SERIES_ID))!;
+    await repo.updateSeries('fa-manual', SERIES_ID, {
+      fixtures: (s.fixtures as Array<Record<string, unknown>>).map((f) =>
+        f.id === 'f2'
+          ? { ...f, slots: { home: 'tbd:Pool%20winner' }, slotsManual: { home: true } }
+          : f,
+      ),
+      version: s.version,
+    });
+    const dataBase64 = await baseline(); // retimes f2 13:30 → 09:00
+    const pv = (await (await post('fa-manual', 'preview', { dataBase64 })).json()) as Preview;
+    const res = await post('fa-manual', 'confirm', { dataBase64, planHash: pv.planHash });
+    assert.equal(res.status, 200, await res.clone().text());
+    const f2 = await fixtureOf('fa-manual', 'f2');
+    assert.equal(f2.time, '09:00', 'the amendment was written');
+    assert.equal(f2.home, 'gamma');
+    assert.deepEqual(f2.slots, { home: 'tbd:Pool%20winner' });
+    assert.deepEqual(f2.slotsManual, { home: true });
+  });
+
   test('fixturesAmended counts only sheet amendments; draft relocations are draftMoves', async () => {
     await seedTenant('fa-moves');
     // A DRAFT fixture on Neutral Ground at 13:30 — the slot f3 takes from the sheet.

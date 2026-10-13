@@ -53,11 +53,12 @@ const schemaFor = (file: string) =>
 describe('contract examples', () => {
   const files = readdirSync(EXAMPLES).filter((f) => f.endsWith('.json'));
 
-  test('all eight shared examples are present', () => {
+  test('all nine shared examples are present', () => {
     assert.deepEqual(files.sort(), [
       'changes-knockout-reschedule.json',
       'changes-live-result.json',
       'changes-manual-and-cleared.json',
+      'changes-result-with-play.json',
       'player-push-request.json',
       'player-push-response.json',
       'schedule-push-request.json',
@@ -179,13 +180,15 @@ describe('shared contract checksum', () => {
   const DOCS = path.resolve(EXAMPLES, '..');
   const PINNED: Record<string, string> = {
     'medicoach-sync-contract.md':
-      'e85e20d388a83b7b81af7d67e889b62c0f9f586b083fbbdaf65e70310e03fe7c',
+      'a2ff351e05c8c4015b21197bb66e3a7455c94557ba6535ce32293e5250c68f7b',
     'medicoach-sync-examples/changes-knockout-reschedule.json':
       '7040b5a70f49a4adcefe173659126e383c1d0813c5ab0581748fb6e4e8634aa4',
     'medicoach-sync-examples/changes-live-result.json':
       'b235212fcf773fd31f51668fc86466ff0f9246ba62c562b770addf50a219cc11',
     'medicoach-sync-examples/changes-manual-and-cleared.json':
       'ffcf0b6c4542402fc6a996328740828244b5fcf1ac6977d5aaedd30935e96ac4',
+    'medicoach-sync-examples/changes-result-with-play.json':
+      'ba73c381b800d6f62013551120b7e990726fbeee2078351fafdf6562e8103ed1',
     'medicoach-sync-examples/player-push-request.json':
       '27effdde2b8883acd4f1e8017bf038da84c55b866b206fe78c401722c02eb01c',
     'medicoach-sync-examples/player-push-response.json':
@@ -325,6 +328,38 @@ describe('stored result view', () => {
         .medicoachMatchUrl,
       'https://live.medicoach.co.za/m/1',
     );
+  });
+});
+
+describe('result play block (ground time and balls)', () => {
+  const base = () =>
+    JSON.parse(readFileSync(path.join(EXAMPLES, 'changes-result-with-play.json'), 'utf8'));
+
+  test('is optional: a medicoach that does not send it still parses', () => {
+    const raw = JSON.parse(readFileSync(path.join(EXAMPLES, 'changes-live-result.json'), 'utf8'));
+    const parsed = ChangesResponseSchema.parse(raw);
+    assert.equal(parsed.fixtures[0].result?.play, undefined);
+  });
+
+  test('a malformed block becomes null; the result and the page still parse', () => {
+    for (const bad of [
+      { startedAt: 'yesterday', endedAt: null, legalBalls: 1, deliveries: 1 },
+      { startedAt: null, endedAt: null, legalBalls: -4, deliveries: 1 },
+      {
+        startedAt: '2026-10-04T12:00:00.000Z',
+        endedAt: '2026-10-04T08:00:00.000Z',
+        legalBalls: 1,
+        deliveries: 1,
+      },
+      { startedAt: null, endedAt: null, legalBalls: 240, deliveries: 100 },
+      'two hundred balls',
+    ]) {
+      const raw = base();
+      raw.fixtures[0].result.play = bad;
+      const parsed = ChangesResponseSchema.parse(raw);
+      assert.equal(parsed.fixtures[0].result?.play, null, JSON.stringify(bad));
+      assert.equal(parsed.fixtures[0].result?.homeScore, '184/6 (20)');
+    }
   });
 });
 

@@ -12,7 +12,7 @@
  *   any `sent`.
  *
  * When nothing was sent:
- *   - every channel `skipped` (no usable email/cell on the umpire's registry entry): the row stays
+ *   - every channel `skipped` (no usable email/cell on the official's umpire or scorer registry entry): the row stays
  *     queued WITHOUT counting an attempt, so it sends on the first run after the contacts are
  *     backfilled (a 5-minute cadence would otherwise exhaust it within the hour);
  *   - any channel `failed` (a provider fault): `attempts` is bumped; at ATTEMPT_CAP the row is
@@ -40,7 +40,7 @@ import {
 import { resolveTeam } from '../teams.js';
 import { hasFeature } from '../features.js';
 import { orgCopy } from '../branding.js';
-import type { Channel, Club, Series, TenantConfig, Umpire } from '../types.js';
+import type { Channel, Club, Scorer, Series, TenantConfig, Umpire } from '../types.js';
 
 /** Failed sends before a row is marked `exhausted` (≈50 minutes of 5-minute retries). */
 export const ATTEMPT_CAP = 10;
@@ -53,6 +53,7 @@ type NoticeRepo = Pick<
   | 'getSeries'
   | 'listClubs'
   | 'listUmpires'
+  | 'listScorers'
   | 'completeOfficialsNotify'
   | 'bumpOfficialsNotifyAttempt'
   | 'deleteOfficialsNotify'
@@ -148,12 +149,14 @@ export async function runOfficialNotices(
       const channels = officialNoticeChannels(cfg, deps.whatsappTemplateStatus);
       const orgName = orgCopy(cfg).name;
       // Loaded once per tenant, only when there is work.
-      const [clubs, umpires] = await Promise.all([
+      const [clubs, umpires, scorers] = await Promise.all([
         repo.listClubs(tenant),
         repo.listUmpires(tenant),
+        repo.listScorers(tenant),
       ]);
       const clubsById = new Map<string, Club>(clubs.map((cl) => [cl.id, cl]));
       const umpiresById = new Map<string, Umpire>(umpires.map((u) => [u.id, u]));
+      const scorersById = new Map<string, Scorer>(scorers.map((x) => [x.id, x]));
       const seriesCache = new Map<string, Series | null>();
       const seriesOf = async (id: string) => {
         if (!seriesCache.has(id)) seriesCache.set(id, await repo.getSeries(tenant, id));
@@ -167,7 +170,9 @@ export async function runOfficialNotices(
         const stillOn =
           row.role === 'referee'
             ? current?.referee?.umpireId === row.umpireId
-            : (current?.umpires ?? []).some((u) => u.umpireId === row.umpireId);
+            : row.role === 'scorer'
+              ? (current?.scorers ?? []).some((x) => x.scorerId === row.umpireId)
+              : (current?.umpires ?? []).some((u) => u.umpireId === row.umpireId);
         const series = stillOn ? await seriesOf(row.seriesId) : null;
         const fixture = series
           ? ((series.fixtures as FixtureLite[] | undefined) ?? []).find(
@@ -183,16 +188,18 @@ export async function runOfficialNotices(
           summary.deferred++;
           return;
         }
-        const umpire = umpiresById.get(row.umpireId);
+        // `umpireId` is the registry id for the role: scorer rows resolve against the scorers.
+        const person: Umpire | Scorer | undefined =
+          row.role === 'scorer' ? scorersById.get(row.umpireId) : umpiresById.get(row.umpireId);
         const home = resolveTeam(series, fixture.home ?? '', clubsById);
         const away = resolveTeam(series, fixture.away ?? '', clubsById);
         // Real time/venue even when withheld from clubs (ADR 0011 is club-facing only).
         const venue = fixture.venueOverride?.trim() || fixture.venueName || undefined;
         const { results } = await deps.send({
           official: {
-            name: umpire?.fullName || umpire?.displayName || '',
-            ...(umpire?.email ? { email: umpire.email } : {}),
-            ...(umpire?.phone ? { phone: umpire.phone } : {}),
+            name: person?.fullName || person?.displayName || '',
+            ...(person?.email ? { email: person.email } : {}),
+            ...(person?.phone ? { phone: person.phone } : {}),
           },
           roleLabel: row.role,
           orgName,

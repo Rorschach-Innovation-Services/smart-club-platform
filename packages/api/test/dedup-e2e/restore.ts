@@ -29,6 +29,8 @@ for (const row of group.rows) {
   console.log(
     `restored ${row.naturalKey.slice(0, 12)} at ${row.clubId}` +
       (doc ? ` — idDoc ${existsSync(file!) ? 'present' : 'DANGLING (object deleted)'}` : '') +
-      (row.veteransClubId ? ` — veteransClubId ${row.veteransClubId} (VETAFFIL not rewritten)` : ''),
+      (row.veteransClubId
+        ? ` — veteransClubId ${row.veteransClubId} (VETAFFIL not rewritten)`
+        : ''),
   );
 }

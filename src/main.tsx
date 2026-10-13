@@ -2,7 +2,7 @@ import { resolveCompetitionDefaults } from '../packages/engine/src/defaults';
 import { Sentry } from './sentry'; // first — installs global error handlers before render
 import { useState as useStateApp, useMemo as useMemoApp, useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
-import type { Umpire } from './types';
+import type { Scorer, Umpire } from './types';
 import { ErrorBoundary } from 'react-error-boundary';
 import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
@@ -17,6 +17,7 @@ import {
 } from 'react-router-dom';
 import { QueryClientProvider, useQuery, useQueries } from '@tanstack/react-query';
 import { queryClient, qk } from './query';
+import { refreshSeasonSetup } from './season-setup-refresh';
 import { clubPlaysVeterans } from '../packages/engine/src/leagues';
 import { allocateVenues, buildLedger } from '../packages/engine/src/venues';
 import * as api from './api';
@@ -711,15 +712,18 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       { rawConflict: true },
     ).then(() => invalidate(qk.series()));
   }
+  // Delete/duplicate/approve return the promise unswallowed (like setReleased): the caller
+  // chains its success toast off success only and mops up the rejection itself — withToast
+  // has already surfaced the error (ADR 0021 "Known, unchanged" toast bugs, fixed).
   function deleteSeries(seriesId) {
-    withToast(() => api.deleteSeriesReq(seriesId), 'Could not delete series')
-      .then(() => invalidate(qk.series()))
-      .catch(() => {});
+    return withToast(() => api.deleteSeriesReq(seriesId), 'Could not delete series').then(() =>
+      invalidate(qk.series()),
+    );
   }
   function duplicateSeries(seriesId) {
-    withToast(() => api.duplicateSeriesReq(seriesId), 'Could not duplicate series')
-      .then(() => invalidate(qk.series()))
-      .catch(() => {});
+    return withToast(() => api.duplicateSeriesReq(seriesId), 'Could not duplicate series').then(
+      () => invalidate(qk.series()),
+    );
   }
   /**
    * Run a generate/rebase; when the server refuses because released fixtures are synced with
@@ -740,9 +744,11 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   }
   /* ─── Season runs (ADR 0008) ─── */
   function createSeasonRun(run) {
-    // A league with no setup (400 setup_missing) or a label already running (409
-    // season_exists) gets copy that says what to do, not the generic refresh line. A 409
-    // means this tab's runs list missed a season, so that is what it refetches.
+    // A league with no setup, or whose structure or calendar is gone (400 setup_missing /
+    // structure_missing / calendar_missing), or a label already running (409 season_exists)
+    // gets copy that says what to do, not the generic refresh line. A 409 means this tab's
+    // runs list missed a season, so that is what it refetches; the Start a season modal
+    // refetches the setup itself on a 400.
     return withToast(() => api.createSeasonRun(run), 'Could not start the season', {
       errorMessage: startSeasonErrorMessage,
       invalidate: [qk.seasonRuns()],
@@ -969,9 +975,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
     return withToast(
       () => api.patchSeries(seriesId, { approved: value, version: cur?.version }),
       'Could not update approval',
-    )
-      .then(() => invalidate(qk.series()))
-      .catch(() => {});
+    ).then(() => invalidate(qk.series()));
   }
   function setSubmissionDeadline(iso) {
     // Returned raw (no .catch swallow) so the deadline modal stays open on a failed save.
@@ -1447,6 +1451,39 @@ function Shell({
     enabled: role === 'admin' && vertical.sport === 'cricket',
   });
   const allCaptainsReports = captainsReportsQuery.data ?? [];
+  // ── Scorer allocation (admin) ── the union's register; appointments ride on GET /series
+  // as each fixture's `officials.scorers`, like umpires.
+  const scorersQuery = useQuery({
+    queryKey: qk.scorers(),
+    queryFn: api.getScorers,
+    enabled: role === 'admin' && vertical.sport === 'cricket',
+  });
+  const allScorers = scorersQuery.data ?? [];
+  function saveScorers(seriesId: string, fixtureId: string, scorerIds: string[]) {
+    return withToast(
+      () => api.putFixtureScorers(seriesId, fixtureId, scorerIds),
+      'Could not save the scorers',
+    ).then(() => invalidate(qk.series()));
+  }
+  function createScorer(body: Partial<Scorer>): Promise<Scorer> {
+    return withToast(() => api.createScorer(body), 'Could not add the scorer').then((x) => {
+      invalidate(qk.scorers());
+      return x;
+    });
+  }
+  // Result confirmation: errors are the caller's (a 409 result_changed is shown in place,
+  // with the newer result, not as a generic toast).
+  function confirmResult(seriesId: string, fixtureId: string, recordedAt: string) {
+    return api
+      .confirmResult(seriesId, fixtureId, recordedAt)
+      .finally(() => invalidate(qk.series()));
+  }
+  function unconfirmResult(seriesId: string, fixtureId: string) {
+    return withToast(
+      () => api.unconfirmResult(seriesId, fixtureId),
+      'Could not withdraw the confirmation',
+    ).then(() => invalidate(qk.series()));
+  }
   function saveOfficials(seriesId: string, fixtureId: string, umpireIds: string[]) {
     return withToast(
       () => api.putFixtureOfficials(seriesId, fixtureId, umpireIds),
@@ -2684,6 +2721,32 @@ function Shell({
   const orgName = branding?.name ?? 'Smart Club';
   const orgFooter = branding?.copy?.footer ?? 'Powered by Medicoach';
 
+  // The league catalogue: its own page (Leagues) and embedded in Fixtures & Venues →
+  // Leagues & tournaments, beside the competitions built on it.
+  const leaguesCatalogue = (embedded: boolean) => (
+    <AdminLeagues
+      embedded={embedded}
+      allLeagues={allLeagues}
+      clubs={clubs}
+      onCreate={() => setShowLeagueForm({})}
+      onEdit={(L) => setShowLeagueForm(L)}
+      onDeleteLeague={deleteLeague}
+      toast={toastShow}
+      structures={allStructures}
+      calendars={allCalendars}
+      seasonRuns={allSeasonRuns}
+      allSeries={allSeries}
+      seasonSetupLoading={seasonSetupLoading}
+      seasonSetupFailed={structuresFailed || seasonRunsFailed}
+      onCreateSeasonRun={createSeasonRun}
+      onRefreshSeasonSetup={refetchSeasonSetup}
+      onOpenSeason={(runId) =>
+        navigate(`/admin/fixtures?tab=series&run=${encodeURIComponent(runId)}`)
+      }
+      onOpenClub={setActiveClub}
+    />
+  );
+
   function renderMain() {
     if (role === 'admin') {
       const gotoList = () => gotoAdminView('clubs_list');
@@ -2815,17 +2878,7 @@ function Shell({
             toast={toastShow}
           />
         );
-      if (view === 'leagues')
-        return (
-          <AdminLeagues
-            allLeagues={allLeagues}
-            clubs={clubs}
-            onCreate={() => setShowLeagueForm({})}
-            onEdit={(L) => setShowLeagueForm(L)}
-            onDeleteLeague={deleteLeague}
-            toast={toastShow}
-          />
-        );
+      if (view === 'leagues') return leaguesCatalogue(false);
       if (view === 'insights')
         return (
           <AdminInsightsPage
@@ -2863,6 +2916,9 @@ function Shell({
       if (view === 'fixtures')
         return (
           <AdminFixtures
+            defaultTab="week"
+            leaguesCatalogue={leaguesCatalogue(true)}
+            onCompetitionsChanged={() => invalidate(qk.series())}
             clubs={clubs}
             allSeries={allSeries}
             onUpdateSeries={updateSeries}
@@ -2901,6 +2957,13 @@ function Shell({
             umpires={allUmpires}
             onSaveOfficials={saveOfficials}
             onCreateUmpire={(displayName) => createUmpire({ displayName })}
+            scorers={allScorers}
+            onSaveScorers={saveScorers}
+            onCreateScorer={(displayName: string, contacts?: { phone?: string; email?: string }) =>
+              createScorer({ displayName, ...contacts })
+            }
+            onConfirmResult={confirmResult}
+            onUnconfirmResult={unconfirmResult}
           />
         );
       if (view === 'umpires' && vertical.sport === 'cricket')
@@ -3175,11 +3238,11 @@ function Shell({
           .slice(0, 2)
           .join('');
 
-  // Refetch the season setup: the runs list and the tenant config (where leagues carry
-  // their operator-created setup). The launcher calls it on open so what it shows is what
-  // the server will freeze.
+  // Refetch the season setup: the runs list, the authenticated config (structures) and the
+  // public tenant (leagues with their operator-created setup, and the calendars). The Start
+  // a season modal calls it on open so what it shows is what the server will freeze.
   function refetchSeasonSetup() {
-    return Promise.all([invalidate(qk.seasonRuns()), invalidate(qk.tenantConfig())]);
+    return refreshSeasonSetup(invalidate);
   }
 
   const shellView = (

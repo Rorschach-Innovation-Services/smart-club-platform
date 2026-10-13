@@ -2,7 +2,7 @@
  * Set team (ADR 0018) edge cases and failure modes through the real PATCH /series/:id on
  * dynalite: participant add/drop on set, replace and revert; the no-op set; team double-booking
  * (`team_busy`); foreign / unknown / malformed team ids; a legacy series; a medicoach-synced
- * series (`win:`/`lose:` sides refused, `pos:`/`tbd:` sides reported for a bundle top-up and
+ * series (`win:`/`lose:` sides settable and flagged `slotsManual`, `pos:`/`tbd:` sides reported for a bundle top-up and
  * never pushed); released and withheld series; approval recall on a draft; and the orphan check
  * on a series that had no teams to judge by. Every refusal asserts the status, the code and
  * that nothing was stored.
@@ -395,21 +395,94 @@ describe('Set team — legacy, synced, released, withheld, drafts (A13–A16)', 
     assert.deepEqual((await repo.getSeries(T, 'e13'))!.teams, ['irene']);
   });
 
-  test('(14) synced series: a win: side is medicoach’s (409 sync_owned_side); revert too', async () => {
+  test('(14) synced series: a win: side takes a manual fill (owned: slotsManual); revert clears it', async () => {
+    // ADR 0022 §7 supersedes the old sync_owned_side refusal.
     await repo.putSeries(
       SYNC,
       ko('s14', { approved: true, released: true, releasedAt: '2027-01-01T00:00:00Z' }),
     );
-    const before = await repo.getSeries(SYNC, 's14');
+    const res = await setSide('s14', { fixtureId: 'f3', side: 'home', teamId: 'irene' }, SYNC);
+    assert.equal(res.status, 200, await res.clone().text());
+    let f3 = fx(await repo.getSeries(SYNC, 's14'), 'f3');
+    assert.equal(f3.home, 'irene');
+    assert.deepEqual(f3.slots, { home: 'win:f1' });
+    assert.deepEqual(f3.slotsManual, { home: true });
+
+    // Revert: the placeholder and automation get the side back; empty keys are dropped.
+    assert.equal(
+      (await setSide('s14', { fixtureId: 'f3', side: 'home', teamId: null }, SYNC)).status,
+      200,
+    );
+    f3 = fx(await repo.getSeries(SYNC, 's14'), 'f3');
+    assert.equal(f3.home, 'win:f1');
+    assert.equal('slotsManual' in f3, false, 'flag key dropped when empty');
+    assert.equal('slots' in f3, false);
+  });
+
+  test('(14) slotsManual merges per side; a revert clears only its own side', async () => {
+    await repo.putSeries(T, ko('s14m'));
+    for (const [side, teamId] of [
+      ['home', 'irene'],
+      ['away', 'pretoria'],
+    ] as const)
+      assert.equal((await setSide('s14m', { fixtureId: 'f3', side, teamId })).status, 200);
+    assert.deepEqual(fx(await repo.getSeries(T, 's14m'), 'f3').slotsManual, {
+      home: true,
+      away: true,
+    });
+    assert.equal(
+      (await setSide('s14m', { fixtureId: 'f3', side: 'home', teamId: null })).status,
+      200,
+    );
+    const f3 = fx(await repo.getSeries(T, 's14m'), 'f3');
+    assert.deepEqual(f3.slotsManual, { away: true });
+    assert.deepEqual(f3.slots, { away: 'win:f2' });
+  });
+
+  test('(14) revert is refused while the fixture has a stored result (409 result_attached)', async () => {
+    // Its own date, so no other test's released fixture makes irene busy (team_busy).
+    const base = ko('s14r');
+    base.fixtures = (base.fixtures as Fx[]).map((f) => ({ ...f, date: '2027-03-07' }));
+    await repo.putSeries(T, base);
+    assert.equal(
+      (await setSide('s14r', { fixtureId: 'f1', side: 'home', teamId: 'irene' })).status,
+      200,
+    );
+    await repo.putFixtureResultIfNewer(T, {
+      seriesId: 's14r',
+      fixtureId: 'f1',
+      ref: `smartclub:${T}:fixture:s14r:f1`,
+      orderAt: '2027-02-14T15:00:00.000Z',
+      homeScore: '120/4',
+      awayScore: '100/9',
+      winner: 'home',
+      storedAt: '2027-02-14T15:00:00.000Z',
+    });
+    const before = await repo.getSeries(T, 's14r');
     const b = await refused(
-      await setSide('s14', { fixtureId: 'f3', side: 'home', teamId: 'irene' }, SYNC),
+      await setSide('s14r', { fixtureId: 'f1', side: 'home', teamId: null }),
       409,
-      'sync_owned_side',
-      SYNC,
-      's14',
+      'result_attached',
+      T,
+      's14r',
       before,
     );
-    assert.match(String(b.error), /^medicoach decides this side/);
+    assert.match(String(b.error), /clear or withdraw the result/);
+
+    // A cleared result (tombstone) no longer blocks the revert.
+    await repo.putFixtureResultIfNewer(T, {
+      seriesId: 's14r',
+      fixtureId: 'f1',
+      ref: `smartclub:${T}:fixture:s14r:f1`,
+      orderAt: '2027-02-15T15:00:00.000Z',
+      cleared: true,
+      clearedAt: '2027-02-15T15:00:00.000Z',
+      storedAt: '2027-02-15T15:00:00.000Z',
+    });
+    assert.equal(
+      (await setSide('s14r', { fixtureId: 'f1', side: 'home', teamId: null })).status,
+      200,
+    );
   });
 
   test('(14) synced series: a tbd: side is settable, reported for a bundle top-up, never pushed', async () => {
@@ -422,12 +495,20 @@ describe('Set team — legacy, synced, released, withheld, drafts (A13–A16)', 
       (await setSide('s14b', { fixtureId: 'f1', side: 'home', teamId: 'irene' }, SYNC)).status,
       200,
     );
-    assert.deepEqual(await repo.listPendingSync(SYNC), [], 'one side still a tbd: — nothing');
+    assert.deepEqual(
+      (await repo.listPendingSync(SYNC)).filter((p) => p.seriesId === 's14b'), // s14 pushes its own
+      [],
+      'one side still a tbd: — nothing',
+    );
     assert.equal(
       (await setSide('s14b', { fixtureId: 'f1', side: 'away', teamId: 'pretoria' }, SYNC)).status,
       200,
     );
-    assert.deepEqual(await repo.listPendingSync(SYNC), [], 'never pushed (medicoach lacks it)');
+    assert.deepEqual(
+      (await repo.listPendingSync(SYNC)).filter((p) => p.seriesId === 's14b'), // s14 pushes its own
+      [],
+      'never pushed (medicoach lacks it)',
+    );
     const logs = await repo.listSyncLogs(SYNC);
     const top = logs.find((l) => l.kind === 'new-fixtures');
     assert.ok(top, 'a new-fixtures SYNCLOG row');

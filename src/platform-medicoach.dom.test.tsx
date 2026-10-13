@@ -140,7 +140,9 @@ describe('MedicoachConnectionCard', () => {
     vi.mocked(api.platformMedicoachConnection).mockResolvedValue(CLEAR);
     renderCard();
     const card = await cardTitled('Match Centre');
-    expect(await within(card).findByRole('status')).toHaveTextContent(/no fixtures awaiting carry/i);
+    expect(await within(card).findByRole('status')).toHaveTextContent(
+      /no fixtures awaiting carry/i,
+    );
     await userEvent.setup().click(screen.getByRole('button', { name: 'Open console' }));
     expect(await screen.findByText('console page')).toBeInTheDocument();
   });

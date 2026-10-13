@@ -214,6 +214,8 @@ interface StoredSeriesFixture {
   syncRef?: string;
   /** The placeholder a slot held before the sync filled it with a team (audit/restore). */
   slots?: { home?: string; away?: string };
+  /** Sides an admin filled by hand (ADR 0022 §7): the sync never overwrites them. */
+  slotsManual?: { home?: true; away?: true };
 }
 
 /** ref → series/fixture, over every fixture's derived ref and explicit `syncRef`. */
@@ -289,6 +291,8 @@ function resultItem(
     // No captainRef: a player ref is never kept on the result (POPIA). It rides only on the
     // REPORTOPEN# marker while the reports are pending.
     medicoachMatchUrl: r.medicoachMatchUrl,
+    // Ground time and balls (contract `play`, optional): kept with the result it came with.
+    ...(r.play ? { play: r.play } : {}),
     // The scorecard key (both ids or the fetch is skipped); empty strings are not ids.
     ...(r.medicoachMatchId ? { medicoachMatchId: r.medicoachMatchId } : {}),
     ...(r.medicoachTournamentId ? { medicoachTournamentId: r.medicoachTournamentId } : {}),
@@ -575,6 +579,7 @@ export async function runMedicoachSync(
           const current = target.fixture[side];
           const placeholder = target.fixture.slots?.[side] ?? current;
           if (!teamRef || !placeholder || !isSlotRef(placeholder)) continue;
+          if (target.fixture.slotsManual?.[side]) continue; // a manual fill owns the side
           const team = parseTeamRef(teamRef);
           if (
             !team ||
@@ -688,6 +693,8 @@ async function applySlotFills(
           const team = fill[side];
           const placeholder = f.slots?.[side] ?? f[side];
           if (!team || !placeholder || !isSlotRef(placeholder) || f[side] === team) continue;
+          // Authoritative on the fresh read: a manual Set team owns the side (ADR 0022 §7).
+          if (f.slotsManual?.[side]) continue;
           next.slots![side] = placeholder;
           next[side] = team;
           changed++;

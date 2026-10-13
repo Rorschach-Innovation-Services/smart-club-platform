@@ -41,7 +41,7 @@ import { chairContactOf } from './club-contacts.js';
 import { captainsReportLinkBase, captainsReportLinkSecret } from './env.js';
 import { hasFeature } from './features.js';
 import { toE164 } from './notify/e164.js';
-import { isWithheld } from './series-projection.js';
+import { isWithheld, projectSeriesForClub } from './series-projection.js';
 import { TENANT_UTC_OFFSET_MINUTES, tenantDate } from './tenant-time.js';
 import type {
   CaptainsReport,
@@ -606,11 +606,9 @@ export async function openCaptainReports(
   deps: CaptainsReportDeps,
 ): Promise<OpenOutcome> {
   const { repo } = deps;
-  const now = deps.now ?? (() => new Date());
-  const out: OpenOutcome = { opened: [], notified: [] };
-  const { tenant, seriesId, fixtureId, result, config } = event;
+  const { tenant, seriesId, fixtureId, result } = event;
 
-  if (result.source === 'import') return { ...out, skipped: 'import' };
+  if (result.source === 'import') return { opened: [], notified: [], skipped: 'import' };
 
   // A corrected result (same fixture, newer recordedAt): pending reports take the new
   // summary. Done before the go-live/age rules — they decide whether reports OPEN, not
@@ -619,10 +617,45 @@ export async function openCaptainReports(
     if (r.status === 'pending' && (r.resultSummary ?? null) !== (result.summary ?? null))
       await repo.updatePendingCaptainsReportSummary(tenant, r, result.summary ?? null);
 
+  return openReportsForFixture(event, deps);
+}
+
+/** What `openReportsForFixture` opens: a result event, or a match-day open with no result. */
+export interface OpenReportsTarget {
+  tenant: string;
+  seriesId: string;
+  fixtureId: string;
+  /** The medicoach fixture ref; match-day opens have none (`fixtureRef` is then omitted). */
+  ref?: string;
+  /** null = no result yet: no summary, and both sides go to the chair. */
+  result: SyncResult | null;
+  config: TenantConfig;
+  /** When the result first arrived (a retry passes its marker's time); default now. */
+  receivedAt?: Date;
+  /** The stored series, when the caller already holds it (saves a read). */
+  series?: Series;
+  /** Open only these sides (default both). */
+  sides?: ReadonlyArray<'home' | 'away'>;
+}
+
+/**
+ * The result-optional core of `openCaptainReports` (no import skip, no summary correction).
+ * With `result: null` the captain is unknowable (only a result names the scoring side's
+ * captain), so both sides go to the chair; a later result fills the summary in silently.
+ */
+export async function openReportsForFixture(
+  target: OpenReportsTarget,
+  deps: CaptainsReportDeps,
+): Promise<OpenOutcome> {
+  const { repo } = deps;
+  const now = deps.now ?? (() => new Date());
+  const out: OpenOutcome = { opened: [], notified: [] };
+  const { tenant, seriesId, fixtureId, result, config } = target;
+
   const goLive = config.integrations?.medicoach?.goLiveDate;
   if (!goLive) return { ...out, skipped: 'no-go-live' };
 
-  const series = await repo.getSeries(tenant, seriesId);
+  const series = target.series ?? (await repo.getSeries(tenant, seriesId));
   const fixture = (series?.fixtures as StoredFixture[] | undefined)?.find(
     (f) => f?.id === fixtureId,
   );
@@ -632,7 +665,7 @@ export async function openCaptainReports(
   // Too old = the link would already be dead: its expiry (the later of match + 7 days and
   // result received + 3 days, end of that SAST day) has passed. A retry judges this on the
   // time the result first arrived, so a long-failing opening does not stretch the window.
-  const receivedAtMs = (event.receivedAt ?? now()).getTime();
+  const receivedAtMs = (target.receivedAt ?? now()).getTime();
   const expiry = reportLinkExpiry(matchDate, receivedAtMs);
   if (expiry * 1000 <= now().getTime()) return { ...out, skipped: 'too-old' };
 
@@ -658,6 +691,8 @@ export async function openCaptainReports(
   const failedNotices: string[] = [];
   for (const s of sides) {
     if (!s) continue;
+    // A side left out still names the opponent, so it is filtered here, not above.
+    if (target.sides && !target.sides.includes(s.side)) continue;
     const club = clubs.get(s.clubId);
     if (!club) continue;
     const other = sides.find((x) => x && x.side !== s.side);
@@ -666,7 +701,7 @@ export async function openCaptainReports(
       : 'TBC';
     const chair = chairContactOf(club);
     const captain =
-      result.scoringSide === s.side
+      result && result.scoringSide === s.side
         ? await resolveCaptain(repo, tenant, club.id, result.captainRef)
         : null;
     const contact = captain ?? chair;
@@ -682,14 +717,14 @@ export async function openCaptainReports(
       clubId: club.id,
       status: 'pending',
       source: 'auto',
-      fixtureRef: event.ref,
+      ...(target.ref ? { fixtureRef: target.ref } : {}),
       matchDate,
       side: s.side,
       clubName: sideName(series, s.teamId, club),
       opponentName,
       competition: series.name ?? '',
       ...(venue ? { venue } : {}),
-      resultSummary: result.summary ?? null,
+      resultSummary: result?.summary ?? null,
       umpiresSnapshot,
       recipient,
       captainName: captain?.name ?? '',
@@ -742,6 +777,162 @@ export async function openCaptainReports(
   if (failedNotices.length)
     throw new Error(`${NOTICE_FAILED_ERROR} (${failedNotices.length} report(s))`);
   return out;
+}
+
+// ───────────────────────── Opening reports on match day ─────────────────────────
+
+/** How far back (days before today, SAST) the match-day opener looks by default. */
+export const MATCH_DAY_LOOKBACK_DAYS = 1;
+
+export interface MatchDayOpenSummary {
+  /** Fixtures on the target dates that were walked (skips included). */
+  fixtures: number;
+  /** Reports opened. */
+  opened: number;
+  /** Reports whose notice reached someone (a channel sent). */
+  notified: number;
+  /** Reports whose notice failed on every channel, plus fixtures whose opening threw. */
+  failed: number;
+  /** Fixtures left for the next run (deadline) plus notices deferred by it. */
+  deferred: number;
+  /** Fixtures or sides passed over: undated, cancelled, already reported, unopenable. */
+  skipped: number;
+  /** The 18:00 window was shut: nothing was enumerated. */
+  windowClosed?: true;
+}
+
+/** YYYY-MM-DD `days` before `date`. */
+const daysBefore = (date: string, days: number) =>
+  new Date(Date.parse(`${date}T00:00:00Z`) - days * DAY_MS).toISOString().slice(0, 10);
+
+/**
+ * Open the reports of every fixture PLAYED on the target dates (default today and the
+ * MATCH_DAY_LOOKBACK_DAYS before it, SAST), result or not. Runs inside the 18:00 notice window
+ * only; a shut window returns at once without reading anything (`windowClosed`).
+ *
+ * A side that already has a report row of ANY status is left alone: `openCaptainsReportIfAbsent`
+ * succeeds on a VOID row, so re-walking it would resurrect a report withdrawn by a cleared
+ * result (fresh memberId ⇒ a fresh chair notice every evening). Void → reopen stays the result
+ * path's. One exception: a pending auto report whose opening notice never went out and is not
+ * settled (no notice recorded, or every channel failed) goes back through the core, whose
+ * NOTIFY# claim makes a resend safe.
+ *
+ * Idempotency is open-if-absent + the NOTIFY# ledger; no marker of its own. A later result
+ * fills the summary in (the corrected-summary loop) and notifies nobody again.
+ */
+export async function openMatchDayReports(
+  tenant: string,
+  config: TenantConfig,
+  deps: CaptainsReportDeps,
+  opts?: { targetDates?: string[]; seriesIds?: string[] },
+): Promise<MatchDayOpenSummary> {
+  const { repo } = deps;
+  const now = deps.now ?? (() => new Date());
+  const log = deps.log ?? ((line: string) => console.log(line));
+  const sum: MatchDayOpenSummary = {
+    fixtures: 0,
+    opened: 0,
+    notified: 0,
+    failed: 0,
+    deferred: 0,
+    skipped: 0,
+  };
+  if (!reportNoticeWindowOpen(now())) return { ...sum, windowClosed: true };
+
+  const today = tenantDate(now());
+  const dates = new Set(
+    opts?.targetDates ??
+      Array.from({ length: MATCH_DAY_LOOKBACK_DAYS + 1 }, (_, i) => daysBefore(today, i)),
+  );
+  const onlySeries = opts?.seriesIds ? new Set(opts.seriesIds) : null;
+  // One gsi1 query (no scans). Released + activated only — the projection's gate; reports
+  // open from the STORED series (the core withholds the venue itself).
+  const series = (await repo.listSeries(tenant)).filter(
+    (s) => (!onlySeries || onlySeries.has(s.id)) && projectSeriesForClub(s, today) !== null,
+  );
+  // The core's own outcome hook belongs to the sync run's result tally; match-day counts are
+  // kept apart (they are not result-driven).
+  const { onOpenOutcome: _ignored, ...coreDeps } = deps;
+
+  for (const s of series) {
+    const byTeam = new Map((s.participants ?? []).map((p) => [p.teamId, p]));
+    for (const f of (s.fixtures as StoredFixture[] | undefined) ?? []) {
+      if (!f?.id || !f.date || !dates.has(f.date)) continue;
+      sum.fixtures++;
+      // Undated postponement keeps its old date + dateTbc; a rescheduled one keeps status
+      // 'postponed' with the NEW date — so status 'postponed' alone is not a skip.
+      if (f.dateTbc === true || f.status === 'cancelled') {
+        sum.skipped++;
+        continue;
+      }
+      if (pastDeadline(deps.deadlineMs)) {
+        sum.deferred++;
+        continue;
+      }
+      try {
+        const existing = await repo.listCaptainsReportsForFixture(tenant, s.id, f.id);
+        const sides = (['home', 'away'] as const).filter((side) => {
+          const teamId = f[side];
+          if (typeof teamId !== 'string' || !teamId || isSlotRef(teamId)) return false;
+          const clubId = byTeam.get(teamId)?.clubId ?? teamId;
+          const row = existing.find((r) => r.clubId === clubId);
+          if (!row || noticeUnsettled(row)) return true;
+          sum.skipped++;
+          return false;
+        });
+        if (!sides.length) continue;
+        let outcome = { opened: [] as string[], notified: [] as string[], failed: [] as string[] };
+        try {
+          const out = await openReportsForFixture(
+            {
+              tenant,
+              seriesId: s.id,
+              fixtureId: f.id,
+              result: null,
+              config,
+              receivedAt: now(),
+              series: s,
+              sides,
+            },
+            { ...coreDeps, onOpenOutcome: (o) => (outcome = o) },
+          );
+          if (out.skipped) sum.skipped += sides.length;
+          sum.deferred += out.deferred?.length ?? 0;
+        } catch (err) {
+          // A notice that failed on every channel released its claim; the next run resends.
+          if (!outcome.failed.length) throw err;
+        }
+        sum.opened += outcome.opened.length;
+        sum.notified += outcome.notified.length;
+        sum.failed += outcome.failed.length;
+      } catch (err) {
+        sum.failed++;
+        log(
+          `[captains-report] ${tenant} ${s.id}/${f.id}: match-day open failed — ${
+            err instanceof Error ? err.message : 'error'
+          }`,
+        );
+      }
+    }
+  }
+  if (sum.opened + sum.notified + sum.failed + sum.deferred)
+    log(
+      `[captains-report] ${tenant}: match-day fixtures=${sum.fixtures} opened=${sum.opened} notified=${sum.notified} failed=${sum.failed} deferred=${sum.deferred} skipped=${sum.skipped}`,
+    );
+  return sum;
+}
+
+/**
+ * A pending auto report whose opening notice may still go out: never notified, and no notice
+ * recorded as settled (a 'skipped' delivery — no contact, dry run — completed its claim).
+ */
+export function noticeUnsettled(r: CaptainsReport): boolean {
+  return (
+    r.status === 'pending' &&
+    r.source === 'auto' &&
+    !r.notifiedAt &&
+    !(r.deliveries ?? []).some((d) => d.status === 'skipped')
+  );
 }
 
 const contactOnly = (c: { email?: string; cell?: string }) => ({

@@ -8,7 +8,7 @@ Accepted — Phase 1 (visibility) implemented October 2026. Phases 2–4 planned
 ## Context
 
 Connecting a tenant's fixtures to the Match Centre (medicoach) has two halves. The 15-minute
-sync (ADR 0016) keeps *already-mapped* fixtures in step; the sync contract has no way to create
+sync (ADR 0016) keeps _already-mapped_ fixtures in step; the sync contract has no way to create
 a match. New fixtures reach medicoach only through a one-off "bundle carry": a developer-run
 export CLI on our side and a suite of import scripts (human admin token, git-committed ID map)
 on medicoach's side.
@@ -20,7 +20,7 @@ push was answered `unmapped` and dropped, and the only trace was a log line
 act on it without a developer.
 
 The platform has ~5 operators, one developer, and a handful of carries ever performed. Any
-design must make the gap *visible* immediately, make the standard carry operator-drivable
+design must make the gap _visible_ immediately, make the standard carry operator-drivable
 eventually, and must not replace medicoach's battle-tested import path with something riskier.
 
 ## Decision
@@ -45,11 +45,11 @@ shippable.
 3. **Split state ownership.** Smart club owns orchestration state (`MCAWAIT#`, `MCRECON#`,
    later `MCCONN#`/`MCCARRY#`) under `TENANT#<t>`; medicoach's external-ref table remains the
    only mapping truth. Derived status shown before a real carry record exists is labelled
-   *inferred* in the UI. Carried/mapped counts are never stored authoritatively on our side.
+   _inferred_ in the UI. Carried/mapped counts are never stored authoritatively on our side.
 4. **Operator surface:** a read-only Match Centre card on the client settings page, a per-client
    console at `/platform/tenants/:slug/medicoach` (awaiting-carry table, health, "Check now"),
    and an awaiting-carry badge on the client list (suppressed when the sync feature is off).
-   An empty sync secret — previously a *silent* dry run — is surfaced as a prominent warning.
+   An empty sync secret — previously a _silent_ dry run — is surfaced as a prominent warning.
 5. **Later phases.** Phase 2 moves the smart-club half of the carry (readiness checks, bundle
    build with preview/confirm, league-scoped edit freeze with a hard TTL) into the console;
    medicoach's half stays a runbook. Phase 3 (server-side medicoach import service, SQS worker)

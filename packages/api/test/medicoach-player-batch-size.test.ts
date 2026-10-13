@@ -16,7 +16,8 @@ const size = (v?: string) =>
   playerPushBatchSize(v === undefined ? {} : { MEDICOACH_SYNC_BATCH_SIZE: v });
 
 test('unset, empty or malformed ⇒ the contract cap (unchanged default)', () => {
-  for (const v of [undefined, '', '  ', 'ten', '10.5', '1e1']) assert.equal(size(v), PLAYER_PUSH_MAX);
+  for (const v of [undefined, '', '  ', 'ten', '10.5', '1e1'])
+    assert.equal(size(v), PLAYER_PUSH_MAX);
 });
 
 test('an in-range integer is used as is', () => {

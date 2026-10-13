@@ -143,7 +143,8 @@ type SyncSummary = {
 async function syncNowInUi(browser: Page): Promise<SyncSummary> {
   const [res] = await Promise.all([
     browser.waitForResponse(
-      (r) => r.url().includes('/integrations/medicoach/sync-now') && r.request().method() === 'POST',
+      (r) =>
+        r.url().includes('/integrations/medicoach/sync-now') && r.request().method() === 'POST',
     ),
     browser.getByRole('button', { name: 'Sync now' }).click(),
   ]);
@@ -204,7 +205,7 @@ test.afterAll(async ({ request }) => {
   });
 });
 
-test("report notices wait for 18:00, then go out once per side — never twice", async ({
+test('report notices wait for 18:00, then go out once per side — never twice', async ({
   page: browser,
   request,
 }) => {

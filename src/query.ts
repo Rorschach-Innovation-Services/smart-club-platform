@@ -34,6 +34,7 @@ export const qk = {
   seasonRuns: () => ['season-runs', t()],
   venues: () => ['venues', t()],
   umpires: () => ['umpires', t()],
+  scorers: () => ['scorers', t()],
   captainsReports: () => ['captains-reports', t()],
   captainsReportContactGaps: () => ['captains-report-contact-gaps', t()],
   medicoachSync: () => ['medicoach-sync', t()],

@@ -27,10 +27,10 @@ The certificate is **not emailed or sent anywhere automatically**. It lives on t
 
 Each union picks one of two designs (we set this for them in the operator portal):
 
-| | Classic | Confirmation |
-|---|---|---|
-| Feel | Traditional certificate: landscape, gold border, seal | Official form: portrait, tabulated records |
-| Suits | Unions that frame and present | Unions that file and audit |
+|       | Classic                                               | Confirmation                               |
+| ----- | ----------------------------------------------------- | ------------------------------------------ |
+| Feel  | Traditional certificate: landscape, gold border, seal | Official form: portrait, tabulated records |
+| Suits | Unions that frame and present                         | Unions that file and audit                 |
 
 Both carry the union's logo and name automatically. The Confirmation design also prints the union's registration number, address, phone, website and email in the footer, so make sure we've captured those details for the union.
 
@@ -47,7 +47,7 @@ Both carry the union's logo and name automatically. The Confirmation design also
 - **"Old approvals don't name who approved."** Approvals made before this feature recorded a date but not a name. Their certificates say "Approving official not recorded" with the date. New approvals always name the official.
 - **Union overrides.** When the union office approves a transfer over a club's head, the certificate says so plainly ("issued by the union office on the clubs' behalf"). When an override is only being used to clean up a junk record, the office unticks "Issue transfer certificate" and no certificate is created.
 - **Approvals feel a touch slower.** Clicking approve now also builds the certificate, so the button works for a second or three ("Issuing certificate…"). Worth mentioning if a client comments.
-- **The paper is only as good as the scan.** Our line to clients: *a certificate is genuine when the QR check says VALID **and** the details on the page match the details on the paper*. A photocopied genuine certificate with a doctored name still fails, because the checklist won't match.
+- **The paper is only as good as the scan.** Our line to clients: _a certificate is genuine when the QR check says VALID **and** the details on the page match the details on the paper_. A photocopied genuine certificate with a doctored name still fails, because the checklist won't match.
 
 ## What we still handle internally
 
@@ -57,11 +57,11 @@ Both carry the union's logo and name automatically. The Confirmation design also
 
 ## Quick reference
 
-| Question | Answer |
-|---|---|
-| Who gets a certificate? | Every approved transfer (and union overrides, unless deliberately skipped) |
-| Who can see the PDF? | Both clubs' staff and the union office, signed in |
-| Who can verify one? | Anyone with the QR code or reference — no login |
-| Can it be forged? | The reference space is effectively unguessable, and verification always answers from our records |
-| Can it be edited? | Any edit shows up as a mismatch against the verify page, and a downloaded file can be checked byte-for-byte |
-| Is it legally signed? | Yes — digital approvals by authenticated officials satisfy the ECT Act for this document type; the certificate states this |
+| Question                | Answer                                                                                                                     |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Who gets a certificate? | Every approved transfer (and union overrides, unless deliberately skipped)                                                 |
+| Who can see the PDF?    | Both clubs' staff and the union office, signed in                                                                          |
+| Who can verify one?     | Anyone with the QR code or reference — no login                                                                            |
+| Can it be forged?       | The reference space is effectively unguessable, and verification always answers from our records                           |
+| Can it be edited?       | Any edit shows up as a mismatch against the verify page, and a downloaded file can be checked byte-for-byte                |
+| Is it legally signed?   | Yes — digital approvals by authenticated officials satisfy the ECT Act for this document type; the certificate states this |

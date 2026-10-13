@@ -970,7 +970,10 @@ describe('hardening — overlapping reconciliations (per-tenant lease)', () => {
       "only A's answer applied",
     );
     assert.deepEqual(await repo.getMcReconcile(T), stampA, 'the stamp is whole, from A');
-    assert.equal(stampA.unmappedTotal, rows.reduce((n, r) => n + r.count, 0));
+    assert.equal(
+      stampA.unmappedTotal,
+      rows.reduce((n, r) => n + r.count, 0),
+    );
   });
 
   test('after the first run completes the lease is released and a rerun succeeds', async () => {
@@ -1098,7 +1101,8 @@ describe('hardening — overlapping reconciliations (per-tenant lease)', () => {
     let clock = T0;
     const competitor: unknown[] = [];
     const f = fakeCheckRefs(async (refs) => {
-      if (f.calls.length === 1) clock = T0 + 4 * MIN; // chunk 1 is slow: 4 minutes
+      if (f.calls.length === 1)
+        clock = T0 + 4 * MIN; // chunk 1 is slow: 4 minutes
       else {
         // Chunk 2 runs at +8 min — past the ORIGINAL expiry (+5), inside the renewed one (+9).
         clock = T0 + 8 * MIN;

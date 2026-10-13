@@ -90,7 +90,7 @@ Check the summary:
 - the confirm-list is empty;
 - the only league exclusion is the Promotion Women's warning;
 - the host name shows the real branding (not "dolphins").
-The file contains PII: keep it local, delete after the prod import.
+  The file contains PII: keep it local, delete after the prod import.
 
 ## 6. Medicoach testing pass (after the PR reaches main + testing deploy)
 
@@ -163,11 +163,13 @@ node import-bundle.mjs --bundle ~/dolphins-bundle.json \
 #   node import-bundle.mjs --rollback migration-manifest.prod.jsonl \
 #     --host https://api.medicoach.co.za --env prod --map league-map.prod.json [--apply]
 ```
+
 The season starts after cutover, so standings legitimately begin empty and all
 scoring happens in medicoach. The importer's `--results` flag stays available
 if a backfill is ever needed.
 
 Publish happens automatically when each league reconciles. Then:
+
 ```bash
 # dry run: masked plan + notify-plan.prod.json
 node import-bundle.mjs --notify --bundle ~/dolphins-bundle.json \

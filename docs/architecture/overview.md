@@ -78,5 +78,8 @@ flowchart TB
 | [0017](0017-transfer-windows-and-auto-reject.md)           | Transfer windows; registrations outside auto-reject     |
 | [0018](0018-named-knockout-placeholders.md)                | Named knockout placeholders (`tbd:`) and Set team       |
 | [0019](0019-medicoach-player-sync.md)                      | Medicoach player sync: push desired roster per person   |
+| [0020](0020-match-centre-connection-console.md)            | Match Centre connection console                         |
+| [0021](0021-match-week-office.md)                          | Match-week office: officials, confirmation, ground use  |
+| [0022](0022-leagues-and-tournaments.md)                    | Leagues & tournaments: create, draw, table, knockout    |
 
 For the data layout and access patterns, see [data-model.md](data-model.md).

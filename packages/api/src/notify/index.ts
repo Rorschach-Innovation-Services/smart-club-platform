@@ -1117,7 +1117,7 @@ export async function sendFixtureReminder(args: {
 /** Tell an umpire/referee they were appointed to a fixture. */
 export async function sendOfficialAppointedNotice(args: {
   official: { name?: string; email?: string; phone?: string };
-  roleLabel: 'umpire' | 'referee';
+  roleLabel: 'umpire' | 'referee' | 'scorer';
   orgName: string;
   seriesName: string;
   /** "Umzinto CC v African Warriors". */

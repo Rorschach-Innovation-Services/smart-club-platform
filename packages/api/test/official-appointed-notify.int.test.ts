@@ -530,3 +530,87 @@ describe('notify-status route', () => {
     assert.equal(res.status, 403);
   });
 });
+
+describe('scorer notices', () => {
+  const createScorer = async (body: Record<string, unknown>) => {
+    const res = await call('POST', '/scorers', body);
+    assert.equal(res.status, 201, await res.clone().text());
+    return ((await res.json()) as { id: string }).id;
+  };
+  let scorerA: string;
+  let scorerNoContact: string;
+  before(async () => {
+    scorerA = await createScorer({
+      displayName: 'S.Scorer',
+      fullName: 'Sipho Scorer',
+      email: 'ss@example.org',
+      phone: '0820000009',
+    });
+    scorerNoContact = await createScorer({ displayName: 'S.Silent' });
+  });
+
+  test('PUT queues a role=scorer row; an umpire-only save neither re-sends nor drops it', async () => {
+    await repo.putSeries(TENANT, series('s-sc', [fx('f1')]));
+    await appoint('s-sc', 'f1', { umpires: ['u-a-ngubane'], scorers: [scorerA] });
+    assert.deepEqual((await ledger('s-sc')).map((r) => `${r.role}:${r.umpireId}`).sort(), [
+      `scorer:${scorerA}`,
+      'umpire:u-a-ngubane',
+    ]);
+    const { sends } = await run();
+    const scorerSend = sends.find((s) => s.roleLabel === 'scorer');
+    assert.equal(scorerSend?.official.name, 'Sipho Scorer');
+    assert.equal(scorerSend?.official.email, 'ss@example.org');
+    assert.equal(scorerSend?.official.phone, '0820000009');
+
+    // Partial save (umpires only): the stored scorer is kept, its completed row untouched.
+    await appoint('s-sc', 'f1', { umpires: ['u-b-tyali'] });
+    const rows = await ledger('s-sc');
+    assert.equal(rows.find((r) => r.role === 'scorer')?.status, 'completed');
+    const again = await run();
+    assert.ok(!again.sends.some((s) => s.seriesName === 'Series s-sc' && s.roleLabel === 'scorer'));
+  });
+
+  test('a scorer removed before the drain is dropped as stale without sending', async () => {
+    await repo.putSeries(TENANT, series('s-sc-stale', [fx('f1')]));
+    await appoint('s-sc-stale', 'f1', { scorers: [scorerA] });
+    // Raced write straight to the store: the ledger row survives, the scorer does not.
+    await repo.putFixtureOfficials(TENANT, 's-sc-stale', 'f1', { umpires: [] });
+    const { sends } = await run();
+    assert.ok(!sends.some((s) => s.seriesName === 'Series s-sc-stale'));
+    assert.deepEqual(await ledger('s-sc-stale'), []);
+  });
+
+  test('a contact-less scorer stays queued with no attempt counted (same as umpires)', async () => {
+    await repo.putSeries(TENANT, series('s-sc-nc', [fx('f1')]));
+    await appoint('s-sc-nc', 'f1', { scorers: [scorerNoContact] });
+    const { captured } = await run();
+    await run();
+    const [row] = await ledger('s-sc-nc');
+    assert.equal(row.role, 'scorer');
+    assert.equal(row.status, 'queued');
+    assert.equal(row.attempts, 0);
+    assert.ok(!captured.some((t) => t.seriesId === 's-sc-nc'), 'no Sentry capture');
+  });
+
+  test('backfill claims pre-existing scorer appointments; notify-status lists scorer rows', async () => {
+    const { backfillOfficialNotify } = await import('../src/backfill-official-notify.js');
+    await repo.putSeries(TENANT, series('s-sc-bf', [fx('f1')]));
+    await repo.putFixtureOfficials(TENANT, 's-sc-bf', 'f1', {
+      umpires: [],
+      scorers: [{ scorerId: scorerA, name: 'S.Scorer' }],
+    });
+    await backfillOfficialNotify(repo, { tenant: TENANT, log: () => {}, confirm: true });
+    const rows = await ledger('s-sc-bf');
+    assert.deepEqual(
+      rows.map((r) => `${r.role}:${r.umpireId}:${r.status}`),
+      [`scorer:${scorerA}:completed`],
+    );
+    const res = await call('GET', '/series/s-sc-bf/officials/notify-status');
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { rows: Array<{ role: string; umpireId: string }> };
+    assert.deepEqual(
+      body.rows.map((r) => `${r.role}:${r.umpireId}`),
+      [`scorer:${scorerA}`],
+    );
+  });
+});

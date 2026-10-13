@@ -64,8 +64,7 @@ function startStub(): Promise<void> {
         signatureHeader: req.headers['x-sync-signature'] as string | undefined,
       });
       if (!check.ok) return void res.writeHead(401).end('{}');
-      if (req.url !== contract.PLAYERS_PATH)
-        return void res.writeHead(404).end('{}');
+      if (req.url !== contract.PLAYERS_PATH) return void res.writeHead(404).end('{}');
       const body = JSON.parse(raw) as { players: Entry[] };
       pushes.push(body.players);
       const results = body.players.map((e) => ({
@@ -141,8 +140,7 @@ const mkPlayer = (over: Partial<PlayerRegistration> = {}): PlayerRegistration =>
 };
 
 const ref = (nk: string) => `smartclub:${T}:player:${nk}`;
-const flush = () =>
-  players.flushPlayerOutbox(T, 'manual', { repo, url: stubUrl, secret: SECRET });
+const flush = () => players.flushPlayerOutbox(T, 'manual', { repo, url: stubUrl, secret: SECRET });
 const sentRefs = () => pushes.flat().map((e) => `${e.op}:${e.ref}`);
 const optOut = (nk: string) =>
   repo.putPlayerSyncOptOut(T, {
@@ -317,7 +315,11 @@ describe('operator CLI', () => {
     await repo.createPlayer(T, p);
     await review(p.naturalKey);
 
-    await cli.run(args({ player: p.naturalKey.slice(0, 8), confirm: true, note: 'MC self-delete' }), repo, log);
+    await cli.run(
+      args({ player: p.naturalKey.slice(0, 8), confirm: true, note: 'MC self-delete' }),
+      repo,
+      log,
+    );
 
     const marker = await repo.getPlayerSyncOptOut(T, p.naturalKey);
     assert.equal(marker?.reason, 'medicoach-account-deleted');
@@ -355,7 +357,11 @@ describe('operator CLI', () => {
     await optOut(p.naturalKey);
     await repo.deletePendingPlayerSync(T, p.naturalKey);
 
-    await cli.run(args({ player: p.naturalKey.slice(0, 8), remove: true, confirm: true }), repo, log);
+    await cli.run(
+      args({ player: p.naturalKey.slice(0, 8), remove: true, confirm: true }),
+      repo,
+      log,
+    );
 
     assert.equal(await repo.getPlayerSyncOptOut(T, p.naturalKey), null);
     assert.ok(await repo.getPendingPlayerSync(T, p.naturalKey), 're-queued');

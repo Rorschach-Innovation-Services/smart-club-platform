@@ -519,15 +519,18 @@ export interface WritePlan {
 const sameOfficials = (a: FixtureOfficials | null | undefined, b: FixtureOfficials): boolean =>
   !!a &&
   a.umpires.map((u) => u.umpireId).join('|') === b.umpires.map((u) => u.umpireId).join('|') &&
-  (a.referee?.umpireId ?? '') === (b.referee?.umpireId ?? '');
+  (a.referee?.umpireId ?? '') === (b.referee?.umpireId ?? '') &&
+  (a.scorers ?? []).map((x) => x.scorerId).join('|') ===
+    (b.scorers ?? []).map((x) => x.scorerId).join('|');
 
 /** One appointed official on a fixture, as the notice ledger keys it. */
 export interface OfficialPair {
+  /** The registry id for the role: an umpire id for umpire/referee, a scorer id for scorer. */
   umpireId: string;
-  role: 'umpire' | 'referee';
+  role: 'umpire' | 'referee' | 'scorer';
 }
 
-/** Every (umpireId, role) pair in an appointment (deduped; empty for null). */
+/** Every (registry id, role) pair in an appointment (deduped; empty for null). */
 export function officialPairs(officials: FixtureOfficials | null | undefined): OfficialPair[] {
   if (!officials) return [];
   const out: OfficialPair[] = [];
@@ -540,6 +543,7 @@ export function officialPairs(officials: FixtureOfficials | null | undefined): O
   };
   for (const u of officials.umpires ?? []) add(u.umpireId, 'umpire');
   if (officials.referee) add(officials.referee.umpireId, 'referee');
+  for (const x of officials.scorers ?? []) add(x.scorerId, 'scorer');
   return out;
 }
 
@@ -587,11 +591,14 @@ export function planWrites(
       .filter((u) => (ids.includes(u.id) ? false : (ids.push(u.id), true)))
       .map((u) => ({ umpireId: u.id, name: u.displayName }));
     const ref = m.row.referee ? byName.get(m.row.referee) : undefined;
+    const prev = existing.get(`${m.seriesId}#${m.fixtureId}`);
+    // The sheet names umpires only: carry the stored scorers through, or the whole-item write
+    // would wipe them (and the notice diff would drop their ledger rows).
     const officials: FixtureOfficials = {
       umpires,
       ...(ref ? { referee: { umpireId: ref.id, name: ref.displayName } } : {}),
+      ...(prev?.scorers?.length ? { scorers: prev.scorers } : {}),
     };
-    const prev = existing.get(`${m.seriesId}#${m.fixtureId}`);
     const action: WriteAction = sameOfficials(prev, officials)
       ? 'unchanged'
       : prev && (prev.umpires.length || prev.referee)
