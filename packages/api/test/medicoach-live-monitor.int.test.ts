@@ -519,6 +519,7 @@ describe('match monitor', () => {
     let h = (await health())!;
     assert.equal(h.liveLastOkAt, r.generatedAt);
     assert.equal(h.liveLinksUnconfigured, false);
+    assert.equal(h.liveLinksCheckedAt, r.generatedAt);
 
     // A live match without a link flags the links as unconfigured.
     body = {
@@ -529,14 +530,25 @@ describe('match monitor', () => {
     h = (await health())!;
     assert.equal(h.liveLastOkAt, r.generatedAt);
     assert.equal(h.liveLinksUnconfigured, true);
+    assert.equal(h.liveLinksCheckedAt, r.generatedAt);
+    const flaggedAt = r.generatedAt;
 
-    // A day with no live match (not started) leaves the links signal as it was.
+    // A day with no live match (not started) leaves the links signal and its time as they were.
     body = {
       ...(body as object),
       matches: [liveMatch(REF('s1', 'f1'), { status: 'not_started', medicoachMatchUrl: null })],
     };
     await poll();
-    assert.equal((await health())!.liveLinksUnconfigured, true);
+    h = (await health())!;
+    assert.equal(h.liveLinksUnconfigured, true);
+    assert.equal(h.liveLinksCheckedAt, flaggedAt);
+
+    // Links restored: a live match with a link clears the flag as today's observation.
+    body = { ...(body as object), matches: [liveMatch(REF('s1', 'f1'))] };
+    r = await poll();
+    h = (await health())!;
+    assert.equal(h.liveLinksUnconfigured, false);
+    assert.equal(h.liveLinksCheckedAt, r.generatedAt);
 
     // Failures: failingSince is the FIRST failure of the run; lastError is technical text.
     httpFail = 502;

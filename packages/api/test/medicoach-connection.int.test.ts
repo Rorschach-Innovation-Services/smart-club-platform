@@ -485,6 +485,7 @@ describe('operator endpoints', () => {
       liveFailingSince: '2026-10-08T08:30:00.000Z',
       liveLastError: 'medicoach answered HTTP 502',
       liveLinksUnconfigured: true,
+      liveLinksCheckedAt: new Date(Date.now() - 60_000).toISOString(),
     });
     let body = await view(get(`/platform/tenants/${T}/medicoach/connection`));
     assert.deepEqual(body.live, {
@@ -504,6 +505,13 @@ describe('operator endpoints', () => {
     assert.equal(body.live.failingSince, null);
     assert.equal(body.live.lastError, null);
     assert.equal(body.live.linksUnconfigured, true);
+
+    // A flag observed more than 7 days ago is not shown as current.
+    await repo.putSyncHealth(T, {
+      liveLinksCheckedAt: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    body = await view(get(`/platform/tenants/${T}/medicoach/connection`));
+    assert.equal(body.live.linksUnconfigured, false);
   });
 
   test('connection: never synced with secrets set reads `never`; a tenant without the sync too', async () => {

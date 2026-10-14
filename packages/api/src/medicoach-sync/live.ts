@@ -322,7 +322,10 @@ export function liveHealthPatch(
   return {
     liveLastOkAt: at,
     ...(liveNow.length
-      ? { liveLinksUnconfigured: liveNow.some((m) => m.medicoachMatchUrl === null) }
+      ? {
+          liveLinksUnconfigured: liveNow.some((m) => m.medicoachMatchUrl === null),
+          liveLinksCheckedAt: at,
+        }
       : {}),
   };
 }

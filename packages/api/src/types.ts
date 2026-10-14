@@ -1463,6 +1463,8 @@ export interface SyncHealth {
    * only when that answer had a live match; otherwise the previous value stands.
    */
   liveLinksUnconfigured?: boolean;
+  /** When liveLinksUnconfigured was last observed (written with it, true or false). */
+  liveLinksCheckedAt?: string;
 }
 
 /**

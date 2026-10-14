@@ -37,7 +37,16 @@ export type LiveEndpointStatus = 'reachable' | 'failing' | 'never';
  * the last failure is newer than the last good answer (or there was none), reachable after a
  * good answer, never before the monitor has made a real fetch.
  */
-export function liveEndpointView(health: SyncHealth | null): MedicoachConnectionView['live'] {
+/**
+ * How long a links-unconfigured observation stays current. The flag is only re-observed on a
+ * day with a live match, so an older one is shown as nothing rather than as today's truth.
+ */
+export const LIVE_LINKS_FLAG_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function liveEndpointView(
+  health: SyncHealth | null,
+  now: number = Date.now(),
+): MedicoachConnectionView['live'] {
   const ok = health?.liveLastOkAt ?? null;
   const err = health?.liveLastErrorAt ?? null;
   const status: LiveEndpointStatus =
@@ -48,7 +57,10 @@ export function liveEndpointView(health: SyncHealth | null): MedicoachConnection
     lastErrorAt: err,
     failingSince: status === 'failing' ? (health?.liveFailingSince ?? err) : null,
     lastError: status === 'failing' ? (health?.liveLastError ?? null) : null,
-    linksUnconfigured: health?.liveLinksUnconfigured === true,
+    linksUnconfigured:
+      health?.liveLinksUnconfigured === true &&
+      !!health.liveLinksCheckedAt &&
+      now - Date.parse(health.liveLinksCheckedAt) <= LIVE_LINKS_FLAG_MAX_AGE_MS,
   };
 }
 
