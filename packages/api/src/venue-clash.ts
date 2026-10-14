@@ -311,6 +311,19 @@ export function clashKey(
   return `${c.fixtureId}|${groundKey(c.ground, aliases)}|${c.with.seriesId}/${c.with.fixtureId}`;
 }
 
+/** Identity of a double-booking as an UNORDERED pair on a ground: both `seriesId/fixtureId`
+ * refs sorted and `~`-joined, plus the normalised ground. `clashKey` is directional (the gate
+ * reports each double-booking once from each side); this collapses the two directions to one
+ * key, which is what the amendments upload's per-clash override acknowledges. Like `clashKey`,
+ * deliberately no date/time component (ADR 0011). */
+export function clashPairKey(
+  c: Clash & { subjectSeriesId: string },
+  aliases: Record<string, string> = DEFAULT_VENUE_ALIASES,
+): string {
+  const refs = [`${c.subjectSeriesId}/${c.fixtureId}`, `${c.with.seriesId}/${c.with.fixtureId}`];
+  return `${refs.sort().join('~')}|${groundKey(c.ground, aliases)}`;
+}
+
 /** Back-compat wrapper: the release gate's original prose-line signature, now a projection
  * of `findClashes`. Existing callers and tests are untouched. */
 export function findReleaseClashes(

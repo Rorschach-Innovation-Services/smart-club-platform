@@ -193,8 +193,10 @@ export interface PatchGate {
  * How the gate decides. `strict` (the CLI default): refuse any introduced clash AND any clash
  * on the manifest dates involving a released fixture (and any residual draft-vs-released
  * slot after relocation). `introduced` (the operator upload): refuse only clashes the plan
- * INTRODUCES (the in-season subset rule); pre-existing ones are reported, not fatal. Neither
- * mode has a bypass for an introduced clash.
+ * INTRODUCES (the in-season subset rule); pre-existing ones are reported, not fatal. Both
+ * modes put an introduced clash in `plan.errors`; the operator upload alone may override one,
+ * by acknowledging its pair key at confirm (reminder-fixtures.ts filters the gate line out of
+ * its verdict). The CLI has no bypass.
  */
 export type PatchGateMode = 'strict' | 'introduced';
 

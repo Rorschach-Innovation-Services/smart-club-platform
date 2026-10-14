@@ -21,7 +21,9 @@ import { createReleased, createSeries, getSeries, patchSeries } from './fixtures
  *     shown as "Sheet not read" with the reason, and their rows are never applied;
  *   - an admin edit between preview and Apply → 409 plan_changed: a toast, the fresh preview
  *     (with the fixture's new live values) replaces the stale one, nothing is written;
- *   - a change that lands on a ground a released fixture holds blocks the whole upload;
+ *   - a change that lands on a ground a released fixture holds blocks the upload until the
+ *     clash is unticked or overridden ("Override all"); the raw API still refuses it without
+ *     the clash keys;
  *   - a change that lands on a ground a DRAFT fixture holds can relocate that draft instead,
  *     and the result reports the relocation apart from the sheet amendments.
  *
@@ -356,7 +358,7 @@ test('an admin edit between preview and Apply is refused with the fresh preview 
   expect(done.fixtures.find((f) => f.id === 'f2')).toMatchObject({ time: '13:30' });
 });
 
-test('a change onto a ground a released fixture holds blocks the whole upload', async ({
+test('a change onto a ground a released fixture holds blocks the upload until overridden', async ({
   page,
   request,
 }) => {
@@ -383,7 +385,7 @@ test('a change onto a ground a released fixture holds blocks the whole upload', 
   await openAmendments(page);
   await upload(page, buffer);
 
-  const blockPanel = page.locator('.insights-callout.alert', { hasText: 'Blocked' });
+  const blockPanel = page.locator('.insights-callout', { hasText: 'venue clash' });
   // One double-booking, listed once (the gate sees it from both fixtures' sides).
   await expect(blockPanel).toContainText(
     'Blocked — these amendments would introduce 1 venue clash.',
@@ -395,9 +397,10 @@ test('a change onto a ground a released fixture holds blocks the whole upload', 
   await expect(blockPanel).not.toContainText('draft relocation');
   await expect(applyBtn(page)).toHaveText('Apply 2 changes');
   await expect(applyBtn(page)).toBeDisabled();
-  await expect(page.getByText('Resolve the blocking clash first.')).toBeVisible();
+  await expect(page.getByText('Resolve or override the blocking clashes first.')).toBeVisible();
+  await expect(blockPanel.getByRole('checkbox', { name: /^Apply anyway:/ })).not.toBeChecked();
 
-  // The server refuses the plan too, even with its own fresh hash.
+  // The server refuses the plan too, even with its own fresh hash, without the clash keys.
   const pv = await request.post(
     `${API_BASE}/platform/tenants/${TENANT}/fixture-amendments/preview`,
     { headers: operator(), data: { filename: 'r.xlsx', dataBase64: buffer.toString('base64') } },
@@ -424,6 +427,19 @@ test('a change onto a ground a released fixture holds blocks the whole upload', 
   await expect(blockPanel).toHaveCount(0);
   await expect(applyBtn(page)).toHaveText('Apply 1 change');
   await expect(applyBtn(page)).toBeEnabled();
+
+  // Re-ticking brings the clash back unacknowledged; "Override all" applies it anyway.
+  await moved.getByRole('checkbox').check();
+  await expect(applyBtn(page)).toHaveText('Apply 2 changes');
+  await expect(applyBtn(page)).toBeDisabled();
+  await blockPanel.getByRole('checkbox', { name: /Override all 1 clash/ }).check();
+  await expect(blockPanel).toContainText('Overriding 1 venue clash — they will be applied anyway.');
+  await expect(applyBtn(page)).toBeEnabled();
+  await applyBtn(page).click();
+  await expect(page.locator('.insights-callout.good')).toContainText('Amended 2 fixtures.');
+  await expect(page.locator('.toast', { hasText: '1 clash overridden' })).toBeVisible();
+  const done = await storedFixtures(request, w.seriesId);
+  expect(done.version).toBeGreaterThan(before.version);
 });
 
 test('a change onto a ground a draft fixture holds relocates the draft when opted in', async ({
