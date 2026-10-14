@@ -223,7 +223,8 @@ Body:
     gender?: string,
     email?: string,              // may be absent; see email rules below
     cell?: string,
-    isMinor?: boolean,
+    isMinor?: boolean,           // derived from dob at build time when dob is present (under 18);
+                                 //   the stored registration flag is only the fallback
     guardianName?: string,
     teamRefs?: string[],         // the COMPLETE set of smart-club-mapped teams the player belongs on
     fanOutTeamRefs?: string[],   // additive (2026-10-10): ADD-ONLY fan-out sides, disjoint from
@@ -266,7 +267,8 @@ Medicoach rules:
   2. Exact normalised name + dob WITHIN the target institution only → link. The same match at a
      DIFFERENT institution → `needs-review`.
   3. Anything weaker, or MORE THAN ONE candidate at any tier → `needs-review` with `candidates`.
-  4. No candidate → create. A 409 identity-claim conflict on create is NOT a link: link only when
+  4. No candidate → create, with email/cell on the player's own fields; a minor ALSO gets
+     guardianName, guardianEmail (= email) and guardianNumber (= cell). A 409 identity-claim conflict on create is NOT a link: link only when
      the claim-holder's dob or SA-ID hash agrees AND the holder belongs to one of the tenant's
      smart-club-mapped institutions; otherwise `needs-review` with the holder as candidate.
   A `resolution` skips matching: `link` binds the ref to that player id; `create` creates unless
@@ -283,7 +285,10 @@ Medicoach rules:
   there too (new entries unticked), preserving existing squad ticks.
 - Details: update only name, dob, contact and guardian fields. Name/email changes go through the
   identity-claim rekey in the same transaction. Email is asymmetric: fill a placeholder, never
-  replace a real email (and never once the player's account is active). Names compare normalised
+  replace a real email (and never once the player's account is active). Email/cell always go to
+  the player's own fields under that rule, minors included; for a minor (dob under 18 when a dob
+  is pushed, else `isMinor`) guardianName/guardianEmail/guardianNumber are ADDITIONALLY filled
+  from guardianName/email/cell. Guardian fields are never cleared. Names compare normalised
   (single `name` vs "firstName lastName"; case/space/middle-name tolerant).
 - `remove`: soft-remove the ref's licensed memberships (its stored set minus what the athlete's
   other live refs want); a legacy ref with no stored set drops every smart-club-mapped membership
