@@ -259,6 +259,8 @@ test('match-day reports open to the chairs without a result, and gain it later w
 
   await signInAsAdmin(browser);
   await browser.locator('aside.nav .nav-item', { hasText: 'Medicoach sync' }).click();
+  // The sync controls live on the "Sync health" tab (the page opens on the Action board).
+  await browser.getByRole('tab', { name: /Sync health/ }).click();
   await expect(browser.getByRole('heading', { name: /Medicoach sync/ })).toBeVisible();
 
   // 1. Match day, no result: one report per side, both to the chairs, one notice each.
