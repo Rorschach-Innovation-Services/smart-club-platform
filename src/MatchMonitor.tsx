@@ -343,7 +343,7 @@ export function MatchMonitor({
                       label="No scorer input for"
                       unit="min"
                       value={t.quietMin}
-                      options={[5, 10, 15, 20]}
+                      options={[5, 10, 15, 20, 30, 45]}
                       onChange={(v) => setThreshold('quietMin', v)}
                     />
                     <Threshold

@@ -25,7 +25,7 @@ import {
   type LivePlayer,
 } from '../medicoach-sync-contract.js';
 import { fixtureSyncRef } from '../fixture-identity.js';
-import type { Club, PlayerRegistration, Series } from '../types.js';
+import type { Club, PlayerRegistration, Series, SyncHealth } from '../types.js';
 import { explainSyncError } from './explain.js';
 import { MedicoachSyncError } from './puller.js';
 
@@ -281,6 +281,52 @@ export interface LiveDeps {
   fetch?: typeof fetch;
 }
 
+/** A medicoach match is "live" here while it is being scored (not before, not after). */
+const LIVE_STATUSES = new Set<LiveMatch['status']>(['in_progress', 'innings_break']);
+
+/**
+ * Merge one fetch's live facet into SYNCHEALTH#, keeping `liveFailingSince` at the first
+ * failure of a run of failures (one extra read per real fetch; the response cache bounds it).
+ */
+export async function recordLiveHealth(
+  repo: {
+    getSyncHealth: (tenant: string) => Promise<SyncHealth | null>;
+    putSyncHealth: (tenant: string, patch: SyncHealth) => Promise<void>;
+  },
+  tenant: string,
+  patch: SyncHealth,
+): Promise<void> {
+  if (patch.liveLastErrorAt) {
+    const prev = await repo.getSyncHealth(tenant);
+    const wasFailing =
+      prev?.liveFailingSince &&
+      (!prev.liveLastOkAt || Date.parse(prev.liveFailingSince) > Date.parse(prev.liveLastOkAt));
+    patch = {
+      ...patch,
+      liveFailingSince: wasFailing ? prev!.liveFailingSince : patch.liveLastErrorAt,
+    };
+  }
+  await repo.putSyncHealth(tenant, patch);
+}
+
+/**
+ * The live facet of SYNCHEALTH# for one real fetch (pure): ok or failed, and — when the answer
+ * had a live match — whether any live match came without a medicoach link.
+ */
+export function liveHealthPatch(
+  at: string,
+  outcome: { ok: true; matches: LiveMatch[] } | { ok: false; error: string },
+): SyncHealth {
+  if (!outcome.ok) return { liveLastErrorAt: at, liveLastError: outcome.error };
+  const liveNow = outcome.matches.filter((m) => LIVE_STATUSES.has(m.status));
+  return {
+    liveLastOkAt: at,
+    ...(liveNow.length
+      ? { liveLinksUnconfigured: liveNow.some((m) => m.medicoachMatchUrl === null) }
+      : {}),
+  };
+}
+
 /** The live response with each match left unparsed, so one bad match can't sink the day. */
 const LiveEnvelopeSchema = LiveResponseSchema.extend({ matches: z.array(z.unknown()) });
 
@@ -352,6 +398,8 @@ export async function buildMatchMonitor(
   deps: LiveDeps & {
     now?: () => Date;
     listPlayers: RosterDeps['listPlayers'];
+    /** Merge the live facet into SYNCHEALTH# (real fetches only; a failure here is logged, never thrown). */
+    recordHealth?: (patch: SyncHealth) => Promise<void>;
   },
 ): Promise<MatchMonitorResponse> {
   const now = deps.now ?? (() => new Date());
@@ -369,12 +417,25 @@ export async function buildMatchMonitor(
       unmatched: 0,
       parseFailures: 0,
     };
+  const record = async (patch: SyncHealth) => {
+    if (!deps.recordHealth) return;
+    try {
+      await deps.recordHealth(patch);
+    } catch (err) {
+      // The console line goes stale; the monitor still answers. No payload data is logged.
+      console.error('match monitor: recording live health failed', {
+        tenant,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
   let live: LiveMatch[];
   let parseFailures: number;
   try {
     ({ matches: live, parseFailures } = await fetchLiveMatches(tenant, date, deps));
   } catch (err) {
     if (!(err instanceof MedicoachSyncError)) throw err;
+    await record(liveHealthPatch(base.generatedAt, { ok: false, error: err.message }));
     return {
       ...base,
       dryRun: false,
@@ -390,6 +451,7 @@ export async function buildMatchMonitor(
       parseFailures: 0,
     };
   }
+  await record(liveHealthPatch(base.generatedAt, { ok: true, matches: live }));
   const byRef = new Map(live.map((l) => [l.ref, l]));
   const refs = new Set(day.map((m) => m.ref));
   const payload: MatchMonitorResponse = {

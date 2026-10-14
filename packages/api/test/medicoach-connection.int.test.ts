@@ -443,6 +443,7 @@ describe('operator endpoints', () => {
     'health',
     'inferred',
     'lastReconcileAt',
+    'live',
     'mcReachable',
     'playerSync',
     'stage',
@@ -464,9 +465,45 @@ describe('operator endpoints', () => {
       mcReachable: null,
       lastReconcileAt: null,
       health: { status: 'dry-run', lastSuccessAt: null, lastError: null },
+      live: {
+        status: 'never',
+        lastOkAt: null,
+        lastErrorAt: null,
+        failingSince: null,
+        lastError: null,
+        linksUnconfigured: false,
+      },
       awaitingTotal: 0,
       awaiting: [],
     });
+  });
+
+  test('connection: the live endpoint line — failing since the first failure, then reachable', async () => {
+    await repo.putSyncHealth(T, {
+      liveLastOkAt: '2026-10-08T08:00:00.000Z',
+      liveLastErrorAt: '2026-10-08T09:00:00.000Z',
+      liveFailingSince: '2026-10-08T08:30:00.000Z',
+      liveLastError: 'medicoach answered HTTP 502',
+      liveLinksUnconfigured: true,
+    });
+    let body = await view(get(`/platform/tenants/${T}/medicoach/connection`));
+    assert.deepEqual(body.live, {
+      status: 'failing',
+      lastOkAt: '2026-10-08T08:00:00.000Z',
+      lastErrorAt: '2026-10-08T09:00:00.000Z',
+      failingSince: '2026-10-08T08:30:00.000Z',
+      lastError: 'medicoach answered HTTP 502',
+      linksUnconfigured: true,
+    });
+    // The sync's own health is a separate facet of the same row and stays untouched.
+    assert.equal(body.health.lastSuccessAt, null);
+
+    await repo.putSyncHealth(T, { liveLastOkAt: '2026-10-08T09:30:00.000Z' });
+    body = await view(get(`/platform/tenants/${T}/medicoach/connection`));
+    assert.equal(body.live.status, 'reachable');
+    assert.equal(body.live.failingSince, null);
+    assert.equal(body.live.lastError, null);
+    assert.equal(body.live.linksUnconfigured, true);
   });
 
   test('connection: never synced with secrets set reads `never`; a tenant without the sync too', async () => {

@@ -30,6 +30,28 @@ export function syncHealthStatus(health: SyncHealth | null, dryRun: boolean): Sy
   return health?.lastSuccessAt ? 'ok' : 'never';
 }
 
+export type LiveEndpointStatus = 'reachable' | 'failing' | 'never';
+
+/**
+ * The live endpoint (match monitor) in one word, from SYNCHEALTH#'s live facet: failing when
+ * the last failure is newer than the last good answer (or there was none), reachable after a
+ * good answer, never before the monitor has made a real fetch.
+ */
+export function liveEndpointView(health: SyncHealth | null): MedicoachConnectionView['live'] {
+  const ok = health?.liveLastOkAt ?? null;
+  const err = health?.liveLastErrorAt ?? null;
+  const status: LiveEndpointStatus =
+    err && (!ok || Date.parse(err) > Date.parse(ok)) ? 'failing' : ok ? 'reachable' : 'never';
+  return {
+    status,
+    lastOkAt: ok,
+    lastErrorAt: err,
+    failingSince: status === 'failing' ? (health?.liveFailingSince ?? err) : null,
+    lastError: status === 'failing' ? (health?.liveLastError ?? null) : null,
+    linksUnconfigured: health?.liveLinksUnconfigured === true,
+  };
+}
+
 export interface MedicoachConnectionView {
   stage: 'not_connected' | 'live';
   inferred: true;
@@ -40,6 +62,15 @@ export interface MedicoachConnectionView {
   mcReachable: boolean | null;
   lastReconcileAt: string | null;
   health: { status: SyncHealthStatus; lastSuccessAt: string | null; lastError: string | null };
+  /** The match monitor's live endpoint, recorded inline on each real live fetch. */
+  live: {
+    status: LiveEndpointStatus;
+    lastOkAt: string | null;
+    lastErrorAt: string | null;
+    failingSince: string | null;
+    lastError: string | null;
+    linksUnconfigured: boolean;
+  };
   awaitingTotal: number;
   awaiting: Array<{
     seriesId: string;
@@ -82,6 +113,7 @@ export async function buildConnectionView(
       lastSuccessAt: health?.lastSuccessAt ?? null,
       lastError: health?.lastError ?? null,
     },
+    live: liveEndpointView(health),
     awaitingTotal: rows.reduce((sum, r) => sum + r.count, 0),
     awaiting: rows.map((r) => ({
       seriesId: r.seriesId,

@@ -60,6 +60,17 @@ function reachableText(r: boolean | null): string {
   return r ? 'Reachable' : 'Not reachable';
 }
 
+/** The live endpoint (match monitor) in a few words. */
+export function liveEndpointText(live: MedicoachConnection['live']): string {
+  if (!live || live.status === 'never') return 'Never used';
+  if (live.status === 'failing')
+    return `Failing since ${formatStamp(live.failingSince ?? live.lastErrorAt ?? '')}`;
+  return 'Reachable';
+}
+
+export const LINKS_UNCONFIGURED_COPY =
+  "medicoach match links aren't configured — the monitor's 'medicoach ↗' buttons won't show.";
+
 export function MedicoachConsolePage({ toast }: { toast: Toast }) {
   const { slug = '' } = useParams();
   const navigate = useNavigate();
@@ -183,7 +194,13 @@ export function MedicoachConsolePage({ toast }: { toast: Toast }) {
               <StatusRow label="Last successful sync">
                 {conn.health.lastSuccessAt ? formatStamp(conn.health.lastSuccessAt) : 'Never'}
               </StatusRow>
+              <StatusRow label="Live endpoint">{liveEndpointText(conn.live)}</StatusRow>
             </div>
+            {conn.live?.linksUnconfigured && (
+              <p style={{ ...HINT, color: 'var(--muted)' }} data-testid="live-links-unconfigured">
+                {LINKS_UNCONFIGURED_COPY}
+              </p>
+            )}
             <p style={HINT}>
               The stage is inferred from this client&apos;s settings until the Match Centre reports
               its own connection summary. Conflicts and the outbox are on the client&apos;s

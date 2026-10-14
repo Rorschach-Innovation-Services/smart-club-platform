@@ -500,6 +500,14 @@ test('a flag threshold hides and restores a flag, and persists across a reload',
   await expect(quiet).toContainText(/No input for 1[23] min/);
   const select = page.getByLabel('No scorer input for');
   await page.getByText('Flag thresholds').click();
+  await expect(select.locator('option')).toHaveText([
+    '5 min',
+    '10 min',
+    '15 min',
+    '20 min',
+    '30 min',
+    '45 min',
+  ]);
   await select.selectOption('15');
   await expect(quiet).toHaveCount(0);
 

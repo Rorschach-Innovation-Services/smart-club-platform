@@ -507,6 +507,66 @@ describe('match monitor', () => {
     assert.equal(seen.length, 2);
   });
 
+  test('each real fetch stamps the live facet of SYNCHEALTH#: ok, failing since, links', async () => {
+    const health = () => repo.getSyncHealth(T);
+    const poll = async () => {
+      live.resetLiveCaches();
+      return (await (await get(`?date=${DAY}`)).json()) as MatchMonitorResponse;
+    };
+    // A good answer whose live match has a link: reachable, links configured.
+    let r = await poll();
+    assert.equal(r.reachable, true);
+    let h = (await health())!;
+    assert.equal(h.liveLastOkAt, r.generatedAt);
+    assert.equal(h.liveLinksUnconfigured, false);
+
+    // A live match without a link flags the links as unconfigured.
+    body = {
+      ...(body as object),
+      matches: [liveMatch(REF('s1', 'f1'), { medicoachMatchUrl: null })],
+    };
+    r = await poll();
+    h = (await health())!;
+    assert.equal(h.liveLastOkAt, r.generatedAt);
+    assert.equal(h.liveLinksUnconfigured, true);
+
+    // A day with no live match (not started) leaves the links signal as it was.
+    body = {
+      ...(body as object),
+      matches: [liveMatch(REF('s1', 'f1'), { status: 'not_started', medicoachMatchUrl: null })],
+    };
+    await poll();
+    assert.equal((await health())!.liveLinksUnconfigured, true);
+
+    // Failures: failingSince is the FIRST failure of the run; lastError is technical text.
+    httpFail = 502;
+    const first = await poll();
+    assert.equal(first.reachable, false);
+    await new Promise((res) => setTimeout(res, 5));
+    const second = await poll();
+    h = (await health())!;
+    assert.equal(h.liveLastErrorAt, second.generatedAt);
+    assert.equal(h.liveFailingSince, first.generatedAt);
+    assert.equal(h.liveLastError, 'medicoach answered HTTP 502');
+    // The sync's own facet is never touched by the monitor.
+    assert.equal(h.lastErrorAt, undefined);
+
+    // Recovery, then a new failure starts a new run.
+    httpFail = null;
+    await poll();
+    await new Promise((res) => setTimeout(res, 5));
+    httpFail = 502;
+    const again = await poll();
+    assert.equal((await health())!.liveFailingSince, again.generatedAt);
+  });
+
+  test('a dry run records nothing in the live facet', async () => {
+    const before = await repo.getSyncHealth(T);
+    process.env.MEDICOACH_SYNC_SECRET = '';
+    await get(`?date=${DAY}`);
+    assert.deepEqual(await repo.getSyncHealth(T), before);
+  });
+
   test('with the sync unconfigured it is a dry run with no request made', async () => {
     process.env.MEDICOACH_SYNC_SECRET = '';
     const r = (await (await get(`?date=${DAY}`)).json()) as MatchMonitorResponse;

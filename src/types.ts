@@ -612,6 +612,19 @@ export interface MedicoachConnection {
     lastSuccessAt: string | null;
     lastError: string | null;
   };
+  /**
+   * The match monitor's live endpoint, recorded on each real live fetch. Optional only so a
+   * page newer than its API still renders.
+   */
+  live?: {
+    status: 'reachable' | 'failing' | 'never';
+    lastOkAt: string | null;
+    lastErrorAt: string | null;
+    failingSince: string | null;
+    lastError: string | null;
+    /** A live match came without a medicoach link (LIVE_BASE_URL / institution slug unset). */
+    linksUnconfigured: boolean;
+  };
   awaitingTotal: number;
   awaiting: MedicoachAwaitingSeries[];
 }

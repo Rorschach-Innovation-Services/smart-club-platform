@@ -1447,6 +1447,22 @@ export interface SyncHealth {
   lastErrorAt?: string;
   /** Technical text (the "Details" toggle); the page explains it with explainSyncError. */
   lastError?: string;
+  /**
+   * The live endpoint's facet of the same row (match monitor), stamped inline on each real
+   * (non-dry-run) live fetch: the last good answer and the last failure.
+   */
+  liveLastOkAt?: string;
+  liveLastErrorAt?: string;
+  /** Technical text only (status / contract path) — never a payload value. */
+  liveLastError?: string;
+  /** The first failure after the last good answer (kept while it keeps failing). */
+  liveFailingSince?: string;
+  /**
+   * True when the last good answer with any live match had a live match without a
+   * medicoachMatchUrl (medicoach's LIVE_BASE_URL or the institution slug is unset). Written
+   * only when that answer had a live match; otherwise the previous value stands.
+   */
+  liveLinksUnconfigured?: boolean;
 }
 
 /**

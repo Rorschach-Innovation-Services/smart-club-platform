@@ -64,7 +64,7 @@ import {
 } from './medicoach-sync/series-results.js';
 import { MedicoachSyncError } from './medicoach-sync/puller.js';
 import { runTenantSync } from './medicoach-sync/run.js';
-import { buildMatchMonitor } from './medicoach-sync/live.js';
+import { buildMatchMonitor, recordLiveHealth } from './medicoach-sync/live.js';
 import { isReconcileBusy, reconcileAwaitingCarry } from './medicoach-sync/reconcile.js';
 import { buildConnectionView, buildOverviewRow } from './medicoach-sync/connection.js';
 import {
@@ -5395,7 +5395,12 @@ app.get('/integrations/medicoach/live', async (c) => {
       tenant,
       date,
       { series, clubs },
-      { url: medicoachSyncUrl(), secret: medicoachSyncSecret(), listPlayers: repo.listPlayers },
+      {
+        url: medicoachSyncUrl(),
+        secret: medicoachSyncSecret(),
+        listPlayers: repo.listPlayers,
+        recordHealth: (patch) => recordLiveHealth(repo, tenant, patch),
+      },
     ),
   );
 });
