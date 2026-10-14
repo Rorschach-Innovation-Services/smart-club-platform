@@ -72,6 +72,9 @@ export function isWithheld(series: Series, field: WithheldField): boolean {
  *  - `withheld.venue` ⇒ each fixture loses all eight venue keys
  *  - always keeps `withheld`/`revealedAt` so the client renders "to be confirmed"
  *    explicitly rather than inferring it from missing fields
+ *  - always keeps each fixture's `status`, `originalDate` and `postponementId` (ADR 0015):
+ *    a postponement's dates are not withheld data — dates never are — so clubs see the
+ *    postponed badge and the struck-through original date even on a withheld series
  */
 export function projectSeriesForClub(series: Series, today: string): Series | null {
   if (!series.released) return null;

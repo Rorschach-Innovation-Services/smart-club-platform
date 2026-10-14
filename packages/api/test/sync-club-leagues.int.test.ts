@@ -142,6 +142,14 @@ before(async () => {
         group: 'Seniors',
         district: 'All districts',
       },
+      // A fixtures-only cup: only its key may ever be added to a club.
+      {
+        key: 'premier-t20',
+        label: 'Premier T20',
+        group: 'Cups',
+        district: 'All districts',
+        fixturesOnly: true,
+      },
     ],
   } as unknown as Parameters<(typeof import('../src/repo.js'))['putTenantConfig']>[0]);
 
@@ -371,5 +379,37 @@ describe('syncClubLeaguesFromSeries', () => {
     assert.ok(!summary!.includes('+[none]'), 'summary must not print +[none]');
     assert.match(summary!, /rosters: veterans-promotion\(2\)/);
     assert.match(summary!, /count: veterans-promotion 1→2/);
+  });
+
+  test('a fixtures-only cup adds only its league key — never a roster or a count', async () => {
+    // The cup borrows charlie's PREMIER roster ids (two sides).
+    const cup = series('s-cup', 'premier-t20', false, [
+      participant('tm_charlie_premier_0', 'charlie', 'Charlie A'),
+      participant('tm_charlie_premier_1', 'charlie', 'Charlie B'),
+    ]);
+    const before = await repo.getClub(TENANT, 'charlie');
+    const r = await syncClubLeaguesFromSeries(TENANT, {
+      confirm: true,
+      includeDrafts: true,
+      series: [cup],
+      only: ['s-cup'],
+      log: () => {},
+    });
+    assert.equal(r.patched, 1);
+    assert.equal(r.conflicts, 0);
+    assert.ok((await leaguesOf('charlie')).includes('premier-t20'));
+    assert.equal((await leagueTeamsOf('charlie'))['premier-t20'], undefined);
+    assert.equal((await rostersOf('charlie'))['premier-t20'], undefined);
+    // the premier roster the cup borrowed from is untouched
+    assert.deepEqual((await rostersOf('charlie')).premier, before!.teamRosters!.premier);
+    // idempotent
+    const again = await syncClubLeaguesFromSeries(TENANT, {
+      confirm: true,
+      includeDrafts: true,
+      series: [cup],
+      only: ['s-cup'],
+      log: () => {},
+    });
+    assert.equal(again.patched, 0);
   });
 });

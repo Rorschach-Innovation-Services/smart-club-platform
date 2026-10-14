@@ -36,7 +36,7 @@
  * migration bundle carries its own `venueWithheld`/`timeWithheld`.
  */
 import { randomUUID } from 'node:crypto';
-import { isSlotRef } from '../../../engine/src/formats.js';
+import { isSlotRef, slotSource, tbdLabel } from '../../../engine/src/formats.js';
 import { fixtureSyncRef } from '../fixture-identity.js';
 import {
   capVenue,
@@ -91,6 +91,8 @@ export interface ScheduleFixture {
   away?: string;
   status?: string;
   dateTbc?: boolean;
+  /** The date a rescheduled postponement left (ADR 0015); absent on an undated one. */
+  originalDate?: string;
   venueId?: string;
   venueName?: string;
   venueOverride?: string;
@@ -157,6 +159,15 @@ export function fixtureSchedule(
   };
 }
 
+/** True when a side is a placeholder the medicoach export can't carry: a `pos:` group position
+ * or a `tbd:` label (not a `win:`/`lose:` fixture link). Such a fixture is skipped by the
+ * export (`unresolved-side`), so medicoach never had it. */
+export function neverExported(f: Pick<ScheduleFixture, 'home' | 'away'>): boolean {
+  return [f.home, f.away].some(
+    (side) => typeof side === 'string' && isSlotRef(side) && !slotSource(side),
+  );
+}
+
 /** Same match before and after an edit: the same unordered pair, or a knockout slot filled. */
 export function sameMatch(a: ScheduleFixture, b: ScheduleFixture): boolean {
   const pair = (f: ScheduleFixture) =>
@@ -221,7 +232,7 @@ export interface ScheduleDiffHandle {
   /**
    * Refs of fixtures this write ADDS to a mapped series. Medicoach has no such match and the
    * v1 contract cannot create one, so they are never pushed — `enqueue()` reports them (log +
-   * SYNCLOG) as needing a bundle top-up instead of ignoring them silently.
+   * SYNCLOG + MCAWAIT#) as needing a bundle top-up instead of ignoring them silently.
    */
   newRefs: string[];
   /** Write the PENDINGSYNC# rows — call only AFTER the series write succeeded. */
@@ -236,6 +247,40 @@ export function newFixturesNotice(tenant: string, seriesId: string, refs: string
     `[medicoach-sync] ${tenant}: ${refs.length} new fixture(s) in ${seriesId} not in medicoach ` +
     `(needs bundle top-up): ${refs.join(', ')}`
   );
+}
+
+/**
+ * Persist refs medicoach does not have as MCAWAIT#<seriesId> (Connection Console, ADR 0020):
+ * unioned with the refs already recorded for the series. Best-effort — the series write
+ * already landed, and the daily reconciliation against medicoach re-derives the rows — so a
+ * failure is logged, never thrown.
+ */
+export async function recordAwaitingCarry(
+  repo: Pick<RepoModule, 'upsertMcAwait'>,
+  tenant: string,
+  series: Pick<Series, 'id' | 'name'> & { leagueKey?: unknown },
+  refs: string[],
+  nowIso: string,
+): Promise<void> {
+  if (!refs.length) return;
+  try {
+    await repo.upsertMcAwait(
+      tenant,
+      {
+        seriesId: String(series.id),
+        ...(series.name ? { seriesName: String(series.name) } : {}),
+        ...(typeof series.leagueKey === 'string' && series.leagueKey
+          ? { leagueKey: series.leagueKey }
+          : {}),
+        refs,
+      },
+      { now: nowIso },
+    );
+  } catch (err) {
+    console.error(
+      `[medicoach-sync] ${tenant}: awaiting-carry record failed for ${String(series.id)} — ${err instanceof Error ? err.message : 'error'}`,
+    );
+  }
 }
 
 /**
@@ -254,7 +299,10 @@ export function newFixturesNotice(tenant: string, seriesId: string, refs: string
  * (its ref no longer means what medicoach has).
  */
 export async function recordScheduleDiff(
-  repo: Pick<RepoModule, 'getTenantConfig' | 'putPendingSync' | 'getSeasonRun' | 'putSyncLog'>,
+  repo: Pick<
+    RepoModule,
+    'getTenantConfig' | 'putPendingSync' | 'getSeasonRun' | 'putSyncLog' | 'upsertMcAwait'
+  >,
   tenant: string,
   before: Series | null | undefined,
   after: Series,
@@ -278,6 +326,16 @@ export async function recordScheduleDiff(
       if (f?.id) newRefs.push(fixtureSyncRef(tenant, String(after.id), f));
       return f;
     }
+    // A fixture with a `pos:`/`tbd:` side was never exported (ADR 0018: no team, no fixture to
+    // wait on), so medicoach has no match to update. Once Set team leaves it with no such side
+    // it needs a bundle top-up — reported like a new fixture, never pushed (a push would come
+    // back `unmapped` and vanish). Still unresolved: nothing to push either.
+    if (neverExported(old)) {
+      if (!neverExported(f) && f.id) newRefs.push(fixtureSyncRef(tenant, String(after.id), f));
+      return f;
+    }
+    // Reverted to a `pos:`/`tbd:` placeholder: the contract can't carry it, so nothing is pushed.
+    if (neverExported(f)) return f;
     if (!before || !sameMatch(old, f)) return f;
     if (scheduleKey(before, old) === scheduleKey(after, f)) return f;
     const next: ScheduleFixture = { ...f, schedule: { ...(f.schedule ?? {}), changedAt: nowIso } };
@@ -320,6 +378,7 @@ export async function recordScheduleDiff(
           },
           newFixtureRefs: newRefs,
         });
+        await recordAwaitingCarry(repo, tenant, after, newRefs, nowIso);
       }
       return rows.length;
     },
@@ -468,8 +527,10 @@ export async function flushScheduleOutbox(
     return { status: 'dry-run', pending: all.length - dropped, held, counts };
   }
 
-  const failRow = async (row: PendingScheduleSync, error: string) => {
-    counts.errors++;
+  // `unreached`: the request never reached medicoach — distinct from a per-fixture rejection.
+  const failRow = async (row: PendingScheduleSync, error: string, unreached = false) => {
+    if (unreached) counts.unreached = (counts.unreached ?? 0) + 1;
+    else counts.errors++;
     await repo.markPendingSyncFailed(
       tenant,
       row.ref,
@@ -488,6 +549,8 @@ export async function flushScheduleOutbox(
 
   /** The first whole-request failure of this flush (unreachable, HTTP, contract), if any. */
   let requestError: string | undefined;
+  /** Refs medicoach answered `unmapped`, by series (recorded as MCAWAIT# after the batches). */
+  const unmappedBySeries = new Map<string, string[]>();
   for (let i = 0; i < sendable.length; i += SCHEDULE_PUSH_MAX) {
     const batch = sendable.slice(i, i + SCHEDULE_PUSH_MAX);
     const body = JSON.stringify({
@@ -538,7 +601,7 @@ export async function flushScheduleOutbox(
       const message = err instanceof Error ? err.message : 'push failed';
       log(`[medicoach-sync] ${tenant}: schedule push failed — ${message}`);
       requestError ??= message;
-      for (const row of batch) await failRow(row, message);
+      for (const row of batch) await failRow(row, message, true);
       continue;
     }
     for (const row of batch) {
@@ -548,8 +611,18 @@ export async function flushScheduleOutbox(
       else {
         counts[r.status as 'applied' | 'stale' | 'unchanged' | 'unmapped']++;
         await repo.deletePendingSyncIfUnchanged(tenant, row.ref, row.schedule.changedAt);
+        if (r.status === 'unmapped') {
+          const refs = unmappedBySeries.get(row.seriesId) ?? [];
+          refs.push(row.ref);
+          unmappedBySeries.set(row.seriesId, refs);
+        }
       }
     }
+  }
+  // An `unmapped` answer: medicoach has no such fixture — it awaits a carry (ADR 0020).
+  for (const [seriesId, refs] of unmappedBySeries) {
+    const series = live.get(seriesId);
+    if (series) await recordAwaitingCarry(repo, tenant, series, refs, now().toISOString());
   }
 
   if (counts.sent || counts.errors)
@@ -558,7 +631,7 @@ export async function flushScheduleOutbox(
       at: now().toISOString(),
       trigger,
       kind: 'push',
-      outcome: counts.errors ? 'error' : 'ok',
+      outcome: counts.errors || counts.unreached ? 'error' : 'ok',
       pages: 0,
       fixtures: counts.sent,
       counts: {
@@ -634,6 +707,21 @@ export function buildInboundFixture(
     next.status = 'scheduled';
     changed.push('status');
   }
+  // A postponement that lands on a new date is a RESCHEDULED one: stamp the date being left
+  // (only if absent — ADR 0015 `postponedFixture` semantics). An undated postponement's
+  // `dateTbc` needs no handling here: it mirrors `schedule.dateTbc` above, so a dated change
+  // already clears it. A fixture that LEAVES postponed drops `originalDate`, so a stale one
+  // never resurfaces on a later postponement.
+  if (statusFlag(ours) === 'postponed' && next.status !== 'postponed' && next.originalDate)
+    delete next.originalDate;
+  if (
+    next.status === 'postponed' &&
+    !next.originalDate &&
+    fixture.date &&
+    next.date &&
+    next.date !== fixture.date
+  )
+    next.originalDate = fixture.date;
   // Truncated to the contract's 200-character cap before it is resolved, on both sides of
   // the comparison (a ground named longer than that is what medicoach holds of it).
   const wanted = capVenue(schedule.venue)?.trim();
@@ -801,7 +889,10 @@ export async function applyInboundSchedule(
 /** A readable "Home v Away" for a fixture (participant names, else the raw side). */
 function matchLineOf(series: Series, f: ScheduleFixture): string {
   const name = (side: string | undefined) =>
-    series.participants?.find((p) => p.teamId === side)?.name ?? side ?? '?';
+    series.participants?.find((p) => p.teamId === side)?.name ??
+    (side ? tbdLabel(side) : null) ??
+    side ??
+    '?';
   return `${name(f.home)} v ${name(f.away)}`;
 }
 
@@ -944,17 +1035,8 @@ export function notifyConflictByEmail(
     const sendSyncConflictEmail =
       opts.send ?? (await import('../notify/email.js')).sendSyncConflictEmail;
     const { orgCopy } = await import('../branding.js');
-    const { PLATFORM_TENANT } = await import('../types.js');
-    const users = await repo.listTenantUsers(tenant);
-    const emails = new Set<string>();
-    for (const u of users) {
-      const profile = await repo.getUser(u.sub);
-      const isAdmin = profile?.memberships.some((m) => m.tenantId === tenant && m.role === 'admin');
-      const isOperator = profile?.memberships.some(
-        (m) => m.tenantId === PLATFORM_TENANT && m.role === 'operator',
-      );
-      if (isAdmin && !isOperator && u.email) emails.add(u.email);
-    }
+    const { listTenantAdminEmails } = await import('../notify/admin-emails.js');
+    const emails = await listTenantAdminEmails(repo, tenant);
     const orgName = config ? orgCopy(config).name : tenant;
     for (const to of emails)
       await sendSyncConflictEmail({

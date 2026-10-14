@@ -9,6 +9,7 @@ import {
   scoreLines,
   sortRows,
   totals,
+  undoText,
 } from './match-monitor';
 import type { LiveMatch, MonitorMatch, MonitorPlayer } from './api';
 
@@ -289,6 +290,14 @@ describe('match monitor', () => {
     expect(
       monitorRow(fixture({ live: live({ undoCount: null }) }), at('11:02')).undoCount,
     ).toBeNull();
+    // Medicoach's server-side estimate reads "~N"; an exact count reads plainly.
+    const approx = monitorRow(
+      fixture({ live: live({ undoCount: 6, undoCountExact: false }) }),
+      at('11:02'),
+    );
+    expect(approx.flags.map((f) => f.label)).toEqual(['Undo used ~6 times']);
+    expect(undoText(approx)).toBe('~6');
+    expect(undoText(at5)).toBe('5');
   });
 
   it('puts every flag of the day on one board, alerts first, then by type and how long open', () => {

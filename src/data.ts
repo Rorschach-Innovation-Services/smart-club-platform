@@ -565,8 +565,9 @@ export function roleAssigned(docs: RequiredDoc[], role: DocRole): boolean {
 // ── Compliance document file types ──
 // Every uploadable format → its exact MIME type. Word covers Google Docs (which exports
 // .docx/.pdf); the spreadsheet trio serves catalogues whose docs are filled-in workbooks;
-// odt + the image trio (phone photos/scans of paper forms) are opt-in per doc via
-// `accepts`. jpg precedes jpeg so extFromMime('image/jpeg') resolves to 'jpg'.
+// odt, ppt/pptx (slide-deck reports — no inline renderer, so docPreviewKind lands them
+// on 'unknown' → download fallback) and the image trio (phone photos/scans of paper
+// forms) are opt-in per doc via `accepts`. jpg precedes jpeg so extFromMime('image/jpeg') resolves to 'jpg'.
 // Mirrored server-side in packages/api/src/catalogue.ts DOC_FORMAT_MIME.
 export const DOC_FORMAT_MIME = {
   pdf: 'application/pdf',
@@ -576,6 +577,8 @@ export const DOC_FORMAT_MIME = {
   xls: 'application/vnd.ms-excel',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   ods: 'application/vnd.oasis.opendocument.spreadsheet',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
   png: 'image/png',

@@ -20,11 +20,19 @@
  *                   schedule.ts): most-recent-wins, then the clash gate, then apply or hold
  *                   as SYNCCONFLICT#.
  *   - unknown ref → counted as "unmapped" (no ref values logged).
+ *   - scorecard   → a newly stored non-import result with both medicoach ids fetches its
+ *                   scorecard (FIXSCORECARD#, scorecard-fetch.ts) — at most
+ *                   SCORECARD_INLINE_MAX_PER_PAGE per page, none after
+ *                   SCORECARD_SWEEP_MAX_CONSECUTIVE_FAILURES failures in a row (the rest fall
+ *                   to the run's sweep); a stored clear deletes the card.
  *
  * A newly stored result is first marked `REPORTOPEN#<ref>`; the marker is deleted once the
  * hook succeeded, so a report/notify failure is retried by the next run
  * (`retryPendingReportOpens`, up to REPORT_OPEN_MAX_ATTEMPTS) instead of being lost — a
- * replay never re-fires the hook. A notice counts as failed only when it reached nobody
+ * replay never re-fires the hook. Before 18:00 SAST (REPORT_NOTICE_HOUR) — or once the run's
+ * `deadlineMs` has passed — the hook is NOT called and the marker is NOT deleted: the result
+ * is stored and its reports wait, queued, for the first run in the window (counted as
+ * `reportsDeferred`; a deferral is never an attempt). A notice counts as failed only when it reached nobody
  * (every channel tried failed): its NOTIFY# claim is released and the hook throws, so the
  * retry re-sends it. One channel delivered is done; a delivered notice is never re-sent.
  *
@@ -46,6 +54,8 @@ import { isSlotRef } from '../../../engine/src/formats.js';
 import {
   captainsReportClearedHook,
   captainsReportResultHook,
+  pastDeadline,
+  reportNoticeWindowOpen,
   type CaptainsReportDeps,
 } from '../captains-reports.js';
 import { hasFeature } from '../features.js';
@@ -64,6 +74,10 @@ import {
 import type { Series, StoredFixtureResult, SyncLogEntry, TenantConfig } from '../types.js';
 import { explainSyncError } from './explain.js';
 import {
+  fetchAndStoreScorecard,
+  SCORECARD_SWEEP_MAX_CONSECUTIVE_FAILURES,
+} from './scorecard-fetch.js';
+import {
   applyInboundSchedule,
   wallClock,
   type InboundApplyCache,
@@ -81,6 +95,11 @@ export const PAGE_LIMIT = 200;
 /** Max schedule-differs refs kept on one SYNCLOG row. */
 const MAX_LOGGED_REFS = 50;
 const HTTP_TIMEOUT_MS = 10_000;
+/**
+ * Inline scorecard fetches per changes page: a page of 200 results must not spend the
+ * shared cron budget on 200 sequential fetches. The rest are left to the run's sweep.
+ */
+export const SCORECARD_INLINE_MAX_PER_PAGE = 10;
 
 /** Passed to `onResultStored` when a result is stored for the first time or replaced by a
  * newer one. Carries the full pulled result (captainRef included) — handle it as PII. */
@@ -123,8 +142,11 @@ export interface PullerDeps {
   secret: string;
   fetch?: typeof fetch;
   now?: () => Date;
-  /** Defaults to opening captain's reports (captains-reports.ts) — never throws. */
-  onResultStored?: (event: ResultStoredEvent) => Promise<void>;
+  /**
+   * Defaults to opening captain's reports (captains-reports.ts). Resolving `'deferred'` keeps
+   * the REPORTOPEN# marker (the run's deadline passed before a notice was claimed).
+   */
+  onResultStored?: (event: ResultStoredEvent) => Promise<void | 'deferred'>;
   /** Defaults to voiding pending captain's reports / flagging submitted ones. */
   onResultCleared?: (event: ResultClearedEvent) => Promise<void>;
   /** Overrides for the default captain's-report hooks (tests inject a capturing sender). */
@@ -134,6 +156,8 @@ export interface PullerDeps {
   /** Overrides the conflict email of the default schedule handler (tests capture it). */
   notifyConflict?: import('./schedule.js').InboundScheduleDeps['notifyConflict'];
   log?: (line: string) => void;
+  /** This invocation's wall-clock deadline (epoch ms); past it, report openings stay queued. */
+  deadlineMs?: number;
 }
 
 export interface SyncRunSummary {
@@ -148,6 +172,8 @@ export interface SyncRunSummary {
   error?: string;
   /** What a dry run would have requested (path + query; no host, no secret). */
   wouldRequest?: string;
+  /** Stored results whose report opening was left queued (before 18:00 SAST, or deadline). */
+  reportsDeferred?: number;
 }
 
 export class MedicoachSyncError extends Error {
@@ -188,6 +214,8 @@ interface StoredSeriesFixture {
   syncRef?: string;
   /** The placeholder a slot held before the sync filled it with a team (audit/restore). */
   slots?: { home?: string; away?: string };
+  /** Sides an admin filled by hand (ADR 0022 §7): the sync never overwrites them. */
+  slotsManual?: { home?: true; away?: true };
 }
 
 /** ref → series/fixture, over every fixture's derived ref and explicit `syncRef`. */
@@ -263,6 +291,11 @@ function resultItem(
     // No captainRef: a player ref is never kept on the result (POPIA). It rides only on the
     // REPORTOPEN# marker while the reports are pending.
     medicoachMatchUrl: r.medicoachMatchUrl,
+    // Ground time and balls (contract `play`, optional): kept with the result it came with.
+    ...(r.play ? { play: r.play } : {}),
+    // The scorecard key (both ids or the fetch is skipped); empty strings are not ids.
+    ...(r.medicoachMatchId ? { medicoachMatchId: r.medicoachMatchId } : {}),
+    ...(r.medicoachTournamentId ? { medicoachTournamentId: r.medicoachTournamentId } : {}),
     storedAt: now,
   };
 }
@@ -282,7 +315,13 @@ export async function runMedicoachSync(
   const now = deps.now ?? (() => new Date());
   const doFetch = deps.fetch ?? fetch;
   const resultHook =
-    deps.onResultStored ?? captainsReportResultHook({ repo, now, ...(deps.captainsReports ?? {}) });
+    deps.onResultStored ??
+    captainsReportResultHook({
+      repo,
+      now,
+      ...(deps.captainsReports ?? {}),
+      ...(deps.deadlineMs !== undefined ? { deadlineMs: deps.deadlineMs } : {}),
+    });
   const clearedHook =
     deps.onResultCleared ?? captainsReportClearedHook({ repo, ...(deps.captainsReports ?? {}) });
   const scheduleHook =
@@ -369,6 +408,9 @@ export async function runMedicoachSync(
   };
 
   let moreToFetch = false;
+  // Inline scorecard fetches: failures in a row across the run (medicoach's scorecard
+  // endpoint down) stop them until the next run; the sweep picks up what is left.
+  let scorecardFailuresInARow = 0;
   try {
     for (let page = 0; page < MAX_PAGES_PER_RUN; page++) {
       const pq = changesPathAndQuery(tenant, cursor ?? undefined, PAGE_LIMIT);
@@ -416,6 +458,7 @@ export async function runMedicoachSync(
       // Knockout slot fills, grouped per series so each series is written once per page.
       const slotFills = new Map<string, Map<string, { home?: string; away?: string }>>();
       const scheduleQueue: FixtureChange[] = [];
+      let inlineScorecardFetches = 0;
       for (const change of data.fixtures) {
         const parsedRef = parseFixtureRef(change.ref);
         const target =
@@ -455,29 +498,57 @@ export async function runMedicoachSync(
           );
           if (stored) {
             counts.resultsStored++;
-            try {
-              await resultHook({
-                tenant,
-                seriesId,
-                fixtureId,
-                ref: change.ref,
-                result: change.result,
-                first: !prior || prior.cleared === true,
-                config,
-              });
-              await repo.deleteReportOpenMarker(tenant, change.ref);
-            } catch (err) {
-              // The result is stored; the marker keeps the report opening for the next run.
-              // Never fails the sync run (ids only — no payload is logged).
-              await repo.markReportOpenFailed(
-                tenant,
-                change.ref,
-                err instanceof Error ? err.message : 'report hook failed',
-                now().toISOString(),
-              );
-              log(
-                `[medicoach-sync] ${tenant}: captain's reports for ${seriesId}/${fixtureId} will be retried`,
-              );
+            if (!reportNoticeWindowOpen(now()) || pastDeadline(deps.deadlineMs)) {
+              // Before 18:00 SAST (or out of time): the hook is not called and the marker
+              // stays — it IS the queue. Never thrown: a throw would count as an attempt.
+              summary.reportsDeferred = (summary.reportsDeferred ?? 0) + 1;
+            } else {
+              try {
+                const hooked = await resultHook({
+                  tenant,
+                  seriesId,
+                  fixtureId,
+                  ref: change.ref,
+                  result: change.result,
+                  first: !prior || prior.cleared === true,
+                  config,
+                });
+                if (hooked === 'deferred')
+                  summary.reportsDeferred = (summary.reportsDeferred ?? 0) + 1;
+                else await repo.deleteReportOpenMarker(tenant, change.ref);
+              } catch (err) {
+                // The result is stored; the marker keeps the report opening for the next run.
+                // Never fails the sync run (ids only — no payload is logged).
+                await repo.markReportOpenFailed(
+                  tenant,
+                  change.ref,
+                  err instanceof Error ? err.message : 'report hook failed',
+                  now().toISOString(),
+                );
+                log(
+                  `[medicoach-sync] ${tenant}: captain's reports for ${seriesId}/${fixtureId} will be retried`,
+                );
+              }
+            }
+            if (change.result.source !== 'import') {
+              // The scorecard behind it (never for migrations/backfills), within the page's
+              // inline budget. Never throws: a failed or deferred fetch is the sweep's.
+              if (
+                inlineScorecardFetches < SCORECARD_INLINE_MAX_PER_PAGE &&
+                scorecardFailuresInARow < SCORECARD_SWEEP_MAX_CONSECUTIVE_FAILURES
+              ) {
+                const outcome = await fetchAndStoreScorecard(
+                  { repo, url: deps.url, secret: deps.secret, fetch: doFetch, now, log },
+                  tenant,
+                  seriesId,
+                  fixtureId,
+                  change.result.medicoachMatchId,
+                  change.result.medicoachTournamentId,
+                );
+                if (outcome !== 'skipped') inlineScorecardFetches++;
+                if (outcome === 'error') scorecardFailuresInARow++;
+                else if (outcome !== 'skipped') scorecardFailuresInARow = 0;
+              }
             }
           } else {
             counts.resultsStale++;
@@ -496,6 +567,8 @@ export async function runMedicoachSync(
           if (cleared) {
             counts.resultsCleared++;
             await clearedHook({ tenant, seriesId, fixtureId, ref: change.ref });
+            // A cleared result has no scorecard to confirm.
+            await repo.deleteFixtureScorecard(tenant, seriesId, fixtureId);
           } else counts.resultsStale++;
         }
 
@@ -506,6 +579,7 @@ export async function runMedicoachSync(
           const current = target.fixture[side];
           const placeholder = target.fixture.slots?.[side] ?? current;
           if (!teamRef || !placeholder || !isSlotRef(placeholder)) continue;
+          if (target.fixture.slotsManual?.[side]) continue; // a manual fill owns the side
           const team = parseTeamRef(teamRef);
           if (
             !team ||
@@ -619,6 +693,8 @@ async function applySlotFills(
           const team = fill[side];
           const placeholder = f.slots?.[side] ?? f[side];
           if (!team || !placeholder || !isSlotRef(placeholder) || f[side] === team) continue;
+          // Authoritative on the fresh read: a manual Set team owns the side (ADR 0022 §7).
+          if (f.slotsManual?.[side]) continue;
           next.slots![side] = placeholder;
           next[side] = team;
           changed++;

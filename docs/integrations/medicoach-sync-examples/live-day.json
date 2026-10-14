@@ -57,6 +57,7 @@
         }
       ],
       "undoCount": 6,
+      "undoCountExact": true,
       "players": [
         {
           "side": "home",
@@ -73,7 +74,7 @@
           "addedAt": "2026-10-04T09:40:00.000Z"
         }
       ],
-      "medicoachMatchUrl": "https://live.medicoach.co.za/match/example"
+      "medicoachMatchUrl": "https://live.medicoach.co.za/dolphins/scorecard/example-match?tournamentId=example-tournament"
     },
     {
       "ref": "smartclub:dolphins:fixture:s-planb-promotion-men-t20-g2:f7",
@@ -87,6 +88,7 @@
       "medianGapSec": null,
       "longGaps": [],
       "undoCount": null,
+      "undoCountExact": null,
       "players": [],
       "medicoachMatchUrl": null
     }

@@ -22,6 +22,8 @@
  * Pure: no repo, no I/O — unit-tested directly.
  */
 
+import { isSlotRef } from '../../engine/src/formats.js';
+
 /** The fixture fields this module reads/carries. Everything else rides along untouched. */
 export interface IdentityFixture {
   id?: string;
@@ -35,6 +37,10 @@ export interface IdentityFixture {
   syncRef?: string;
   /** Sync bookkeeping: when the schedule last changed (most-recent-wins, Slice 3/4). */
   schedule?: { changedAt?: string };
+  /** Knockout placeholders a filled side came from (puller / Set team). */
+  slots?: { home?: string; away?: string };
+  /** Sides an admin filled by hand (ADR 0022 §7): automation never overwrites them. */
+  slotsManual?: { home?: true; away?: true };
 }
 
 /**
@@ -42,12 +48,28 @@ export interface IdentityFixture {
  * series (an importer's putSeries, a CLI) must carry them over from the stored fixture,
  * or the next pull can no longer map/order the fixture.
  */
-export const SYNC_OWNED_FIXTURE_FIELDS = ['syncRef', 'schedule'] as const;
+export const SYNC_OWNED_FIXTURE_FIELDS = ['syncRef', 'schedule', 'slots', 'slotsManual'] as const;
 
-/** Copy the sync-owned fields from `from` onto `to` (only those `from` actually has). */
+/** Copy the sync-owned fields from `from` onto `to` (only those `from` actually has, and that
+ * `to` lacks; `slots`/`slotsManual` only for a side `to` still fills with a real team). */
 export function carrySyncOwnedFields<T extends IdentityFixture>(from: IdentityFixture, to: T): T {
   if (from.syncRef !== undefined && to.syncRef === undefined) to.syncRef = from.syncRef;
   if (from.schedule !== undefined && to.schedule === undefined) to.schedule = from.schedule;
+  // Knockout slot bookkeeping (ADR 0022 §7) is carried per side, and only onto a side that
+  // still holds a real team: a rewrite that put the placeholder back has undone the fill, and
+  // a carried `slotsManual` there would lock automation out of a side nobody filled.
+  if (to.slots === undefined && to.slotsManual === undefined) {
+    const slots: { home?: string; away?: string } = {};
+    const manual: { home?: true; away?: true } = {};
+    for (const side of ['home', 'away'] as const) {
+      const v = to[side];
+      if (!from.slots?.[side] || typeof v !== 'string' || !v || isSlotRef(v)) continue;
+      slots[side] = from.slots[side];
+      if (from.slotsManual?.[side]) manual[side] = true;
+    }
+    if (Object.keys(slots).length) to.slots = slots;
+    if (Object.keys(manual).length) to.slotsManual = manual;
+  }
   return to;
 }
 

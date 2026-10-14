@@ -9,7 +9,7 @@
  * and the admin must see the right consequence before confirming. Every reject is reversible from
  * this screen via Reopen, so nothing here is terminal any more.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { screen, within, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AdminClearances } from './admin';
@@ -739,5 +739,71 @@ describe('the reopen dialog waits for the request to settle', () => {
 
     expect(onReopen).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(screen.queryByText(/reopen this clearance/i)).toBeNull());
+  });
+});
+
+describe('a ?clearance=<id> notification deep link', () => {
+  const NO_MATCH = /no clearance matches this link/i;
+  const linkTo = (id: string) =>
+    window.history.replaceState({}, '', `/admin/clearances?clearance=${id}`);
+  afterEach(() => window.history.replaceState({}, '', '/'));
+
+  const cohort = [
+    request(),
+    request({
+      id: 'clr-2',
+      status: 'admin-override',
+      playerName: 'Thabo Mokoena',
+      idNumber: '0202025800088',
+    }),
+  ];
+
+  it('seeds the search with the linked id, so only that clearance shows — even a resolved one', () => {
+    linkTo('clr-2');
+    setup(cohort);
+
+    expect(screen.getByRole('textbox', { name: /search clearances/i })).toHaveValue('clr-2');
+    expect(screen.getByText('Thabo Mokoena')).toBeVisible();
+    expect(screen.queryByText('Sipho Ndlovu')).toBeNull();
+    expect(screen.queryByText(NO_MATCH)).toBeNull();
+  });
+
+  it('says so when the linked clearance is gone, and dismissing returns to the full list', async () => {
+    linkTo('clr-gone');
+    const { user } = setup(cohort);
+
+    expect(screen.getByText(NO_MATCH)).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: /dismiss/i }));
+    expect(screen.queryByText(NO_MATCH)).toBeNull();
+    expect(screen.getByRole('textbox', { name: /search clearances/i })).toHaveValue('');
+    expect(screen.getByText('Sipho Ndlovu')).toBeVisible();
+    expect(screen.getByText('Thabo Mokoena')).toBeVisible();
+  });
+
+  it('holds the notice back while the list is still loading', () => {
+    linkTo('clr-1');
+    renderWithProviders(
+      <AdminClearances
+        clearances={[]}
+        leagues={leagues as never[]}
+        clubs={clubs as never[]}
+        onOverride={vi.fn()}
+        onReject={vi.fn()}
+        onReassign={vi.fn()}
+        onReopen={vi.fn()}
+        onRevokeCertificate={vi.fn()}
+        busyId={undefined}
+        busyAction={undefined}
+        clearancesLoaded={false}
+      />,
+    );
+    expect(screen.queryByText(NO_MATCH)).toBeNull();
+  });
+
+  it('leaves the search empty and shows no notice without a link', () => {
+    setup(cohort);
+    expect(screen.getByRole('textbox', { name: /search clearances/i })).toHaveValue('');
+    expect(screen.queryByText(NO_MATCH)).toBeNull();
   });
 });

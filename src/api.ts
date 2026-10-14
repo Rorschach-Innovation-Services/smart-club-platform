@@ -12,10 +12,14 @@
 
 import { Sentry } from './sentry';
 import { devAuthHeader } from './devAuth';
+import type { CompetitionSpec } from '../packages/engine/src/competition';
 import type {
   TenantConfig,
+  TransferWindow,
   TenantBranding,
   TenantSummary,
+  MedicoachConnection,
+  MedicoachOverviewRow,
   TutorialVideo,
   UserProfile,
   Club,
@@ -31,11 +35,16 @@ import type {
   SeasonRun,
   Venue,
   Umpire,
+  Scorer,
   FixtureOfficials,
   CaptainsReport,
   CaptainsReportFields,
+  ClubCaptainsReportDetail,
   LinkedCaptainsReport,
+  ScorecardConsoleFilter,
+  ScorecardConsolePayload,
   SendResult,
+  PlayerErasureCounts,
   LogoUploadPost,
   TutorialUploadGrant,
   TenantOverview,
@@ -46,6 +55,9 @@ import type {
   DocIntakeCommitClubResult,
   RosterIntakeParseRequest,
   RosterIntakeParseResponse,
+  RosterDraftRow,
+  RosterSheetParseResult,
+  AgeGroupRaw,
   RosterIntakeCommitItem,
   RosterIntakeCommitResponse,
   StructureIntakeParseResponse,
@@ -62,6 +74,7 @@ import type {
   ClubSignupLink,
   ClubSignupInfo,
   ClubSignupResult,
+  PostponementRequest,
 } from './types';
 
 /**
@@ -339,11 +352,149 @@ export const sendClubFixtures = (
   });
 
 // ── Players (roster) ──
-// Players now self-register via the public link (see register* below). The in-portal chair
-// "Register player" form was retired, so its client wrappers (registerPlayer / id-doc
-// upload + mark) were removed; the backend routes remain for any future re-introduction.
+// Players self-register via the public link (see register* below) OR the chair registers them
+// in the portal (registerPlayer / the quick-add batch / the spreadsheet upload below). Every
+// chair path runs through the same clearance-aware core as the public link, so a player
+// already registered at another club opens a clearance rather than a silent duplicate.
 export const getPlayers = (clubId: string) =>
   request<PlayerRegistration[]>(`/clubs/${clubId}/players`);
+
+/**
+ * What a chair registration did. `created` — on the roster, active. `clearance-opened` — on the
+ * roster as clearance-pending; `clearance` names the source club. `review-opened` — the declared
+ * previous club is not on the system, so the union office was flagged to check it (the player is
+ * still registered). A duplicate or an already-open transfer is a plain 409 instead.
+ */
+export type ChairRegisterOutcome = 'created' | 'clearance-opened' | 'review-opened';
+export type RegisterPlayerResponse = PlayerRegistration & {
+  outcome: ChairRegisterOutcome;
+  clearance?: { id: string; fromClubId: string; fromClubName: string };
+  /** Clubs where the same name + date of birth is registered under another ID (a soft warning). */
+  possibleExistingAt?: string[];
+};
+export const registerPlayer = (clubId: string, body: Record<string, unknown>) =>
+  request<RegisterPlayerResponse>(`/clubs/${clubId}/players`, { method: 'POST', body });
+// Post-create ID document: presign a PUT, upload via uploadToPresigned, then record the meta.
+export const getPlayerIdDocUploadUrl = (clubId: string, naturalKey: string, contentType: string) =>
+  request<{ uploadUrl: string; objectKey: string; contentType: string }>(
+    `/clubs/${clubId}/players/${encodeURIComponent(naturalKey)}/id-doc/upload-url`,
+    { method: 'POST', body: { contentType } },
+  );
+export const markPlayerIdDoc = (
+  clubId: string,
+  naturalKey: string,
+  meta: { objectKey: string; size: number; contentType?: string },
+) =>
+  request<PlayerRegistration>(`/clubs/${clubId}/players/${encodeURIComponent(naturalKey)}/id-doc`, {
+    method: 'PATCH',
+    body: meta,
+  });
+
+/** Per-row outcome of a bulk chair registration (quick-add batch or spreadsheet commit). */
+export type ChairBulkOutcome =
+  | 'created'
+  | 'clearance-opened'
+  | 'clearance-already-open'
+  | 'skipped-duplicate'
+  | 'error';
+export interface ChairBulkResult {
+  /** Position of the row in the request that produced it. */
+  index: number;
+  rowNumber?: number;
+  sheet?: string;
+  outcome: ChairBulkOutcome;
+  naturalKey?: string;
+  fromClubName?: string;
+  /** Clubs where the same name + date of birth is registered under another ID (a soft warning). */
+  possibleExistingAt?: string[];
+  error?: string;
+  /** A grid-cell-sized form of `error`, when the server has one (full text stays in `error`). */
+  errorShort?: string;
+}
+export interface ChairBulkResponse {
+  results: ChairBulkResult[];
+  summary: Record<ChairBulkOutcome, number>;
+  playerCount: number;
+}
+/** One quick-add row. SA ID rows derive dob server-side; passport rows need nationality + dob. */
+export interface ChairBatchRow {
+  firstName: string;
+  lastName: string;
+  idType?: 'sa-id' | 'passport';
+  idNumber: string;
+  nationality?: string;
+  dob?: string;
+  gender?: string;
+  race?: string;
+  team?: string;
+}
+/** At most CHAIR_BATCH_MAX_ROWS rows per call (the server 400s above it). */
+export const CHAIR_BATCH_MAX_ROWS = 25;
+export const registerPlayersBatch = (clubId: string, rows: ChairBatchRow[]) =>
+  request<ChairBulkResponse>(`/clubs/${clubId}/players/batch`, {
+    method: 'POST',
+    body: { rows },
+  });
+
+/** Why a parsed spreadsheet row won't simply be created (chair roster parse). */
+export type ChairRosterConflict =
+  | { type: 'in-club-duplicate' }
+  | {
+      type: 'cross-club';
+      clubId: string;
+      clubName: string;
+      /** 'active' → commit opens a clearance; 'clearance-pending' → a transfer is in flight. */
+      status: string;
+    }
+  | {
+      /** The same ID is rostered under an older record (a different key): commit would refuse. */
+      type: 'legacy-id';
+      clubId: string;
+      clubName: string;
+      /** Full chair-facing reason (tooltip); `messageShort` fits the review column. */
+      message: string;
+      messageShort: string;
+    };
+export type ChairRosterParseRow = RosterDraftRow & { conflict?: ChairRosterConflict };
+/** The operator parse's shape (RosterIntakeParseResponse, parseable branch) plus `conflict`. */
+export interface ChairRosterParseResponse {
+  parseable: true;
+  sheets: Array<Omit<RosterSheetParseResult, 'rows'> & { rows: ChairRosterParseRow[] }>;
+  dobOnlyCount: number;
+  juniorLeagueKeys: string[];
+  ageGroupRaws: AgeGroupRaw[];
+}
+export interface ChairRosterCommitItem {
+  rowNumber: number;
+  firstName: string;
+  lastName: string;
+  dob: string;
+  idNumber: string;
+  gender?: string;
+  race?: string;
+  team?: string;
+  sheet?: string;
+}
+/** At most this many items per commit call — the client drives chunks sequentially. */
+export const CHAIR_ROSTER_COMMIT_MAX_ROWS = 50;
+// The workbook rides as base64 JSON (the route accepts multipart too) — ≤ 2 MB by contract.
+export const parseClubRoster = async (
+  clubId: string,
+  file: File,
+  ageGroupMap?: Record<string, string>,
+) =>
+  request<ChairRosterParseResponse>(`/clubs/${clubId}/roster/parse`, {
+    method: 'POST',
+    body: {
+      dataBase64: await fileToBase64(file),
+      ...(ageGroupMap && Object.keys(ageGroupMap).length ? { ageGroupMap } : {}),
+    },
+  });
+export const commitClubRoster = (clubId: string, items: ChairRosterCommitItem[]) =>
+  request<ChairBulkResponse>(`/clubs/${clubId}/roster/commit`, {
+    method: 'POST',
+    body: { items },
+  });
 export const getPlayerIdDocViewUrl = (clubId: string, naturalKey: string) =>
   request<{ viewUrl: string }>(`/clubs/${clubId}/players/${naturalKey}/id-doc/view-url`, {
     method: 'POST',
@@ -352,6 +503,14 @@ export const getPlayerIdDocViewUrl = (clubId: string, naturalKey: string) =>
 // player is mid-transfer.
 export const deletePlayer = (clubId: string, naturalKey: string) =>
   request(`/clubs/${clubId}/players/${encodeURIComponent(naturalKey)}`, { method: 'DELETE' });
+// Union admin: erase a person from EVERY club in this organisation (rows, ID documents,
+// clearances + certificates, reviews, veterans requests; captain's-report mentions scrubbed).
+// 404 when nothing names them; 409 while a clearance naming them is pending.
+export const adminErasePlayer = (naturalKey: string) =>
+  request<{ ok: true; counts: PlayerErasureCounts }>(
+    `/admin/players/${encodeURIComponent(naturalKey)}`,
+    { method: 'DELETE' },
+  );
 
 // Rep-safe {id,name} list of sibling clubs (for clearance source/destination choice).
 export const getClubDirectory = () => request<{ id: string; name: string }[]>('/clubs/directory');
@@ -487,6 +646,15 @@ export const rejectClearance = (clearanceId: string, body: unknown) =>
 // Restores the pre-reject rows from the snapshot the reject stored; the source club decides again.
 export const reopenClearance = (clearanceId: string, body: unknown) =>
   request<PlayerClearance>(`/admin/clearances/${clearanceId}/reopen`, { method: 'POST', body });
+// Union "Send reminder" to a pending clearance's source chair (email + WhatsApp). 409 when it
+// was already reminded today (manually or by the daily cron) or is no longer pending; 422 when
+// the source club is not on the system. `reminded: false` ⇒ nothing was delivered (no usable
+// chair contact, or every channel failed); the day's claim was released, so a retry may follow.
+export const remindClearance = (clearanceId: string, fromClubId: string) =>
+  request<{ results: SendResult[]; reminded: boolean }>(
+    `/admin/clearances/${encodeURIComponent(clearanceId)}/remind`,
+    { method: 'POST', body: { fromClubId } },
+  );
 // Union reallocation of a directory-sourced clearance to a real club that has since
 // registered: body { fromClubId, newFromClubId, version? }. The clearance moves into the
 // target club's queue for its rep to action via the normal flow.
@@ -526,6 +694,97 @@ export const checkSeriesClashes = (id: string, candidates: unknown[]) =>
     `/series/${id}/clash-check`,
     { method: 'POST', body: { candidates } },
   );
+// ── Fixture postponements (ADR 0015) ──
+// A chair asks to move a released fixture; the other club counters / accepts / declines; an
+// accepted date applies to the fixture immediately. 409 codes the UI branches on (ApiError.code):
+// postponement_exists, fixture_cancelled, fixture_past, version_conflict, not_your_turn,
+// postponement_closed, fixture_changed, venue_clash (details: clashes + teamBusy).
+export interface ClubPostponements {
+  /** This club is the OPPOSING side (asked to agree). */
+  inbound: PostponementRequest[];
+  /** This club opened the request. */
+  outbound: PostponementRequest[];
+}
+export const getPostponements = (clubId: string) =>
+  request<ClubPostponements>(`/clubs/${clubId}/postponements`);
+export const createPostponement = (
+  clubId: string,
+  body: {
+    seriesId: string;
+    fixtureId: string;
+    proposedDate: string;
+    proposedTime?: string;
+    reason?: string;
+  },
+) => request<PostponementRequest>(`/clubs/${clubId}/postponements`, { method: 'POST', body });
+export const counterPostponement = (
+  clubId: string,
+  reqId: string,
+  body: { proposedDate: string; proposedTime?: string; note?: string; version?: number },
+) =>
+  request<PostponementRequest>(`/clubs/${clubId}/postponements/${reqId}/counter`, {
+    method: 'POST',
+    body,
+  });
+export const acceptPostponement = (clubId: string, reqId: string, version?: number) =>
+  request<PostponementRequest>(`/clubs/${clubId}/postponements/${reqId}/accept`, {
+    method: 'POST',
+    body: { version },
+  });
+export const withdrawPostponement = (clubId: string, reqId: string, version?: number) =>
+  request<PostponementRequest>(`/clubs/${clubId}/postponements/${reqId}/withdraw`, {
+    method: 'POST',
+    body: { version },
+  });
+export const declinePostponement = (
+  clubId: string,
+  reqId: string,
+  body: { declineReason?: string; version?: number },
+) =>
+  request<PostponementRequest>(`/clubs/${clubId}/postponements/${reqId}/decline`, {
+    method: 'POST',
+    body,
+  });
+export const acknowledgePostponement = (clubId: string, reqId: string, version?: number) =>
+  request<PostponementRequest>(`/clubs/${clubId}/postponements/${reqId}/acknowledge`, {
+    method: 'POST',
+    body: { version },
+  });
+/** Coarse, rep-safe busy signals for a candidate move — never the clashing fixture itself. */
+export interface ClashHint {
+  groundBusy: boolean;
+  homeTeamBusy: boolean;
+  awayTeamBusy: boolean;
+}
+export const getClashHints = (
+  clubId: string,
+  candidates: Array<{ seriesId: string; fixtureId: string; date: string; time?: string }>,
+) =>
+  request<{ results: ClashHint[] }>(`/clubs/${clubId}/clash-hints`, {
+    method: 'POST',
+    body: { candidates },
+  });
+// Admin (union office): every request in the tenant, newest first, optionally status-filtered.
+export const getAllPostponements = (status?: PostponementRequest['status']) =>
+  request<PostponementRequest[]>('/admin/postponements', { query: { status } });
+// Admin ruling: set the final date (+ optional time / venue). A clash 409 carries
+// details.clashes (full Clash[]) for ClashPanel.
+export const overridePostponement = (
+  reqId: string,
+  body: {
+    date: string;
+    time?: string;
+    venueId?: string;
+    venueName?: string;
+    note?: string;
+    version?: number;
+  },
+) =>
+  request<PostponementRequest>(`/admin/postponements/${reqId}/override`, {
+    method: 'POST',
+    body,
+  });
+
 export const duplicateSeriesReq = (id: string) =>
   request<Series>(`/series/${id}/duplicate`, { method: 'POST' });
 
@@ -699,6 +958,93 @@ export const putFixtureOfficials = (seriesId: string, fixtureId: string, umpireI
     { method: 'PUT', body: { umpires: umpireIds.map((umpireId) => ({ umpireId })) } },
   );
 
+// A fixture's scorers (scorer + backup, max two). Same officials item as the umpires, but
+// only the `scorers` part is sent, so the umpires (and any referee) are kept as stored.
+export const putFixtureScorers = (seriesId: string, fixtureId: string, scorerIds: string[]) =>
+  request<FixtureOfficials & { seriesId: string; fixtureId: string }>(
+    `/series/${encodeURIComponent(seriesId)}/fixtures/${encodeURIComponent(fixtureId)}/officials`,
+    { method: 'PUT', body: { scorers: scorerIds.map((scorerId) => ({ scorerId })) } },
+  );
+
+// ── Scorer register (admin) ──
+export const getScorers = () => request<Scorer[]>('/scorers');
+export const createScorer = (body: Partial<Scorer>) =>
+  request<Scorer>('/scorers', { method: 'POST', body });
+export const patchScorer = (id: string, body: Partial<Scorer>) =>
+  request<Scorer>(`/scorers/${encodeURIComponent(id)}`, { method: 'PATCH', body });
+
+// ── Result confirmation (the office's "checked and validated") ──
+// `recordedAt` is the result the admin looked at: a newer one from medicoach answers 409
+// `result_changed` (with the current result in the error details).
+export const confirmResult = (
+  seriesId: string,
+  fixtureId: string,
+  recordedAt: string,
+  note?: string,
+) =>
+  request<{ confirmedAt: string; confirmedBy: string }>(
+    `/series/${encodeURIComponent(seriesId)}/fixtures/${encodeURIComponent(fixtureId)}/result/confirm`,
+    { method: 'POST', body: { recordedAt, ...(note ? { note } : {}) } },
+  );
+export const unconfirmResult = (seriesId: string, fixtureId: string) =>
+  request<{ ok: true }>(
+    `/series/${encodeURIComponent(seriesId)}/fixtures/${encodeURIComponent(fixtureId)}/result/confirm`,
+    { method: 'DELETE' },
+  );
+
+// ── Leagues & tournaments (ADR 0022) ── generated server-side; drafts via the series path.
+export type CompetitionSpecBody = Omit<CompetitionSpec, 'id'> & { id?: string };
+export interface CompetitionPreview {
+  id: string;
+  series: Series[];
+  summary: { rounds: number; fixtures: number; firstDate: string; lastDate: string };
+  warnings: string[];
+  /** Ground double-bookings against what is already scheduled (release refuses them). */
+  clashes: string[];
+}
+export const previewCompetition = (body: CompetitionSpecBody) =>
+  request<CompetitionPreview>('/competitions/preview', { method: 'POST', body });
+export const createCompetition = (body: CompetitionSpecBody) =>
+  request<CompetitionPreview>('/competitions', { method: 'POST', body });
+export const regenerateCompetition = (id: string, body: CompetitionSpecBody) =>
+  request<CompetitionPreview>(`/competitions/${encodeURIComponent(id)}/regenerate`, {
+    method: 'POST',
+    body,
+  });
+export const patchCompetition = (
+  id: string,
+  body: { name?: string; points?: CompetitionSpec['points'] },
+) =>
+  request<{ id: string; series: Series[] }>(`/competitions/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body,
+  });
+export const deleteCompetition = (id: string) =>
+  request<{ ok: true; deleted: string[] }>(`/competitions/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+export const advanceCompetition = (id: string, allowIncomplete = false) =>
+  request<{ filled: number; waiting: string[] }>(
+    `/competitions/${encodeURIComponent(id)}/advance`,
+    { method: 'POST', body: { allowIncomplete } },
+  );
+
+// Appointment-notice status per official for one series (admin only; badges in the editor).
+export interface OfficialsNotifyStatusRow {
+  fixtureId: string;
+  role: 'umpire' | 'referee' | 'scorer';
+  /** The registry id for the role: an umpire id for umpire/referee, a scorer id for scorer. */
+  umpireId: string;
+  status: 'queued' | 'completed' | 'exhausted';
+  attempts: number;
+  reason?: string;
+  completedAt?: string;
+}
+export const getOfficialsNotifyStatus = (seriesId: string) =>
+  request<{ rows: OfficialsNotifyStatusRow[] }>(
+    `/series/${encodeURIComponent(seriesId)}/officials/notify-status`,
+  );
+
 // ── Medicoach sync (ADR 0016) ── admin only; visible when `features.medicoachSync` is on.
 export interface MedicoachSyncSchedule {
   scheduledTime: string | null;
@@ -730,7 +1076,7 @@ export interface MedicoachSyncLog {
   id: string;
   at: string;
   trigger: 'cron' | 'manual' | 'write' | 'cli';
-  kind?: 'pull' | 'push' | 'new-fixtures';
+  kind?: 'pull' | 'push' | 'new-fixtures' | 'player-push';
   /** Refs of fixtures added in smart club that medicoach does not have (`new-fixtures`). */
   newFixtureRefs?: string[];
   outcome: 'ok' | 'error';
@@ -738,6 +1084,8 @@ export interface MedicoachSyncLog {
   fixtures: number;
   counts: Record<string, number | undefined>;
   push?: Record<string, number>;
+  /** Player push outcome counts (`player-push` rows, ADR 0019). */
+  playerPush?: Record<string, number>;
   /** Technical failure text (shown under "Details"). */
   error?: string;
   /** The failure in plain language. */
@@ -792,7 +1140,53 @@ export interface MedicoachSyncStatus {
   pendingReports?: number;
   /** Captain's-report notices that failed on every channel and are waiting on a retry. */
   noticesFailed?: number;
+  /** The player sync (ADR 0019) — counts only. */
+  players?: MedicoachPlayerSyncStatus;
+  /** What needs an admin: held schedule changes, player reviews, players waiting for a team. */
+  attention?: { conflicts: number; playerReviews: number; playersParked: number; total: number };
 }
+export type MedicoachPlayerSyncStatus =
+  | { enabled: false }
+  | {
+      enabled: true;
+      /** People waiting to be sent (not parked). */
+      pending: number;
+      /** Of those, re-queued by an admin (retry / a review decision) and not sent yet. */
+      queued?: number;
+      /** Waiting on a team medicoach doesn't have yet (bundle top-up), not resent every run. */
+      parked: number;
+      /** Failed 5+ pushes; still retried every run. */
+      stuck: number;
+      /** Held for an admin decision. */
+      reviews: number;
+      /** Never sent to medicoach at their request (e.g. deleted their Match Centre account). */
+      optedOut?: number;
+      /** The medicoach team refs parked players need (no personal data). */
+      missingTeamRefs: string[];
+      lastError?: string;
+      lastErrorText?: string;
+    };
+/** One held player (PERSONAL DATA — admin only). */
+export interface MedicoachPlayerReview {
+  naturalKey: string;
+  reason: 'medicoach-needs-review' | 'smartclub-possible-duplicate';
+  message?: string;
+  detectedAt: string;
+  playerName: string;
+  dob: string | null;
+  clubName: string | null;
+  candidates: Array<{
+    playerId?: string;
+    name: string;
+    dob: string | null;
+    institutionName: string | null;
+  }>;
+}
+export type MedicoachPlayerResolution =
+  | { action: 'link'; medicoachPlayerId: string }
+  | { action: 'create'; acknowledgedCandidates: string[] }
+  | { action: 'distinct' }
+  | { action: 'dismiss' };
 export const getMedicoachSyncStatus = () =>
   request<MedicoachSyncStatus>('/integrations/medicoach/status');
 
@@ -830,6 +1224,11 @@ export interface LiveMatch {
   longGaps: LiveGap[];
   /** Times the scorer undid a ball; null when the scoring app doesn't report it. */
   undoCount: number | null;
+  /**
+   * true: an exact count stamped by the scoring app; false: medicoach's server-side estimate
+   * (shown as "~N"); null/absent when undoCount is null.
+   */
+  undoCountExact?: boolean | null;
   /** Each side's players, checked against the club rosters. */
   players: MonitorPlayer[];
   medicoachMatchUrl: string | null;
@@ -884,7 +1283,14 @@ export interface MatchMonitorResponse {
 export const getMatchMonitor = (date: string) =>
   request<MatchMonitorResponse>(`/integrations/medicoach/live?date=${encodeURIComponent(date)}`);
 export const medicoachSyncNow = () =>
-  request<{ status: string; counts?: Record<string, number> }>('/integrations/medicoach/sync-now', {
+  request<{
+    status: string;
+    counts?: Record<string, number>;
+    /** The player push: "Sync now" sends a first slice; `deferred` wait for the next sync. */
+    playerPush?: { status: string; deferred?: number; counts?: Record<string, number> };
+    /** Set before 18:00 SAST when captain's reports were queued instead of sent. */
+    reportsMessage?: string;
+  }>('/integrations/medicoach/sync-now', {
     method: 'POST',
   });
 export const applyMedicoachConflict = (ref: string) =>
@@ -910,12 +1316,43 @@ export const dropMedicoachOutbox = (ref: string) =>
     body: { ref },
   });
 
+/**
+ * What a review decision did: link/create/distinct are sent to medicoach at once — `sent`,
+ * `queued` (goes out on the next sync) or `review` (medicoach needs another decision);
+ * dismiss answers `dismissed`.
+ */
+export interface MedicoachResolveResult {
+  status: 'sent' | 'queued' | 'review' | 'dismissed';
+  sent?: number;
+  queued?: number;
+  review?: number;
+}
+export const getMedicoachPlayerReviews = () =>
+  request<MedicoachPlayerReview[]>('/integrations/medicoach/player-reviews');
+export const resolveMedicoachPlayerReview = (
+  naturalKey: string,
+  resolution: MedicoachPlayerResolution,
+) =>
+  request<MedicoachResolveResult>(
+    `/integrations/medicoach/player-reviews/${encodeURIComponent(naturalKey)}/resolve`,
+    { method: 'POST', body: resolution },
+  );
+/** Un-park / restart player rows so the next sync sends them again. */
+export const retryMedicoachPlayers = (scope: 'parked' | 'stuck' | 'all') =>
+  request<{ requeued: number }>('/integrations/medicoach/players/retry', {
+    method: 'POST',
+    body: { scope },
+  });
+
 // ── Captain's reports (ADR 0016) ──
 // Club routes are own-club only. `submit: true` files the report (first submit wins → 409);
 // without it the body is saved as a draft.
 const reportPath = (id: string) => `/club/captains-reports/${encodeURIComponent(id)}`;
 export const getClubCaptainsReports = (clubId: string) =>
   request<CaptainsReport[]>('/club/captains-reports', { query: { clubId } });
+/** One report for the form: the view plus its match scorecard context (detail only). */
+export const getClubCaptainsReport = (id: string) =>
+  request<ClubCaptainsReportDetail>(reportPath(id));
 export const putClubCaptainsReport = (
   id: string,
   body: CaptainsReportFields & { submit?: boolean },
@@ -984,6 +1421,16 @@ export const forwardLinkedCaptainsReport = (token: string, candidateId: string) 
     method: 'POST',
     body: { candidateId },
     auth: false,
+  });
+
+/** Operator console: scorecard answers in captains reports across every tenant. */
+export const listPlatformCaptainsReportScorecards = (
+  days: number,
+  status: ScorecardConsoleFilter,
+  tenant?: string,
+) =>
+  request<ScorecardConsolePayload>('/platform/captains-report-scorecards', {
+    query: { days, status, tenant: tenant || undefined },
   });
 
 // ── Venues (ADR 0008 phase 2) ──
@@ -1070,12 +1517,14 @@ export const getRegistration = (clubId: string, token: string) =>
   }>(`/register/${clubId}`, { auth: false, query: { t: token } });
 // `clearance` present ⇔ the registration opened a transfer from the named previous club
 // (the player lands on the joining club's roster as clearance-pending until that club or
-// the union office approves). Body may include `currentClubId` to register into a club
+// the union office approves). `transferWindow` present ⇔ it arrived outside every transfer
+// window: recorded as an auto-rejected clearance, the player is NOT registered. Body may include `currentClubId` to register into a club
 // other than the one whose link was used — no consent from that club is required.
 export const submitRegistration = (clubId: string, token: string, body: unknown) =>
   request<{
     ok: boolean;
     clearance?: { fromClubName: string };
+    transferWindow?: { closed: true; nextWindow?: TransferWindow };
   }>(`/register/${clubId}`, {
     method: 'POST',
     auth: false,
@@ -1204,6 +1653,21 @@ export const platformReopenSetup = (slug: string) =>
 // sanitized InsightsClub projection — never the full Club records.
 export const platformTenantOverview = (slug: string) =>
   request<TenantOverview>(`/platform/tenants/${encodeURIComponent(slug)}/overview`);
+// Match Centre connection console (ADR 0020 phase 1) — read-only visibility. The stage is
+// inferred from config; awaiting-carry rows come from the reconciliation against the
+// Match Centre, never from the absence of write events. `reconcile` ("Check now") runs a
+// reconciliation for this client and answers the refreshed connection.
+export const platformMedicoachConnection = (slug: string) =>
+  request<MedicoachConnection>(
+    `/platform/tenants/${encodeURIComponent(slug)}/medicoach/connection`,
+  );
+export const platformMedicoachOverview = () =>
+  request<{ tenants: MedicoachOverviewRow[] }>('/platform/medicoach/overview');
+export const platformMedicoachReconcile = (slug: string) =>
+  request<MedicoachConnection>(
+    `/platform/tenants/${encodeURIComponent(slug)}/medicoach/reconcile`,
+    { method: 'POST' },
+  );
 // Bulk document-intake (operator uploads compliance docs for many clubs at once).
 // Mint presigned PUTs for a batch (max 100 rows); `items` is POSITIONAL — index i
 // of the response corresponds to index i of the request, and a bad row fails only
@@ -1272,6 +1736,161 @@ export const platformStructureIntakeCommit = (slug: string, body: StructureIntak
   request<StructureIntakeCommitResponse>(
     `/platform/tenants/${encodeURIComponent(slug)}/structure-intake/commit`,
     { method: 'POST', body },
+  );
+
+// ── Fixture amendments (operator) ── the union's weekly "Reminder Fixtures" workbook, through
+// the reminder-fixtures CLI's parser/matcher/planner behind a preview → confirm pair. Shapes
+// mirror packages/api/src/reminder-fixtures.ts (ReminderPreview, SeriesWriteResult, …).
+export type AmendmentRowOutcome =
+  | 'matched-change'
+  | 'matched-no-change'
+  | 'unmatched'
+  | 'ambiguous'
+  | 'venue-unknown'
+  | 'blocked'
+  | 'competition-unknown';
+export interface AmendmentRowChange {
+  field: 'date' | 'time' | 'venue' | 'status';
+  before: string;
+  after: string;
+}
+export interface AmendmentPreviewRow {
+  /** `<sheet>:<row>` — the key of the per-row skip toggle. */
+  rowId: string;
+  sheetRow: number;
+  competition: string;
+  group?: string;
+  sheet: { home: string; away: string; date: string; time?: string; venue: string };
+  outcome: AmendmentRowOutcome;
+  reason?: string;
+  warnings: string[];
+  skipped: boolean;
+  seriesId?: string;
+  seriesName?: string;
+  fixtureId?: string;
+  fixture?: {
+    home: string;
+    away: string;
+    date: string;
+    time: string;
+    venue: string;
+    status: string;
+    released: boolean;
+  };
+  changes?: AmendmentRowChange[];
+}
+/** One double-booked slot: `fixture` is the side the sheet amends, `with` the ground-holder. */
+export interface AmendmentClash {
+  date: string;
+  time?: string;
+  ground: string;
+  fixture: string;
+  with: string;
+  /** The ground-holder is a DRAFT fixture — draft relocation could clear the clash. */
+  holderDraft: boolean;
+}
+export interface AmendmentGate {
+  ok: boolean;
+  errors: string[];
+  introduced: AmendmentClash[];
+  /** Pre-existing clashes on the sheet dates — reported, never blocking. */
+  preExisting: AmendmentClash[];
+}
+/** How one sheet of the workbook read (also on a 400 `no_rows`, as `details.sheets`). */
+export interface AmendmentSheetReport {
+  sheet: string;
+  status: 'ok' | 'empty' | 'refused';
+  reason?: string;
+  fixtureRows: number;
+  unrecognisedRows: number;
+  vColumn?: number;
+}
+export interface AmendmentPreview {
+  planHash: string;
+  sheets: Array<
+    AmendmentSheetReport & {
+      competitions: Array<{ competition: string; seriesIds: string[] }>;
+      rows: AmendmentPreviewRow[];
+      alreadyCorrect: number;
+      alreadyCorrectRows: Array<{
+        rowId: string;
+        sheetRow: number;
+        home: string;
+        away: string;
+        date: string;
+      }>;
+    }
+  >;
+  skippedRows: Array<{ sheet: string; sheetRow: number; text: string; reason: string }>;
+  counts: Record<AmendmentRowOutcome, number> & { applicable: number; applied: number };
+  moves: Array<{
+    seriesId: string;
+    seriesName: string;
+    fixtureId: string;
+    date: string;
+    home: string;
+    away: string;
+    from: string;
+    to: string;
+    takenBy: string[];
+    registryMiss: boolean;
+  }>;
+  gate: AmendmentGate;
+  touchedSeries: Array<{ id: string; name: string; version: number }>;
+  officials?: Array<{ seriesId: string; fixtureId: string; umpires: string[]; referee?: string }>;
+}
+export interface AmendmentOptions {
+  skipRowIds: string[];
+  relocateDraftClashes: boolean;
+}
+export interface AmendmentConfirmResult {
+  backupKey: string;
+  fixturesAmended: number;
+  draftMoves: number;
+  series: Array<{
+    seriesId: string;
+    seriesName: string;
+    status: 'written' | 'drifted';
+    version?: number;
+    fixtureIds: string[];
+  }>;
+  /** A written fixture sits on a slot a drifted series' fixture still holds: re-upload now. */
+  splitSlotRisks: Array<{
+    written: { seriesId: string; fixtureId: string };
+    stranded: { seriesId: string; fixtureId: string };
+    ground: string;
+    date: string;
+    time?: string;
+  }>;
+  medicoachSync: boolean;
+  clubsNotified: false;
+}
+export const platformFixtureAmendmentsPreview = async (
+  slug: string,
+  file: File,
+  opts: AmendmentOptions,
+) =>
+  request<AmendmentPreview>(
+    `/platform/tenants/${encodeURIComponent(slug)}/fixture-amendments/preview`,
+    {
+      method: 'POST',
+      body: { filename: file.name, dataBase64: await fileToBase64(file), ...opts },
+    },
+  );
+/** 409 `plan_changed` carries the fresh preview on `details.preview`; 409 `clash_gate` the
+ * gate on `details.details`; 409 `plan_errors` the list on `details.errors`. */
+export const platformFixtureAmendmentsConfirm = async (
+  slug: string,
+  file: File,
+  opts: AmendmentOptions,
+  planHash: string,
+) =>
+  request<AmendmentConfirmResult>(
+    `/platform/tenants/${encodeURIComponent(slug)}/fixture-amendments/confirm`,
+    {
+      method: 'POST',
+      body: { filename: file.name, dataBase64: await fileToBase64(file), ...opts, planHash },
+    },
   );
 
 // Rep invites: coverage read + a tightened mirror of /admin/users pinned to role:'rep'.

@@ -103,6 +103,8 @@ export interface MonitorRow {
   durationMin: number | null;
   /** Undos so far; null when the scoring app doesn't report them. */
   undoCount: number | null;
+  /** False when undoCount is medicoach's estimate rather than an exact count ("~N"). */
+  undoApprox: boolean;
   /** Players the scorer added with "add player" during the match. */
   playersAdded: number;
   /** Players the rosters can't vouch for (unregistered, other club, inactive). */
@@ -332,10 +334,11 @@ export function monitorRow(
     });
 
   const undoCount = live?.undoCount ?? null;
+  const undoApprox = undoCount !== null && live?.undoCountExact === false;
   if (undoCount !== null && undoCount >= t.undoMax)
     flags.push({
       key: 'undo',
-      label: `Undo used ${undoCount} times`,
+      label: `Undo used ${undoApprox ? '~' : ''}${undoCount} times`,
       tone: 'warn',
       since: null,
       // Comes back each time the count climbs another threshold's worth.
@@ -365,6 +368,7 @@ export function monitorRow(
     inningsBreak,
     durationMin,
     undoCount,
+    undoApprox,
     playersAdded: added.length,
     ineligible: ineligible.length,
     flags,
@@ -427,4 +431,9 @@ export function totals(rows: MonitorRow[]): MonitorTotals {
     attention: rows.filter((r) => r.flags.some((f) => f.tone === 'alert')).length,
     unregistered: rows.reduce((n, r) => n + r.ineligible, 0),
   };
+}
+
+/** An undo count as shown: "~N" when medicoach could only estimate it. */
+export function undoText(r: Pick<MonitorRow, 'undoCount' | 'undoApprox'>): string {
+  return r.undoCount === null ? '' : `${r.undoApprox ? '~' : ''}${r.undoCount}`;
 }

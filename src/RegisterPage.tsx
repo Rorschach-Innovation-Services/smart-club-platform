@@ -29,7 +29,34 @@ import {
   type DobError,
 } from './data';
 import { leagueOptionsForDistrict } from '../packages/engine/src/leagues';
-import { useModule, useSeasonLabel, useVertical } from './branding';
+import {
+  useModule,
+  useSeasonLabel,
+  useTenantSettled,
+  useTransferWindowStatus,
+  useVertical,
+} from './branding';
+import { formatDayYear } from './dates';
+import type { TransferWindow } from './types';
+
+/**
+ * The player-facing message for a failed submit. A 409 keeps the server's deliberately
+ * collapsed wording (dedup vs mid-transfer are indistinguishable by design) plus a next step;
+ * other 4xx answers are specific and shown as sent (bad link, rate limit, a field the server
+ * refused). Anything else — a 5xx, a network drop, a failed upload PUT — gets a human sentence
+ * that says which step failed instead of a bare "internal error".
+ */
+export function registrationErrorMessage(err: unknown, phase: 'upload' | 'submit'): string {
+  if (err instanceof ApiError && err.status === 409) {
+    return 'This person is already registered, or a transfer is already in progress. Contact your club or the union office if you think this is wrong.';
+  }
+  // uploadToPresigned's own failure ('upload failed') is a storage answer, not an API one.
+  const fromApi = err instanceof ApiError && err.message !== 'upload failed';
+  if (fromApi && err.status >= 400 && err.status < 500 && err.message) return err.message;
+  return phase === 'upload'
+    ? "We couldn't upload your ID document — please try again."
+    : 'Something went wrong submitting your registration — please try again.';
+}
 
 const EMPTY = {
   surname: '',
@@ -55,13 +82,14 @@ const EMPTY = {
   // the player's previous club differs from the link club (see showCurrentClub below).
   currentClubChoice: '',
   // Veterans second-club affiliation (capture-only): '' (unanswered) | 'no' | 'yes'. When
-  // 'yes', `vetsClubId` names the club this player plays veterans cricket for — it must be a
-  // club other than their chosen current club. Optional; a blank pick sends nothing.
+  // 'yes', `vetsClubId` names the club this player plays veterans (in the tenant's sport) for —
+  // it must be a club other than their chosen current club. Optional; a blank pick sends nothing.
   vetsChoice: '',
   vetsClubId: '',
-  battingHand: 'Right',
-  battingType: 'Mid Order',
-  bowlingHand: 'Right',
+  // Cricket playing profile is optional: '' = not answered, and nothing is sent for it.
+  battingHand: '',
+  battingType: '',
+  bowlingHand: '',
   bowlerType: '',
   isAllRounder: false,
   isWk: false,
@@ -98,6 +126,8 @@ export function RegisterPage() {
   const [clubs, setClubs] = useState<{ id: string; name: string; directory?: boolean }[]>([]);
   // Set when the submit opened a transfer — drives the clearance success variant.
   const [clearanceFrom, setClearanceFrom] = useState('');
+  // Set when the submit arrived outside every transfer window (recorded, not registered).
+  const [windowClosed, setWindowClosed] = useState<{ nextWindow?: TransferWindow } | null>(null);
   const [d, setD] = useState(EMPTY);
   const [idFile, setIdFile] = useState<File | null>(null);
   const [error, setError] = useState('');
@@ -110,6 +140,12 @@ export function RegisterPage() {
   const seasonLabel = useSeasonLabel();
   const clearancesOn = useModule('clearances');
   const veteransOn = useModule('veterans');
+  // Server-computed (never the device clock): closed ⇒ a transfer can't complete right now.
+  const windowStatus = useTransferWindowStatus();
+  const transfersClosed = clearancesOn && !!windowStatus && !windowStatus.open;
+  // Until GET /tenant settles, useVertical() falls back to cricket — gate the first paint on
+  // it so a football tenant never flashes cricket fields / cricket copy.
+  const tenantSettled = useTenantSettled();
 
   useEffect(() => {
     let live = true;
@@ -164,7 +200,7 @@ export function RegisterPage() {
   const currentClubId = showCurrentClub ? d.currentClubChoice || clubId : clubId;
   // Veterans-club options: sibling clubs on the system (directory entries excluded — a club not
   // on the system can't be a veterans club), minus the chosen CURRENT club (you can't play
-  // veterans cricket "for" your own club). The API's `clubs` payload excludes the link club, so
+  // veterans "for" your own club). The API's `clubs` payload excludes the link club, so
   // re-add it as an option when the current club isn't the link club (same recombination trick
   // as the current-club picker above).
   const vetsClubOptions = [
@@ -253,6 +289,9 @@ export function RegisterPage() {
     }
     setError('');
     setBusy(true);
+    // Which step failed decides the message: a failed ID-document upload and a failed
+    // registration POST read differently to the player.
+    let phase: 'upload' | 'submit' = 'upload';
     try {
       // Presign + upload the ID document first so its meta rides on the registration POST
       // (one atomic create, mirroring the portal's create-then-record but without auth).
@@ -263,6 +302,7 @@ export function RegisterPage() {
         ct,
       );
       await uploadToPresigned(uploadUrl, idFile, contentType);
+      phase = 'submit';
       const res = await submitRegistration(clubId, token, {
         firstName: d.firstNames.trim(),
         lastName: d.surname.trim(),
@@ -306,9 +346,9 @@ export function RegisterPage() {
         ...(positionsMode
           ? { position: d.position || undefined }
           : {
-              battingHand: d.battingHand,
-              bowlingHand: d.bowlingHand,
-              battingType: d.battingType,
+              battingHand: d.battingHand || undefined,
+              bowlingHand: d.bowlingHand || undefined,
+              battingType: d.battingType || undefined,
               bowlerType: d.bowlerType || undefined,
               isAllRounder: d.isAllRounder,
               isWk: d.isWk,
@@ -316,22 +356,20 @@ export function RegisterPage() {
         guardianName: minor ? d.guardianName : undefined,
         idDocMeta: { objectKey, size: idFile.size, contentType },
       });
-      if (res?.clearance?.fromClubName) setClearanceFrom(res.clearance.fromClubName);
+      if (res?.transferWindow?.closed)
+        setWindowClosed({ nextWindow: res.transferWindow.nextWindow });
+      else if (res?.clearance?.fromClubName) setClearanceFrom(res.clearance.fromClubName);
       setState('done');
     } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
-        // Matches the server's deliberately-collapsed conflict wording (dedup vs
-        // mid-transfer are indistinguishable by design).
-        setError('This person is already registered, or a transfer is already in progress.');
-      } else {
-        setError(err?.message || 'Could not submit. Please try again.');
-      }
+      setError(registrationErrorMessage(err, phase));
     } finally {
       setBusy(false);
     }
   }
 
-  if (state === 'loading') {
+  // Gates BOTH the loading and the invalid screens: a missing token sets 'invalid'
+  // synchronously, and that screen renders vertical copy too.
+  if (!tenantSettled || state === 'loading') {
     return <CenterCard>Checking your registration link…</CenterCard>;
   }
   if (state === 'invalid') {
@@ -352,6 +390,28 @@ export function RegisterPage() {
       currentClubId === clubId
         ? clubName
         : currentClubOptions.find((c) => c.id === currentClubId)?.name || clubName;
+    if (windowClosed) {
+      const next = windowClosed.nextWindow;
+      return (
+        <CenterCard>
+          <h1 className="ps-title" style={{ fontSize: 22 }}>
+            Registration recorded — transfers are closed
+          </h1>
+          <p className="ps-desc">
+            Your details have been recorded, but because you were registered at another club and
+            transfers are closed
+            {next ? (
+              <>
+                {' '}
+                until <strong>{formatDayYear(next.start)}</strong> ({next.label})
+              </>
+            ) : null}
+            , you have not been registered with {joiningClubName}. The Union office has been
+            notified.
+          </p>
+        </CenterCard>
+      );
+    }
     if (clearanceFrom) {
       // The server names the clearance's REAL source: it may match the player's directory
       // pick, or a real club it auto-routed to via the ID-number match — so classify by
@@ -369,16 +429,16 @@ export function RegisterPage() {
             {fromDirectory ? (
               <>
                 Because you were last registered at <strong>{clearanceFrom}</strong>, a clearance
-                request has been raised for the Union office to review. You&apos;ll appear on{' '}
-                {joiningClubName}&apos;s roster as <em>clearance pending</em> until the Union office
+                request has been raised for the {t.office} to review. You&apos;ll appear on{' '}
+                {joiningClubName}&apos;s roster as <em>clearance pending</em> until the {t.office}{' '}
                 approves the transfer.
               </>
             ) : (
               <>
                 Because you were last registered at <strong>{clearanceFrom}</strong>, a clearance
                 request has been sent to them. You&apos;ll appear on {joiningClubName}&apos;s roster
-                as <em>clearance pending</em> until {clearanceFrom} (or the Union office) approves
-                the transfer.
+                as <em>clearance pending</em> until {clearanceFrom} (or the {t.office}) approves the
+                transfer.
               </>
             )}
           </p>
@@ -559,16 +619,23 @@ export function RegisterPage() {
               <Seg
                 label="Batting hand"
                 options={HANDS}
+                noneLabel="— Not set —"
                 value={d.battingHand}
                 onPick={(v) => setVal('battingHand', v)}
               />
               <Seg
                 label="Bowling hand"
                 options={HANDS}
+                noneLabel="— Not set —"
                 value={d.bowlingHand}
                 onPick={(v) => setVal('bowlingHand', v)}
               />
-              <Select label="Batting type" value={d.battingType} onChange={set('battingType')}>
+              <Select
+                label="Batting type"
+                value={d.battingType}
+                onChange={set('battingType')}
+                placeholder="— Not set —"
+              >
                 {BATTING_TYPES.map((b) => (
                   <option key={b}>{b}</option>
                 ))}
@@ -597,20 +664,34 @@ export function RegisterPage() {
 
         {(clearancesOn || (veteransOn && clubs.length > 0)) && (
           <Section title={clearancesOn ? 'Registration history' : 'Veterans'}>
+            {transfersClosed && (
+              <div
+                className="reg-span"
+                role="note"
+                style={{ fontSize: 12.5, color: 'var(--gold, #E0B341)', marginBottom: 8 }}
+              >
+                Transfers between clubs are currently closed
+                {windowStatus?.next
+                  ? ` — the next window opens ${formatDayYear(windowStatus.next.start)} (${windowStatus.next.label})`
+                  : ''}
+                . If you were last registered at another club, your registration will be recorded
+                but not completed until the Union office reopens it.
+              </div>
+            )}
             {!clearancesOn ? null : clubs.length === 0 ? (
               // Older backend (no club list in the link context) — legacy free text.
               <Field
                 span
-                label="Club for which last registered"
+                label={`${t.Club} for which last registered`}
                 value={d.lastClub}
                 onChange={set('lastClub')}
-                placeholder="Previous club, or — if first registration"
+                placeholder={`Previous ${t.club}, or — if first registration`}
               />
             ) : (
               <>
                 <Select
                   span
-                  label="Club for which last registered"
+                  label={`${t.Club} for which last registered`}
                   value={d.lastClubChoice}
                   onChange={(e) =>
                     // Leaving 'Other' clears the typed name so it can't ride along with
@@ -630,21 +711,23 @@ export function RegisterPage() {
                   <option value="__first__">None (first registration)</option>
                   {/* The link club itself — for a player re-registering at the same club.
                     Picking it keeps the current club as the link club (no transfer). */}
-                  <option value={clubId}>{clubName} (this club)</option>
+                  <option value={clubId}>
+                    {clubName} (this {t.club})
+                  </option>
                   {clubs.map((cl) => (
                     <option key={cl.id} value={cl.id}>
                       {cl.name}
                     </option>
                   ))}
-                  <option value="__other__">Other club (type below)</option>
+                  <option value="__other__">Other {t.club} (type below)</option>
                 </Select>
                 {d.lastClubChoice === '__other__' && (
                   <Field
                     span
-                    label="Previous club name"
+                    label={`Previous ${t.club} name`}
                     value={d.lastClub}
                     onChange={set('lastClub')}
-                    placeholder="Name of the club you last registered for"
+                    placeholder={`Name of the ${t.club} you last registered for`}
                   />
                 )}
                 {typedOtherOnSystem && (
@@ -652,8 +735,8 @@ export function RegisterPage() {
                     className="reg-span"
                     style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}
                   >
-                    {typedOtherOnSystem.name} is in the club list — select it from the dropdown
-                    above instead of typing it, so your registration links to that club.
+                    {typedOtherOnSystem.name} is in the {t.club} list — select it from the dropdown
+                    above instead of typing it, so your registration links to that {t.club}.
                   </div>
                 )}
                 {!!d.lastClubChoice &&
@@ -665,8 +748,8 @@ export function RegisterPage() {
                       style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}
                     >
                       {clubs.find((cl) => cl.id === d.lastClubChoice)?.directory
-                        ? 'A clearance request will be raised for the Union office to review before you join your current club.'
-                        : 'If you’re still registered there under this ID number, a clearance request will be sent to that club — they (or the Union office) must approve it before you join your current club.'}
+                        ? `A clearance request will be raised for the ${t.office} to review before you join your current ${t.club}.`
+                        : `If you’re still registered there under this ID number, a clearance request will be sent to that ${t.club} — they (or the ${t.office}) must approve it before you join your current ${t.club}.`}
                     </div>
                   )}
                 {d.lastClubChoice === clubId && (
@@ -681,7 +764,7 @@ export function RegisterPage() {
                   <>
                     <Select
                       span
-                      label="Current club"
+                      label={`Current ${t.club}`}
                       value={d.currentClubChoice || clubId}
                       onChange={(e) => setD((f) => ({ ...f, currentClubChoice: e.target.value }))}
                     >
@@ -697,9 +780,9 @@ export function RegisterPage() {
                         className="reg-span"
                         style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}
                       >
-                        You&apos;re registering with a club other than the one whose link you used,
-                        so your registration will be sent to that club to approve before you appear
-                        on their roster.
+                        You&apos;re registering with a {t.club} other than the one whose link you
+                        used, so your registration will be sent to that {t.club} to approve before
+                        you appear on their roster.
                       </div>
                     )}
                   </>
@@ -713,7 +796,7 @@ export function RegisterPage() {
                   be reused for this). "Yes" reveals a club picker, excluding the chosen current
                   club. No answer sends nothing. */}
                 <div className="reg-span">
-                  <Label label="Are you playing veterans cricket for another club?" />
+                  <Label label={`Are you playing veterans ${t.sport} for another ${t.club}?`} />
                   <div className="seg">
                     {[
                       { v: 'yes', l: 'Yes' },
@@ -740,10 +823,10 @@ export function RegisterPage() {
                 {d.vetsChoice === 'yes' && (
                   <Select
                     span
-                    label="Veterans club"
+                    label={`Veterans ${t.club}`}
                     value={d.vetsClubId}
                     onChange={(e) => setVal('vetsClubId', e.target.value)}
-                    placeholder="Select the club you play veterans cricket for"
+                    placeholder={`Select the ${t.club} you play veterans ${t.sport} for`}
                   >
                     {vetsClubOptions.map((cl) => (
                       <option key={cl.id} value={cl.id}>
@@ -1074,17 +1157,29 @@ function Seg({
   value,
   onPick,
   span,
+  noneLabel,
 }: {
   label: ReactNode;
   options: string[];
   value: string;
   onPick: (v: string) => void;
   span?: boolean;
+  /** When set, a leading button that picks '' — the "not answered" state. */
+  noneLabel?: string;
 }) {
   return (
     <div className={span ? 'reg-span' : undefined}>
       <Label label={label} />
       <div className="seg">
+        {noneLabel !== undefined && (
+          <button
+            type="button"
+            className={`seg-btn ${value === '' ? 'on' : ''}`}
+            onClick={() => onPick('')}
+          >
+            {noneLabel}
+          </button>
+        )}
         {options.map((o) => (
           <button
             key={o}

@@ -21,8 +21,11 @@ import {
   hasActiveFilters,
   emptyPlayerFilters,
 } from './playerFilters';
-import { filterClearances } from './clearanceFilters';
+import { filterClearances, readClearanceLinkId, clearanceLinkMissing } from './clearanceFilters';
 import { GUIDE_URL } from './help/HelpDrawer';
+import { AllFixturesView, GroundsWeek, ResultsView, WeekView, type HubManage } from './FixturesHub';
+import { buildFixtureIndex } from './fixture-index';
+import { CompetitionsPanel } from './CompetitionsPanel';
 import {
   DISTRICTS,
   DEFAULT_REQUIRED_DOCS,
@@ -68,6 +71,7 @@ import {
   slugifyLeagueKey,
   labelByKey,
   teamCounts,
+  clubSides,
   OVERARCHING_DISTRICT,
 } from '../packages/engine/src/leagues';
 import {
@@ -82,31 +86,37 @@ import {
   isLocked,
   VENUE_REASON_PREFIX,
 } from '../packages/engine/src/venues';
-import { isSlotRef, slotRefLabel } from '../packages/engine/src/formats';
+import {
+  isSlotRef,
+  slotRefLabel,
+  slotSource,
+  type SlotFixture,
+} from '../packages/engine/src/formats';
 import { resolveCompetitionDefaults } from '../packages/engine/src/defaults';
+import { TRANSFER_WINDOW_REJECTOR } from './types';
 import type {
   AdminClearanceView,
+  TransferWindowStatus,
   Club,
+  CompetitionStructure,
   League,
   PlayerRegistration,
   SeasonCalendar,
   SeasonRun,
   Series,
   Clash,
+  TenantConfig,
   Umpire,
+  Scorer,
   Venue,
   WithheldField,
 } from './types';
-import {
-  SeasonRunsPanel,
-  GenerateFixturesLauncher,
-  SeriesOriginPill,
-  seriesOrigin,
-} from './season-run';
+import { SeasonRunsPanel, StartSeasonModal, type StartSeasonRunRequest } from './season-run';
+import { leaguesReadiness } from './league-readiness';
+import { LeagueSeasonCell, ReadinessSummary } from './LeagueReadiness';
 import { VenuesCard } from './venues-card';
 import { cqiBandTone, cqiBandRows, docComplianceRows, docTone } from './insights';
 import {
-  formatDay,
   formatDayYear,
   formatStamp,
   formatStampDay,
@@ -163,6 +173,7 @@ import {
   InfoDot,
   ScrollX,
   FieldGuide,
+  ClearanceLinkMissingNotice,
 } from './atoms';
 
 /* ─── Local view-state shapes — explicit type params for `useState(null)` state that is
@@ -285,8 +296,36 @@ export type CheckClashes = (
   candidates: unknown[],
 ) => Promise<{ results: ClashResult[] }>;
 
+/** Knockout "Set team" (ADR 0018): put a real team into one fixture's placeholder side, or
+ *  `teamId: null` to put the placeholder back. Server-side (PATCH /series/:id `setSide`), so
+ *  the participant snapshot and the clash gate are applied there; rejects with the API error
+ *  (a `venue_clash` 409 carries `details.clashes`). */
+export type SetSide = (
+  seriesId: string,
+  fixtureId: string,
+  side: 'home' | 'away',
+  teamId: string | null,
+) => Promise<unknown>;
+
 /* ─── AdminFixtures — series cards + drilldown fixture table with travel distance ─── */
+/** The Fixtures & Venues tabs: the finding-things views, then the existing tools. */
+export type FixturesTab = 'week' | 'fixtures' | 'results' | 'venues' | 'series';
+const FIXTURES_TABS: Array<[FixturesTab, string]> = [
+  ['week', 'This week'],
+  ['fixtures', 'All fixtures'],
+  ['results', 'Results'],
+  ['venues', 'Venues'],
+  ['series', 'Leagues & tournaments'],
+];
+
 interface AdminFixturesProps {
+  /** The league catalogue (AdminLeagues, embedded) shown beside the competitions. */
+  leaguesCatalogue?: ReactNode;
+  /** A league or tournament was created, changed or deleted: refetch the series. */
+  onCompetitionsChanged?: () => void;
+  /** Opening tab when the URL names none (`?tab=` / `?series=` win). The console opens on
+   *  This week; the default stays Leagues & tournaments for callers that render the editor. */
+  defaultTab?: FixturesTab;
   clubs: Club[];
   // `Series.fixtures` is `unknown[]` (frontend strict ratchet, deferred) and this
   // long-standing function accesses fixture fields freely with no casts — typing this
@@ -306,6 +345,8 @@ interface AdminFixturesProps {
   /** Admin-only clash pre-check (ADR 0011 addendum). Absent ⇒ the editor shows no hints,
    *  everything else unchanged. Results align by index with the candidates sent. */
   onCheckClashes?: CheckClashes;
+  /** Knockout Set team / revert. Absent ⇒ placeholder sides stay read-only. */
+  onSetSide?: SetSide;
   toast: (message: string, tone?: string) => void;
   allCalendars?: SeasonCalendar[];
   allSeasonRuns?: SeasonRun[];
@@ -335,6 +376,18 @@ interface AdminFixturesProps {
   onSaveOfficials?: (seriesId: string, fixtureId: string, umpireIds: string[]) => Promise<unknown>;
   /** Add an umpire from the picker's "add umpire" option. */
   onCreateUmpire?: (displayName: string) => Promise<Umpire>;
+  /** The scorer register; appointments ride on each fixture's `officials.scorers`. */
+  scorers?: Scorer[];
+  onSaveScorers?: (seriesId: string, fixtureId: string, scorerIds: string[]) => Promise<unknown>;
+  /** The series' appointment-notice ledger, for the officials dialog's per-chip badges. */
+  loadNotifyStatus?: (seriesId: string) => Promise<{ rows: api.OfficialsNotifyStatusRow[] }>;
+  onCreateScorer?: (
+    displayName: string,
+    contacts?: import('./FixtureManage').PersonContacts,
+  ) => Promise<Scorer>;
+  /** Confirm a fixture's result as checked; rejects 409 `result_changed` on a stale page. */
+  onConfirmResult?: (seriesId: string, fixtureId: string, recordedAt: string) => Promise<unknown>;
+  onUnconfirmResult?: (seriesId: string, fixtureId: string) => Promise<unknown>;
 }
 
 // Export row shape shared by the per-series and whole-season exports — the same
@@ -400,7 +453,18 @@ export function seriesScheduleRows(
       Suburb: home?.ground?.suburb || '',
       Away: away?.name || 'TBD',
       'Distance (km)': hasGeo && cost ? Number(cost.distanceKm.toFixed(1)) : '—',
-      Status: f.status || 'scheduled',
+      // A medicoach result makes the game completed, as in the fixture table.
+      Status: fixtureStatus(f),
+      Result: f.result
+        ? [
+            f.result.homeScore || f.result.awayScore
+              ? `${f.result.homeScore ?? '–'} v ${f.result.awayScore ?? '–'}`
+              : '',
+            f.result.summary ?? (f.result.noResult ? 'No result' : ''),
+          ]
+            .filter(Boolean)
+            .join(' · ')
+        : '',
     };
   });
 }
@@ -416,6 +480,7 @@ export const SCHEDULE_COLS = [
   'Away',
   'Distance (km)',
   'Status',
+  'Result',
 ] as const;
 
 // Whole-season summary: one row per competition — the cover sheet of the season export
@@ -465,6 +530,9 @@ function SeriesStatusPills({ series: s }: { series: Series }) {
 }
 
 export function AdminFixtures({
+  leaguesCatalogue,
+  onCompetitionsChanged,
+  defaultTab = 'series',
   clubs,
   allSeries,
   onUpdateSeries,
@@ -474,6 +542,7 @@ export function AdminFixtures({
   onReveal,
   onSetApproved,
   onCheckClashes,
+  onSetSide,
   toast,
   allCalendars = [],
   allSeasonRuns = [],
@@ -497,14 +566,18 @@ export function AdminFixtures({
   umpires = [],
   onSaveOfficials,
   onCreateUmpire,
+  scorers = [],
+  onSaveScorers,
+  onCreateScorer,
+  onConfirmResult,
+  onUnconfirmResult,
+  loadNotifyStatus = api.getOfficialsNotifyStatus,
 }: AdminFixturesProps) {
   const vt = useVertical().terms;
   const copy = useCopy();
-  // Overs are cricket label metadata — other sports never show them.
-  const showOvers = useVertical().sport === 'cricket';
-  // The single "Start a season" entry point — only a league the operator has set up can
-  // continue to StartSeasonForm; the rest are listed with the hand-off to the operator.
-  // Owned here, not in SeasonRunsPanel, so its own button and the header button share it.
+  // The Start a season modal — only a league that is ready can start; the rest are listed
+  // with their reason. Owned here, not in SeasonRunsPanel, so the header button and the
+  // panel's empty-state CTA share it.
   const [launcherOpen, setLauncherOpen] = useStateA(false);
   const [viewerOpen, setViewerOpen] = useStateA(false);
   // `?series=<id>` (from the Medicoach sync page) opens that series; else the first one.
@@ -515,28 +588,88 @@ export function AdminFixtures({
         : null) ?? allSeries[0]?.id,
   );
   const active = allSeries.find((s) => s.id === activeId) || allSeries[0];
+  // `?series=` (a deep link to one series) opens Leagues & tournaments on it; `?tab=` names a tab.
+  const [tab, setTabState] = useStateA<FixturesTab>(() => {
+    const q = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+    const named = q?.get('tab') as FixturesTab | null;
+    if (named && FIXTURES_TABS.some(([k]) => k === named)) return named;
+    return q?.get('series') ? 'series' : defaultTab;
+  });
+  const setTab = (next: FixturesTab) => {
+    setTabState(next);
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      url.searchParams.set('tab', next);
+      if (next !== 'series') {
+        url.searchParams.delete('series');
+        url.searchParams.delete('run');
+      }
+      window.history.replaceState(window.history.state, '', url);
+    }
+  };
+  /** From any finding view: open that fixture's series in the editor. */
+  const openSeries = (seriesId: string) => {
+    setActiveId(seriesId);
+    setTab('series');
+    if (typeof window !== 'undefined') {
+      // Leagues & tournaments opens straight on this series' competition.
+      const url = new URL(window.location.href);
+      url.searchParams.set('series', seriesId);
+      window.history.replaceState(window.history.state, '', url);
+      window.scrollTo({ top: 0 });
+    }
+  };
+  // Today as a South African calendar day (UTC+2, no daylight saving).
+  const today = new Date(Date.now() + 2 * 3_600_000).toISOString().slice(0, 10);
+  const fixtureRows = useMemoA(
+    () => buildFixtureIndex(allSeries, clubs, allVenues, today),
+    [allSeries, clubs, allVenues, today],
+  );
+  const hub = {
+    rows: fixtureRows,
+    today,
+    onOpenSeries: openSeries,
+    series: allSeries.map((s) => ({ id: s.id, name: s.name })),
+    clubs: [...clubs].sort((a, b) => a.name.localeCompare(b.name)),
+    // Managing a fixture from the finding views: the same writes the series editor uses.
+    manage: {
+      series: allSeries,
+      clubs,
+      venues: allVenues,
+      umpires,
+      scorers,
+      // The hub's updaters spread the current series and change only `fixtures` (plus the
+      // confirmRemoveSynced action key), so every Series field the editor relies on survives.
+      onUpdateSeries: onUpdateSeries as unknown as HubManage['onUpdateSeries'],
+      onSaveUmpires: onSaveOfficials,
+      onSaveScorers,
+      onCreateUmpire,
+      onCreateScorer,
+      onConfirmResult,
+      onUnconfirmResult,
+      toast,
+      loadNotifyStatus: onSaveOfficials || onSaveScorers ? loadNotifyStatus : undefined,
+    },
+  };
+  const awaiting = fixtureRows.filter((r) => r.state === 'awaiting-result').length;
+  // No series yet: one setup page (venues, then seasons, then the empty state) — there is
+  // nothing to find, so no tabs.
+  const tabbed = allSeries.length > 0;
+  const showTab = (t: FixturesTab) => !tabbed || tab === t;
+  const openLauncher = () => {
+    if (tabbed) setTab('series');
+    setLauncherOpen(true);
+  };
+  // `?run=<id>` ("Open season" on the Leagues page) shows that season first.
+  const [initialRunId] = useStateA(() =>
+    typeof window !== 'undefined'
+      ? (new URLSearchParams(window.location.search).get('run') ?? undefined)
+      : undefined,
+  );
   const [confirm, setConfirm] = useStateA<ConfirmDialogState | null>(null); // shared confirmation modal state (recall/reveal)
   const [releaseFor, setReleaseFor] = useStateA<ReleaseSeriesState | null>(null); // series whose ReleaseDialog is open
-  const clubBy = (id) => clubs.find((c) => c.id === id);
-  // Resolve a fixture id → team (series participant). A single-team club resolves to
-  // itself; a multi-team club's `tm_…` id resolves via the series snapshot.
-  const teamBy = (s, id) => resolveTeam(s, id, clubBy);
   // The tenant's travel-cost defaults (ADR 0014); a series' own values win.
   const travel = resolveCompetitionDefaults(tenantConfig).travel;
-
-  // Aggregate distance per series
-  const seriesAgg = (s) => {
-    let totalKm = 0;
-    s.fixtures.forEach((f) => {
-      const home = teamBy(s, f.home),
-        away = teamBy(s, f.away);
-      if (!home.clubId || !away.clubId) return;
-      const t = seriesTravel(s, travel);
-      const c = fixtureCost(home, away, t.costPerKm, t.carsPerAwayTrip, fixtureVenue(f));
-      totalKm += c.roundTripKm;
-    });
-    return { totalKm };
-  };
 
   function exportSchedule(s: Series) {
     if (!s) return toast?.('No series to export');
@@ -627,12 +760,40 @@ export function AdminFixtures({
       },
     });
   }
+  // Success toasts chain off a resolved write only; a failed save was already toasted by
+  // withToast (main.tsx), so the rejection is just mopped up here.
   function approve(s) {
-    onSetApproved?.(s.id, true)?.then?.(() => toast?.(s.name + ' · approved — ready to release'));
+    Promise.resolve(onSetApproved?.(s.id, true))
+      .then(() => toast?.(s.name + ' · approved — ready to release'))
+      .catch(() => {});
   }
   function unapprove(s) {
-    onSetApproved?.(s.id, false)?.then?.(() => toast?.(s.name + ' · approval withdrawn'));
+    Promise.resolve(onSetApproved?.(s.id, false))
+      .then(() => toast?.(s.name + ' · approval withdrawn'))
+      .catch(() => {});
   }
+
+  // The operator's structured seasons (stage by stage) sit under the competitions table.
+  const seasonsPanel =
+    tenantConfig && onCreateSeasonRun ? (
+      <div style={{ marginBottom: 18 }}>
+        <SeasonRunsPanel
+          configFailed={structuresFailed || seasonRunsFailed}
+          clubs={clubs}
+          allLeagues={allLeagues}
+          allSeries={allSeries}
+          runs={allSeasonRuns}
+          onOpenLauncher={openLauncher}
+          initialRunId={initialRunId}
+          onPatchRun={onPatchSeasonRun}
+          onGenerate={onGenerateStageSeries}
+          onDeleteRun={onDeleteSeasonRun}
+          structures={tenantConfig?.structures ?? []}
+          onRebaseRun={onRebaseSeasonRun}
+          onFetchRun={onFetchSeasonRun}
+        />
+      </div>
+    ) : undefined;
 
   return (
     <div>
@@ -643,10 +804,10 @@ export function AdminFixtures({
             Fixtures &amp; <em>Venues</em>
           </h1>
           <p className="ph-desc">
-            Every league runs a season, stage by stage, on the setup your platform operator created
-            for it. A one-off cup or festival is a season too: your operator can add a One-off
-            tournament structure for it. Home venues flow from the affiliation form. Travel distance
-            is calculated for every away fixture.{' '}
+            Find the week&apos;s games, results and grounds. Create a league or tournament under
+            Leagues &amp; tournaments and its fixtures are drawn for you; seasons your platform
+            operator set up run stage by stage. Home venues flow from the affiliation form. Travel
+            distance is calculated for every away fixture.{' '}
             <a className="help-link" href={GUIDE_URL} target="_blank" rel="noopener noreferrer">
               Open the full guide
             </a>
@@ -655,8 +816,9 @@ export function AdminFixtures({
         <div className="ph-actions">
           <InfoDot title="Fixture actions" align="end">
             <p>
-              The pills show the selected series&apos; status. Approve, release, reveal and recall
-              are in the release bar under its fixtures.
+              <strong>Leagues &amp; tournaments</strong> — create a league or tournament and its
+              fixtures are drawn for you. Open one to edit fixtures, see the table and results, and
+              approve or release it from the bar under its fixtures.
             </p>
             <p>
               <strong>Start a season</strong> — build a season’s schedule stage by stage on a league
@@ -683,26 +845,42 @@ export function AdminFixtures({
           <Btn tone="outline" icon={Icon.Eye} size="sm" onClick={() => setViewerOpen(true)}>
             View season
           </Btn>
-          <Btn tone="outline" icon={Icon.Plus} size="sm" onClick={() => setLauncherOpen(true)}>
+          <Btn tone="teal" icon={Icon.Plus} size="sm" onClick={openLauncher}>
             Start a season
           </Btn>
-          {/* Status only. Approve, release, reveal and recall live in ONE place — the
-              release bar under the active series' fixtures — so the page never offers the
-              same action twice. */}
-          {active && (
-            <span className="fix-head-status" title={`Status of ${active.name}`}>
-              <SeriesStatusPills series={active} />
-            </span>
-          )}
         </div>
       </div>
+
+      {tabbed && (
+        <div className="fh-tabs" role="tablist" aria-label="Fixtures and venues">
+          {FIXTURES_TABS.map(([k, label]) => (
+            <button
+              key={k}
+              role="tab"
+              aria-selected={tab === k}
+              className={`fh-tab${tab === k ? ' on' : ''}`}
+              onClick={() => setTab(k)}
+            >
+              {label}
+              {k === 'results' && awaiting > 0 && (
+                <span className="fh-tab-n" title={`${awaiting} played games without a result`}>
+                  {awaiting}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+      {tabbed && tab === 'week' && <WeekView {...hub} />}
+      {tabbed && tab === 'fixtures' && <AllFixturesView {...hub} />}
+      {tabbed && tab === 'results' && <ResultsView {...hub} />}
 
       {/* Venues + seasons render regardless of series count: generating a season stage is
           what CREATES the first series, so a zero-series tenant needs the Start-a-season
           flow most of all. While the season-setup queries are in flight, hold the space
           with a plain card — an unloaded runs list rendered as "No season running" offers
           a Start CTA whose duplicate guard is checking a list that never arrived. */}
-      {seasonSetupLoading ? (
+      {!showTab('venues') && !showTab('series') ? null : seasonSetupLoading ? (
         <div style={{ marginBottom: 18 }}>
           <Card
             title="Seasons"
@@ -711,7 +889,12 @@ export function AdminFixtures({
         </div>
       ) : (
         <>
-          {onSaveVenue && (
+          {tabbed && tab === 'venues' && (
+            <div style={{ marginBottom: 18 }}>
+              <GroundsWeek {...hub} />
+            </div>
+          )}
+          {onSaveVenue && showTab('venues') && (
             <div style={{ marginBottom: 18 }}>
               <VenuesCard
                 clubs={clubs}
@@ -723,122 +906,50 @@ export function AdminFixtures({
               />
             </div>
           )}
-          {/* Structured competitions run stage by stage here; the flat series strip below
-              still covers ad-hoc series and everything a season has generated. */}
-          {tenantConfig && onCreateSeasonRun && (
-            <div style={{ marginBottom: 18 }}>
-              <SeasonRunsPanel
-                configFailed={structuresFailed || seasonRunsFailed}
-                clubs={clubs}
-                allLeagues={allLeagues}
-                allSeries={allSeries}
-                runs={allSeasonRuns}
-                onOpenLauncher={() => setLauncherOpen(true)}
-                onPatchRun={onPatchSeasonRun}
-                onGenerate={onGenerateStageSeries}
-                onDeleteRun={onDeleteSeasonRun}
-                structures={tenantConfig?.structures ?? []}
-                onRebaseRun={onRebaseSeasonRun}
-                onFetchRun={onFetchSeasonRun}
-              />
-            </div>
-          )}
         </>
       )}
 
-      {allSeries.length === 0 ? (
-        // The empty state's copy points "above" at the season setup panel — while that
-        // panel is still loading, there's nothing there yet to point at, so render nothing.
-        seasonSetupLoading ? null : (
-          <EmptyState
-            icon={Icon.Field}
-            title="No series yet"
-            sub="Start a season on a league your platform operator has set up and work through it stage by stage. For a one-off cup or festival, your operator can add a One-off tournament structure."
-            action={
-              <Btn tone="teal" icon={Icon.Plus} onClick={() => setLauncherOpen(true)}>
-                Start a season
-              </Btn>
-            }
-          />
-        )
-      ) : (
-        <>
-          {/* Series cards strip — status only; actions live in the release bar below */}
-          <div className="series-strip">
-            {allSeries.map((s) => {
-              const agg = seriesAgg(s);
-              return (
-                <div
-                  key={s.id}
-                  className={`series-card ${s.id === activeId ? 'active' : ''}`}
-                  onClick={() => setActiveId(s.id)}
-                  role="button"
-                  tabIndex={0}
-                >
-                  <div className="series-card-head">
-                    <div className="series-card-name">{s.name}</div>
-                    <SeriesStatusPills series={s} />
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: 'var(--muted)',
-                      fontWeight: 500,
-                      fontFamily: "'Montserrat',sans-serif",
-                    }}
-                  >
-                    {s.teams.length} teams · {s.fixtures.length} fixtures ·{' '}
-                    {showOvers ? `${s.maxOvers} ov · ` : ''}
-                    {s.endDate ? '' : 'start '}
-                    {formatDay(s.startDate)}
-                    {s.endDate ? ` – ${formatDay(s.endDate)}` : ''}
-                  </div>
-                  <div className="series-card-meta">
-                    <div className="series-card-stat">
-                      <div className="series-card-stat-l">Total km</div>
-                      <div className="series-card-stat-n">
-                        {Math.round(agg.totalKm).toLocaleString()}
-                      </div>
-                    </div>
-                  </div>
-                  {seriesOrigin(s) && (
-                    // Its own click target: opening the explainer must not also switch
-                    // the active series underneath it.
-                    <div className="series-card-origin" onClick={(e) => e.stopPropagation()}>
-                      <SeriesOriginPill series={s} />
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Active series drill-down */}
-          {active && (
-            <FixtureTable
-              series={active}
-              clubs={clubs}
-              travel={travel}
-              onUpdateSeries={onUpdateSeries}
-              onDeleteSeries={onDeleteSeries}
-              onDuplicateSeries={onDuplicateSeries}
-              onAskRelease={askRelease}
-              onAskRecall={askRecall}
-              onAskReveal={onReveal ? reveal : undefined}
-              onApprove={approve}
-              onUnapprove={unapprove}
-              toast={toast}
-              allCalendars={allCalendars}
-              allSeasonRuns={allSeasonRuns}
-              onAllocateVenues={onAllocateVenues}
-              onCheckClashes={onCheckClashes}
-              allSeries={allSeries}
-              umpires={umpires}
-              onSaveOfficials={onSaveOfficials}
-              onCreateUmpire={onCreateUmpire}
-            />
-          )}
-        </>
+      {showTab('series') && !seasonSetupLoading && (
+        <CompetitionsPanel
+          allSeries={allSeries}
+          clubs={clubs}
+          leagues={allLeagues}
+          runs={allSeasonRuns}
+          activeId={active?.id}
+          onSelectSeries={setActiveId}
+          onChanged={() => onCompetitionsChanged?.()}
+          toast={toast}
+          catalogue={leaguesCatalogue}
+          seasons={seasonsPanel}
+          renderStatus={() => active && <SeriesStatusPills series={active} />}
+          renderFixtures={() =>
+            active ? (
+              <FixtureTable
+                series={active}
+                clubs={clubs}
+                travel={travel}
+                onUpdateSeries={onUpdateSeries}
+                onDeleteSeries={onDeleteSeries}
+                onDuplicateSeries={onDuplicateSeries}
+                onAskRelease={askRelease}
+                onAskRecall={askRecall}
+                onAskReveal={onReveal ? reveal : undefined}
+                onApprove={approve}
+                onUnapprove={unapprove}
+                toast={toast}
+                allCalendars={allCalendars}
+                allSeasonRuns={allSeasonRuns}
+                onAllocateVenues={onAllocateVenues}
+                onCheckClashes={onCheckClashes}
+                onSetSide={onSetSide}
+                allSeries={allSeries}
+                umpires={umpires}
+                onSaveOfficials={onSaveOfficials}
+                onCreateUmpire={onCreateUmpire}
+              />
+            ) : null
+          }
+        />
       )}
 
       {/* Shared confirmation modal — portaled to document.body so it escapes the
@@ -925,17 +1036,18 @@ export function AdminFixtures({
       )}
 
       {launcherOpen && (
-        <GenerateFixturesLauncher
+        <StartSeasonModal
           clubs={clubs}
           allLeagues={allLeagues}
           config={tenantConfig || { structures: [], calendars: [] }}
           existingRuns={allSeasonRuns}
+          allSeries={allSeries}
           onCreateRun={
             onCreateSeasonRun ||
             (() => Promise.reject(new Error('season-run creation is not wired for this host')))
           }
-          // Refetch runs + tenant config: opening the launcher must show what the server
-          // will freeze into the new season, not a config cached earlier.
+          // Refetch runs, tenant config and the public tenant (leagues + calendars): opening
+          // the modal must show what the server will freeze, not a config cached earlier.
           onRefreshConfig={onSeasonSetupChanged}
           onClose={() => setLauncherOpen(false)}
           toast={toast}
@@ -1162,6 +1274,7 @@ export function FixtureTable({
   allSeasonRuns = [] as SeasonRun[],
   onAllocateVenues,
   onCheckClashes,
+  onSetSide = undefined as SetSide | undefined,
   // Umpire allocation: every series (for the cross-series double-booking warning), the
   // registry, and the officials write. Without them the column renders names read-only.
   allSeries = undefined as Series[] | undefined,
@@ -1333,7 +1446,7 @@ export function FixtureTable({
               series.seriesType,
               `${series.teams.length} teams`,
               `${series.fixtures.length} fixtures`,
-              showOvers && `${series.maxOvers} overs`,
+              showOvers && series.maxOvers != null && `${series.maxOvers} overs`,
               // A season-generated series has no category — the competition already says
               // what it is. Joining on the present parts avoids a dangling separator.
               series.category,
@@ -1406,7 +1519,11 @@ export function FixtureTable({
                   body: series.released
                     ? `This series is RELEASED. Reallocating rewrites the ground for all ${series.fixtures.length} fixtures — ${vt.clubs} and players have already been sent the current ones, and there is no undo.`
                     : `Assigns a ground to all ${series.fixtures.length} fixtures, replacing any already set. Hand-picked venues are kept only where the fixture is locked.`,
-                  onYes: () => onAllocateVenues(series),
+                  // Close the confirm first: the allocation reports back by toast.
+                  onYes: () => {
+                    setConfirm(null);
+                    onAllocateVenues(series);
+                  },
                   danger: series.released,
                 })
               }
@@ -1418,8 +1535,9 @@ export function FixtureTable({
             tone="outline"
             size="sm"
             onClick={() => {
-              onDuplicateSeries(series.id);
-              toast?.('Series duplicated');
+              Promise.resolve(onDuplicateSeries(series.id))
+                .then(() => toast?.('Series duplicated'))
+                .catch(() => {});
             }}
           >
             Duplicate
@@ -1432,9 +1550,10 @@ export function FixtureTable({
                 title: 'Delete this series?',
                 body: `Permanently remove "${series.name}" along with all ${series.fixtures.length} fixtures. The ${copy.office} cannot undo this.`,
                 onYes: () => {
-                  onDeleteSeries(series.id);
                   setConfirm(null);
-                  toast?.('Series deleted');
+                  Promise.resolve(onDeleteSeries(series.id))
+                    .then(() => toast?.('Series deleted'))
+                    .catch(() => {});
                 },
                 danger: true,
               })
@@ -1474,6 +1593,11 @@ export function FixtureTable({
                     seriesId={series.id}
                     released={series.released}
                     onCheckClashes={onCheckClashes}
+                    onSetSide={onSetSide}
+                    clubs={clubs}
+                    // No participant snapshot: the series' sides are club ids (Set team
+                    // offers clubs only).
+                    legacy={!series.participants?.length}
                     teams={series.teams.map((id) => {
                       const r = teamBy(id);
                       return { id, name: r.name, ground: r.ground, club: r.club };
@@ -1521,6 +1645,13 @@ export function FixtureTable({
                       }
                       return seriesHasTimes ? <div className="fix-row-time">Time TBC</div> : null;
                     })()}
+                    {/* A postponed fixture keeps its first schedule in `originalDate` (ADR 0015);
+                        `date` is already the new one. */}
+                    {status === 'postponed' && f.originalDate && f.originalDate !== f.date && (
+                      <div className="fix-row-time">
+                        was <s>{formatWeekdayDay(f.originalDate)}</s>
+                      </div>
+                    )}
                   </td>
                   <td>
                     <div className="fix-row-team">
@@ -1545,14 +1676,14 @@ export function FixtureTable({
                         )}
                         <VenueReasonPill reason={f.venueReason} status={f.venueStatus} />
                       </div>
+                      <div className="fix-row-venue-suburb">{home.ground?.suburb || ''}</div>
                       {/* The reason is the whole point of a greedy allocator over a solver:
                           an operator can argue with "home ground closed for maintenance",
-                          not with an objective value. */}
-                      <div className="fix-row-venue-suburb">
-                        {f.venueReason && f.venueStatus !== 'home'
-                          ? f.venueReason
-                          : home.ground?.suburb || ''}
-                      </div>
+                          not with an objective value. A secondary note under the suburb, so a
+                          reason ("Union reminder fixtures upload") never reads as a place. */}
+                      {f.venueReason && f.venueStatus !== 'home' && (
+                        <div className="fix-row-venue-note">{f.venueReason}</div>
+                      )}
                     </div>
                   </td>
                   <td>
@@ -1587,6 +1718,7 @@ export function FixtureTable({
                       warnings={umpireWarnings.get(`${series.id}#${f.id}`)}
                       onSave={onSaveOfficials}
                       onCreate={onCreateUmpire}
+                      loadNotifyStatus={onSaveOfficials ? api.getOfficialsNotifyStatus : undefined}
                     />
                   </td>
                   <td>
@@ -1784,6 +1916,123 @@ export function FixtureTable({
   );
 }
 
+/**
+ * One knockout side in the fixture editor (ADR 0018): what the side is now (the placeholder's
+ * label, or the team set into it), plus "Set team" — series teams first, then every other
+ * side in the tenant grouped by club, for a winner from outside the series ("Community Cup
+ * winner") — and "Revert to placeholder" once a team has been set. A legacy series (no
+ * participant snapshot) takes clubs only, so it lists one option per club (its club id).
+ * Without `onSet` (no write path) it is read-only; `note` carries sync context (ADR 0022 §7).
+ */
+function KnockoutSide({
+  id,
+  sideLabel,
+  value,
+  placeholder,
+  otherSide,
+  fixtures,
+  teams,
+  clubs,
+  legacy = false,
+  busy,
+  onSet,
+  note,
+  badge = false,
+}: {
+  id: string;
+  sideLabel: 'home' | 'away';
+  value: string;
+  placeholder?: string;
+  otherSide: string;
+  fixtures: unknown[];
+  teams: Array<{ id: string; name: string }>;
+  clubs: Club[];
+  legacy?: boolean;
+  busy: boolean;
+  onSet?: (teamId: string | null) => void;
+  note?: string;
+  /** Divergence badge: a manual override on a synced series (ADR 0022 §7). */
+  badge?: boolean;
+}) {
+  const [pick, setPick] = useStateA('');
+  const shown = isSlotRef(value)
+    ? (slotRefLabel(value, fixtures as SlotFixture[]) ?? value)
+    : (teams.find((t) => t.id === value)?.name ?? value);
+  const inSeries = new Set(teams.map((t) => t.id));
+  const others = clubs
+    .map((c) => ({
+      club: c.name,
+      sides: (legacy ? [{ teamId: c.id, name: c.name }] : clubSides(c)).filter(
+        (p) => !inSeries.has(p.teamId),
+      ),
+    }))
+    .filter((g) => g.sides.length)
+    .sort((a, b) => a.club.localeCompare(b.club));
+  const usable = (teamId: string) => teamId !== value && teamId !== otherSide;
+  return (
+    <>
+      <input id={id} type="text" value={shown} disabled />
+      {badge && (
+        <div style={{ marginTop: 4 }}>
+          <Pill tone="gold">Manual override</Pill>
+        </div>
+      )}
+      {placeholder && (
+        <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
+          Placeholder: {slotRefLabel(placeholder, fixtures as SlotFixture[]) ?? placeholder}
+        </div>
+      )}
+      {note && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>{note}</div>}
+      {onSet && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+          <select
+            aria-label={`Team to set as ${sideLabel}`}
+            value={pick}
+            onChange={(e) => setPick(e.target.value)}
+            disabled={busy}
+          >
+            <option value="">Choose a team…</option>
+            {teams.length > 0 && (
+              <optgroup label="In this series">
+                {teams.map((t) => (
+                  <option key={t.id} value={t.id} disabled={!usable(t.id)}>
+                    {t.name}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            {others.map((g) => (
+              <optgroup key={g.club} label={g.club}>
+                {g.sides.map((p) => (
+                  <option key={p.teamId} value={p.teamId} disabled={!usable(p.teamId)}>
+                    {p.name}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+          <Btn
+            tone="outline"
+            size="sm"
+            disabled={busy || !pick || !usable(pick)}
+            onClick={() => {
+              onSet(pick);
+              setPick('');
+            }}
+          >
+            Set {sideLabel} team
+          </Btn>
+          {placeholder && (
+            <Btn tone="ghost" size="sm" disabled={busy} onClick={() => onSet(null)}>
+              Revert {sideLabel} to placeholder
+            </Btn>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
 /* Inline edit row */
 function EditFixtureRow({
   fixture,
@@ -1794,6 +2043,9 @@ function EditFixtureRow({
   seriesId,
   released,
   onCheckClashes,
+  onSetSide = undefined as SetSide | undefined,
+  clubs = [] as Club[],
+  legacy = false,
 }) {
   const vt = useVertical().terms;
   // Each label is bound to its control. These sit BESIDE their inputs, so without an id
@@ -2027,6 +2279,58 @@ function EditFixtureRow({
     }
   }
 
+  // Knockout Set team / revert (ADR 0018). A server action, not part of the draft: it lands
+  // on its own, then the draft's side follows it so a later Save can't write the old value
+  // back. Errors reuse the save panel — a clash 409 reads exactly like a refused save.
+  async function setSide(side: 'home' | 'away', teamId: string | null) {
+    if (!onSetSide || !seriesId) return;
+    setSaving(true);
+    setSaveClashes(null);
+    setSaveError(null);
+    try {
+      await onSetSide(seriesId, fixture.id, side, teamId);
+      u(side, teamId ?? fixture.slots?.[side] ?? draft[side]);
+    } catch (err) {
+      const clashes = (err as ApiError)?.details?.clashes as Clash[] | undefined;
+      if (clashes?.length) setSaveClashes(clashes);
+      else if (
+        err instanceof ApiError &&
+        err.status === 409 &&
+        err.message === SERIES_CONFLICT_MESSAGE
+      )
+        setSaveError(SERIES_CONFLICT_FRIENDLY);
+      else setSaveError((err instanceof Error && err.message) || 'Could not set the team.');
+    } finally {
+      setSaving(false);
+    }
+  }
+  // A side the editor treats as a knockout slot: still a placeholder, or set from one (its
+  // placeholder kept in `slots`). Those change through Set team / revert, never the select.
+  const isKnockoutSide = (side: 'home' | 'away') =>
+    isSlotRef(draft[side]) || isSlotRef(fixture.slots?.[side] ?? '');
+  // On a medicoach-synced series a `win:`/`lose:` side is filled by the sync from the result,
+  // but a manual Set team owns the side (ADR 0022 §7, superseding ADR 0018's sync-owned
+  // refusal): the sync never overwrites a `slotsManual` side until it is reverted. Set team
+  // stays available everywhere; on a sync-filled side the picker warns what it overrides.
+  const syncFilled = (side: 'home' | 'away') =>
+    fixture.syncMapped === true && !!slotSource(fixture.slots?.[side] ?? draft[side] ?? '');
+  // GET /series does not carry Match Centre's own resolution of the side, so a divergence
+  // can't be computed client-side: flag every manually overridden side on a synced series.
+  const manualOnSync = (side: 'home' | 'away') =>
+    fixture.syncMapped === true && fixture.slotsManual?.[side] === true;
+  const sideNote = (side: 'home' | 'away') => {
+    if (manualOnSync(side)) return 'Manual override — Match Centre may differ until you revert.';
+    if (syncFilled(side) && !isSlotRef(draft[side])) {
+      const name = teams.find((t) => t.id === draft[side])?.name ?? draft[side];
+      return `Match Centre resolved this side as ${name}; your choice overrides it until you revert.`;
+    }
+    if (syncFilled(side))
+      return 'Filled by the medicoach sync from the result; a team you set overrides it until you revert.';
+    return undefined;
+  };
+  const setterFor = (side: 'home' | 'away') =>
+    onSetSide && seriesId ? (teamId: string | null) => setSide(side, teamId) : undefined;
+
   return (
     <tr className="fix-edit-tr">
       <td colSpan={9}>
@@ -2059,18 +2363,28 @@ function EditFixtureRow({
               onChange={(e) => u('time', e.target.value)}
             />
           </div>
-          {/* A knockout side that is still a forward reference (`win:f3`) has no entry in
-              `teams`, so the select would render blank and any touch would silently
-              replace the bracket reference with a concrete club — breaking the link the
-              rest of the round depends on. Show what it is, read-only, instead. */}
+          {/* A knockout side that is still a placeholder (`win:f3`, `pos:…`, `tbd:…`) has no
+              entry in `teams`, so the select would render blank and any touch would silently
+              replace the bracket reference with a concrete club — breaking the link the rest
+              of the round depends on. Show what it is, read-only, with Set team / revert
+              (ADR 0018) as the only way to change it. */}
           <div className="fix-edit-field">
             <label htmlFor={`${uid}-home`}>Home (host)</label>
-            {isSlotRef(draft.home) ? (
-              <input
+            {isKnockoutSide('home') ? (
+              <KnockoutSide
                 id={`${uid}-home`}
-                type="text"
-                value={slotRefLabel(draft.home, fixtures) ?? draft.home}
-                disabled
+                sideLabel="home"
+                value={draft.home}
+                placeholder={fixture.slots?.home}
+                otherSide={draft.away}
+                fixtures={fixtures}
+                teams={teams}
+                clubs={clubs}
+                legacy={legacy}
+                busy={saving}
+                onSet={setterFor('home')}
+                note={sideNote('home')}
+                badge={manualOnSync('home')}
               />
             ) : (
               <select
@@ -2088,12 +2402,21 @@ function EditFixtureRow({
           </div>
           <div className="fix-edit-field">
             <label htmlFor={`${uid}-away`}>Away (visitors)</label>
-            {isSlotRef(draft.away) ? (
-              <input
+            {isKnockoutSide('away') ? (
+              <KnockoutSide
                 id={`${uid}-away`}
-                type="text"
-                value={slotRefLabel(draft.away, fixtures) ?? draft.away}
-                disabled
+                sideLabel="away"
+                value={draft.away}
+                placeholder={fixture.slots?.away}
+                otherSide={draft.home}
+                fixtures={fixtures}
+                teams={teams}
+                clubs={clubs}
+                legacy={legacy}
+                busy={saving}
+                onSet={setterFor('away')}
+                note={sideNote('away')}
+                badge={manualOnSync('away')}
               />
             ) : (
               <select
@@ -2311,6 +2634,12 @@ function EmptyCohort({ onShareLink, onInviteAdmin }) {
 }
 
 /* ─── AdminLeagues — manage the tenant league catalogue clubs opt into ─── */
+/**
+ * The catalogue, plus where each league stands for its season: set up by the operator or
+ * not, how many sides are affiliated, and the season running on it — with one next step
+ * per league (see `league-readiness.ts`). The admin starts seasons here; the setup itself
+ * stays the operator's.
+ */
 export function AdminLeagues({
   allLeagues,
   clubs,
@@ -2318,6 +2647,17 @@ export function AdminLeagues({
   onEdit,
   onDeleteLeague,
   toast,
+  structures = [],
+  calendars = [],
+  seasonRuns = [],
+  allSeries = [],
+  seasonSetupLoading = false,
+  seasonSetupFailed = false,
+  onCreateSeasonRun,
+  onRefreshSeasonSetup,
+  onOpenSeason,
+  onOpenClub,
+  embedded = false,
 }: {
   allLeagues;
   clubs;
@@ -2325,12 +2665,48 @@ export function AdminLeagues({
   onEdit;
   onDeleteLeague;
   toast;
+  /** The LIVE structures (authenticated tenant config) a league's setup points at. */
+  structures?: CompetitionStructure[];
+  /** The operator's season calendars (public tenant config). */
+  calendars?: SeasonCalendar[];
+  seasonRuns?: SeasonRun[];
+  /** For a running season's release progress. */
+  allSeries?: Series[];
+  /** Structures or season runs still loading: statuses wait rather than guess. */
+  seasonSetupLoading?: boolean;
+  /** Structures or season runs failed to load: say so rather than show false statuses. */
+  seasonSetupFailed?: boolean;
+  /** POST /season-runs. Absent ⇒ no Start buttons on this page. */
+  onCreateSeasonRun?: (run: StartSeasonRunRequest) => Promise<SeasonRun | void>;
+  /** Refetch leagues, calendars, structures and runs — the Start modal calls it on open. */
+  onRefreshSeasonSetup?: () => Promise<unknown> | void;
+  /** Go to the season on Fixtures & Venues → Leagues & tournaments. */
+  onOpenSeason?: (runId: string) => void;
+  onOpenClub?: (clubId: string) => void;
+  /** Shown inside Fixtures & Venues → Leagues & tournaments: no page head, just the actions. */
+  embedded?: boolean;
 }) {
   const vt = useVertical().terms;
   const copy = useCopy();
   const [confirm, setConfirm] = useStateA<ConfirmDialogState | null>(null);
+  // null = closed; '' = opened from the header (no league preselected); a key = that row.
+  const [startFor, setStartFor] = useStateA<string | null>(null);
   const countFor = (key) =>
     clubs.filter((c) => Array.isArray(c.leagues) && c.leagues.includes(key)).length;
+  const setupKnown = !seasonSetupLoading && !seasonSetupFailed;
+  const readiness = useMemoA(
+    () =>
+      leaguesReadiness(allLeagues, {
+        clubs,
+        structures,
+        calendars,
+        runs: seasonRuns,
+        series: allSeries,
+        isAffiliated: affiliationSubmitted,
+      }),
+    [allLeagues, clubs, structures, calendars, seasonRuns, allSeries],
+  );
+  const canStart = !!onCreateSeasonRun && setupKnown;
 
   function askDelete(L) {
     const n = countFor(L.key);
@@ -2350,23 +2726,61 @@ export function AdminLeagues({
 
   return (
     <div>
-      <div className="page-head">
-        <div className="ph-left">
-          <div className="ph-crumb">{copy.crumbRoot} · Admin Console / Leagues</div>
-          <h1 className="ph-title">
-            League <em>catalogue</em>
-          </h1>
-          <p className="ph-desc">
-            Create the leagues &amp; divisions clubs opt into during affiliation — fixtures are then
-            generated per league. Set these up before inviting clubs so they can register.
+      {embedded ? (
+        <div className="cmp-cat-head">
+          <p className="ump-sub">
+            The leagues &amp; divisions {vt.clubs} opt into during affiliation. A league&apos;s
+            season setup comes from your platform operator.
           </p>
+          <div className="fh-toolbar-right">
+            {canStart && allLeagues.length > 0 && (
+              <Btn tone="outline" icon={Icon.Plus} size="sm" onClick={() => setStartFor('')}>
+                Start a season
+              </Btn>
+            )}
+            <Btn tone="teal" icon={Icon.Plus} size="sm" onClick={onCreate}>
+              Create league
+            </Btn>
+          </div>
         </div>
-        <div className="ph-actions">
-          <Btn tone="teal" icon={Icon.Plus} size="sm" onClick={onCreate}>
-            Create league
-          </Btn>
+      ) : (
+        <div className="page-head">
+          <div className="ph-left">
+            <div className="ph-crumb">{copy.crumbRoot} · Admin Console / Leagues</div>
+            <h1 className="ph-title">
+              League <em>catalogue</em>
+            </h1>
+            <p className="ph-desc">
+              Create the leagues &amp; divisions clubs opt into during affiliation — fixtures are
+              then generated per league. Set these up before inviting clubs so they can register.
+              Each league&apos;s season setup (its structure and calendar) comes from your platform
+              operator; once a league is ready, start its season here.
+            </p>
+          </div>
+          <div className="ph-actions">
+            {canStart && allLeagues.length > 0 && (
+              <Btn tone="outline" icon={Icon.Plus} size="sm" onClick={() => setStartFor('')}>
+                Start a season
+              </Btn>
+            )}
+            <Btn tone="teal" icon={Icon.Plus} size="sm" onClick={onCreate}>
+              Create league
+            </Btn>
+          </div>
         </div>
-      </div>
+      )}
+
+      {allLeagues.length > 0 &&
+        (seasonSetupLoading ? (
+          <p className="lr-note">Checking each league&apos;s season setup…</p>
+        ) : seasonSetupFailed ? (
+          <p className="lr-note">
+            Couldn&apos;t load the season setup, so season statuses are hidden. Refresh to try
+            again.
+          </p>
+        ) : (
+          <ReadinessSummary list={readiness} />
+        ))}
 
       {allLeagues.length === 0 ? (
         <EmptyState
@@ -2381,34 +2795,48 @@ export function AdminLeagues({
         />
       ) : (
         <div className="tbl-w">
-          <table className="tbl">
+          <table className="tbl lr-tbl">
             <thead>
               <tr>
                 <th>League</th>
                 <th>District</th>
                 <th>Group</th>
                 <th>{vt.Clubs} registered</th>
+                <th>Season</th>
                 <th style={{ width: 130 }}></th>
               </tr>
             </thead>
             <tbody>
-              {allLeagues.map((L) => (
+              {allLeagues.map((L, i) => (
                 <tr key={L.key}>
-                  <td>
+                  <td className="lr-name">
                     <span style={{ fontWeight: 700 }}>{L.label}</span>
                   </td>
-                  <td>
+                  <td data-label="District">
                     <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>{L.district}</span>
                   </td>
-                  <td>
+                  <td data-label="Group">
                     <Pill tone="muted">{L.group}</Pill>
                   </td>
-                  <td>
+                  <td data-label={`${vt.Clubs} registered`}>
                     <span style={{ fontFamily: "'Montserrat',sans-serif", fontWeight: 700 }}>
                       {countFor(L.key)}
                     </span>
                   </td>
-                  <td>
+                  <td className="lr-season">
+                    {setupKnown ? (
+                      <LeagueSeasonCell
+                        readiness={readiness[i]}
+                        onStart={canStart ? () => setStartFor(L.key) : undefined}
+                        onOpenSeason={onOpenSeason}
+                        onOpenClub={onOpenClub}
+                        toast={toast}
+                      />
+                    ) : (
+                      <span className="lr-muted">—</span>
+                    )}
+                  </td>
+                  <td className="lr-row-actions">
                     <div className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
                       <Btn tone="outline" size="sm" onClick={() => onEdit(L)}>
                         Edit
@@ -2423,6 +2851,21 @@ export function AdminLeagues({
             </tbody>
           </table>
         </div>
+      )}
+
+      {startFor !== null && onCreateSeasonRun && (
+        <StartSeasonModal
+          clubs={clubs}
+          allLeagues={allLeagues}
+          config={{ structures, calendars } as TenantConfig}
+          existingRuns={seasonRuns}
+          allSeries={allSeries}
+          initialLeagueKey={startFor || undefined}
+          onCreateRun={onCreateSeasonRun}
+          onRefreshConfig={onRefreshSeasonSetup}
+          onClose={() => setStartFor(null)}
+          toast={toast}
+        />
       )}
 
       {confirm &&
@@ -2511,7 +2954,7 @@ export function LeagueForm({
     <div style={{ display: 'grid', gap: 14 }}>
       <p style={{ margin: 0, fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
         {editing
-          ? 'Edit this league. Its key is fixed — clubs are matched to it by key.'
+          ? 'Edit this league. Its key is fixed — clubs are matched to it by key. Its season setup (structure and calendar) is managed by your platform operator.'
           : 'Name the league, choose the district it belongs to, and group it for the picker.'}
       </p>
       <div className="field">
@@ -4283,7 +4726,8 @@ export function nextChairContact(
    chair changes later. Mirrors EditSupportContactModal's EMAIL_RE validation so
    an invalid address can't be saved into a broken mailto:. */
 export function ChairContactModal({ club, onClose, onSave, toast }) {
-  const vt = useVertical().terms;
+  const vertical = useVertical();
+  const vt = vertical.terms;
   const seed = club.exco?.chair || {};
   const [name, setName] = useStateA(seed.name || club.chair || '');
   const [email, setEmail] = useStateA(seed.email || '');
@@ -4353,8 +4797,9 @@ export function ChairContactModal({ club, onClose, onSave, toast }) {
             />
             {nameChanged && (
               <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6, lineHeight: 1.5 }}>
-                Term dates and ID details of the previous {vt.chair} will be cleared; the {vt.club}
-                completes them on its affiliation form.
+                {vertical.sport === 'cricket'
+                  ? `Term dates and ID details of the previous ${vt.chair} will be cleared; the ${vt.club} completes them on its affiliation form.`
+                  : `The previous ${vt.chair}'s other details will be cleared; the ${vt.club} completes them on its affiliation form.`}
               </div>
             )}
           </div>
@@ -5412,10 +5857,13 @@ export function AdminClubDetail({
                   'clearance-approved': 'Clearance approved notice',
                   'clearance-rejected': 'Clearance rejected notice',
                   'clearance-reopened': 'Clearance reopened notice',
+                  'clearance-inbound': 'Clearance inbound notice',
+                  'clearance-reminder': 'Clearance reminder',
                   'veterans-request': 'Veterans request notice',
                   'veterans-request-accepted': 'Veterans request accepted notice',
                   'veterans-request-declined': 'Veterans request declined notice',
                   fixtures: 'Fixtures shared with players',
+                  'fixture-reminder': 'Fixture reminder',
                 };
                 const sendItems = (club.commLog || []).map((e) => {
                   const isFixtures = e.kind === 'fixtures';
@@ -6173,7 +6621,8 @@ function AffiliationViewModal({ club, allLeagues, onClose }) {
                       <Row label="Cell" value={m.cell} />
                       <Row label="Gender" value={m.gender} />
                       <Row label="Race" value={m.race} />
-                      {key === 'chair' && (
+                      {/* ID / term are a cricket-only capture; schools never collect them. */}
+                      {key === 'chair' && vertical.sport === 'cricket' && (
                         <>
                           <Row label="ID number" value={m.idNumber} />
                           <Row
@@ -7124,6 +7573,36 @@ export function AdminTeamAccessView({
   );
 }
 
+/**
+ * Transfer-window status line for the clearances console. `status` is the SERVER-computed one
+ * from the tenant payload (absent ⇒ no windows configured ⇒ nothing to say).
+ */
+export function TransferWindowBanner({ status }: { status?: TransferWindowStatus }) {
+  if (!status) return null;
+  const text = status.open
+    ? `Transfers open${status.current ? ` — ${status.current.label} until ${formatDayYear(status.current.end)}` : ''}`
+    : status.next
+      ? `Transfers closed — next window: ${status.next.label} from ${formatDayYear(status.next.start)}`
+      : 'Transfers closed — no upcoming window';
+  return (
+    <div
+      role="status"
+      style={{
+        marginTop: 14,
+        padding: '8px 12px',
+        borderRadius: 8,
+        fontSize: 12.5,
+        background: status.open ? 'var(--green-soft, #E6F4EA)' : 'var(--coral-soft, #FDECEA)',
+        color: status.open ? 'var(--green, #1E7B3A)' : 'var(--coral, #C0392B)',
+      }}
+    >
+      {text}
+      {!status.open &&
+        '. Clubs cannot request clearances; registrations naming another club are auto-rejected.'}
+    </div>
+  );
+}
+
 /* ─── AdminClearances — oversight of every clearance across the cohort ─── */
 export function AdminClearances({
   clearances,
@@ -7133,10 +7612,15 @@ export function AdminClearances({
   onReject,
   onReassign,
   onReopen,
+  onRemind = undefined,
   onRevokeCertificate,
   onCertificateViewed = undefined,
+  transferWindowStatus = undefined,
   busyId,
   busyAction,
+  // False while the list is still loading — `clearances` is `[]` then, so the dead-link
+  // notice below would flash before the real list lands.
+  clearancesLoaded = true,
 }) {
   const [confirm, setConfirm] = useStateA<ClearanceConfirmState | null>(null);
   // Optional note the admin attaches to a rejection (shown to both clubs).
@@ -7148,8 +7632,14 @@ export function AdminClearances({
   // Target club for a reallocation (the reassign confirm's picker).
   const [reassignTarget, setReassignTarget] = useStateA('');
   const [filter, setFilter] = useStateA('all');
+  // `?clearance=<id>` (from a clearance notification email) seeds the search with that id —
+  // the filter matches on `r.id` and the default pill is All, so it surfaces at any status.
+  const [linkId] = useStateA(() =>
+    typeof window !== 'undefined' ? readClearanceLinkId(window.location.search) : null,
+  );
+  const [linkNoticeDismissed, setLinkNoticeDismissed] = useStateA(false);
   // Free-text search across every status; combines with the status pills below.
-  const [q, setQ] = useStateA('');
+  const [q, setQ] = useStateA(linkId ?? '');
   const teamLabel = labelByKey(leagues ?? []);
   // requestedAt is an INSTANT — the local calendar day, not the UTC one, or a request
   // logged at 01:00 SAST reads as the previous day.
@@ -7203,6 +7693,18 @@ export function AdminClearances({
           </Btn>
         </div>
       </div>
+
+      <TransferWindowBanner status={transferWindowStatus} />
+
+      {clearancesLoaded && !linkNoticeDismissed && clearanceLinkMissing(linkId, all) && (
+        <ClearanceLinkMissingNotice
+          onDismiss={() => {
+            setLinkNoticeDismissed(true);
+            // Drop the dead seeded search too, so dismissing lands on the full list.
+            if (q === linkId) setQ('');
+          }}
+        />
+      )}
 
       <div className="players-stats">
         <div className="players-stat">
@@ -7403,6 +7905,11 @@ export function AdminClearances({
                         : `The Union office can override ${req.fromClubName}'s approval and issue the clearance to ${req.toClubName}, or reject it — ${rejectClause[predicted]}.${canReallocate ? ` If ${req.fromClubName} has since registered under a slightly different name, reallocate this clearance to it instead.` : ''}`}
                     </div>
                   </div>
+                  {onRemind && !offSystem && (
+                    <Btn tone="outline" disabled={busy} onClick={() => onRemind(req)}>
+                      {busy && busyAction === 'remind' ? 'Sending…' : 'Send reminder'}
+                    </Btn>
+                  )}
                   {canReallocate && (
                     <Btn
                       tone="outline"
@@ -7491,7 +7998,11 @@ export function AdminClearances({
 
               {req.status !== 'pending' && (
                 <div className="clr-resolved-bar">
-                  {req.status === 'rejected' ? (
+                  {req.status === 'rejected' && req.rejectedBy === TRANSFER_WINDOW_REJECTOR ? (
+                    <Pill tone="coral" dot>
+                      Auto-rejected — window closed
+                    </Pill>
+                  ) : req.status === 'rejected' ? (
                     <Pill tone="coral" dot>
                       Rejected{req.rejectedBy ? ` · ${req.rejectedBy}` : ''}
                     </Pill>
@@ -7512,6 +8023,11 @@ export function AdminClearances({
                   {req.status === 'rejected' && req.rejectOutcome === 'stays-at-destination' && (
                     <span style={{ fontSize: 11, color: 'var(--muted)' }}>
                       Stays at {req.toClubName}
+                    </span>
+                  )}
+                  {req.status === 'rejected' && req.rejectOutcome === 'not-registered' && (
+                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+                      Not registered at {req.toClubName}
                     </span>
                   )}
                   {req.status === 'rejected' && req.rejectReason && (
@@ -7558,7 +8074,10 @@ export function AdminClearances({
                           kind: 'reopen',
                           title: 'Reopen this clearance?',
                           req,
-                          body: `${req.playerName}'s registration goes back to how it was before the rejection, and ${req.fromClubName}'s chair is notified again. It can be rejected again afterwards.`,
+                          body:
+                            req.rejectOutcome === 'not-registered'
+                              ? `${req.playerName} is placed on ${req.toClubName}'s roster as clearance pending, and ${req.fromClubName}'s chair is asked to decide. It can be rejected again afterwards.`
+                              : `${req.playerName}'s registration goes back to how it was before the rejection, and ${req.fromClubName}'s chair is notified again. It can be rejected again afterwards.`,
                           // Keep the dialog open until the request settles; close on success and
                           // on 'conflict' (already refetched), stay open only on 'failed'.
                           onYes: async () => {
@@ -8274,7 +8793,9 @@ function playerRoleLabel(p, playerProfile: 'cricket' | 'positions' = 'cricket') 
 
 const PLAYERS_PER_PAGE = 25;
 
-export function AdminPlayersView({ clubs, leagues, toast }) {
+// `onErasePlayer(naturalKey, playerName)` (main.tsx) runs the tenant-wide erasure; it resolves on
+// success and rejects (already toasted) on failure. Absent ⇒ the detail modal shows no erase zone.
+export function AdminPlayersView({ clubs, leagues, toast, onErasePlayer = undefined }) {
   const vt = useVertical().terms;
   const list = clubs ?? [];
   const teamLabel = labelByKey(leagues ?? []);
@@ -8603,6 +9124,17 @@ export function AdminPlayersView({ clubs, leagues, toast }) {
                         queryKey: qk.players(selectedPlayer.clubId),
                       }),
                     ),
+                }
+              : undefined
+          }
+          adminErase={
+            onErasePlayer
+              ? {
+                  onErase: () =>
+                    onErasePlayer(
+                      selectedPlayer.naturalKey,
+                      `${selectedPlayer.firstName ?? ''} ${selectedPlayer.lastName ?? ''}`.trim(),
+                    ).then(() => setSelectedPlayer(null)),
                 }
               : undefined
           }

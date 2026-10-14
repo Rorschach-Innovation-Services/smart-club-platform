@@ -9,7 +9,12 @@
  *   … --confirm                                                                        # write
  *   … --confirm --with-teams                                                           # + leagues/teamRosters
  *   … --confirm --skip-docs                                                            # clubs only, no S3/doc writes
- *   … --revert [--all [--erase-preexisting]] [--confirm]
+ *   … --revert [--club <id>] [--all [--erase-preexisting]] [--confirm]
+ *
+ * Top-up / partial packs (Oct 2026): only clubs whose folder is present in --dir are in
+ * scope (the rest are listed as out of scope and never touched); --structure is optional
+ * (only --with-teams needs it); entry-form team mode replaces it for a top-up:
+ *   … --dir "…/Compliance Documents" --teams-from-entry --entry-forms "…/entry-forms" [--skip-docs] [--confirm]
  *
  * See docs/runbooks/titans-compliance-import.md.
  *
@@ -28,7 +33,7 @@ import { readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import ExcelJS from 'exceljs';
-import type { Club, RequiredDoc } from './types.js';
+import type { Club, ClubTeam, RequiredDoc } from './types.js';
 import {
   resolveRequiredDocs,
   activeRequiredDocs,
@@ -53,9 +58,13 @@ import {
   isKnownStructureAnomaly,
   KNOWN_STRUCTURE_ANOMALIES,
   EXTRA_LEAGUES,
+  scopeClubs,
+  leagueKeyForEntryLabel,
+  WOMENS_AGGREGATE,
   type StructureSection,
 } from './titans-import-map.js';
 import { deriveTeamPlanCounts } from './team-plan.js';
+import { parseEntryFormWorkbook, type EntryFormRow } from './entry-form-parse.js';
 
 type RepoModule = typeof import('./repo.js');
 
@@ -99,8 +108,69 @@ const CLUB_COLORS = ['#0E3529', '#215F47', '#4B8A6C', '#B89B4A', '#E7DDC6', '#8C
  * ids it already created, or a later `--revert --all` mis-classifies them as
  * pre-existing and refuses to delete them — the exact inversion of the bug this
  * manifest exists to prevent.
+ *
+ * STAGE-SCOPED (Oct 2026 top-up): `./titans-import-created-clubs.<stage>.json`. The
+ * original unsuffixed path was stage-agnostic, and club ids are derived from names —
+ * identical on every stage. A dev rehearsal that CREATES tut-cricket-club would record
+ * that id, and a later prod `--revert --all` run from the same directory would read it as
+ * "this import created the prod club" and hard-delete a live prod club. The stage now
+ * keys the file, so dev evidence can never steer a prod revert.
+ *
+ * The LEGACY unsuffixed file (`LEGACY_CREATED_CLUBS_MANIFEST_PATH`) is the manifest of
+ * the August 2026 PROD import only. It is never read automatically; if a prod revert ever
+ * needs it, rename it to `titans-import-created-clubs.prod.json` by hand (see the
+ * runbook). Both CLIs warn when it is sitting in the working directory.
  */
-const CREATED_CLUBS_MANIFEST_PATH = './titans-import-created-clubs.json';
+const LEGACY_CREATED_CLUBS_MANIFEST_PATH = './titans-import-created-clubs.json';
+
+/**
+ * Stage from `SST_STAGE`, else from `SST_RESOURCE_App` (the `{"name","stage"}` JSON
+ * `sst shell` injects — what the sst SDK's `Resource.App.stage` reads; same mechanism as
+ * import-tuskers-compliance.ts). Neither set (plain `npx tsx`, e.g. --parse-only) →
+ * `'unknown'`, `resolved: false` — callers warn. Pure over `env` for testing.
+ */
+function resolveManifestStage(env: NodeJS.ProcessEnv = process.env): {
+  stage: string;
+  resolved: boolean;
+} {
+  let stage = env.SST_STAGE?.trim();
+  if (!stage && env.SST_RESOURCE_App) {
+    try {
+      const app = JSON.parse(env.SST_RESOURCE_App) as { stage?: unknown };
+      if (typeof app.stage === 'string') stage = app.stage.trim();
+    } catch {
+      throw new Error('SST_RESOURCE_App is set but is not valid JSON — cannot resolve the stage');
+    }
+  }
+  if (!stage) return { stage: 'unknown', resolved: false };
+  if (!/^[A-Za-z0-9_-]+$/.test(stage)) throw new Error(`unsafe stage name "${stage}"`);
+  return { stage, resolved: true };
+}
+
+function createdClubsManifestPath(env: NodeJS.ProcessEnv = process.env): string {
+  return `./titans-import-created-clubs.${resolveManifestStage(env).stage}.json`;
+}
+
+/** Print the manifest-path warnings every confirm/revert run should surface: an
+ * unresolved stage (manifest falls back to `.unknown.json`), and a legacy unsuffixed
+ * manifest sitting in the working directory (never read — see above). */
+async function warnManifestContext(): Promise<void> {
+  if (!resolveManifestStage().resolved) {
+    console.warn(
+      `⚠ stage not resolvable (no SST_STAGE / SST_RESOURCE_App — not under sst shell?): the ` +
+        `created-clubs manifest falls back to ${createdClubsManifestPath()}.`,
+    );
+  }
+  try {
+    await stat(LEGACY_CREATED_CLUBS_MANIFEST_PATH);
+    console.warn(
+      `⚠ legacy ${LEGACY_CREATED_CLUBS_MANIFEST_PATH} found in the working directory — it is the ` +
+        `August 2026 PROD manifest and is NOT read by this run (using ${createdClubsManifestPath()}).`,
+    );
+  } catch {
+    // absent — the normal case
+  }
+}
 
 /**
  * Three-way read result — "absent" and "corrupt" are NOT interchangeable. The revert
@@ -117,7 +187,7 @@ type ManifestReadResult =
 async function readCreatedClubsManifest(): Promise<ManifestReadResult> {
   let raw: string;
   try {
-    raw = await readFile(CREATED_CLUBS_MANIFEST_PATH, 'utf8');
+    raw = await readFile(createdClubsManifestPath(), 'utf8');
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'absent' };
     return { kind: 'corrupt', detail: err instanceof Error ? err.message : String(err) };
@@ -138,7 +208,7 @@ async function readCreatedClubsManifest(): Promise<ManifestReadResult> {
 }
 
 async function writeCreatedClubsManifest(ids: Set<string>): Promise<void> {
-  await writeFile(CREATED_CLUBS_MANIFEST_PATH, JSON.stringify([...ids].sort(), null, 2));
+  await writeFile(createdClubsManifestPath(), JSON.stringify([...ids].sort(), null, 2));
 }
 
 // ───────────────────────── File-tree walk + classification ─────────────────────────
@@ -259,9 +329,9 @@ function printClassificationTable(classified: ClassifiedFile[], unclassified: Fi
   }
 }
 
-function printDocCoverageTable(classified: ClassifiedFile[]) {
-  console.log(`\n── Per-club doc-key coverage`);
-  for (const club of CLUB_MAP) {
+function printDocCoverageTable(classified: ClassifiedFile[], clubs: ClubMapEntry[]) {
+  console.log(`\n── Per-club doc-key coverage (${clubs.length} in-scope club(s))`);
+  for (const club of clubs) {
     const mine = classified.filter((f) => f.club?.id === club.id && f.docKey);
     const byKey = new Map<string, number>();
     for (const f of mine) byKey.set(f.docKey!, (byKey.get(f.docKey!) ?? 0) + 1);
@@ -281,7 +351,10 @@ function printDocCoverageTable(classified: ClassifiedFile[]) {
  * dry-run phase (Phase 1, `sst shell`, no --confirm), which calls the real
  * runDocUploadPhase read-only.
  */
-async function printDocUploadPreview(classified: ClassifiedFile[]): Promise<void> {
+async function printDocUploadPreview(
+  classified: ClassifiedFile[],
+  clubs: ClubMapEntry[],
+): Promise<void> {
   console.log(`\n── Doc upload preview (post-dedupe; no-op/already-current only known at Phase 1)`);
   const groups = new Map<string, ClassifiedFile[]>();
   for (const f of classified) {
@@ -292,7 +365,7 @@ async function printDocUploadPreview(classified: ClassifiedFile[]): Promise<void
   }
   let totalRaw = 0;
   let totalDistinct = 0;
-  for (const club of CLUB_MAP) {
+  for (const club of clubs) {
     const keysForClub = [...groups.keys()].filter((k) => k.startsWith(`${club.id}::`));
     if (keysForClub.length === 0) continue;
     const parts: string[] = [];
@@ -358,7 +431,16 @@ function printStructureReport(sections: StructureSection[]): {
 
 interface Args {
   dir: string;
+  /** Union structure workbook. Optional since the Oct 2026 top-up: only `--with-teams`
+   * (the legacy structure-driven team path) requires it. */
   structure: string;
+  /** Entry-form team mode: diff each in-scope club's league-entry form against its
+   * stored team plan and (on --confirm) write only the leagues that differ. Mutually
+   * exclusive with --with-teams and --structure. Requires --entry-forms. */
+  teamsFromEntry: boolean;
+  /** Directory of `<CLUB_MAP.folder>.xlsx` entry forms (xlsx Save-As copies of the
+   * union's `.xls` originals). */
+  entryForms: string;
   parseOnly: boolean;
   confirm: boolean;
   club?: string;
@@ -370,9 +452,10 @@ interface Args {
    * into (i.e. one that pre-existed the import) — see runRevert's comment. `--all`
    * alone never touches a pre-existing club's real data. */
   erasePreexisting: boolean;
-  /** With --with-teams: append any EXTRA_LEAGUES entries (Women's/Veterans) missing
-   * from TenantConfig.leagues before writing teams. Without it, a team plan that
-   * references an unconfigured league key aborts — never writes a dangling key. */
+  /** With --with-teams / --teams-from-entry: append any EXTRA_LEAGUES entries
+   * (Women's/Veterans) missing from TenantConfig.leagues before writing teams. Without
+   * it, a team plan that references an unconfigured league key aborts — never writes a
+   * dangling key. */
   addMissingLeagues: boolean;
 }
 
@@ -380,6 +463,8 @@ function parseArgs(argv: string[]): Args {
   const args: Args = {
     dir: '',
     structure: '',
+    teamsFromEntry: false,
+    entryForms: '',
     parseOnly: false,
     confirm: false,
     withTeams: false,
@@ -393,6 +478,8 @@ function parseArgs(argv: string[]): Args {
     const a = argv[i];
     if (a === '--dir') args.dir = argv[++i] ?? '';
     else if (a === '--structure') args.structure = argv[++i] ?? '';
+    else if (a === '--teams-from-entry') args.teamsFromEntry = true;
+    else if (a === '--entry-forms') args.entryForms = argv[++i] ?? '';
     else if (a === '--parse-only') args.parseOnly = true;
     else if (a === '--confirm') args.confirm = true;
     else if (a === '--club') args.club = argv[++i];
@@ -408,11 +495,23 @@ function parseArgs(argv: string[]): Args {
     throw new Error('--erase-preexisting only makes sense with --revert --all');
   }
   if (args.revert) {
-    if (args.dir || args.structure) throw new Error('--revert takes no --dir/--structure');
+    if (args.dir || args.structure || args.teamsFromEntry || args.entryForms)
+      throw new Error('--revert takes no --dir/--structure/--teams-from-entry/--entry-forms');
     return args;
   }
-  if (!args.dir || !args.structure)
-    throw new Error('requires --dir "<Compliance Documents>" --structure "<xlsx>" (or --revert)');
+  if (!args.dir) throw new Error('requires --dir "<Compliance Documents>" (or --revert)');
+  // --structure is optional now; the legacy structure-driven team write still needs it.
+  if (args.withTeams && !args.structure)
+    throw new Error('--with-teams requires --structure "<xlsx>"');
+  if (args.teamsFromEntry) {
+    // Two team sources at once would leave "which plan wins" to code order — refuse.
+    if (args.withTeams || args.structure)
+      throw new Error('--teams-from-entry is mutually exclusive with --with-teams/--structure');
+    if (!args.entryForms)
+      throw new Error('--teams-from-entry requires --entry-forms "<dir of <folder>.xlsx>"');
+  } else if (args.entryForms) {
+    throw new Error('--entry-forms only makes sense with --teams-from-entry');
+  }
   return args;
 }
 
@@ -427,7 +526,7 @@ function buildClubDocsSeed(activeDocs: RequiredDoc[]): Record<string, boolean> {
 interface TeamPlan {
   leagues: string[];
   leagueTeams: Record<string, number>;
-  teamRosters: Record<string, { id: string; name: string; venue?: string }[]>;
+  teamRosters: Record<string, ClubTeam[]>;
 }
 
 function buildTeamPlan(
@@ -469,8 +568,12 @@ function buildClub(
   summary: ReturnType<typeof summarizeByClub> extends Map<string, infer V> ? V | undefined : never,
   withTeams: boolean,
   index: number,
+  /** --teams-from-entry, club not yet on the tenant: the entry-form plan IS the initial
+   * plan (it wins over the structure-driven one, which can't be in play anyway —
+   * parseArgs makes the two modes mutually exclusive). */
+  planOverride?: TeamPlan,
 ): Club {
-  const plan = withTeams ? buildTeamPlan(club, summary) : null;
+  const plan = planOverride ?? (withTeams ? buildTeamPlan(club, summary) : null);
   // Total team count across every league this club fields, plus the denormalized
   // women's/junior side counts (dashboard KPIs) — derived from the same plan so they can
   // never disagree with leagueTeams. A clubs-only run (no plan) is teams:1, women/
@@ -498,28 +601,356 @@ function buildClub(
   } as Club;
 }
 
+// ───────────────────────── Entry-form teams (--teams-from-entry) ─────────────────────────
+
+/** The parts of a stored Club that make up its team plan. */
+interface StoredTeamPlan {
+  leagues: string[];
+  leagueTeams?: Record<string, number>;
+  teamRosters?: Record<string, ClubTeam[]>;
+}
+
+const EMPTY_STORED_PLAN: StoredTeamPlan = { leagues: [] };
+
+function storedPlanOf(club: Club | null | undefined): StoredTeamPlan {
+  if (!club) return EMPTY_STORED_PLAN;
+  return {
+    leagues: club.leagues ?? [],
+    leagueTeams: club.leagueTeams,
+    teamRosters: club.teamRosters,
+  };
+}
+
+/** Stored side count for a league: 0 if the club isn't in it; else leagueTeams[key],
+ * absent ⇒ 1 (types.ts: "Teams entered per league key … absent ⇒ 1"). */
+function storedCount(stored: StoredTeamPlan, key: string): number {
+  if (!stored.leagues.includes(key)) return 0;
+  return stored.leagueTeams?.[key] ?? 1;
+}
+
+/**
+ * Fail-closed checks on one club's parsed entry form, before any diff is trusted:
+ * an unknown label (not in ENTRY_LEAGUE_MAP), two rows resolving to the same league key,
+ * and a non-blank requested count that isn't a whole number. The last is stricter than
+ * the parser (which reads it as 0): a 0 against a stored league is an UPDATE that would
+ * DELETE that league's teams, so "2 teams"-style free text must abort, not shrink.
+ */
+function entryFormProblems(rows: EntryFormRow[]): string[] {
+  const problems: string[] = [];
+  const seen = new Map<string, string>();
+  for (const r of rows) {
+    const key = leagueKeyForEntryLabel(r.label);
+    if (key === undefined) {
+      problems.push(
+        `row ${r.rowNumber}: unknown league label "${r.label}" (add it to ENTRY_LEAGUE_MAP)`,
+      );
+      continue;
+    }
+    if (r.countRaw !== undefined) {
+      problems.push(
+        `row ${r.rowNumber} "${r.label}": requested count "${r.countRaw}" is not a whole number`,
+      );
+    }
+    if (key === null) continue;
+    const prior = seen.get(key);
+    if (prior) problems.push(`rows "${prior}" and "${r.label}" both resolve to league "${key}"`);
+    else seen.set(key, r.label);
+  }
+  return problems;
+}
+
+type EntryDiffAction = 'none' | 'UPDATE' | 'manual';
+
+interface EntryDiffRow {
+  /** Form label, or "(not on form)" for a stored league no form row covers. */
+  label: string;
+  /** Tenant league key, WOMENS_AGGREGATE, or null (recognised, no tenant league). */
+  leagueKey: string | null;
+  stored: number;
+  requested: number;
+  action: EntryDiffAction;
+  /** The form's home-venue cell — used for any generated (growth) side. */
+  venue: string;
+  note?: string;
+}
+
+/**
+ * Diff one club's (problem-free — see entryFormProblems) entry form against its stored
+ * team plan. Pure.
+ *   - mapped league: requested ≠ stored → UPDATE (the only rows ever written).
+ *   - null-mapped label (Reserve/President/Junior Girls): non-zero → `manual` (union
+ *     follow-up), never written, never minted as a league.
+ *   - WOMENS_AGGREGATE: compared to the SUM of stored `womens-*` counts; a mismatch is
+ *     `manual` — which women's league a side belongs in is the union's call.
+ *   - a stored league no form row covers (other than `womens-*`): `none`, kept verbatim.
+ * Rows that are 0 on both sides are omitted (nothing to say).
+ */
+function diffEntryForm(rows: EntryFormRow[], stored: StoredTeamPlan): EntryDiffRow[] {
+  const out: EntryDiffRow[] = [];
+  const covered = new Set<string>();
+  for (const r of rows) {
+    const key = leagueKeyForEntryLabel(r.label);
+    if (key === undefined) continue; // entryFormProblems already aborted on this
+    if (key === null) {
+      if (r.count > 0)
+        out.push({
+          label: r.label,
+          leagueKey: null,
+          stored: 0,
+          requested: r.count,
+          action: 'manual',
+          venue: r.venue,
+          note: 'no tenant league for this entry — union follow-up',
+        });
+      continue;
+    }
+    if (key === WOMENS_AGGREGATE) {
+      const womensKeys = stored.leagues.filter((k) => k.startsWith('womens-'));
+      for (const k of womensKeys) covered.add(k);
+      const sum = womensKeys.reduce((t, k) => t + storedCount(stored, k), 0);
+      if (sum === 0 && r.count === 0) continue;
+      out.push({
+        label: r.label,
+        leagueKey: WOMENS_AGGREGATE,
+        stored: sum,
+        requested: r.count,
+        action: sum === r.count ? 'none' : 'manual',
+        venue: r.venue,
+        note:
+          sum === r.count
+            ? `sum of ${womensKeys.join(' + ') || 'womens-*'}`
+            : "women's placement is the union's call — never written",
+      });
+      continue;
+    }
+    covered.add(key);
+    const s = storedCount(stored, key);
+    if (s === 0 && r.count === 0) continue;
+    out.push({
+      label: r.label,
+      leagueKey: key,
+      stored: s,
+      requested: r.count,
+      action: s === r.count ? 'none' : 'UPDATE',
+      venue: r.venue,
+    });
+  }
+  for (const key of stored.leagues) {
+    if (covered.has(key)) continue;
+    out.push({
+      label: '(not on form)',
+      leagueKey: key,
+      stored: storedCount(stored, key),
+      requested: storedCount(stored, key),
+      action: 'none',
+      venue: '',
+      note: 'no form row for this league — kept as stored',
+    });
+  }
+  return out;
+}
+
+/**
+ * Apply a diff's UPDATE rows to the stored plan. Pure. Only UPDATE leagues change;
+ * every other league keeps its stored count and roster entries VERBATIM (August's side
+ * names/venues survive).
+ *   - requested 0 → league removed (leagues[], leagueTeams, teamRosters).
+ *   - requested 1 → teamRosters[key] DELETED, not truncated: rosters exist only for
+ *     counts ≥ 2 (types.ts — "present ONLY for leagues with leagueTeams[key] >= 2").
+ *   - shrink to n ≥ 2 → truncated from the end.
+ *   - growth → generated `tm_${clubId}_${key}_${i}` ids appended (index-based like
+ *     buildTeamPlan, bumped past any id already in use), with the form's home venue.
+ * Every removed/added tm_ id is returned so the caller can report it.
+ */
+function applyEntryFormDiff(
+  club: { id: string; name: string },
+  stored: StoredTeamPlan,
+  diff: EntryDiffRow[],
+): { plan: TeamPlan; droppedTeamIds: string[]; addedTeamIds: string[] } {
+  const leagues = [...stored.leagues];
+  const leagueTeams: Record<string, number> = { ...(stored.leagueTeams ?? {}) };
+  for (const k of leagues) leagueTeams[k] ??= 1;
+  const teamRosters: Record<string, ClubTeam[]> = { ...(stored.teamRosters ?? {}) };
+  const droppedTeamIds: string[] = [];
+  const addedTeamIds: string[] = [];
+
+  for (const d of diff) {
+    if (d.action !== 'UPDATE' || !d.leagueKey) continue;
+    const key = d.leagueKey;
+    const n = d.requested;
+    const prev = teamRosters[key] ?? [];
+    if (n === 0) {
+      const at = leagues.indexOf(key);
+      if (at >= 0) leagues.splice(at, 1);
+      delete leagueTeams[key];
+      droppedTeamIds.push(...prev.map((t) => t.id));
+      delete teamRosters[key];
+      continue;
+    }
+    if (!leagues.includes(key)) leagues.push(key);
+    leagueTeams[key] = n;
+    if (n === 1) {
+      droppedTeamIds.push(...prev.map((t) => t.id));
+      delete teamRosters[key];
+      continue;
+    }
+    if (prev.length >= n) {
+      droppedTeamIds.push(...prev.slice(n).map((t) => t.id));
+      teamRosters[key] = prev.slice(0, n);
+      continue;
+    }
+    const next = [...prev];
+    const used = new Set(Object.values(teamRosters).flatMap((r) => r.map((t) => t.id)));
+    let i = next.length;
+    while (next.length < n) {
+      let id = `tm_${club.id}_${key}_${i++}`;
+      while (used.has(id)) id = `tm_${club.id}_${key}_${i++}`;
+      used.add(id);
+      next.push({
+        id,
+        name: `${club.name} ${String.fromCharCode(65 + next.length)}`,
+        ...(d.venue ? { venue: d.venue } : {}),
+      });
+      addedTeamIds.push(id);
+    }
+    teamRosters[key] = next;
+  }
+  // leagueTeams only for leagues the club is in (a stale entry would skew the counters).
+  for (const k of Object.keys(leagueTeams)) if (!leagues.includes(k)) delete leagueTeams[k];
+  return { plan: { leagues, leagueTeams, teamRosters }, droppedTeamIds, addedTeamIds };
+}
+
+function printEntryDiff(clubName: string, diff: EntryDiffRow[], storedKnown: boolean): void {
+  console.log(`\n  ${clubName}`);
+  console.log(
+    `    ${'league'.padEnd(46)} ${'stored'.padStart(6)} ${'requested'.padStart(9)}  action`,
+  );
+  if (diff.length === 0) console.log('    (no teams requested or stored)');
+  for (const d of diff) {
+    const league = `${d.label} → ${d.leagueKey === null ? '(none)' : d.leagueKey === WOMENS_AGGREGATE ? "women's (sum)" : d.leagueKey}`;
+    const stored = storedKnown ? String(d.stored) : '?';
+    const action = storedKnown || d.action === 'manual' ? d.action : 'request';
+    console.log(
+      `    ${league.padEnd(46)} ${stored.padStart(6)} ${String(d.requested).padStart(9)}  ${action}${d.note ? ` — ${d.note}` : ''}`,
+    );
+  }
+}
+
+/** Read `<dir>/<club.folder>.xlsx` for every in-scope club. A missing file, a missing
+ * Sheet1, or any entryFormProblems is a hard failure (returned, never thrown). */
+async function loadEntryForms(
+  dir: string,
+  clubs: ClubMapEntry[],
+): Promise<{ forms: Map<string, EntryFormRow[]>; failures: string[] }> {
+  const forms = new Map<string, EntryFormRow[]>();
+  const failures: string[] = [];
+  for (const club of clubs) {
+    const file = path.join(dir, `${club.folder}.xlsx`);
+    try {
+      await stat(file);
+    } catch {
+      failures.push(`${club.name}: entry form not found at ${file}`);
+      continue;
+    }
+    const wb = new ExcelJS.Workbook();
+    try {
+      await wb.xlsx.readFile(file);
+    } catch (err) {
+      failures.push(
+        `${club.name}: cannot read ${file} as .xlsx (${err instanceof Error ? err.message : String(err)}) — ` +
+          'BIFF .xls must be Save-As .xlsx first',
+      );
+      continue;
+    }
+    let rows: EntryFormRow[];
+    try {
+      rows = parseEntryFormWorkbook(wb).rows;
+    } catch (err) {
+      failures.push(`${club.name}: ${err instanceof Error ? err.message : String(err)}`);
+      continue;
+    }
+    if (rows.length === 0) {
+      failures.push(`${club.name}: no SENIORS/JUNIORS league rows found in ${file}`);
+      continue;
+    }
+    const problems = entryFormProblems(rows);
+    if (problems.length) {
+      failures.push(...problems.map((p) => `${club.name}: ${p}`));
+      continue;
+    }
+    forms.set(club.id, rows);
+  }
+  return { forms, failures };
+}
+
 // ───────────────────────── Phase P (parse) ─────────────────────────
+
+/** Print the scope header every run shows — in-scope clubs, and ALWAYS the out-of-scope
+ * list (even when empty), so a folder missing from a pack can never go unnoticed. */
+function printScope(inScope: ClubMapEntry[], outOfScope: ClubMapEntry[]): void {
+  console.log(
+    `\n── Pack scope: ${inScope.length} club(s) in scope, ${outOfScope.length} out of scope`,
+  );
+  console.log(`  in scope:     ${inScope.map((c) => c.name).join(', ') || '(none)'}`);
+  console.log(
+    `  out of scope: ${outOfScope.map((c) => c.name).join(', ') || '(none — full pack)'}` +
+      (outOfScope.length ? '  ← no folder in --dir; NOT parsed, checked or written' : ''),
+  );
+}
 
 async function runParsePhase(args: Args): Promise<{
   classified: ClassifiedFile[];
   sections: StructureSection[];
   summary: ReturnType<typeof summarizeByClub>;
+  inScope: ClubMapEntry[];
+  entryForms: Map<string, EntryFormRow[]>;
 } | null> {
   const files = await walkDocs(args.dir);
   const { classified, unclassified, unmappedFolders } = classifyAll(files);
+  // Partial-pack scoping: only clubs whose folder is present in --dir are in play.
+  const { inScope, outOfScope } = scopeClubs(files.map((f) => f.folder));
+  printScope(inScope, outOfScope);
   printClassificationTable(classified, unclassified);
-  printDocCoverageTable(classified);
-  await printDocUploadPreview(classified);
+  printDocCoverageTable(classified, inScope);
+  await printDocUploadPreview(classified, inScope);
 
-  const sections = await loadStructureSections(args.structure);
-  const { unresolvedTokens, emptySections } = printStructureReport(sections);
+  // --structure is optional (only --with-teams needs it — parseArgs enforces that).
+  // Without it there is no structure report and no summary: clubs built here carry no
+  // structure-derived ground venue or plan.
+  const sections = args.structure ? await loadStructureSections(args.structure) : [];
+  const { unresolvedTokens, emptySections } = args.structure
+    ? printStructureReport(sections)
+    : { unresolvedTokens: [], emptySections: [] };
   const summary = summarizeByClub(sections);
 
-  const noDocsClubs = CLUB_MAP.filter(
+  let entryForms = new Map<string, EntryFormRow[]>();
+  let entryFailures: string[] = [];
+  if (args.teamsFromEntry) {
+    ({ forms: entryForms, failures: entryFailures } = await loadEntryForms(
+      args.entryForms,
+      inScope,
+    ));
+    console.log(`\n── Entry-form team requests (stored plans compared at dry-run)`);
+    for (const club of inScope) {
+      const rows = entryForms.get(club.id);
+      if (rows) printEntryDiff(club.name, diffEntryForm(rows, EMPTY_STORED_PLAN), false);
+    }
+  }
+
+  const noDocsClubs = inScope.filter(
     (c) => !classified.some((f) => f.club?.id === c.id && f.docKey),
   );
 
   const hardFailures: string[] = [];
+  if (inScope.length === 0)
+    hardFailures.push(`no CLUB_MAP club folder found in --dir "${args.dir}" — nothing in scope`);
+  if (args.club && !inScope.some((c) => c.id === args.club))
+    hardFailures.push(
+      CLUB_MAP.some((c) => c.id === args.club)
+        ? `--club "${args.club}" is out of scope (no folder for it in --dir)`
+        : `--club "${args.club}" not in CLUB_MAP`,
+    );
+  for (const f of entryFailures) hardFailures.push(`entry form — ${f}`);
   if (unclassified.length)
     hardFailures.push(`${unclassified.length} unclassified file(s) — see above`);
   if (unmappedFolders.length)
@@ -540,7 +971,7 @@ async function runParsePhase(args: Args): Promise<{
   }
 
   console.log('\n✓ Parse phase clean.');
-  return { classified, sections, summary };
+  return { classified, sections, summary, inScope, entryForms };
 }
 
 // ───────────────────────── Phase 1/2/3 (dry-run / confirm) ─────────────────────────
@@ -737,7 +1168,10 @@ async function runConfirm(
   classified: ClassifiedFile[],
   summary: ReturnType<typeof summarizeByClub>,
   activeDocs: RequiredDoc[],
+  inScope: ClubMapEntry[],
+  entryForms: Map<string, EntryFormRow[]>,
 ): Promise<void> {
+  await warnManifestContext();
   const existing = await repo.listClubs(TENANT);
   const existingById = new Map(existing.map((c) => [c.id, c]));
   const titansExisting = existing.filter((c) => CLUB_MAP.some((m) => m.id === c.id));
@@ -746,8 +1180,10 @@ async function runConfirm(
   await writeFile(backupPath, JSON.stringify(titansExisting, null, 2));
   console.log(`Backup written: ${backupPath} (${titansExisting.length} existing titans club(s))`);
 
-  const targets = args.club ? CLUB_MAP.filter((c) => c.id === args.club) : CLUB_MAP;
-  if (args.club && targets.length === 0) throw new Error(`--club "${args.club}" not in CLUB_MAP`);
+  // Scoped to the clubs whose folder is in --dir: a partial pack must never merge into,
+  // audit-note, or (on a fresh stage) create the clubs it carries nothing for.
+  const targets = args.club ? inScope.filter((c) => c.id === args.club) : inScope;
+  if (targets.length === 0) throw new Error('no in-scope club to write (check --dir/--club)');
 
   // A present-but-unparseable manifest must never be silently overwritten with only
   // this run's ids — that would discard every previously recorded creation the moment
@@ -756,7 +1192,7 @@ async function runConfirm(
   const manifestResult = await readCreatedClubsManifest();
   if (manifestResult.kind === 'corrupt') {
     throw new Error(
-      `${CREATED_CLUBS_MANIFEST_PATH} exists but is unreadable/malformed (${manifestResult.detail}) ` +
+      `${createdClubsManifestPath()} exists but is unreadable/malformed (${manifestResult.detail}) ` +
         '— refusing to continue: writing through it now would silently discard every club id a ' +
         'prior run recorded. Fix the file by hand or move it aside before re-running --confirm.',
     );
@@ -765,9 +1201,27 @@ async function runConfirm(
 
   let created = 0;
   let merged = 0;
-  for (const [i, club] of targets.entries()) {
-    const built = buildClub(club, activeDocs, summary.get(club.id), args.withTeams, i);
+  let teamPlansWritten = 0;
+  for (const club of targets) {
     const already = existingById.get(club.id);
+    const entryRows = args.teamsFromEntry ? entryForms.get(club.id) : undefined;
+    // --teams-from-entry on a club that doesn't exist yet (the dev rehearsal): the entry
+    // form's plan becomes the club's initial plan via buildClub.
+    const initialEntryPlan =
+      entryRows && !already
+        ? applyEntryFormDiff(club, EMPTY_STORED_PLAN, diffEntryForm(entryRows, EMPTY_STORED_PLAN))
+            .plan
+        : undefined;
+    // Colour by CLUB_MAP position (not scoped-target position) so a partial pack picks
+    // the same colour a full-pack run would have.
+    const built = buildClub(
+      club,
+      activeDocs,
+      summary.get(club.id),
+      args.withTeams,
+      CLUB_MAP.indexOf(club),
+      initialEntryPlan,
+    );
     if (!already) {
       // Write-before-create: the id is persisted to the manifest BEFORE `createClub` is
       // even attempted, not after it succeeds. The danger this manifest exists to
@@ -827,6 +1281,31 @@ async function runConfirm(
           if (!current.teamRosters && built.teamRosters) patch.teamRosters = built.teamRosters;
         }
       }
+      // --teams-from-entry: diff the entry form against what is stored NOW and write only
+      // where a league differs (see diffEntryForm/applyEntryFormDiff). A club created a
+      // moment ago from the same form diffs clean. The patch pins `version` to the club
+      // as read at the top of this run, so an admin edit landing in between fails the
+      // write (VersionConflictError) instead of being silently overwritten.
+      if (entryRows) {
+        const stored = storedPlanOf(current);
+        const diff = diffEntryForm(entryRows, stored);
+        printEntryDiff(club.name, diff, true);
+        if (diff.some((d) => d.action === 'UPDATE')) {
+          const { plan, droppedTeamIds, addedTeamIds } = applyEntryFormDiff(club, stored, diff);
+          const counts = deriveTeamPlanCounts(plan.leagueTeams);
+          patch.leagues = plan.leagues;
+          patch.leagueTeams = plan.leagueTeams;
+          patch.teamRosters = plan.teamRosters;
+          patch.teams = counts.teams;
+          patch.women = counts.women;
+          patch.juniors = counts.juniors;
+          patch.version = current.version;
+          teamPlansWritten++;
+          if (droppedTeamIds.length)
+            console.log(`    dropped team id(s): ${droppedTeamIds.join(', ')}`);
+          if (addedTeamIds.length) console.log(`    added team id(s): ${addedTeamIds.join(', ')}`);
+        }
+      }
       const missingDocs = Object.keys(built.docs).filter((k) => current.docs?.[k] === undefined);
       if (missingDocs.length) {
         patch.docs = { ...current.docs, ...Object.fromEntries(missingDocs.map((k) => [k, false])) };
@@ -856,8 +1335,10 @@ async function runConfirm(
     }
   }
   console.log(`· clubs: ${created} created, ${merged} merged`);
+  if (args.teamsFromEntry)
+    console.log(`· team plans: ${teamPlansWritten} club(s) updated from entry forms`);
   console.log(
-    `· created-clubs manifest: ${CREATED_CLUBS_MANIFEST_PATH} has ${manifest.size} club(s) ` +
+    `· created-clubs manifest: ${createdClubsManifestPath()} has ${manifest.size} club(s) ` +
       'recorded as created by this import across all runs (persisted incrementally as each ' +
       'club was created, not batched at the end).',
   );
@@ -1160,7 +1641,7 @@ export function revertManifestGate(
     return {
       kind: 'refuse',
       message:
-        `--revert --all --erase-preexisting requires a readable ${CREATED_CLUBS_MANIFEST_PATH}, ` +
+        `--revert --all --erase-preexisting requires a readable ${createdClubsManifestPath()}, ` +
         `which ${why}. Without it, every non-pristine CLUB_MAP club would be treated as ` +
         '"pre-existing, force it" and fully deleted — refusing rather than guessing. Restore ' +
         'or fix the manifest, or omit --erase-preexisting to strip import docs only.',
@@ -1169,15 +1650,26 @@ export function revertManifestGate(
   return {
     kind: 'warn',
     message:
-      `⚠ --all requested but ${CREATED_CLUBS_MANIFEST_PATH} ${why} — this import cannot ` +
+      `⚠ --all requested but ${createdClubsManifestPath()} ${why} — this import cannot ` +
       'positively tell an import-created club apart from a pre-existing one it only merged ' +
       'into, so --all is falling back to pristine-only deletion (same as no --all).',
   };
 }
 
 async function runRevert(repo: RepoModule, args: Args): Promise<void> {
+  await warnManifestContext();
+  // NOTE (prod): every import-authored objectKey shares the `-import-` marker, so a plain
+  // `--revert` strips the AUGUST import's docs too, not just a later top-up's. Recovery
+  // for a bad top-up doc is fix-the-pack-and-re-run, never a prod revert (runbook).
+  //
+  // --club narrows the revert to one club — it used to be parsed and silently ignored
+  // here, so `--revert --club x` reverted EVERY CLUB_MAP club.
+  if (args.club && !CLUB_MAP.some((m) => m.id === args.club))
+    throw new Error(`--club "${args.club}" not in CLUB_MAP`);
   const clubs = await repo.listClubs(TENANT);
-  const mine = clubs.filter((c) => CLUB_MAP.some((m) => m.id === c.id));
+  const mine = clubs.filter(
+    (c) => CLUB_MAP.some((m) => m.id === c.id) && (!args.club || c.id === args.club),
+  );
   if (mine.length === 0) {
     console.log('Nothing to revert.');
     return;
@@ -1187,7 +1679,7 @@ async function runRevert(repo: RepoModule, args: Args): Promise<void> {
   // import only MERGED into — a pre-existing club with a real chair/exco/roster that
   // happened to also need a missing ground/leagues field filled. `--all` must never
   // erase one of those; it forces the delete only for clubs the manifest positively
-  // confirms THIS import created. See CREATED_CLUBS_MANIFEST_PATH's comment for why
+  // confirms THIS import created. See LEGACY_CREATED_CLUBS_MANIFEST_PATH's comment for why
   // this signal (not onboardedVia / the audit note / club.version) is the robust one.
   const manifestResult = args.all
     ? await readCreatedClubsManifest()
@@ -1341,16 +1833,58 @@ async function main(): Promise<void> {
     await ensureLeaguesConfigured(repo, args, referencedKeys);
   }
 
-  const targets = args.club ? CLUB_MAP.filter((c) => c.id === args.club) : CLUB_MAP;
-  if (args.club && targets.length === 0) throw new Error(`--club "${args.club}" not in CLUB_MAP`);
+  // Scoped exactly like runConfirm's targets — the dry-run must preview what --confirm
+  // will touch, never the full CLUB_MAP on a partial pack.
+  const targets = args.club ? parsed.inScope.filter((c) => c.id === args.club) : parsed.inScope;
+  if (targets.length === 0) throw new Error('no in-scope club to write (check --dir/--club)');
+
+  if (args.teamsFromEntry) {
+    // Every tenant league key a form REQUESTS sides in must already be configured — a
+    // genuinely new competition is never minted by an import (EXTRA_LEAGUES aside, which
+    // still needs --add-missing-leagues). Null-mapped and women's-aggregate rows are
+    // never written, so they reference nothing.
+    const referencedKeys = new Set<string>();
+    for (const club of targets) {
+      for (const r of parsed.entryForms.get(club.id) ?? []) {
+        const key = leagueKeyForEntryLabel(r.label);
+        if (key && key !== WOMENS_AGGREGATE && r.count > 0) referencedKeys.add(key);
+      }
+    }
+    await ensureLeaguesConfigured(repo, args, referencedKeys);
+  }
 
   if (!args.confirm) {
     const existing = await repo.listClubs(TENANT);
-    const existingIds = new Set(existing.map((c) => c.id));
+    const existingById = new Map(existing.map((c) => [c.id, c]));
     console.log('\n── Dry-run diff');
     for (const club of targets) {
-      const action = existingIds.has(club.id) ? 'MERGE (fill absent fields only)' : 'CREATE';
+      const action = existingById.has(club.id) ? 'MERGE (fill absent fields only)' : 'CREATE';
       console.log(`  ${club.name} (${club.id}): ${action}`);
+    }
+    if (args.teamsFromEntry) {
+      console.log(
+        '\n── Entry-form team diff (only UPDATE rows are written on --confirm; ' +
+          '"manual" rows are union follow-ups, never written)',
+      );
+      for (const club of targets) {
+        const rows = parsed.entryForms.get(club.id);
+        if (!rows) continue;
+        const current = existingById.get(club.id);
+        const stored = storedPlanOf(current);
+        const diff = diffEntryForm(rows, stored);
+        printEntryDiff(
+          `${club.name}${current ? '' : ' (CREATE — the form becomes the initial plan)'}`,
+          diff,
+          true,
+        );
+        if (diff.some((d) => d.action === 'UPDATE')) {
+          const { droppedTeamIds, addedTeamIds } = applyEntryFormDiff(club, stored, diff);
+          if (droppedTeamIds.length)
+            console.log(`    would drop team id(s): ${droppedTeamIds.join(', ')}`);
+          if (addedTeamIds.length)
+            console.log(`    would add team id(s): ${addedTeamIds.join(', ')}`);
+        }
+      }
     }
     if (args.skipDocs) {
       console.log('\n· --skip-docs: doc upload phase skipped.');
@@ -1360,12 +1894,20 @@ async function main(): Promise<void> {
       await runDocUploadPhase(repo, args, parsed.classified, activeDocs);
     }
     console.log(
-      `\nRe-run with --confirm to write. ${args.skipDocs ? '(--skip-docs: no S3/doc writes)' : ''}${args.withTeams ? ' (--with-teams: leagues/teamRosters included)' : ''}`,
+      `\nRe-run with --confirm to write. ${args.skipDocs ? '(--skip-docs: no S3/doc writes)' : ''}${args.withTeams ? ' (--with-teams: leagues/teamRosters included)' : ''}${args.teamsFromEntry ? ' (--teams-from-entry: UPDATE rows above included)' : ''}`,
     );
     return;
   }
 
-  await runConfirm(repo, args, parsed.classified, parsed.summary, activeDocs);
+  await runConfirm(
+    repo,
+    args,
+    parsed.classified,
+    parsed.summary,
+    activeDocs,
+    parsed.inScope,
+    parsed.entryForms,
+  );
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -1390,5 +1932,12 @@ export {
   catalogueCoverageProblems,
   readCreatedClubsManifest,
   writeCreatedClubsManifest,
-  CREATED_CLUBS_MANIFEST_PATH,
+  createdClubsManifestPath,
+  resolveManifestStage,
+  LEGACY_CREATED_CLUBS_MANIFEST_PATH,
+  parseArgs,
+  entryFormProblems,
+  diffEntryForm,
+  applyEntryFormDiff,
+  EMPTY_STORED_PLAN,
 };

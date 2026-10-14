@@ -2,9 +2,9 @@
    Appointments are written with their own call (PUT …/officials), never through the series
    PATCH, so assigning an umpire never withdraws approval or runs the clash gate. */
 
-import { useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Btn, Icon, Pill } from './atoms';
-import { ApiError } from './api';
+import { ApiError, type OfficialsNotifyStatusRow } from './api';
 import {
   MAX_UMPIRES_PER_FIXTURE,
   findUmpireDoubleBookings,
@@ -116,6 +116,48 @@ export function doubleBookingIndex(
 
 /* ─── The picker ─── */
 
+/**
+ * The editor's notice badge for one ledger row, or null for none (backfilled = never sent).
+ * Pass the registry entry so a queued notice for someone with neither email nor cell reads as
+ * waiting on contact details rather than about to go out (display only).
+ */
+export function noticeBadge(
+  row:
+    | (Pick<OfficialsNotifyStatusRow, 'status' | 'reason' | 'completedAt'> &
+        Partial<Pick<OfficialsNotifyStatusRow, 'attempts'>>)
+    | undefined,
+  person?: { phone?: string; email?: string },
+): { label: string; title?: string } | null {
+  if (!row) return null;
+  if (row.status === 'queued') {
+    if (person && !(person.email ?? '').trim() && !(person.phone ?? '').trim()) {
+      return {
+        label: 'Waiting for contact details',
+        title: 'No email or cell on file — add one so the queued notice can go out.',
+      };
+    }
+    return { label: 'Notice queued' };
+  }
+  if (row.status === 'exhausted') {
+    return {
+      label: 'Couldn’t reach',
+      title: `${row.attempts ?? 0} delivery attempts failed — check their email and cell on the Umpires page`,
+    };
+  }
+  if (row.status === 'completed' && row.reason !== 'backfill') {
+    return { label: 'Notified ✓', ...(row.completedAt ? { title: row.completedAt } : {}) };
+  }
+  return null;
+}
+
+/** True when the registry entry has neither an email nor a cell, so no notice can go out. */
+export function lacksContact(u: Umpire | undefined): boolean {
+  return !!u && !(u.email ?? '').trim() && !(u.phone ?? '').trim();
+}
+
+const NO_CONTACT_HINT =
+  'No email or cell on file — they won’t get an appointment notice. Add contacts on the Umpires page.';
+
 function matches(u: Umpire, q: string): boolean {
   const n = normaliseUmpireAlias(q);
   if (!n) return true;
@@ -133,6 +175,7 @@ function UmpireSlot({
   umpires,
   onChange,
   onCreate,
+  notice,
 }: {
   label: string;
   value: string | null;
@@ -140,6 +183,8 @@ function UmpireSlot({
   umpires: Umpire[];
   onChange: (id: string | null) => void;
   onCreate?: (displayName: string) => Promise<Umpire>;
+  /** This official's appointment-notice ledger row, when one exists. */
+  notice?: OfficialsNotifyStatusRow;
 }) {
   const [q, setQ] = useState('');
   const [busy, setBusy] = useState(false);
@@ -147,6 +192,7 @@ function UmpireSlot({
   const listRef = useRef<HTMLDivElement>(null);
   const listId = useId();
   const chosen = value ? umpires.find((u) => u.id === value) : undefined;
+  const badge = noticeBadge(notice, chosen);
   // Keyboard: ArrowDown from the box enters the suggestions, arrows move through them (Up
   // from the first returns to the box), Enter picks (a native button click), Escape closes.
   const items = () => [...(listRef.current?.querySelectorAll('button') ?? [])];
@@ -180,6 +226,12 @@ function UmpireSlot({
             ×
           </button>
         </span>
+        {badge && (
+          <span title={badge.title}>
+            <Pill tone="muted">{badge.label}</Pill>
+          </span>
+        )}
+        {lacksContact(chosen) && <span className="ump-sub">{NO_CONTACT_HINT}</span>}
       </div>
     );
   }
@@ -276,6 +328,8 @@ export interface UmpireCellProps {
   /** Absent ⇒ read-only (names only). */
   onSave?: (seriesId: string, fixtureId: string, umpireIds: string[]) => Promise<unknown>;
   onCreate?: (displayName: string) => Promise<Umpire>;
+  /** Loads the series' notice ledger while the picker is open; failures show no badge. */
+  loadNotifyStatus?: (seriesId: string) => Promise<{ rows: OfficialsNotifyStatusRow[] }>;
 }
 
 /** The fixture table's Umpires cell: names, a double-booking ⚠, and a 1–2 slot picker. */
@@ -288,9 +342,28 @@ export function UmpireCell({
   warnings: savedWarnings = [],
   onSave,
   onCreate,
+  loadNotifyStatus,
 }: UmpireCellProps) {
   const saved = fixture.officials?.umpires ?? [];
   const [open, setOpen] = useState(false);
+  const [notices, setNotices] = useState<OfficialsNotifyStatusRow[]>([]);
+  useEffect(() => {
+    if (!open || !loadNotifyStatus) return;
+    let live = true;
+    loadNotifyStatus(series.id).then(
+      (r) => live && setNotices(r.rows ?? []),
+      () => {}, // Badges are a nicety: a failed load just shows none.
+    );
+    return () => {
+      live = false;
+    };
+  }, [open, loadNotifyStatus, series.id]);
+  const noticeFor = (umpireId: string | null) =>
+    umpireId
+      ? notices.find(
+          (n) => n.fixtureId === fixture.id && n.role === 'umpire' && n.umpireId === umpireId,
+        )
+      : undefined;
   const [slots, setSlots] = useState<(string | null)[]>([]);
   const [saving, setSaving] = useState(false);
   const nameOf = (id: string) =>
@@ -362,6 +435,7 @@ export function UmpireCell({
               exclude={slots.filter((_, j) => j !== i)}
               umpires={umpires}
               onCreate={onCreate}
+              notice={noticeFor(id)}
               onChange={(next) => setSlots((prev) => prev.map((x, j) => (j === i ? next : x)))}
             />
           ))}

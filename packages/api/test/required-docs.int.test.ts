@@ -282,13 +282,18 @@ describe('doc routes under a custom catalogue (ADR 0009)', () => {
     assert.equal(upload.status, 400, 'archived key rejects a NEW upload');
   });
 
+  // Every role the (cricket) vertical marks required — the exco route 400s without them.
+  const FULL_EXCO = {
+    chair: { name: 'Chair Person', email: 'c@test', cell: '0821112222' },
+    sec: { name: 'Sec Person', email: 's@test', cell: '0821113333' },
+    tre: { name: 'Tre Person', email: 't@test', cell: '0821114444' },
+  };
+
   test('exco gate: a catalogue with no exco form doc never flips docs.exco', async () => {
     const res = await app.request('/clubs/customcc/exco', {
       method: 'POST',
       headers: headers(ADMIN, CUSTOM_TENANT),
-      body: JSON.stringify({
-        chair: { name: 'Chair Person', email: 'c@test', cell: '0821112222' },
-      }),
+      body: JSON.stringify(FULL_EXCO),
     });
     assert.equal(res.status, 200);
     const club = (await res.json()) as Club;
@@ -300,9 +305,7 @@ describe('doc routes under a custom catalogue (ADR 0009)', () => {
     const res = await app.request('/clubs/defaultcc/exco', {
       method: 'POST',
       headers: headers(DEFAULT_ADMIN, DEFAULT_TENANT),
-      body: JSON.stringify({
-        chair: { name: 'Chair Person', email: 'c@test', cell: '0821112222' },
-      }),
+      body: JSON.stringify(FULL_EXCO),
     });
     assert.equal(res.status, 200);
     const club = (await res.json()) as Club;

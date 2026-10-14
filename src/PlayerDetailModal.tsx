@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom';
 import { Icon, Btn, useEscapeClose, useNestedEscapeClose, playerStatusPill } from './atoms';
 import { getPlayerIdDocViewUrl } from './api';
 import { docPreviewKind } from './data';
-import type { PlayerRegistration, VeteransRequestPublic } from './types';
+import type { PlayerErasureCounts, PlayerRegistration, VeteransRequestPublic } from './types';
 import { formatDayYear, formatStampDay } from './dates';
 import { useModule, useVertical } from './branding';
 
@@ -353,6 +353,101 @@ function VeteransRequestBanner({
   );
 }
 
+/** "2 club registrations, 1 clearance, 3 documents" — the non-zero erasure counts, for a toast. */
+export function erasureSummary(counts?: Partial<PlayerErasureCounts> | null): string {
+  if (!counts) return 'done';
+  const n = (v: number | undefined, one: string, many: string) =>
+    v ? `${v} ${v === 1 ? one : many}` : null;
+  const parts = [
+    n(counts.playerRows, 'club registration', 'club registrations'),
+    n(counts.clearances, 'clearance', 'clearances'),
+    n(counts.registrationReviews, 'registration review', 'registration reviews'),
+    n(counts.veteransRequests, 'veterans request', 'veterans requests'),
+    n(counts.documents, 'document', 'documents'),
+    n(counts.certificates, 'certificate', 'certificates'),
+    n(counts.captainsReportsScrubbed, "captain's report scrubbed", "captain's reports scrubbed"),
+    // reportOpenMarkers is left out on purpose: internal sync bookkeeping, meaningless to an admin.
+  ].filter(Boolean);
+  return parts.length ? parts.join(', ') : 'nothing left to remove';
+}
+
+/**
+ * Union-admin danger zone: erase this person from EVERY club in the organisation. The button
+ * stays disabled until the player's full name is typed exactly (the chair delete's one-click
+ * confirm is not enough for a tenant-wide, unrecoverable cascade). `onErase` resolves on
+ * success (the caller closes the modal + toasts) and rejects on failure (the caller has toasted).
+ */
+function AdminEraseSection({
+  fullName,
+  onErase,
+}: {
+  fullName: string;
+  onErase: () => Promise<unknown>;
+}) {
+  const [typed, setTyped] = useState('');
+  const [busy, setBusy] = useState(false);
+  const matches = typed.trim() === fullName && fullName !== '—';
+  return (
+    <>
+      <SectionTitle>Erase player</SectionTitle>
+      <div
+        style={{
+          padding: '10px 12px',
+          borderRadius: 8,
+          background: 'rgba(224, 82, 82, 0.08)',
+          border: '1px solid rgba(224, 82, 82, 0.35)',
+          fontSize: 12.5,
+          color: 'var(--ink)',
+          lineHeight: 1.5,
+        }}
+      >
+        <p style={{ margin: '0 0 6px' }}>
+          Permanently erases <strong>{fullName}</strong> from{' '}
+          <strong>every club in this organisation</strong>:
+        </p>
+        <ul style={{ margin: '0 0 6px', paddingLeft: 18 }}>
+          <li>their registration at every club, and every uploaded ID document</li>
+          <li>their clearance history, including transfer certificates</li>
+          <li>registration reviews and veterans requests naming them</li>
+          <li>their name and contact details in captain&apos;s reports (the reports stay)</li>
+        </ul>
+        <p style={{ margin: '0 0 6px' }}>
+          Data already exported to Medicoach is <strong>not</strong> recalled — ask Medicoach to
+          remove it separately.
+        </p>
+        <p style={{ margin: '0 0 8px' }}>There is no undo.</p>
+        <label style={{ display: 'block', fontSize: 12, marginBottom: 4 }} htmlFor="erase-confirm">
+          Type <strong>{fullName}</strong> to confirm
+        </label>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <input
+            id="erase-confirm"
+            className="input"
+            value={typed}
+            autoComplete="off"
+            disabled={busy}
+            onChange={(e) => setTyped(e.target.value)}
+            style={{ flex: '1 1 180px', minWidth: 0 }}
+          />
+          <Btn
+            tone="ink"
+            size="sm"
+            disabled={!matches || busy}
+            onClick={() => {
+              setBusy(true);
+              Promise.resolve(onErase())
+                .catch(() => {})
+                .finally(() => setBusy(false));
+            }}
+          >
+            {busy ? 'Erasing…' : 'Erase player everywhere'}
+          </Btn>
+        </div>
+      </div>
+    </>
+  );
+}
+
 /**
  * Read-only view of a single player, opened by clicking a roster row on either the admin
  * or club players list. Every field is already in hand from the list fetch — the only
@@ -366,6 +461,7 @@ export function PlayerDetailModal({
   teamLabel,
   veteransEdit,
   veteransRequest,
+  adminErase,
   onClose,
 }: {
   player: PlayerRegistration;
@@ -385,6 +481,11 @@ export function PlayerDetailModal({
     onAccept: (req: VeteransRequestPublic) => void | Promise<unknown>;
     onDecline?: (req: VeteransRequestPublic, reason?: string) => void | Promise<unknown>;
     busy?: boolean;
+  };
+  // Union admin only (AdminPlayersView): the tenant-wide erase danger zone. Absent ⇒ no section
+  // (the club portal never passes it).
+  adminErase?: {
+    onErase: () => Promise<unknown>;
   };
   onClose: () => void;
 }) {
@@ -520,6 +621,8 @@ export function PlayerDetailModal({
               </div>
             </>
           )}
+
+          {adminErase && <AdminEraseSection fullName={fullName} onErase={adminErase.onErase} />}
         </div>
       </div>
       {showIdDoc && clubId && player.naturalKey && (

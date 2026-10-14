@@ -22,6 +22,7 @@ import {
   DeleteObjectsCommand,
   ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
+import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -47,6 +48,12 @@ import {
   outboundVeteransRequestsListKey,
   veteransRequestGsi1,
   veteransRequestsListGsi1pk,
+  postponementKey,
+  outboundPostponementKey,
+  postponementsListKey,
+  outboundPostponementsListKey,
+  postponementGsi1,
+  postponementsListGsi1pk,
   clearanceKey,
   inboundClearanceKey,
   clearancesListKey,
@@ -63,6 +70,8 @@ import {
   tenantConfigGsi1,
   tenantsListGsi1pk,
   exportLogKey,
+  playerEraseLogKey,
+  playerEraseLogsListKey,
   exportLogsListKey,
   userKey,
   userTenantMarkerKey,
@@ -73,8 +82,19 @@ import {
   OPERATORS_GSI1PK,
   fixtureResultKey,
   fixtureResultsListKey,
+  resultConfirmationKey,
+  resultConfirmationsListKey,
+  scorerKey,
+  scorerGsi1,
+  scorersListGsi1pk,
+  fixtureScorecardKey,
+  fixtureScorecardsListKey,
   syncCursorKey,
   syncHealthKey,
+  mcAwaitKey,
+  mcAwaitListKey,
+  mcReconKey,
+  mcReconLockKey,
   syncLogKey,
   syncLogsListKey,
   syncPartitionPk,
@@ -82,6 +102,14 @@ import {
   syncConflictsListKey,
   pendingSyncKey,
   pendingSyncListKey,
+  pendingPlayerSyncKey,
+  pendingPlayerSyncListKey,
+  playerReviewKey,
+  playerReviewsListKey,
+  playerDistinctKey,
+  playerDistinctListKey,
+  playerSyncOptOutKey,
+  playerSyncOptOutListKey,
   reportOpenKey,
   reportOpenListKey,
   umpireKey,
@@ -89,18 +117,25 @@ import {
   umpiresListGsi1pk,
   fixtureOfficialsKey,
   fixtureOfficialsListKey,
+  officialsNotifyKey,
+  officialsNotifyListKey,
   captainsReportKey,
   captainsReportsListKey,
   captainsReportCounterKey,
   captainsReportNotifyKey,
   whatsappMessageKey,
   captainsReportPartitionPk,
+  broadcastPartitionPk,
+  broadcastDeliveryKey,
 } from './keys.js';
-import { PLATFORM_TENANT } from './types.js';
+import { PLATFORM_TENANT, TRANSFER_WINDOW_REJECTOR } from './types.js';
+import { refs as medicoachRefs } from './medicoach-bundle.js';
 import type {
   Club,
   ClubCommEvent,
   ExportLogEntry,
+  PlayerEraseLogEntry,
+  PlayerErasureCounts,
   League,
   SendResult,
   Series,
@@ -112,6 +147,8 @@ import type {
   PlayerStatus,
   VeteransAffiliation,
   VeteransRequest,
+  PostponementProposal,
+  PostponementRequest,
   PlayerClearance,
   CertificateMeta,
   CertificateRecord,
@@ -121,14 +158,24 @@ import type {
   RegistrationReview,
   RegistrationReviewResolution,
   StoredFixtureResult,
+  StoredFixtureScorecard,
   SyncHealth,
+  McAwaitRow,
+  McReconcileStamp,
+  McReconcileLease,
   SyncLogEntry,
   SyncConflict,
   PendingScheduleSync,
+  PendingPlayerSync,
+  PlayerSyncResolution,
+  PlayerSyncOptOut,
+  PlayerSyncReview,
   ReportOpenMarker,
   Umpire,
   FixtureOfficials,
   FixtureOfficialsRecord,
+  Scorer,
+  ResultConfirmation,
   CaptainsReport,
   CaptainsReportDelivery,
 } from './types.js';
@@ -136,6 +183,7 @@ import type {
 import { tableName } from './env.js';
 import { teamIdsForClub } from './teams.js';
 import { isoInstant } from './medicoach-sync-contract.js';
+import { playerSyncEnabled } from './medicoach-sync/player-placement.js';
 
 const TABLE = tableName();
 // DYNAMO_ENDPOINT points at a local DynamoDB (dynalite) for offline dev; any
@@ -156,17 +204,30 @@ const ddb = DynamoDBDocumentClient.from(
 
 const s3 = new S3Client({});
 const UPLOADS_BUCKET = process.env.UPLOADS_BUCKET;
+/** Charset screen for a `local/` key before it is joined onto LOCAL_UPLOADS_DIR. */
+const LOCAL_KEY_RE = /^[A-Za-z0-9._/-]+$/;
 
 /**
  * Best-effort delete of stored upload objects (compliance PDFs, player ID docs) during
  * tenant/cohort erasure — so a POPIA "right to erasure" actually removes the files, not
- * just the DynamoDB rows. Skips local-dev keys and never throws: a failed object delete is
- * logged (recoverable via a bucket lifecycle rule) and must not abort the erase.
+ * just the DynamoDB rows. Never throws: a failed object delete is logged (recoverable via a
+ * bucket lifecycle rule) and must not abort the erase. `local/` keys are the no-S3 dev
+ * sentinel: skipped, except under dev:local / tests (STAGE=local + LOCAL_UPLOADS_DIR), which
+ * remove the on-disk twin — like deleteUploadPrefixes.
  */
-async function deleteUploadObjects(objectKeys: string[]): Promise<void> {
-  if (!UPLOADS_BUCKET) return;
+export async function deleteUploadObjects(objectKeys: string[]): Promise<void> {
+  const localDir = process.env.STAGE === 'local' ? process.env.LOCAL_UPLOADS_DIR : undefined;
   for (const key of objectKeys) {
-    if (!key || key.startsWith('local/')) continue;
+    if (!key) continue;
+    if (key.startsWith('local/')) {
+      const rel = key.slice('local/'.length);
+      if (!localDir || rel.includes('..') || !LOCAL_KEY_RE.test(rel)) continue;
+      await rm(path.join(localDir, rel), { force: true }).catch((err: unknown) => {
+        console.warn(`erase: failed to delete local upload ${key}`, err);
+      });
+      continue;
+    }
+    if (!UPLOADS_BUCKET) continue;
     try {
       await s3.send(new DeleteObjectCommand({ Bucket: UPLOADS_BUCKET, Key: key }));
     } catch (err) {
@@ -329,6 +390,7 @@ export async function createTenantConfig(config: TenantConfig): Promise<void> {
       ConditionExpression: 'attribute_not_exists(pk)',
     }),
   );
+  invalidatePlayerSyncFlag(config.tenant);
 }
 
 export async function putTenantConfig(config: TenantConfig): Promise<void> {
@@ -341,6 +403,7 @@ export async function putTenantConfig(config: TenantConfig): Promise<void> {
       Item: { ...config, ...tenantConfigKey(config.tenant), ...tenantConfigGsi1(config.tenant) },
     }),
   );
+  invalidatePlayerSyncFlag(config.tenant);
 }
 
 /**
@@ -571,6 +634,8 @@ export async function createClub(tenant: string, club: Club): Promise<Club> {
 
 /** Upsert a club (used by seed; overwrites, no version guard). */
 export async function putClub(tenant: string, club: Club): Promise<void> {
+  // The structure hook needs the prior state; read it only when the player sync is on.
+  const before = (await playerSyncOnSafe(tenant)) ? await getClub(tenant, club.id) : undefined;
   await ddb.send(
     new PutCommand({
       TableName: TABLE,
@@ -582,6 +647,9 @@ export async function putClub(tenant: string, club: Club): Promise<void> {
       },
     }),
   );
+  // A brand-new club has no players yet; an overwrite that moved its structure re-places them.
+  if (before && clubStructureKey(before) !== clubStructureKey(club))
+    await recordClubStructureSyncChange(tenant, [club.id]);
 }
 
 /**
@@ -636,6 +704,8 @@ export async function updateClub(
     }
     throw err;
   }
+  if (clubStructureKey(current) !== clubStructureKey(next))
+    await recordClubStructureSyncChange(tenant, [clubId]);
   return next;
 }
 
@@ -715,6 +785,23 @@ export async function appendClubCommEvents(
   return stripKeys<Club>(res.Attributes) as Club;
 }
 
+/**
+ * What an INVITE#-keyspace idempotency marker guards. `fixture-reminder` is the FixtureReminders
+ * cron's once-per-(club, match date, send date) marker (key
+ * `fixture-reminder:<targetDate>:<sendDate>`). `clearance-reminder` is the once-per-(clearance,
+ * tenant day) reminder marker under the SOURCE club (key `clearance-reminder:<clearanceId>:<date>`),
+ * shared by the admin "Send reminder" route and the ClearanceReminders cron. `broadcast` is a
+ * one-off CLI broadcast's once-per-person marker (send-dolphins-welcome-broadcast.ts, key
+ * `welcome-broadcast-<email|cell>`).
+ */
+export type InviteSendKind =
+  | 'invite'
+  | 'fixtures'
+  | 'staff-invite'
+  | 'fixture-reminder'
+  | 'clearance-reminder'
+  | 'broadcast';
+
 /** Outcome of a duplicate idempotency claim: prior results + whether the first attempt is still running. */
 export interface InviteSendReplay {
   pending: boolean;
@@ -738,7 +825,7 @@ export async function claimInviteSend(
   clubId: string,
   idempotencyKey: string,
   channels: string[],
-  kind: 'invite' | 'fixtures' | 'staff-invite' = 'invite',
+  kind: InviteSendKind = 'invite',
 ): Promise<InviteSendReplay | null> {
   const startedAt = new Date().toISOString();
   // TTL (epoch seconds): the marker only needs to outlive a lost-response retry window,
@@ -773,7 +860,7 @@ export async function claimInviteSend(
         | undefined;
       // The invite/fixtures markers share the INVITE# keyspace; `kind` disambiguates them.
       // A key reused across kinds must never replay the wrong send's results — refuse it.
-      const priorKind = (item?.kind as 'invite' | 'fixtures' | 'staff-invite') ?? 'invite';
+      const priorKind = (item?.kind as InviteSendKind) ?? 'invite';
       if (priorKind !== kind) {
         throw new Error(
           `idempotency key ${idempotencyKey} already used for a ${priorKind} send (got ${kind})`,
@@ -862,9 +949,55 @@ export async function putExportLog(tenant: string, entry: ExportLogEntry): Promi
   );
 }
 
+/** The tenant's medicoach bundle exports (export-medicoach --confirm), oldest first. */
+export async function listMedicoachExportLogs(tenant: string): Promise<ExportLogEntry[]> {
+  const { pk, skPrefix } = exportLogsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items
+    .map((i) => stripKeys<ExportLogEntry>(i)!)
+    .filter((e) => e.kind === 'medicoach-export');
+}
+
 /** Enumerate a tenant's export-log item keys (for erasure — these sit above the pk-prefix sweep). */
 async function listExportLogKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
   const { pk, skPrefix } = exportLogsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+/** Record one player erasure (PII-free: actor + counts). A fresh item per erasure, like EXPORT#. */
+export async function putPlayerEraseLog(tenant: string, entry: PlayerEraseLogEntry): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...playerEraseLogKey(tenant, entry.at, entry.id), ...entry },
+    }),
+  );
+}
+
+/** A tenant's player-erasure audit rows, oldest first. */
+export async function listPlayerEraseLogs(tenant: string): Promise<PlayerEraseLogEntry[]> {
+  const { pk, skPrefix } = playerEraseLogsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<PlayerEraseLogEntry>(i)!);
+}
+
+/** Enumerate a tenant's player-erasure audit keys (tenant erasure — above the pk-prefix sweep). */
+async function listPlayerEraseLogKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
+  const { pk, skPrefix } = playerEraseLogsListKey(tenant);
   const items = await queryAll({
     TableName: TABLE,
     KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
@@ -897,6 +1030,8 @@ export async function getSeries(tenant: string, seriesId: string): Promise<Serie
 }
 
 export async function putSeries(tenant: string, series: Series): Promise<Series> {
+  const on = await playerSyncOnSafe(tenant);
+  const before = on ? await getSeries(tenant, series.id) : null;
   await ddb.send(
     new PutCommand({
       TableName: TABLE,
@@ -908,6 +1043,7 @@ export async function putSeries(tenant: string, series: Series): Promise<Series>
       },
     }),
   );
+  if (on) await recordSeriesStructureChange(tenant, before, series);
   return series;
 }
 
@@ -923,6 +1059,9 @@ export async function putSeriesIfVersion(
   series: Series,
   expectedVersion: number | null | undefined,
 ): Promise<Series> {
+  const on = await playerSyncOnSafe(tenant);
+  // `null` ⇒ a create: there is no prior state to read.
+  const before = on && expectedVersion !== null ? await getSeries(tenant, series.id) : null;
   try {
     await ddb.send(
       new PutCommand({
@@ -948,6 +1087,7 @@ export async function putSeriesIfVersion(
       throw new VersionConflictError();
     throw err;
   }
+  if (on) await recordSeriesStructureChange(tenant, before, series);
   return series;
 }
 
@@ -985,6 +1125,9 @@ export async function updateSeries(
     }
     throw err;
   }
+  // Fixture-only edits (the common case) move no placement and skip the hook entirely.
+  if (seriesStructureClubIds(current, next).length)
+    await recordSeriesStructureChange(tenant, current, next);
   return next;
 }
 
@@ -1068,8 +1211,195 @@ export async function removeFixtureResultCaptainRef(
   }
 }
 
+/** Every key in the results partition: the results AND the office's confirmations of them. */
 async function listFixtureResultKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
-  const { pk, skPrefix } = fixtureResultsListKey(tenant);
+  const { pk } = fixtureResultsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p',
+    ExpressionAttributeValues: { ':p': pk },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+// ── Result confirmations (the union office's "checked and validated") ──
+
+export async function listResultConfirmations(tenant: string): Promise<ResultConfirmation[]> {
+  const { pk, skPrefix } = resultConfirmationsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<ResultConfirmation>(i)!);
+}
+
+export async function getResultConfirmation(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+): Promise<ResultConfirmation | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: resultConfirmationKey(tenant, seriesId, fixtureId) }),
+  );
+  return stripKeys<ResultConfirmation>(res.Item);
+}
+
+/** Replace a fixture's confirmation (one per fixture; the newest confirmation wins). */
+export async function putResultConfirmation(
+  tenant: string,
+  conf: ResultConfirmation,
+): Promise<ResultConfirmation> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...resultConfirmationKey(tenant, conf.seriesId, conf.fixtureId), ...conf },
+    }),
+  );
+  return conf;
+}
+
+export async function deleteResultConfirmation(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+): Promise<void> {
+  await ddb.send(
+    new DeleteCommand({
+      TableName: TABLE,
+      Key: resultConfirmationKey(tenant, seriesId, fixtureId),
+    }),
+  );
+}
+
+// ── Medicoach sync: fixture scorecards (FIXSCORECARD#) ──
+
+/** Store (replace) a fixture's scorecard row — the latest fetch always wins. */
+export async function putFixtureScorecard(
+  tenant: string,
+  scorecard: StoredFixtureScorecard,
+): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...scorecard,
+        ...fixtureScorecardKey(tenant, scorecard.seriesId, scorecard.fixtureId),
+      },
+    }),
+  );
+}
+
+/**
+ * A re-fetch found no card (404 / `available: false`) while an AVAILABLE card is stored:
+ * keep the card and only note when it was last checked. Conditional on the row still being
+ * the card fetched at `fetchedAt` — a concurrent fetch that stored a newer one wins.
+ */
+export async function touchFixtureScorecardCheckedAt(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+  fetchedAt: string,
+  checkedAt: string,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: fixtureScorecardKey(tenant, seriesId, fixtureId),
+        UpdateExpression: 'SET lastCheckedAt = :c',
+        ConditionExpression: 'fetchedAt = :f',
+        ExpressionAttributeValues: { ':c': checkedAt, ':f': fetchedAt },
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
+export async function getFixtureScorecard(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+): Promise<StoredFixtureScorecard | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: fixtureScorecardKey(tenant, seriesId, fixtureId) }),
+  );
+  return stripKeys<StoredFixtureScorecard>(res.Item);
+}
+
+/** Every stored scorecard for a tenant — one Query on one partition. */
+export async function listFixtureScorecards(tenant: string): Promise<StoredFixtureScorecard[]> {
+  const { pk, skPrefix } = fixtureScorecardsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<StoredFixtureScorecard>(i)!);
+}
+
+/** Delete a fixture's scorecard row (idempotent — a missing row is fine). */
+export async function deleteFixtureScorecard(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+): Promise<void> {
+  await ddb.send(
+    new DeleteCommand({ TableName: TABLE, Key: fixtureScorecardKey(tenant, seriesId, fixtureId) }),
+  );
+}
+
+/**
+ * Which of the given fixtures have a stored scorecard row and its `available` flag — keyed
+ * `<seriesId>#<fixtureId>`. BatchGet over the exact pairs, projecting only the key fields and
+ * that flag (never the innings, which carry player names). Chunks of 100 run at most
+ * `concurrency` at a time; UnprocessedKeys are retried after a short jittered backoff, and any
+ * still unanswered after that THROW rather than read as "no card" (the operator console must
+ * not mislabel a match).
+ */
+export async function getFixtureScorecardAvailability(
+  tenant: string,
+  pairs: Array<{ seriesId: string; fixtureId: string }>,
+  concurrency = 4,
+): Promise<Map<string, { available: boolean }>> {
+  const out = new Map<string, { available: boolean }>();
+  const unique = [...new Map(pairs.map((p) => [`${p.seriesId}#${p.fixtureId}`, p])).values()];
+  const chunks: Array<typeof unique> = [];
+  for (let i = 0; i < unique.length; i += 100) chunks.push(unique.slice(i, i + 100));
+  const runChunk = async (chunk: typeof unique) => {
+    let batch = chunk.map((p) => fixtureScorecardKey(tenant, p.seriesId, p.fixtureId));
+    for (let attempt = 0; attempt < 3 && batch.length; attempt++) {
+      if (attempt > 0)
+        await new Promise((r) => setTimeout(r, (50 + Math.random() * 100) * attempt));
+      const res = await ddb.send(
+        new BatchGetCommand({
+          RequestItems: {
+            [TABLE]: {
+              Keys: batch,
+              ProjectionExpression: 'seriesId, fixtureId, #a',
+              ExpressionAttributeNames: { '#a': 'available' },
+            },
+          },
+        }),
+      );
+      for (const item of res.Responses?.[TABLE] ?? [])
+        out.set(`${item.seriesId}#${item.fixtureId}`, { available: item.available === true });
+      batch = (res.UnprocessedKeys?.[TABLE]?.Keys ?? []) as typeof batch;
+    }
+    if (batch.length)
+      throw new Error(`scorecard availability: ${batch.length} keys unprocessed after retries`);
+  };
+  for (let i = 0; i < chunks.length; i += concurrency)
+    await Promise.all(chunks.slice(i, i + concurrency).map(runChunk));
+  return out;
+}
+
+async function listFixtureScorecardKeys(
+  tenant: string,
+): Promise<Array<{ pk: string; sk: string }>> {
+  const { pk, skPrefix } = fixtureScorecardsListKey(tenant);
   const items = await queryAll({
     TableName: TABLE,
     KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
@@ -1125,6 +1455,156 @@ export async function putSyncHealth(tenant: string, patch: SyncHealth): Promise<
       ExpressionAttributeValues: Object.fromEntries(entries.map(([k, v]) => [`:${k}`, v])),
     }),
   );
+}
+
+// ── Medicoach connection console: awaiting carry + reconciliation (ADR 0020) ──
+
+/** A tenant's MCAWAIT# rows (series with fixtures medicoach does not have). */
+export async function listMcAwait(tenant: string): Promise<McAwaitRow[]> {
+  const { pk, skPrefix } = mcAwaitListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<McAwaitRow>(i)!);
+}
+
+/**
+ * Record fixtures of one series as awaiting a medicoach carry. `refs` are UNIONED with the
+ * row's existing refs (the write path only ever adds), or REPLACE them with `replace` (the
+ * reconciliation, whose answer is the whole truth for the series). `firstSeen` is kept,
+ * `lastSeen` is `now`. Read-merge-write: the reconciliation re-derives the set daily, so a
+ * union lost to a concurrent write heals.
+ */
+export async function upsertMcAwait(
+  tenant: string,
+  entry: { seriesId: string; seriesName?: string; leagueKey?: string; refs: string[] },
+  opts: { now: string; replace?: boolean },
+): Promise<McAwaitRow> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: mcAwaitKey(tenant, entry.seriesId) }),
+  );
+  const existing = stripKeys<McAwaitRow>(res.Item);
+  const refs = [...new Set([...(opts.replace ? [] : (existing?.refs ?? [])), ...entry.refs])];
+  const seriesName = entry.seriesName || existing?.seriesName;
+  const leagueKey = entry.leagueKey || existing?.leagueKey;
+  const row: McAwaitRow = {
+    seriesId: entry.seriesId,
+    ...(seriesName ? { seriesName } : {}),
+    ...(leagueKey ? { leagueKey } : {}),
+    refs,
+    count: refs.length,
+    firstSeen: existing?.firstSeen ?? opts.now,
+    lastSeen: opts.now,
+  };
+  await ddb.send(
+    new PutCommand({ TableName: TABLE, Item: { ...row, ...mcAwaitKey(tenant, entry.seriesId) } }),
+  );
+  return row;
+}
+
+export async function deleteMcAwait(tenant: string, seriesId: string): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: TABLE, Key: mcAwaitKey(tenant, seriesId) }));
+}
+
+/** The tenant's last reconciliation stamp, or null before the first one. */
+export async function getMcReconcile(tenant: string): Promise<McReconcileStamp | null> {
+  const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: mcReconKey(tenant) }));
+  return stripKeys<McReconcileStamp>(res.Item);
+}
+
+/** Replace the tenant's reconciliation stamp (each run's stamp stands alone). */
+export async function putMcReconcile(tenant: string, stamp: McReconcileStamp): Promise<void> {
+  await ddb.send(new PutCommand({ TableName: TABLE, Item: { ...stamp, ...mcReconKey(tenant) } }));
+}
+
+/**
+ * Take the tenant's reconciliation lease (MCRECONLOCK#) for `leaseMs` from `now`: a conditional
+ * put that succeeds only when no lease exists or the existing one has expired. Returns the
+ * lease taken, or null while another run holds an unexpired one. Throws any other failure.
+ */
+export async function acquireMcReconcileLease(
+  tenant: string,
+  opts: { now: Date; leaseMs: number },
+): Promise<McReconcileLease | null> {
+  const nowMs = opts.now.getTime();
+  const lease: McReconcileLease = {
+    token: randomUUID(),
+    acquiredAt: opts.now.toISOString(),
+    expiresAt: Math.ceil((nowMs + opts.leaseMs) / 1000),
+  };
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { ...lease, ...mcReconLockKey(tenant) },
+        ConditionExpression: 'attribute_not_exists(pk) OR expiresAt < :now',
+        ExpressionAttributeValues: { ':now': Math.floor(nowMs / 1000) },
+      }),
+    );
+  } catch (err) {
+    if (isCcf(err)) return null;
+    throw err;
+  }
+  return lease;
+}
+
+/**
+ * Extend a held lease to `leaseMs` from `now`: an update of `expiresAt` conditioned on the
+ * holder's own `token`. Returns false when the lease is no longer this holder's (it expired
+ * and another run took it, or it is gone) — nothing is written then. Throws any other failure.
+ */
+export async function renewMcReconcileLease(
+  tenant: string,
+  lease: McReconcileLease,
+  opts: { now: Date; leaseMs: number },
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: mcReconLockKey(tenant),
+        UpdateExpression: 'SET expiresAt = :e',
+        ConditionExpression: '#token = :t',
+        ExpressionAttributeNames: { '#token': 'token' },
+        ExpressionAttributeValues: {
+          ':e': Math.ceil((opts.now.getTime() + opts.leaseMs) / 1000),
+          ':t': lease.token,
+        },
+      }),
+    );
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+  return true;
+}
+
+/**
+ * Release a lease taken by `acquireMcReconcileLease`: a delete conditioned on the holder's own
+ * `token`, so a holder whose lease expired and was taken over never deletes the new
+ * holder's. Returns false when the lease was no longer this holder's (nothing deleted).
+ */
+export async function releaseMcReconcileLease(
+  tenant: string,
+  lease: McReconcileLease,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new DeleteCommand({
+        TableName: TABLE,
+        Key: mcReconLockKey(tenant),
+        ConditionExpression: '#token = :t',
+        ExpressionAttributeNames: { '#token': 'token' },
+        ExpressionAttributeValues: { ':t': lease.token },
+      }),
+    );
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+  return true;
 }
 
 /** SYNCLOG# rows self-expire after this long (DynamoDB TTL on `expiresAt`). */
@@ -1343,6 +1823,598 @@ export async function resetPendingSyncAttempts(
   }
 }
 
+// ── Medicoach PLAYER sync: outbox, reviews, distinct pairs (ADR 0019) ──
+// All in the tenant's SYNC partition, so tenant erasure and cohort clearing (which delete that
+// whole partition) remove them. Natural keys are hashed ID numbers: never log one.
+
+/** Fields a fresh change clears from a row (a parked / failed / tombstoned row starts over). */
+const PLAYER_ROW_RESET = 'parked, parkedAt, missingTeamRefs, lastError, lastAttemptAt';
+
+/**
+ * Enqueue (or collapse onto) a person's outbox row: "this player changed at `changedAt`".
+ * Conditional on the stored `changedAt` being OLDER, so a slower writer never rewinds a newer
+ * row; an equal or older change is a silent no-op (the newer row goes out and is rebuilt
+ * from live data anyway). A newer change un-parks the row and restarts its attempts.
+ *
+ * A row that is an `erase` tombstone is REPLACED (the person registered again after the
+ * erasure): it becomes a plain change flagged `eraseFirst`, so the flush still sends the erase
+ * before the new registration's upsert. A stored `resolution` rides along unless `resolution`
+ * is passed (null clears it).
+ */
+export async function putPendingPlayerSync(
+  tenant: string,
+  naturalKey: string,
+  changedAt: string,
+  opts: { resolution?: PlayerSyncResolution | null; requeued?: boolean } = {},
+): Promise<void> {
+  const c = isoInstant(changedAt);
+  // An admin's action (a resolution, or `requeued`) marks the row "queued" for the panel.
+  const resolutionSet =
+    (opts.resolution ? ', resolution = :r' : '') +
+    (opts.resolution || opts.requeued ? ', requeuedAt = :c' : '');
+  const resolutionRemove = opts.resolution === null ? ', resolution' : '';
+  const values: Record<string, unknown> = { ':nk': naturalKey, ':c': c, ':zero': 0 };
+  if (opts.resolution) values[':r'] = opts.resolution;
+  // A tombstone first: replace it, remembering that the erase must still go out.
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: pendingPlayerSyncKey(tenant, naturalKey),
+        UpdateExpression:
+          `SET naturalKey = :nk, changedAt = :c, enqueuedAt = :c, attempts = :zero, ` +
+          `eraseFirst = :t${resolutionSet} REMOVE #op, ${PLAYER_ROW_RESET}${resolutionRemove}`,
+        ConditionExpression: '#op = :erase AND changedAt < :c',
+        ExpressionAttributeNames: { '#op': 'op' },
+        ExpressionAttributeValues: { ...values, ':t': true, ':erase': 'erase' },
+      }),
+    );
+    return;
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: pendingPlayerSyncKey(tenant, naturalKey),
+        UpdateExpression:
+          `SET naturalKey = :nk, changedAt = :c, enqueuedAt = :c, attempts = :zero` +
+          `${resolutionSet} REMOVE ${PLAYER_ROW_RESET}${resolutionRemove}`,
+        ConditionExpression:
+          'attribute_not_exists(pk) OR (changedAt < :c AND (attribute_not_exists(#op) OR #op <> :erase))',
+        ExpressionAttributeNames: { '#op': 'op' },
+        ExpressionAttributeValues: { ...values, ':erase': 'erase' },
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
+/**
+ * The POPIA erasure tombstone (erasePlayerData only): REPLACES whatever row the person had,
+ * so the flush pushes `erase` rather than a rebuild (the source rows are already gone).
+ */
+export async function putPlayerSyncTombstone(
+  tenant: string,
+  naturalKey: string,
+  changedAt: string,
+): Promise<void> {
+  const c = isoInstant(changedAt);
+  const row: PendingPlayerSync = {
+    naturalKey,
+    changedAt: c,
+    enqueuedAt: c,
+    attempts: 0,
+    op: 'erase',
+  };
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...row, ...pendingPlayerSyncKey(tenant, naturalKey) },
+    }),
+  );
+}
+
+export async function listPendingPlayerSync(tenant: string): Promise<PendingPlayerSync[]> {
+  const { pk, skPrefix } = pendingPlayerSyncListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<PendingPlayerSync>(i)!);
+}
+
+export async function getPendingPlayerSync(
+  tenant: string,
+  naturalKey: string,
+): Promise<PendingPlayerSync | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: pendingPlayerSyncKey(tenant, naturalKey) }),
+  );
+  return stripKeys<PendingPlayerSync>(res.Item);
+}
+
+/** Run a conditional write on a player-outbox row; false when the row moved on (or is gone). */
+async function updatePlayerRowIf(
+  tenant: string,
+  naturalKey: string,
+  changedAt: string,
+  update: string,
+  values: Record<string, unknown> = {},
+  names: Record<string, string> = {},
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: pendingPlayerSyncKey(tenant, naturalKey),
+        UpdateExpression: update,
+        ConditionExpression: 'attribute_exists(pk) AND changedAt = :c',
+        ...(Object.keys(names).length ? { ExpressionAttributeNames: names } : {}),
+        ExpressionAttributeValues: { ...values, ':c': changedAt },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/**
+ * Delete a person's outbox row ONLY while it still holds the change that was sent: a change
+ * enqueued while the push was in flight moved `changedAt` on and must still go out.
+ */
+export async function deletePendingPlayerSyncIfUnchanged(
+  tenant: string,
+  naturalKey: string,
+  changedAt: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new DeleteCommand({
+        TableName: TABLE,
+        Key: pendingPlayerSyncKey(tenant, naturalKey),
+        ConditionExpression: 'changedAt = :c',
+        ExpressionAttributeValues: { ':c': changedAt },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/** Drop a person's outbox row whatever it holds (review dismissed: do not sync). */
+export async function deletePendingPlayerSync(tenant: string, naturalKey: string): Promise<void> {
+  await ddb.send(
+    new DeleteCommand({ TableName: TABLE, Key: pendingPlayerSyncKey(tenant, naturalKey) }),
+  );
+}
+
+/** A failed push of THIS change: attempts + 1, lastError (field paths only — never a value). */
+export async function markPendingPlayerSyncFailed(
+  tenant: string,
+  naturalKey: string,
+  changedAt: string,
+  error: string,
+  at: string,
+): Promise<void> {
+  await updatePlayerRowIf(
+    tenant,
+    naturalKey,
+    changedAt,
+    'SET attempts = if_not_exists(attempts, :zero) + :one, lastError = :e, lastAttemptAt = :at',
+    { ':zero': 0, ':one': 1, ':e': error.slice(0, 300), ':at': at },
+  );
+}
+
+/**
+ * Park THIS change: medicoach lacks one of the player's teams, so resending every run only
+ * repeats the personal data. Retried by the admin's retry or after a bundle top-up.
+ */
+export async function parkPendingPlayerSync(
+  tenant: string,
+  naturalKey: string,
+  changedAt: string,
+  missingTeamRefs: string[],
+  at: string,
+): Promise<void> {
+  await updatePlayerRowIf(
+    tenant,
+    naturalKey,
+    changedAt,
+    'SET parked = :t, parkedAt = :at, missingTeamRefs = :m, lastAttemptAt = :at REMOVE requeuedAt',
+    { ':t': true, ':at': at, ':m': missingTeamRefs.slice(0, 20) },
+  );
+}
+
+/** The erase that preceded a re-registration went out: the row is now a plain change. */
+export async function clearPendingPlayerSyncEraseFirst(
+  tenant: string,
+  naturalKey: string,
+  changedAt: string,
+): Promise<boolean> {
+  return updatePlayerRowIf(tenant, naturalKey, changedAt, 'REMOVE eraseFirst');
+}
+
+/**
+ * Un-park and restart a row (the admin's Retry): it goes out on the next flush with the same
+ * `changedAt` (medicoach never applied it). Returns false when there is no such row.
+ */
+export async function retryPendingPlayerSync(tenant: string, naturalKey: string): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: pendingPlayerSyncKey(tenant, naturalKey),
+        UpdateExpression: `SET attempts = :zero, requeuedAt = :at REMOVE ${PLAYER_ROW_RESET}`,
+        ConditionExpression: 'attribute_exists(pk)',
+        ExpressionAttributeValues: { ':zero': 0, ':at': new Date().toISOString() },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/** PLAYERREVIEW# rows self-expire after this long (they hold medicoach candidates' PII). */
+export const PLAYER_REVIEW_TTL_SECONDS = 60 * 24 * 3600;
+
+export async function putPlayerReview(tenant: string, review: PlayerSyncReview): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...review,
+        ...playerReviewKey(tenant, review.naturalKey),
+        expiresAt: Math.floor(Date.parse(review.detectedAt) / 1000) + PLAYER_REVIEW_TTL_SECONDS,
+      },
+    }),
+  );
+}
+
+/** Strip the TTL attribute, and treat an expired-but-not-yet-swept row as gone. */
+function liveReview(item: Record<string, unknown> | undefined): PlayerSyncReview | null {
+  const row = stripKeys<PlayerSyncReview & { expiresAt?: number }>(item);
+  if (!row) return null;
+  const { expiresAt, ...rest } = row;
+  if (typeof expiresAt === 'number' && expiresAt * 1000 < Date.now()) return null;
+  return rest;
+}
+
+export async function getPlayerReview(
+  tenant: string,
+  naturalKey: string,
+): Promise<PlayerSyncReview | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: playerReviewKey(tenant, naturalKey) }),
+  );
+  return liveReview(res.Item);
+}
+
+export async function listPlayerReviews(tenant: string): Promise<PlayerSyncReview[]> {
+  const { pk, skPrefix } = playerReviewsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map(liveReview).filter((r): r is PlayerSyncReview => r !== null);
+}
+
+export async function deletePlayerReview(tenant: string, naturalKey: string): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: TABLE, Key: playerReviewKey(tenant, naturalKey) }));
+}
+
+/** Record that two natural keys are different people (never flagged as duplicates again). */
+export async function putPlayerDistinct(tenant: string, a: string, b: string): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...playerDistinctKey(tenant, a, b),
+        a: a < b ? a : b,
+        b: a < b ? b : a,
+        at: new Date().toISOString(),
+      },
+    }),
+  );
+}
+
+/** Every confirmed-distinct pair, as `${a}#${b}` with a < b. */
+export async function listPlayerDistinctPairs(tenant: string): Promise<Set<string>> {
+  const { pk, skPrefix } = playerDistinctListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    ProjectionExpression: 'sk',
+  });
+  return new Set(items.map((i) => String(i.sk).slice(skPrefix.length)));
+}
+
+export async function putPlayerSyncOptOut(tenant: string, optOut: PlayerSyncOptOut): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...optOut, ...playerSyncOptOutKey(tenant, optOut.naturalKey) },
+    }),
+  );
+}
+
+export async function getPlayerSyncOptOut(
+  tenant: string,
+  naturalKey: string,
+): Promise<PlayerSyncOptOut | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: playerSyncOptOutKey(tenant, naturalKey) }),
+  );
+  return stripKeys<PlayerSyncOptOut>(res.Item);
+}
+
+export async function deletePlayerSyncOptOut(tenant: string, naturalKey: string): Promise<void> {
+  await ddb.send(
+    new DeleteCommand({ TableName: TABLE, Key: playerSyncOptOutKey(tenant, naturalKey) }),
+  );
+}
+
+/** The natural keys of every person opted out of the player sync. */
+export async function listPlayerSyncOptOuts(tenant: string): Promise<Set<string>> {
+  const { pk, skPrefix } = playerSyncOptOutListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    ProjectionExpression: 'sk',
+  });
+  return new Set(items.map((i) => String(i.sk).slice(skPrefix.length)));
+}
+
+/**
+ * Note that this person changed, for the medicoach player sync (ADR 0019). Called from every
+ * repo write that changes a player row, so routes AND import CLIs are covered. A no-op unless
+ * the tenant has the player sync on. Best-effort: a failed enqueue never fails the write that
+ * already landed (the backfill CLI re-enqueues everyone) — it warns with no player data.
+ */
+/**
+ * The player-sync flag per tenant, cached in-process for a few seconds so a burst of player
+ * writes (a roster import, a club erase) doesn't read the tenant config once per row — and a
+ * flag-off tenant pays almost nothing. This process's own config writes invalidate it at once;
+ * another container's switch-on lands within the TTL (the backfill covers that window).
+ */
+const PLAYER_SYNC_FLAG_TTL_MS = 15_000;
+const playerSyncFlagCache = new Map<string, { on: boolean; at: number }>();
+
+export function invalidatePlayerSyncFlag(tenant?: string): void {
+  if (tenant === undefined) playerSyncFlagCache.clear();
+  else playerSyncFlagCache.delete(tenant);
+}
+
+async function playerSyncOn(tenant: string): Promise<boolean> {
+  const hit = playerSyncFlagCache.get(tenant);
+  if (hit && Date.now() - hit.at < PLAYER_SYNC_FLAG_TTL_MS) return hit.on;
+  const on = playerSyncEnabled(await getTenantConfig(tenant));
+  playerSyncFlagCache.set(tenant, { on, at: Date.now() });
+  return on;
+}
+
+export async function recordPlayerSyncChange(
+  tenant: string,
+  naturalKeys: string | string[],
+  opts: { config?: TenantConfig | null; at?: string } = {},
+): Promise<number> {
+  const keys = [...new Set(Array.isArray(naturalKeys) ? naturalKeys : [naturalKeys])].filter(
+    Boolean,
+  );
+  if (!keys.length) return 0;
+  try {
+    // A caller that holds the config passes it (no read); everyone else uses the short cache.
+    const on =
+      opts.config !== undefined ? playerSyncEnabled(opts.config) : await playerSyncOn(tenant);
+    if (!on) return 0;
+    const at = opts.at ?? new Date().toISOString();
+    // Bounded parallel slices (club erasure / backfill can touch hundreds of people).
+    for (let i = 0; i < keys.length; i += 8)
+      // eslint-disable-next-line no-await-in-loop -- sequential slices, each internally parallel
+      await Promise.all(keys.slice(i, i + 8).map((nk) => putPendingPlayerSync(tenant, nk, at)));
+    return keys.length;
+  } catch (err) {
+    console.warn(
+      `[medicoach-sync] ${tenant}: player sync enqueue failed for ${keys.length} player(s) — ` +
+        `${err instanceof Error ? err.name : 'error'}; re-run enqueue-players to recover`,
+    );
+    return 0;
+  }
+}
+
+/* ── Structure hook: the club / series / season-run writes that move placement ── */
+// Placement (incl. fan-out, medicoach-sync/player-placement.ts) reads a club's `leagues`,
+// `leagueTeams`, `teamRosters` and the series it plays in (leagueKey via the series or its
+// season run). A change there changes the desired teams of the club's players with no player
+// write, so these hooks enqueue them. A season carry that mints new series under existing league
+// keys therefore fills the new sides without anyone running enqueue-players.
+
+type ClubStructure = Pick<Club, 'leagues' | 'leagueTeams' | 'teamRosters'>;
+
+/** The placement-relevant shape of a club (roster names/venues do not move a ref; ids do). */
+function clubStructureKey(c: ClubStructure | null | undefined): string {
+  if (!c) return '';
+  const rosters: Record<string, string[]> = {};
+  for (const [k, list] of Object.entries(c.teamRosters ?? {}))
+    rosters[k] = (Array.isArray(list) ? list : []).map((t) => String(t?.id ?? ''));
+  const sorted = <T>(o: Record<string, T>) =>
+    Object.fromEntries(Object.entries(o).sort(([a], [b]) => a.localeCompare(b)));
+  return JSON.stringify([
+    Array.isArray(c.leagues) ? [...c.leagues].sort() : [],
+    sorted(c.leagueTeams ?? {}),
+    sorted(rosters),
+  ]);
+}
+
+/** `leagueKey` is read the way placement reads it (an untyped legacy field on Series). */
+type SeriesStructure = Pick<Series, 'seasonRunId' | 'participants' | 'teams'> & {
+  id?: string;
+  leagueKey?: unknown;
+};
+
+/** `teamId|clubId` per participant (legacy `teams` lists use the id for both). */
+function seriesParticipantKeys(s: SeriesStructure | null | undefined): Set<string> {
+  if (!s) return new Set();
+  const list = Array.isArray(s.participants)
+    ? s.participants
+    : (s.teams ?? []).map((id) => ({ teamId: id, clubId: id }));
+  return new Set(list.filter((p) => p?.teamId && p.clubId).map((p) => `${p.teamId}|${p.clubId}`));
+}
+
+/**
+ * The clubs whose placement a series write moves: every participant's club on a create or a
+ * league move (leagueKey / seasonRunId), else the clubs of the participants added or dropped.
+ */
+export function seriesStructureClubIds(
+  before: SeriesStructure | null | undefined,
+  after: SeriesStructure | null | undefined,
+): string[] {
+  const a = seriesParticipantKeys(before);
+  const b = seriesParticipantKeys(after);
+  const moved =
+    !before ||
+    !after ||
+    before.leagueKey !== after.leagueKey ||
+    before.seasonRunId !== after.seasonRunId;
+  const keys = moved
+    ? [...a, ...b]
+    : [...[...a].filter((k) => !b.has(k)), ...[...b].filter((k) => !a.has(k))];
+  return [...new Set(keys.map((k) => k.slice(k.indexOf('|') + 1)))].sort();
+}
+
+/**
+ * Queue the players a structure change can move: every ACTIVE, non-placeholder player row of
+ * these clubs, plus their veterans affiliates (whose veterans side lives on the club). Never more
+ * than `enqueue-players` would queue (an active row always means an upsert intent). Same outbox
+ * and dedupe as {@link recordPlayerSyncChange} (one row per person), a no-op unless the player
+ * sync is on, and best-effort: it never fails the structure write that already landed.
+ */
+export async function recordClubStructureSyncChange(
+  tenant: string,
+  clubIds: string[],
+  opts: { config?: TenantConfig | null; at?: string } = {},
+): Promise<number> {
+  const ids = [...new Set(clubIds)].filter(Boolean);
+  if (!ids.length) return 0;
+  try {
+    const on =
+      opts.config !== undefined ? playerSyncEnabled(opts.config) : await playerSyncOn(tenant);
+    if (!on) return 0;
+    const keys = new Set<string>();
+    for (const clubId of ids) {
+      // eslint-disable-next-line no-await-in-loop -- a handful of clubs per structure write
+      const [rows, affs] = await Promise.all([
+        listPlayers(tenant, clubId),
+        listVeteransAffiliations(tenant, clubId),
+      ]);
+      for (const r of rows)
+        if (r.placeholder !== true && (r.status ?? 'active') === 'active') keys.add(r.naturalKey);
+      for (const a of affs) if (a.naturalKey) keys.add(a.naturalKey);
+    }
+    return await recordPlayerSyncChange(tenant, [...keys], { config: opts.config, at: opts.at });
+  } catch (err) {
+    console.warn(
+      `[medicoach-sync] ${tenant}: structure-change enqueue failed for ${ids.length} club(s) — ` +
+        `${err instanceof Error ? err.name : 'error'}; re-run enqueue-players to recover`,
+    );
+    return 0;
+  }
+}
+
+/** The player-sync flag, never throwing (a structure write must not fail on it). */
+async function playerSyncOnSafe(tenant: string): Promise<boolean> {
+  try {
+    return await playerSyncOn(tenant);
+  } catch {
+    return false;
+  }
+}
+
+/** Hook for a series write: `before` is null for a create. */
+async function recordSeriesStructureChange(
+  tenant: string,
+  before: SeriesStructure | null,
+  after: SeriesStructure,
+): Promise<void> {
+  // Recipe knockouts add no teams (placement skips them too).
+  if (String(after.id ?? '').startsWith('s-mc-ko-')) return;
+  const clubIds = seriesStructureClubIds(before, after);
+  if (clubIds.length) await recordClubStructureSyncChange(tenant, clubIds);
+}
+
+/**
+ * Hook for a season-run write: a create or a league move re-places the clubs of every series
+ * already on the run (series created later fire their own hook).
+ */
+async function recordSeasonRunStructureChange(
+  tenant: string,
+  before: Pick<SeasonRun, 'leagueKey'> | null,
+  after: SeasonRun,
+): Promise<void> {
+  if (before && before.leagueKey === after.leagueKey) return;
+  if (!(await playerSyncOnSafe(tenant))) return;
+  try {
+    const onRun = (await listSeries(tenant)).filter((s) => s.seasonRunId === after.id);
+    const clubIds = onRun.flatMap((s) => seriesStructureClubIds(null, s));
+    if (clubIds.length) await recordClubStructureSyncChange(tenant, clubIds);
+  } catch (err) {
+    console.warn(
+      `[medicoach-sync] ${tenant}: season-run structure enqueue failed — ` +
+        `${err instanceof Error ? err.name : 'error'}; re-run enqueue-players to recover`,
+    );
+  }
+}
+
+/**
+ * The erasure counterpart (erasePlayerData only): an `erase` tombstone when the sync is on,
+ * and the person's review, distinct-pair and opt-out markers deleted ALWAYS (they name the
+ * person). Unlike the change hook this throws — an erasure must not report success with PII left.
+ */
+export async function recordPlayerSyncErase(
+  tenant: string,
+  naturalKey: string,
+  at: string,
+): Promise<void> {
+  await deletePlayerReview(tenant, naturalKey);
+  await deletePlayerSyncOptOut(tenant, naturalKey);
+  // Another person's possible-duplicate review that lists THIS person as a candidate names
+  // them too: drop it, and re-queue that person so the guard re-evaluates without them.
+  const requeue: string[] = [];
+  for (const r of await listPlayerReviews(tenant)) {
+    if (!r.candidates.some((c) => c.naturalKey === naturalKey)) continue;
+    await deletePlayerReview(tenant, r.naturalKey);
+    requeue.push(r.naturalKey);
+  }
+  await recordPlayerSyncChange(tenant, requeue, { at });
+  const { pk, skPrefix } = playerDistinctListKey(tenant);
+  const markers = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    ProjectionExpression: 'pk, sk',
+  });
+  for (const m of markers) {
+    const [a, b] = String(m.sk).slice(skPrefix.length).split('#');
+    if (a === naturalKey || b === naturalKey)
+      await ddb.send(new DeleteCommand({ TableName: TABLE, Key: { pk: m.pk, sk: m.sk } }));
+  }
+  if (playerSyncEnabled(await getTenantConfig(tenant)))
+    await putPlayerSyncTombstone(tenant, naturalKey, at);
+  else await deletePendingPlayerSync(tenant, naturalKey);
+}
+
 export async function putReportOpenMarker(tenant: string, marker: ReportOpenMarker): Promise<void> {
   await ddb.send(
     new PutCommand({ TableName: TABLE, Item: { ...marker, ...reportOpenKey(tenant, marker.ref) } }),
@@ -1363,6 +2435,32 @@ export async function deleteReportOpenMarker(tenant: string, ref: string): Promi
   await ddb.send(new DeleteCommand({ TableName: TABLE, Key: reportOpenKey(tenant, ref) }));
 }
 
+/**
+ * Drop a pending marker's `captainRef` (player erasure), keeping the marker itself: the retry
+ * still opens the fixture's reports, and with no captain ref the scoring side's report goes to the
+ * club chair (`resolveCaptain` → null). False when the marker vanished meanwhile (it opened, or
+ * the retry gave up) — nothing left to scrub.
+ */
+export async function scrubReportOpenMarkerCaptainRef(
+  tenant: string,
+  ref: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportOpenKey(tenant, ref),
+        UpdateExpression: 'REMOVE captainRef',
+        ConditionExpression: 'attribute_exists(pk)',
+      }),
+    );
+    return true;
+  } catch (err: unknown) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
 /** One failed attempt to open/notify a marker's reports. */
 export async function markReportOpenFailed(
   tenant: string,
@@ -1370,17 +2468,25 @@ export async function markReportOpenFailed(
   error: string,
   at: string,
 ): Promise<number> {
-  const res = await ddb.send(
-    new UpdateCommand({
-      TableName: TABLE,
-      Key: reportOpenKey(tenant, ref),
-      UpdateExpression:
-        'SET attempts = if_not_exists(attempts, :zero) + :one, lastError = :e, lastAttemptAt = :at',
-      ExpressionAttributeValues: { ':zero': 0, ':one': 1, ':e': error.slice(0, 300), ':at': at },
-      ReturnValues: 'UPDATED_NEW',
-    }),
-  );
-  return Number(res.Attributes?.attempts ?? 0);
+  // Conditional on the marker still existing: a concurrent run that already finished (and
+  // deleted) it must not have it resurrected as a bare attempts row. 0 = already handled.
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportOpenKey(tenant, ref),
+        UpdateExpression:
+          'SET attempts = if_not_exists(attempts, :zero) + :one, lastError = :e, lastAttemptAt = :at',
+        ConditionExpression: 'attribute_exists(pk)',
+        ExpressionAttributeValues: { ':zero': 0, ':one': 1, ':e': error.slice(0, 300), ':at': at },
+        ReturnValues: 'UPDATED_NEW',
+      }),
+    );
+    return Number(res.Attributes?.attempts ?? 0);
+  } catch (err) {
+    if (isCcf(err)) return 0;
+    throw err;
+  }
 }
 
 async function listSyncPartitionKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
@@ -1486,7 +2592,7 @@ export async function putFixtureOfficials(
   officials: FixtureOfficials,
 ): Promise<void> {
   const key = fixtureOfficialsKey(tenant, seriesId, fixtureId);
-  if (!officials.umpires.length && !officials.referee) {
+  if (!officials.umpires.length && !officials.referee && !officials.scorers?.length) {
     await ddb.send(new DeleteCommand({ TableName: TABLE, Key: key }));
     return;
   }
@@ -1506,19 +2612,284 @@ export async function deleteFixtureOfficialsForSeries(
   const keys = (await listFixtureOfficials(tenant))
     .filter((o) => o.seriesId === seriesId)
     .map((o) => fixtureOfficialsKey(tenant, o.seriesId, o.fixtureId));
-  if (keys.length) await batchDelete(keys);
+  // The series' appointment-notice ledger goes with it (a queued row would otherwise point
+  // the cron at a series that no longer exists).
+  const ledger = await listOfficialsNotifyKeys(tenant, seriesId);
+  if (keys.length || ledger.length) await batchDelete([...keys, ...ledger]);
   return keys.length;
 }
 
-/** pk/sk pairs for every umpire + officials item — the erasure sweep needs keys. */
+/**
+ * Drop the officials of specific fixtures (they were removed from their series). Without this
+ * the appointments outlive the fixture — invisible, since the join is by fixture id, but kept.
+ */
+export async function deleteFixtureOfficialsFor(
+  tenant: string,
+  seriesId: string,
+  fixtureIds: string[],
+): Promise<void> {
+  if (fixtureIds.length)
+    await batchDelete(fixtureIds.map((f) => fixtureOfficialsKey(tenant, seriesId, f)));
+}
+
+export class ScorerExistsError extends Error {
+  constructor() {
+    super('scorer id already exists');
+    this.name = 'ScorerExistsError';
+  }
+}
+
+export async function listScorers(tenant: string): Promise<Scorer[]> {
+  const items = await queryAll({
+    TableName: TABLE,
+    IndexName: 'gsi1',
+    KeyConditionExpression: 'gsi1pk = :p',
+    ExpressionAttributeValues: { ':p': scorersListGsi1pk(tenant) },
+  });
+  return items.map((i) => stripKeys<Scorer>(i)!);
+}
+
+export async function getScorer(tenant: string, scorerId: string): Promise<Scorer | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: scorerKey(tenant, scorerId) }),
+  );
+  return stripKeys<Scorer>(res.Item);
+}
+
+/** Insert a NEW scorer; throws ScorerExistsError if the id is taken. */
+export async function createScorer(tenant: string, scorer: Scorer): Promise<Scorer> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: {
+          ...scorerKey(tenant, scorer.id),
+          ...scorerGsi1(tenant, scorer.displayName),
+          ...scorer,
+        },
+        ConditionExpression: 'attribute_not_exists(pk)',
+      }),
+    );
+  } catch (err) {
+    if (isCcf(err)) throw new ScorerExistsError();
+    throw err;
+  }
+  return scorer;
+}
+
+/** Replace a scorer record (last write wins, like umpires). */
+export async function putScorer(tenant: string, scorer: Scorer): Promise<Scorer> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...scorerKey(tenant, scorer.id),
+        ...scorerGsi1(tenant, scorer.displayName),
+        ...scorer,
+      },
+    }),
+  );
+  return scorer;
+}
+
+/** pk/sk pairs for every umpire, scorer + officials item — the erasure sweep needs keys. */
 async function listUmpireAndOfficialsKeys(
   tenant: string,
 ): Promise<Array<{ pk: string; sk: string }>> {
-  const umpires = (await listUmpires(tenant)).map((u) => umpireKey(tenant, u.id));
+  const umpires = [
+    ...(await listUmpires(tenant)).map((u) => umpireKey(tenant, u.id)),
+    ...(await listScorers(tenant)).map((x) => scorerKey(tenant, x.id)),
+  ];
   const officials = (await listFixtureOfficials(tenant)).map((o) =>
     fixtureOfficialsKey(tenant, o.seriesId, o.fixtureId),
   );
-  return [...umpires, ...officials];
+  // The appointment-notice ledger (statuses only, but keyed by umpire id) shares the partition.
+  const ledger = await listOfficialsNotifyKeys(tenant);
+  return [...umpires, ...officials, ...ledger];
+}
+
+// ── Official appointment notices (NOTIFY#officials ledger-as-queue) ──
+// The two appointment routes enqueue one `queued` row per (fixture, role, official) with a
+// conditional put; the OfficialNotices cron drains them. A row that already exists (queued,
+// completed or exhausted) absorbs a re-save, so an identical re-appointment never re-sends;
+// removing an official deletes the row, so a later re-appointment sends again.
+
+/** `umpireId` on a ledger row is the registry id for the role (a scorer id for 'scorer'). */
+export type OfficialRole = 'umpire' | 'referee' | 'scorer';
+export type OfficialsNotifyStatus = 'queued' | 'completed' | 'exhausted';
+
+export interface OfficialsNotifyRow {
+  seriesId: string;
+  fixtureId: string;
+  role: OfficialRole;
+  umpireId: string;
+  status: OfficialsNotifyStatus;
+  attempts: number;
+  queuedAt: string;
+  /** Why a row was completed without a send ('backfill'). */
+  reason?: string;
+  completedAt?: string;
+  lastError?: string;
+  results?: Array<{ channel: string; status: string; error?: string }>;
+}
+
+/** Ledger rows outlive a season comfortably, then self-expire. */
+const OFFICIALS_NOTIFY_TTL_SECONDS = 400 * 24 * 3600;
+
+/**
+ * Enqueue a notice for one appointed official. True ⇒ a new row was written; false ⇒ a row
+ * already exists (queued, sent or exhausted) and nothing changes. `initial` lets the backfill
+ * CLI claim a pre-feature appointment as already `completed` so the cron never sends it.
+ */
+export async function queueOfficialsNotify(
+  tenant: string,
+  pair: { seriesId: string; fixtureId: string; role: OfficialRole; umpireId: string },
+  initial: { status: 'queued' } | { status: 'completed'; reason: string } = { status: 'queued' },
+): Promise<boolean> {
+  const at = new Date().toISOString();
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: {
+          ...officialsNotifyKey(tenant, pair.seriesId, pair.fixtureId, pair.role, pair.umpireId),
+          seriesId: pair.seriesId,
+          fixtureId: pair.fixtureId,
+          role: pair.role,
+          umpireId: pair.umpireId,
+          status: initial.status,
+          attempts: 0,
+          queuedAt: at,
+          ...(initial.status === 'completed' ? { reason: initial.reason, completedAt: at } : {}),
+          expiresAt: Math.floor(Date.now() / 1000) + OFFICIALS_NOTIFY_TTL_SECONDS,
+        },
+        ConditionExpression: 'attribute_not_exists(pk)',
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+async function listOfficialsNotifyRows(
+  tenant: string,
+  seriesId?: string,
+): Promise<OfficialsNotifyRow[]> {
+  const { pk, skPrefix } = officialsNotifyListKey(tenant, seriesId);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => {
+    const { expiresAt: _ttl, ...rest } = stripKeys<OfficialsNotifyRow & { expiresAt?: number }>(i)!;
+    return rest;
+  });
+}
+
+/** Every ledger row in a tenant (any status) — tests and the backfill report read this. */
+export async function listOfficialsNotify(tenant: string): Promise<OfficialsNotifyRow[]> {
+  return listOfficialsNotifyRows(tenant);
+}
+
+/** One series' ledger rows (any status) — the officials editor's notice-status badges. */
+export async function listOfficialsNotifyForSeries(
+  tenant: string,
+  seriesId: string,
+): Promise<OfficialsNotifyRow[]> {
+  return listOfficialsNotifyRows(tenant, seriesId);
+}
+
+/** The rows still waiting for the cron. One partition Query, no scan. */
+export async function listQueuedOfficialsNotify(tenant: string): Promise<OfficialsNotifyRow[]> {
+  return (await listOfficialsNotifyRows(tenant)).filter((r) => r.status === 'queued');
+}
+
+const rowKey = (
+  tenant: string,
+  r: Pick<OfficialsNotifyRow, 'seriesId' | 'fixtureId' | 'role' | 'umpireId'>,
+) => officialsNotifyKey(tenant, r.seriesId, r.fixtureId, r.role, r.umpireId);
+
+/** Mark a row sent (per-channel statuses only — never addresses). */
+export async function completeOfficialsNotify(
+  tenant: string,
+  row: Pick<OfficialsNotifyRow, 'seriesId' | 'fixtureId' | 'role' | 'umpireId'>,
+  results: Array<{ channel: string; status: string; error?: string }>,
+): Promise<void> {
+  await ddb
+    .send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: rowKey(tenant, row),
+        UpdateExpression: 'SET #s = :done, #res = :r, completedAt = :at',
+        ExpressionAttributeNames: { '#s': 'status', '#res': 'results' },
+        ExpressionAttributeValues: {
+          ':done': 'completed',
+          ':r': results.map((r) => ({
+            channel: r.channel,
+            status: r.status,
+            ...(r.error ? { error: r.error } : {}),
+          })),
+          ':at': new Date().toISOString(),
+        },
+        // A row deleted meanwhile (official removed) must not be resurrected by the update.
+        ConditionExpression: 'attribute_exists(pk)',
+      }),
+    )
+    .catch((err) => {
+      if (!isCcf(err)) throw err;
+    });
+}
+
+/**
+ * Count one failed/undeliverable drain attempt. At `cap` the row is marked `exhausted` (the
+ * cron stops retrying it). Returns the new attempt count, or null when the row is gone.
+ */
+export async function bumpOfficialsNotifyAttempt(
+  tenant: string,
+  row: Pick<OfficialsNotifyRow, 'seriesId' | 'fixtureId' | 'role' | 'umpireId' | 'attempts'>,
+  cap: number,
+  lastError: string,
+): Promise<number | null> {
+  const attempts = (row.attempts ?? 0) + 1;
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: rowKey(tenant, row),
+        UpdateExpression: 'SET attempts = :n, lastError = :e, #s = :st',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: {
+          ':n': attempts,
+          ':e': lastError,
+          ':st': attempts >= cap ? 'exhausted' : 'queued',
+        },
+        ConditionExpression: 'attribute_exists(pk)',
+      }),
+    );
+    return attempts;
+  } catch (err) {
+    if (isCcf(err)) return null;
+    throw err;
+  }
+}
+
+/** Drop a ledger row (the official was removed from the fixture, or the row went stale). */
+export async function deleteOfficialsNotify(
+  tenant: string,
+  row: Pick<OfficialsNotifyRow, 'seriesId' | 'fixtureId' | 'role' | 'umpireId'>,
+): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: TABLE, Key: rowKey(tenant, row) }));
+}
+
+/** Ledger keys for sweeps (a whole tenant, or one series). */
+async function listOfficialsNotifyKeys(
+  tenant: string,
+  seriesId?: string,
+): Promise<Array<{ pk: string; sk: string }>> {
+  return (await listOfficialsNotifyRows(tenant, seriesId)).map((r) => rowKey(tenant, r));
 }
 
 // ── Captain's reports (ADR 0016, Slice 2) ──
@@ -1627,8 +2998,33 @@ export async function createCaptainsReport(
 /** The editable fields of a report (what a draft save or a submit writes). */
 export type CaptainsReportFields = Pick<
   CaptainsReport,
-  'captainName' | 'umpires' | 'general' | 'declaration'
+  'captainName' | 'umpires' | 'general' | 'declaration' | 'scorecard'
 >;
+
+/**
+ * The scorecard answer's part of a fields write: SET it when given, REMOVE it when not — the
+ * SET list is fixed, so a cleared answer must be removed explicitly or the old one survives.
+ */
+function scorecardFieldWrite(fields: CaptainsReportFields): {
+  set: string;
+  remove: string;
+  values: Record<string, unknown>;
+} {
+  const sc = fields.scorecard;
+  if (!sc) return { set: '', remove: ' REMOVE scorecard', values: {} };
+  return {
+    set: ', scorecard = :sc',
+    remove: '',
+    values: {
+      ':sc': {
+        action: sc.action,
+        ...(sc.feedback ? { feedback: sc.feedback } : {}),
+        ...(sc.againstFetchedAt ? { againstFetchedAt: sc.againstFetchedAt } : {}),
+        ...(sc.stale ? { stale: true } : {}),
+      },
+    },
+  };
+}
 
 /**
  * Save a draft. Only a PENDING report takes it — and when `memberId` is given (the link
@@ -1640,13 +3036,16 @@ export async function saveCaptainsReportDraft(
   fields: CaptainsReportFields,
   opts: { memberId?: string } = {},
 ): Promise<CaptainsReport> {
+  const sc = scorecardFieldWrite(fields);
   try {
     const res = await ddb.send(
       new UpdateCommand({
         TableName: TABLE,
         Key: reportKeyOf(tenant, key),
         UpdateExpression:
-          'SET captainName = :c, umpires = :u, #gen = :g, declaration = :d, updatedAt = :at',
+          'SET captainName = :c, umpires = :u, #gen = :g, declaration = :d, updatedAt = :at' +
+          sc.set +
+          sc.remove,
         ConditionExpression:
           'attribute_exists(pk) AND #s = :pending' +
           (opts.memberId ? ' AND (recipient.memberId = :m OR chairMemberId = :m)' : ''),
@@ -1658,6 +3057,7 @@ export async function saveCaptainsReportDraft(
           ':d': !!fields.declaration,
           ':at': new Date().toISOString(),
           ':pending': 'pending',
+          ...sc.values,
           ...(opts.memberId ? { ':m': opts.memberId } : {}),
         },
         ReturnValues: 'ALL_NEW',
@@ -1725,6 +3125,7 @@ async function submitCaptainsReportFields(
   meta: { ref?: string; submittedBy: string; via: 'portal' | 'link'; memberId?: string },
 ): Promise<CaptainsReport> {
   const at = new Date().toISOString();
+  const sc = scorecardFieldWrite(fields);
   try {
     const res = await ddb.send(
       new UpdateCommand({
@@ -1733,7 +3134,9 @@ async function submitCaptainsReportFields(
         UpdateExpression:
           'SET captainName = :c, umpires = :u, #gen = :g, declaration = :d, #s = :submitted, ' +
           (meta.ref ? '#ref = :ref, ' : '') +
-          'submittedBy = :by, submittedVia = :via, submittedAt = :at, updatedAt = :at',
+          'submittedBy = :by, submittedVia = :via, submittedAt = :at, updatedAt = :at' +
+          sc.set +
+          sc.remove,
         ConditionExpression:
           'attribute_exists(pk) AND #s = :pending' +
           (meta.memberId ? ' AND (recipient.memberId = :m OR chairMemberId = :m)' : ''),
@@ -1753,6 +3156,7 @@ async function submitCaptainsReportFields(
           ':by': meta.submittedBy,
           ':via': meta.via,
           ':at': at,
+          ...sc.values,
           ...(meta.memberId ? { ':m': meta.memberId } : {}),
         },
         ReturnValues: 'ALL_NEW',
@@ -1763,6 +3167,49 @@ async function submitCaptainsReportFields(
     if (isCcf(err)) throw new CaptainsReportStateError("captain's report already submitted");
     throw err;
   }
+}
+
+/**
+ * A scorecard was (re)fetched at `fetchedAt`: flag the scorecard answer of every SUBMITTED
+ * report for the fixture `stale` when it was given against an older card — its
+ * `againstFetchedAt` when recorded, else its `submittedAt`. Reports without an answer (filed
+ * before the card was attached, or before answers existed) are never flagged. One keyed Query
+ * on the fixture's two reports. Returns how many were flagged.
+ */
+export async function flagStaleCaptainsReportScorecards(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+  fetchedAt: string,
+): Promise<number> {
+  let n = 0;
+  for (const r of await listCaptainsReportsForFixture(tenant, seriesId, fixtureId)) {
+    const sc = r.scorecard;
+    if (r.status !== 'submitted' || !sc?.action || sc.stale) continue;
+    const against = sc.againstFetchedAt ?? r.submittedAt;
+    if (!against || against >= fetchedAt) continue;
+    try {
+      await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: reportKeyOf(tenant, r),
+          UpdateExpression: 'SET scorecard.stale = :t, updatedAt = :at',
+          ConditionExpression:
+            '#s = :submitted AND attribute_exists(scorecard.#a) AND attribute_not_exists(scorecard.stale)',
+          ExpressionAttributeNames: { '#s': 'status', '#a': 'action' },
+          ExpressionAttributeValues: {
+            ':t': true,
+            ':submitted': 'submitted',
+            ':at': new Date().toISOString(),
+          },
+        }),
+      );
+      n++;
+    } catch (err) {
+      if (!isCcf(err)) throw err;
+    }
+  }
+  return n;
 }
 
 /**
@@ -1903,11 +3350,147 @@ export async function putWhatsAppMessageRef(wamid: string, ref: WhatsAppMessageR
   );
 }
 
+/** The captain's-report lookup for a wamid; null for none, or for a broadcast lookup. */
 export async function getWhatsAppMessageRef(wamid: string): Promise<WhatsAppMessageRef | null> {
+  const lookup = await getWhatsAppMessageLookup(wamid);
+  return lookup?.kind === 'captains-report' ? lookup.ref : null;
+}
+
+/**
+ * What a `WAMSG#<wamid>` lookup points at, by its `kind` discriminator. Lookups written before
+ * the discriminator mattered (no `kind`, or `'captains-report'`) are captain's-report refs.
+ */
+export type WhatsAppMessageLookup =
+  | { kind: 'captains-report'; ref: WhatsAppMessageRef }
+  | { kind: 'broadcast'; tenant: string; runId: string };
+
+export async function getWhatsAppMessageLookup(
+  wamid: string,
+): Promise<WhatsAppMessageLookup | null> {
   const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: whatsappMessageKey(wamid) }));
   if (!res.Item) return null;
-  const { tenant, seriesId, fixtureId, clubId } = res.Item as Record<string, string>;
-  return { tenant, seriesId, fixtureId, clubId };
+  const item = res.Item as Record<string, string>;
+  if (item.kind === 'broadcast')
+    return { kind: 'broadcast', tenant: item.tenant, runId: item.runId };
+  const { tenant, seriesId, fixtureId, clubId } = item;
+  return { kind: 'captains-report', ref: { tenant, seriesId, fixtureId, clubId } };
+}
+
+// ── One-off broadcast delivery records (send-dolphins-welcome-broadcast.ts) ──
+
+/** Broadcast delivery rows carry recipient contact (PII): kept 180 days, then self-expire. */
+const BROADCAST_DELIVERY_TTL_SECONDS = 180 * 24 * 3600;
+
+export type BroadcastProviderStatus = 'sent' | 'delivered' | 'read' | 'failed';
+
+/** One WhatsApp message a broadcast run sent, with Meta's latest delivery status. */
+export interface BroadcastDelivery {
+  runId: string;
+  wamid: string;
+  /** E.164 recipient. */
+  to: string;
+  /** Template / message kind, e.g. 'dolphins_player_welcome'. */
+  messageKind: string;
+  recipientName: string;
+  /** The recipient's ledger contact (email, else cell). */
+  recipientContact: string;
+  providerStatus: BroadcastProviderStatus;
+  sentAt: string;
+  /** When Meta reported `providerStatus` (absent until the first webhook status). */
+  providerAt?: string;
+  providerError?: string;
+}
+
+/**
+ * Record a broadcast WhatsApp send: the delivery row plus the `WAMSG#<wamid>` lookup (kind
+ * 'broadcast') the status webhook resolves it through.
+ */
+export async function putBroadcastDelivery(tenant: string, d: BroadcastDelivery): Promise<void> {
+  const now = Math.floor(Date.now() / 1000);
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...broadcastDeliveryKey(tenant, d.runId, d.wamid),
+        ...d,
+        expiresAt: now + BROADCAST_DELIVERY_TTL_SECONDS,
+      },
+    }),
+  );
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...whatsappMessageKey(d.wamid),
+        kind: 'broadcast',
+        tenant,
+        runId: d.runId,
+        expiresAt: now + WHATSAPP_MESSAGE_TTL_SECONDS,
+      },
+    }),
+  );
+}
+
+export async function getBroadcastDelivery(
+  tenant: string,
+  runId: string,
+  wamid: string,
+): Promise<BroadcastDelivery | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: broadcastDeliveryKey(tenant, runId, wamid) }),
+  );
+  return res.Item ? (stripKeys<BroadcastDelivery>(res.Item) as BroadcastDelivery) : null;
+}
+
+/** Every delivery row of one broadcast run. */
+export async function listBroadcastDeliveries(
+  tenant: string,
+  runId: string,
+): Promise<BroadcastDelivery[]> {
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': broadcastPartitionPk(tenant, runId), ':s': 'WA#' },
+  });
+  return items.map((i) => stripKeys<BroadcastDelivery>(i) as BroadcastDelivery);
+}
+
+/**
+ * Set Meta's status on a broadcast delivery, only while it still holds `prevStatus` (a
+ * concurrent webhook that already moved it wins). False when the row is gone or moved.
+ */
+export async function setBroadcastDeliveryStatus(
+  tenant: string,
+  runId: string,
+  wamid: string,
+  prevStatus: BroadcastProviderStatus,
+  update: { providerStatus: BroadcastProviderStatus; providerAt: string; providerError?: string },
+): Promise<boolean> {
+  const sets = ['providerStatus = :s', 'providerAt = :pa'];
+  const values: Record<string, unknown> = {
+    ':s': update.providerStatus,
+    ':pa': update.providerAt,
+    ':prev': prevStatus,
+  };
+  if (update.providerError) {
+    sets.push('providerError = :pe');
+    values[':pe'] = update.providerError;
+  }
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: broadcastDeliveryKey(tenant, runId, wamid),
+        UpdateExpression: `SET ${sets.join(', ')}`,
+        ConditionExpression: 'attribute_exists(pk) AND providerStatus = :prev',
+        ExpressionAttributeValues: values,
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
 }
 
 /**
@@ -2087,6 +3670,27 @@ export async function claimCaptainsReportNotify(
   }
 }
 
+/** One NOTIFY# ledger row (status + start time only), or null. A single GetItem — no scan. */
+export async function getCaptainsReportNotify(
+  tenant: string,
+  reportId: string,
+  audience: string,
+): Promise<{ status: string; startedAt?: string } | null> {
+  const res = await ddb.send(
+    new GetCommand({
+      TableName: TABLE,
+      Key: captainsReportNotifyKey(tenant, reportId, audience),
+      ProjectionExpression: '#s, startedAt',
+      ExpressionAttributeNames: { '#s': 'status' },
+    }),
+  );
+  if (!res.Item) return null;
+  return {
+    status: String(res.Item.status),
+    ...(res.Item.startedAt ? { startedAt: String(res.Item.startedAt) } : {}),
+  };
+}
+
 /** Record a claimed send's per-channel outcome (status only — no addresses). */
 export async function completeCaptainsReportNotify(
   tenant: string,
@@ -2149,9 +3753,9 @@ async function listCaptainsReportNotifyKeys(
 }
 
 /**
- * A deleted series' medicoach-sync state (ADR 0016): its FIXRESULT# results, the outbox rows
- * (PENDINGSYNC#), held conflicts (SYNCCONFLICT#) and report-open markers (REPORTOPEN#) of its
- * fixtures are deleted, and its still-PENDING captain's reports are voided (their links die;
+ * A deleted series' medicoach-sync state (ADR 0016): its FIXRESULT# results and FIXSCORECARD#
+ * scorecards, the outbox rows (PENDINGSYNC#), held conflicts (SYNCCONFLICT#) and report-open
+ * markers (REPORTOPEN#) of its fixtures are deleted, and its still-PENDING captain's reports are voided (their links die;
  * submitted ones are kept as filed). Idempotent.
  */
 export async function deleteSeriesSyncState(
@@ -2170,6 +3774,20 @@ export async function deleteSeriesSyncState(
       ProjectionExpression: 'pk, sk',
     })
   ).map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+  // The office's confirmations of those results go with them.
+  for (const c of await listResultConfirmations(tenant))
+    if (c.seriesId === seriesId) keys.push(resultConfirmationKey(tenant, c.seriesId, c.fixtureId));
+  const scorecards = fixtureScorecardsListKey(tenant);
+  for (const i of await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: {
+      ':p': scorecards.pk,
+      ':s': `${scorecards.skPrefix}${seriesId}#`,
+    },
+    ProjectionExpression: 'pk, sk',
+  }))
+    keys.push({ pk: i.pk as string, sk: i.sk as string });
   const [pending, conflicts, markers, reports] = await Promise.all([
     listPendingSync(tenant),
     listSyncConflicts(tenant),
@@ -2239,6 +3857,7 @@ export async function getSeasonRun(tenant: string, runId: string): Promise<Seaso
 }
 
 export async function putSeasonRun(tenant: string, run: SeasonRun): Promise<SeasonRun> {
+  const before = (await playerSyncOnSafe(tenant)) ? await getSeasonRun(tenant, run.id) : null;
   await ddb.send(
     new PutCommand({
       TableName: TABLE,
@@ -2250,6 +3869,7 @@ export async function putSeasonRun(tenant: string, run: SeasonRun): Promise<Seas
       },
     }),
   );
+  await recordSeasonRunStructureChange(tenant, before, run);
   return run;
 }
 
@@ -2292,6 +3912,7 @@ export async function updateSeasonRun(
     }
     throw err;
   }
+  await recordSeasonRunStructureChange(tenant, current, next);
   return next;
 }
 
@@ -2385,6 +4006,63 @@ export async function listPlayers(tenant: string, clubId: string): Promise<Playe
     ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
   });
   return items.map((i) => stripKeys<PlayerRegistration>(i)!);
+}
+
+/**
+ * A club's roster PROJECTED to the identity fields a name + dob match needs (ADR 0019's
+ * registration-time warning): no ID number, contact or document metadata leaves DynamoDB.
+ */
+export async function listPlayerNameDobRows(
+  tenant: string,
+  clubId: string,
+): Promise<
+  Array<Pick<PlayerRegistration, 'naturalKey' | 'firstName' | 'lastName' | 'dob' | 'placeholder'>>
+> {
+  const { pk, skPrefix } = playersListKey(tenant, clubId);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    ProjectionExpression: 'sk, firstName, lastName, dob, placeholder',
+  });
+  return items.map((i) => ({
+    naturalKey: String(i.sk).slice(skPrefix.length),
+    firstName: String(i.firstName ?? ''),
+    lastName: String(i.lastName ?? ''),
+    dob: String(i.dob ?? ''),
+    ...(i.placeholder === true ? { placeholder: true as const } : {}),
+  }));
+}
+
+/**
+ * A club's roster PROJECTED to natural key + ID (number, type, nationality) + placeholder flag — the registration
+ * ID-number dedup guard (register-player.ts buildIdNumberIndex): a person re-registering whose
+ * normalised ID matches a row stored under a DIFFERENT natural key (a legacy slug key). The ID
+ * fields are all the match needs (passports are namespaced by nationality, as in the natural
+ * key); no name, contact or document metadata is read.
+ */
+export async function listPlayerIdRows(
+  tenant: string,
+  clubId: string,
+): Promise<
+  Array<
+    Pick<PlayerRegistration, 'naturalKey' | 'idNumber' | 'idType' | 'nationality' | 'placeholder'>
+  >
+> {
+  const { pk, skPrefix } = playersListKey(tenant, clubId);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    ProjectionExpression: 'sk, idNumber, idType, nationality, placeholder',
+  });
+  return items.map((i) => ({
+    naturalKey: String(i.sk).slice(skPrefix.length),
+    ...(typeof i.idNumber === 'string' ? { idNumber: i.idNumber } : {}),
+    ...(i.idType === 'passport' || i.idType === 'sa-id' ? { idType: i.idType } : {}),
+    ...(typeof i.nationality === 'string' ? { nationality: i.nationality } : {}),
+    ...(i.placeholder === true ? { placeholder: true as const } : {}),
+  }));
 }
 
 /**
@@ -2592,7 +4270,7 @@ export async function reconcilePlayerCount(
  * `playerCount` is a display-only denormalization — the source of truth is the
  * PLAYER# items, so it's recomputable from `listPlayers` if it ever drifts.
  */
-export async function createPlayer(tenant: string, player: PlayerRegistration): Promise<void> {
+async function createPlayerUnsynced(tenant: string, player: PlayerRegistration): Promise<void> {
   await ddb.send(
     new PutCommand({
       TableName: TABLE,
@@ -2631,7 +4309,7 @@ export async function createPlayer(tenant: string, player: PlayerRegistration): 
  * player. Returns false (instead of throwing) when the guard fails — the row
  * already has a team, or vanished — so the backfill can count skips cheaply.
  */
-export async function setPlayerTeamIfAbsent(
+async function setPlayerTeamIfAbsentUnsynced(
   tenant: string,
   clubId: string,
   naturalKey: string,
@@ -2677,8 +4355,16 @@ export async function setPlayerTeamIfAbsent(
  * concurrent delete of the same player THROWS ConditionalCheckFailedException (the route
  * maps it to 409) before reaching the decrement, so the count can't be driven negative;
  * the `!removed` guard below is belt-and-suspenders for that already-impossible path.
+ *
+ * `opts.keepDocs` (resolve-duplicate-players only) skips the S3 ID-document purge: the caller
+ * has already carried the row's `idDocMeta`/`previousIdDocMeta` onto the surviving duplicate,
+ * so those objects are still referenced. Absent ⇒ the purge runs exactly as before.
  */
-export async function deletePlayer(tenant: string, player: PlayerRegistration): Promise<void> {
+async function deletePlayerUnsynced(
+  tenant: string,
+  player: PlayerRegistration,
+  opts: { keepDocs?: boolean } = {},
+): Promise<void> {
   const res = await ddb.send(
     new DeleteCommand({
       TableName: TABLE,
@@ -2699,7 +4385,7 @@ export async function deletePlayer(tenant: string, player: PlayerRegistration): 
   const objectKeys = [removed.idDocMeta?.objectKey, removed.previousIdDocMeta?.objectKey].filter(
     (k): k is string => !!k,
   );
-  if (objectKeys.length) await deleteUploadObjects(objectKeys);
+  if (objectKeys.length && !opts.keepDocs) await deleteUploadObjects(objectKeys);
   // Write-on-activation invariant: the row is gone, so its VETAFFIL record (if any) must go too.
   // Best-effort — the record is a denormalised index. (deletePlayer refuses clearance-pending
   // rows, which never carry a record under write-on-activation, so this only fires for active ones.)
@@ -2774,7 +4460,7 @@ export async function findPlayerAcrossClubs(
  * legacy rows without one are treated as 0). Used by the ID-doc mark and roster
  * edits. A lost race throws VersionConflictError (→ 409).
  */
-export async function updatePlayer(
+async function updatePlayerUnsynced(
   tenant: string,
   clubId: string,
   naturalKey: string,
@@ -3316,6 +5002,349 @@ async function syncVeteransAffiliation(
   );
 }
 
+// ── Fixture postponement requests (ADR 0015) ──
+//
+// A negotiation between the two clubs of a released fixture: the requesting club proposes a new
+// date, the sides counter until one accepts, and the route applies the agreed date to the fixture
+// through `applySeriesPatch`. Two rows, mirroring veterans requests — a canonical under the
+// OPPOSING club (gsi1 for the admin listing) and a mirror under the REQUESTING club (no gsi1).
+// Unlike veterans requests, EVERY transition rewrites both rows in ONE transaction conditioned on
+// the canonical, so the requesting club's view can never go stale on a partial failure.
+
+/** Raised when the canonical postponement request row cannot be found (→ 404). */
+export class PostponementNotFoundError extends Error {
+  constructor(message = 'postponement request not found') {
+    super(message);
+    this.name = 'PostponementNotFoundError';
+  }
+}
+
+/** Raised when a counter/accept arrives from the side that is NOT awaited (→ 409 not_your_turn). */
+export class PostponementTurnError extends Error {
+  constructor(message = 'it is not your turn to respond to this postponement') {
+    super(message);
+    this.name = 'PostponementTurnError';
+  }
+}
+
+/** Raised when a transition targets a request whose status no longer permits it (→ 409). */
+export class PostponementClosedError extends Error {
+  constructor(message = 'postponement request is no longer open') {
+    super(message);
+    this.name = 'PostponementClosedError';
+  }
+}
+
+/** The canonical (opposing club, gsi1) + mirror (requesting club, no gsi1) put items. */
+function postponementItems(tenant: string, r: PostponementRequest) {
+  return {
+    canonical: {
+      ...postponementKey(tenant, r.opposingClubId, r.id),
+      ...postponementGsi1(tenant, r.requestedAt),
+      ...r,
+    },
+    mirror: {
+      ...outboundPostponementKey(tenant, r.requestingClubId, r.id),
+      ...r,
+    },
+  };
+}
+
+/** Terminal postponement rows self-expire 90 days after resolution (epoch seconds). */
+function postponementExpiresAt(at: string): number {
+  const ms = Date.parse(at);
+  const base = Number.isNaN(ms) ? Date.now() : ms;
+  return Math.floor(base / 1000) + REQUEST_TTL_DAYS * 24 * 60 * 60;
+}
+
+/**
+ * Open a postponement request: write the canonical + mirror atomically. The canonical put's
+ * attribute_not_exists stops a replayed id from double-writing; the route's own open-request check
+ * is the per-fixture duplicate gate. The dynalite (offline/test) path has no TransactWriteItems →
+ * sequential fallback, as createVeteransRequest.
+ */
+export async function createPostponementRequest(
+  tenant: string,
+  r: PostponementRequest,
+): Promise<void> {
+  const { canonical, mirror } = postponementItems(tenant, r);
+  if (localEndpoint) {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: canonical,
+        ConditionExpression: 'attribute_not_exists(sk)',
+      }),
+    );
+    await ddb.send(new PutCommand({ TableName: TABLE, Item: mirror }));
+    return;
+  }
+  await ddb.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        {
+          Put: {
+            TableName: TABLE,
+            Item: canonical,
+            ConditionExpression: 'attribute_not_exists(sk)',
+          },
+        },
+        { Put: { TableName: TABLE, Item: mirror } },
+      ],
+    }),
+  );
+}
+
+/** The canonical request (under the opposing club). */
+export async function getPostponement(
+  tenant: string,
+  opposingClubId: string,
+  id: string,
+): Promise<PostponementRequest | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: postponementKey(tenant, opposingClubId, id) }),
+  );
+  return stripKeys<PostponementRequest>(res.Item);
+}
+
+/** The mirror request (under the requesting club). */
+export async function getOutboundPostponement(
+  tenant: string,
+  requestingClubId: string,
+  id: string,
+): Promise<PostponementRequest | null> {
+  const res = await ddb.send(
+    new GetCommand({
+      TableName: TABLE,
+      Key: outboundPostponementKey(tenant, requestingClubId, id),
+    }),
+  );
+  return stripKeys<PostponementRequest>(res.Item);
+}
+
+/**
+ * A club's postponement requests, both directions, each from its OWN partition: `inbound` are the
+ * canonical rows (the club is opposing), `outbound` the mirrors (the club opened them).
+ */
+export async function listPostponementsForClub(
+  tenant: string,
+  clubId: string,
+): Promise<{ inbound: PostponementRequest[]; outbound: PostponementRequest[] }> {
+  const query = (pk: string, skPrefix: string) =>
+    queryAll({
+      TableName: TABLE,
+      KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+      ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    });
+  const inboundKey = postponementsListKey(tenant, clubId);
+  const outboundKey = outboundPostponementsListKey(tenant, clubId);
+  const [inbound, outbound] = await Promise.all([
+    query(inboundKey.pk, inboundKey.skPrefix),
+    query(outboundKey.pk, outboundKey.skPrefix),
+  ]);
+  return {
+    inbound: inbound.map((i) => stripKeys<PostponementRequest>(i)!),
+    outbound: outbound.map((i) => stripKeys<PostponementRequest>(i)!),
+  };
+}
+
+/** Every postponement request in the tenant (admin console) — one row per request via the gsi1. */
+export async function listPostponementsForTenant(tenant: string): Promise<PostponementRequest[]> {
+  const items = await queryAll({
+    TableName: TABLE,
+    IndexName: 'gsi1',
+    KeyConditionExpression: 'gsi1pk = :p',
+    ExpressionAttributeValues: { ':p': postponementsListGsi1pk(tenant) },
+  });
+  return items.map((i) => stripKeys<PostponementRequest>(i)!);
+}
+
+/**
+ * Write a transition: whole-item Put of the canonical (conditioned on its stored `version`, its
+ * `status` being one of `fromStatuses`, and — for a turn-based move — its `awaiting` side) plus the
+ * mirror, in ONE transaction. Both puts require the row to exist so a request erased mid-flight is
+ * never resurrected as a phantom. Dynalite has no TransactWriteItems → the same sequential fallback
+ * as create (conditional canonical first, then the mirror). A lost condition → VersionConflictError.
+ */
+async function writePostponementTransition(
+  tenant: string,
+  next: PostponementRequest,
+  cond: {
+    expectedVersion: number;
+    fromStatuses: PostponementRequest['status'][];
+    awaiting?: string;
+  },
+): Promise<void> {
+  const { canonical, mirror } = postponementItems(tenant, next);
+  const values: Record<string, unknown> = { ':v': cond.expectedVersion };
+  const statusKeys = cond.fromStatuses.map((s, i) => {
+    values[`:s${i}`] = s;
+    return `:s${i}`;
+  });
+  let condition = `attribute_exists(sk) AND version = :v AND #st IN (${statusKeys.join(', ')})`;
+  if (cond.awaiting) {
+    condition += ' AND awaiting = :aw';
+    values[':aw'] = cond.awaiting;
+  }
+  const canonicalPut = {
+    TableName: TABLE,
+    Item: canonical,
+    ConditionExpression: condition,
+    ExpressionAttributeNames: { '#st': 'status' },
+    ExpressionAttributeValues: values,
+  };
+  const mirrorPut = {
+    TableName: TABLE,
+    Item: mirror,
+    ConditionExpression: 'attribute_exists(sk)',
+  };
+  if (localEndpoint) {
+    try {
+      await ddb.send(new PutCommand(canonicalPut));
+    } catch (err) {
+      if (isCcf(err)) throw new VersionConflictError();
+      throw err;
+    }
+    await ddb.send(new PutCommand(mirrorPut));
+    return;
+  }
+  try {
+    await ddb.send(
+      new TransactWriteCommand({ TransactItems: [{ Put: canonicalPut }, { Put: mirrorPut }] }),
+    );
+  } catch (err: unknown) {
+    const name = (err as { name?: string }).name;
+    if (name === 'TransactionCanceledException') {
+      const reasons = (err as { CancellationReasons?: Array<{ Code?: string }> })
+        .CancellationReasons;
+      // The canonical lost its OCC guard → a concurrent transition won. A cancellation for any
+      // other reason (throttling, a missing mirror, TransactionConflict) is not a lost race —
+      // surface it rather than masking it as a version conflict.
+      if (reasons?.[0]?.Code === 'ConditionalCheckFailed') throw new VersionConflictError();
+    }
+    throw err;
+  }
+}
+
+/** Read the canonical and check the caller's expected version (when supplied) up front. */
+async function loadPostponementForWrite(
+  tenant: string,
+  opposingClubId: string,
+  id: string,
+  expectedVersion: number | undefined,
+): Promise<PostponementRequest> {
+  const current = await getPostponement(tenant, opposingClubId, id);
+  if (!current) throw new PostponementNotFoundError();
+  if (expectedVersion !== undefined && expectedVersion !== current.version)
+    throw new VersionConflictError();
+  return current;
+}
+
+/**
+ * Counter-propose: only the AWAITED side may move, and only while `open`. Appends the proposal and
+ * flips `awaiting` to the other side. Conditioned on `status = open AND version AND awaiting`.
+ */
+export async function counterPostponement(
+  tenant: string,
+  opposingClubId: string,
+  id: string,
+  opts: {
+    side: 'requesting' | 'opposing';
+    proposal: PostponementProposal;
+    expectedVersion?: number;
+  },
+): Promise<PostponementRequest> {
+  const current = await loadPostponementForWrite(tenant, opposingClubId, id, opts.expectedVersion);
+  if (current.status !== 'open') throw new PostponementClosedError();
+  if (current.awaiting !== opts.side) throw new PostponementTurnError();
+  const next: PostponementRequest = {
+    ...current,
+    proposals: [...(current.proposals ?? []), opts.proposal],
+    awaiting: opts.side === 'requesting' ? 'opposing' : 'requesting',
+    version: current.version + 1,
+  };
+  await writePostponementTransition(tenant, next, {
+    expectedVersion: current.version,
+    fromStatuses: ['open'],
+    awaiting: opts.side,
+  });
+  return next;
+}
+
+/**
+ * Terminal transition (`applied` | `admin-final` | `declined` | `withdrawn`). Conditioned on the
+ * stored status being one of `fromStatuses` (default: `open` only — an admin override passes the
+ * wider set it may overrule) and the version. Sets `awaiting: none`, the resolution audit and the
+ * 90-day TTL. An admin ruling may append its own `proposal` and always resets `acknowledgements`
+ * (each new ruling needs fresh acknowledgement from both chairs).
+ */
+export async function resolvePostponement(
+  tenant: string,
+  opposingClubId: string,
+  id: string,
+  opts: {
+    status: 'applied' | 'admin-final' | 'declined' | 'withdrawn';
+    at: string;
+    by: string;
+    via: 'portal' | 'admin';
+    declineReason?: string;
+    proposal?: PostponementProposal;
+    fromStatuses?: PostponementRequest['status'][];
+    expectedVersion?: number;
+  },
+): Promise<PostponementRequest> {
+  const fromStatuses = opts.fromStatuses ?? ['open'];
+  const current = await loadPostponementForWrite(tenant, opposingClubId, id, opts.expectedVersion);
+  if (!fromStatuses.includes(current.status)) throw new PostponementClosedError();
+  const next: PostponementRequest = {
+    ...current,
+    ...(opts.proposal ? { proposals: [...(current.proposals ?? []), opts.proposal] } : {}),
+    awaiting: 'none',
+    status: opts.status,
+    resolvedAt: opts.at,
+    resolvedBy: opts.by,
+    resolvedVia: opts.via,
+    ...(opts.declineReason ? { declineReason: opts.declineReason } : {}),
+    expiresAt: postponementExpiresAt(opts.at),
+    version: current.version + 1,
+  };
+  if (opts.status === 'admin-final') next.acknowledgements = {};
+  await writePostponementTransition(tenant, next, {
+    expectedVersion: current.version,
+    fromStatuses,
+  });
+  return next;
+}
+
+/**
+ * A chair acknowledges an admin-final ruling for their club. Idempotent: a club that already
+ * acknowledged gets the current row back unchanged. Conditioned on `status = admin-final` + version.
+ */
+export async function acknowledgePostponement(
+  tenant: string,
+  opposingClubId: string,
+  id: string,
+  opts: { clubId: string; at: string; by: string; expectedVersion?: number },
+): Promise<PostponementRequest> {
+  const current = await loadPostponementForWrite(tenant, opposingClubId, id, opts.expectedVersion);
+  if (current.status !== 'admin-final')
+    throw new PostponementClosedError('only an admin ruling can be acknowledged');
+  if (current.acknowledgements?.[opts.clubId]) return current;
+  const next: PostponementRequest = {
+    ...current,
+    acknowledgements: {
+      ...(current.acknowledgements ?? {}),
+      [opts.clubId]: { at: opts.at, byUser: opts.by },
+    },
+    version: current.version + 1,
+  };
+  await writePostponementTransition(tenant, next, {
+    expectedVersion: current.version,
+    fromStatuses: ['admin-final'],
+  });
+  return next;
+}
+
 // ── Player clearances (inter-club transfers) ──
 
 /**
@@ -3623,7 +5652,7 @@ function clearanceItems(tenant: string, c: PlayerClearance) {
  * (otherwise a rejected create would orphan the canonical/mirror pair). Production uses
  * the all-or-nothing transaction, where ordering is irrelevant.
  */
-export async function createClearance(tenant: string, c: PlayerClearance): Promise<void> {
+async function createClearanceUnsynced(tenant: string, c: PlayerClearance): Promise<void> {
   const { canonical, mirror } = clearanceItems(tenant, c);
   const playerStatusUpdate = {
     TableName: TABLE,
@@ -3711,7 +5740,7 @@ export async function createClearance(tenant: string, c: PlayerClearance): Promi
  * (same swallowed post-write style as createPlayer) — resolveClearance deliberately
  * skips its increment for registration-origin clearances.
  */
-export async function createPlayerWithClearance(
+async function createPlayerWithClearanceUnsynced(
   tenant: string,
   player: PlayerRegistration,
   c: PlayerClearance,
@@ -3854,7 +5883,7 @@ export async function createPlayerWithClearance(
  * person is clearance-pending anywhere) is what keeps that window to a true race rather than
  * a reachable sequence — do not assume the invariant holds here.
  */
-export async function createPlayerWithSourcelessClearance(
+async function createPlayerWithSourcelessClearanceUnsynced(
   tenant: string,
   player: PlayerRegistration,
   c: PlayerClearance,
@@ -3937,6 +5966,97 @@ export async function createPlayerWithSourcelessClearance(
   } catch (err: unknown) {
     if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
   }
+}
+
+/**
+ * Record a registration that arrived OUTSIDE every transfer window: the clearance is created
+ * already rejected (`rejectedBy: 'system:transfer-window'`, outcome 'not-registered'), with the
+ * would-be destination row kept ONLY on the canonical's snapshot (`{case:'window-closed',
+ * pendingPlayer}`) for a later Reopen.
+ *
+ * Writes ONLY the canonical + mirror clearance items — no player rows, no status flips, no
+ * playerCount changes. That is the whole point: create-then-reject would run rejectClearance,
+ * whose case D (off-system source) leaves the player ACTIVE at the destination, admitting every
+ * player who names a directory club. Because no player row exists, the duplicate-pending guards
+ * (which key on player rows) never see this record, so re-registering once a window opens is
+ * unblocked by construction; the caller's same-nk→destination short-circuit
+ * (findWindowRejectedClearances) is what stops resubmissions during the closed stretch.
+ *
+ * Guards: the destination-club existence check (never write a mirror into a club mid-delete)
+ * and attribute_not_exists on the canonical (a replayed id never double-writes). The dynalite
+ * path has no TransactWriteItems → existence pre-read, canonical first, then the mirror.
+ */
+export async function createAutoRejectedClearance(
+  tenant: string,
+  player: PlayerRegistration,
+  c: PlayerClearance,
+): Promise<PlayerClearance> {
+  const rejected: PlayerClearance = {
+    ...c,
+    rejectSnapshot: { case: 'window-closed', pendingPlayer: player },
+  };
+  const { canonical, mirror } = clearanceItems(tenant, rejected);
+  const canonicalPut = {
+    TableName: TABLE,
+    Item: canonical,
+    ConditionExpression: 'attribute_not_exists(sk)',
+  };
+  try {
+    if (localEndpoint) {
+      if (!(await getClub(tenant, c.toClubId))) throw new DestinationClubGoneError();
+      await ddb.send(new PutCommand(canonicalPut));
+      await ddb.send(new PutCommand({ TableName: TABLE, Item: mirror }));
+    } else {
+      await ddb.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              // Same rationale as createClearance: never create INTO a club mid-delete.
+              ConditionCheck: {
+                TableName: TABLE,
+                Key: clubKey(tenant, c.toClubId),
+                ConditionExpression: 'attribute_exists(pk)',
+              },
+            },
+            { Put: canonicalPut },
+            { Put: { TableName: TABLE, Item: mirror } },
+          ],
+        }),
+      );
+    }
+  } catch (err: unknown) {
+    if (err instanceof DestinationClubGoneError) throw err;
+    const name = (err as { name?: string }).name;
+    if (name === 'TransactionCanceledException') {
+      const reasons = (err as { CancellationReasons?: Array<{ Code?: string }> })
+        .CancellationReasons;
+      if (reasons?.[0]?.Code === 'ConditionalCheckFailed') throw new DestinationClubGoneError();
+      throw new DuplicatePendingClearanceError();
+    }
+    if (name === 'ConditionalCheckFailedException') throw new DuplicatePendingClearanceError();
+    throw err;
+  }
+  return publicClearance(rejected);
+}
+
+/**
+ * Window-closed auto-rejected clearances INTO `toClubId` for this identity, newest first — read
+ * from the destination's own mirror partition (no tenant-wide scan). A reopened one no longer
+ * qualifies (reopen clears rejectedBy).
+ */
+export async function findWindowRejectedClearances(
+  tenant: string,
+  toClubId: string,
+  naturalKey: string,
+): Promise<PlayerClearance[]> {
+  return (await listInboundForDest(tenant, toClubId))
+    .filter(
+      (x) =>
+        x.playerNaturalKey === naturalKey &&
+        x.status === 'rejected' &&
+        x.rejectedBy === TRANSFER_WINDOW_REJECTOR,
+    )
+    .sort((a, b) => (b.rejectedAt ?? '').localeCompare(a.rejectedAt ?? ''));
 }
 
 /**
@@ -4165,6 +6285,8 @@ function outcomeForCase(rc: RejectCase): RejectOutcome {
       return 'moved-to-source';
     case 'dest-activated':
       return 'stays-at-destination';
+    case 'window-closed':
+      return 'not-registered';
   }
 }
 
@@ -4179,9 +6301,14 @@ function outcomeForCase(rc: RejectCase): RejectOutcome {
  */
 export function clearanceDocObjectKeys(c: PlayerClearance): string[] {
   const d = c.rejectSnapshot?.destRow;
+  // A window-closed auto-reject never wrote a player row: its snapshot's pendingPlayer is the
+  // ONLY pointer to the registrant's uploaded ID document.
+  const p = c.rejectSnapshot?.pendingPlayer;
   return [
     d?.idDocMeta?.objectKey,
     d?.previousIdDocMeta?.objectKey,
+    p?.idDocMeta?.objectKey,
+    p?.previousIdDocMeta?.objectKey,
     c.certificateMeta?.objectKey,
   ].filter((k): k is string => !!k);
 }
@@ -4239,7 +6366,7 @@ const uniqueKeys = (keys: Array<{ pk: string; sk: string }>) => [
  * dynalite (offline/test) has no TransactWriteItems → sequential fallback in the same
  * order, with the same destination guard. Production uses the transaction.
  */
-export async function resolveClearance(
+async function resolveClearanceUnsynced(
   tenant: string,
   fromClubId: string,
   id: string,
@@ -4560,7 +6687,7 @@ export async function resolveClearance(
  * reading pending). The transactional branch is untested by the harness (dynalite has no
  * TransactWriteItems); its item arrays are single-sourced with the local ops so they can't drift.
  */
-export async function rejectClearance(
+async function rejectClearanceUnsynced(
   tenant: string,
   fromClubId: string,
   id: string,
@@ -4607,9 +6734,19 @@ export async function rejectClearance(
       // B″ — keep the placeholder the real registration replaced; reopen puts it back.
       rejectSnapshot = { case: rc, placeholderRow: sourceRow! };
       break;
-    default:
-      // request / moved-to-source / dest-activated — reopen moves the LIVE row, no row snapshot.
+    case 'request':
+    case 'moved-to-source':
+    case 'dest-activated':
+      // Reopen moves the LIVE row, no row snapshot.
       rejectSnapshot = { case: rc };
+      break;
+    case 'window-closed':
+      // Creation-time only (createAutoRejectedClearance) — detectRejectCase never yields it.
+      throw new Error('window-closed is not a reject case for a pending clearance');
+    default: {
+      const _exhaustive: never = rc;
+      throw new Error(`unhandled reject case ${String(_exhaustive)}`);
+    }
   }
   const next: PlayerClearance = {
     ...current,
@@ -5047,7 +7184,7 @@ export async function rejectClearance(
  * Local (dynalite) order + rollback mirror rejectClearance: canonical first, unwinds on a failed
  * row write, counts swallowed, mirror last.
  */
-export async function reopenClearance(
+async function reopenClearanceUnsynced(
   tenant: string,
   fromClubId: string,
   id: string,
@@ -5463,6 +7600,103 @@ export async function reopenClearance(
       break;
     }
 
+    case 'window-closed': {
+      // The auto-reject wrote no player rows; reopen materialises the registration it recorded
+      // as a normal registration-origin pending clearance. Check, never skip (cf. case B′): the
+      // player may have re-registered or transferred since, and registration-origin approve
+      // activates the destination even with no source row, so any row for this identity other
+      // than an ACTIVE one at the source would end up double-active. That one source row is the
+      // expected shape (createPlayerWithClearance's) and is flipped to clearance-pending here.
+      const pending = snap.pendingPlayer;
+      if (!pending)
+        throw new ClearanceReopenBlockedError('the auto-rejected registration was not kept');
+      const nk = current.playerNaturalKey;
+      const hits = await findPlayerAcrossClubs(tenant, nk, '');
+      const sourceActive = hits.some((h) => h.clubId === fromClubId && h.status === 'active');
+      if (hits.some((h) => !(h.clubId === fromClubId && h.status === 'active'))) {
+        throw new ClearanceReopenBlockedError(
+          'the player has registered or transferred since this was auto-rejected',
+        );
+      }
+      const destRow: PlayerRegistration = {
+        ...pending,
+        clubId: current.toClubId,
+        status: 'clearance-pending',
+      };
+      const destPut = {
+        TableName: TABLE,
+        Item: { ...destKey, ...destRow },
+        ConditionExpression: 'attribute_not_exists(sk)',
+      };
+      const sourceActiveToPending = {
+        TableName: TABLE,
+        Key: sourceKey,
+        UpdateExpression: 'SET #s = :pending ADD version :one',
+        ConditionExpression: 'attribute_exists(sk) AND #s = :active',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: {
+          ':pending': 'clearance-pending',
+          ':active': 'active',
+          ':one': 1,
+        },
+      };
+      if (localEndpoint) {
+        await putCanonicalReopen();
+        try {
+          await ddb.send(new PutCommand(destPut));
+        } catch (err) {
+          if (isCcf(err)) {
+            await restoreCanonical(tenant, current);
+            throw new PlayerExistsAtDestinationError();
+          }
+          throw err;
+        }
+        if (sourceActive) {
+          try {
+            await ddb.send(new UpdateCommand(sourceActiveToPending));
+          } catch (err) {
+            if (isCcf(err)) {
+              await undoDestRestore(destRow.version ?? 0);
+              await restoreCanonical(tenant, current);
+              throw new ClearanceReopenBlockedError('player no longer active at the source club');
+            }
+            throw err;
+          }
+        }
+        await swallowCcf(() => ddb.send(new UpdateCommand(destClubInc)));
+        await ddb.send(new PutCommand(mirrorPut));
+      } else {
+        // No source row at read time ⇒ require it still absent, so a row landing in between
+        // can't be left beside an activating destination.
+        const sourceOp = sourceActive
+          ? { Update: sourceActiveToPending }
+          : {
+              ConditionCheck: {
+                TableName: TABLE,
+                Key: sourceKey,
+                ConditionExpression: 'attribute_not_exists(sk)',
+              },
+            };
+        // [0] canonical [1] mirror [2] dest put [3] source (flip / absent check) [4] dest count +1
+        await sendReopen(
+          [
+            { Put: canonicalPut },
+            { Put: mirrorPut },
+            { Put: destPut },
+            sourceOp,
+            { Update: destClubInc },
+          ],
+          {
+            destPut: 2,
+            sourceGuard: 3,
+            sourceGuardMsg: 'the source club record changed; refetch and try again',
+            destCount: 4,
+          },
+        );
+      }
+      break;
+    }
+
     default: {
       const _exhaustive: never = snap.case;
       throw new Error(`unhandled reopen case ${String(_exhaustive)}`);
@@ -5529,7 +7763,7 @@ export async function reopenClearance(
  * partition needs no cleanup, since nothing here touches it. A clearance moved out from under
  * a real source row would strand that row 'clearance-pending' forever.
  */
-export async function reassignClearanceSource(
+async function reassignClearanceSourceUnsynced(
   tenant: string,
   oldFromClubId: string,
   id: string,
@@ -6465,7 +8699,7 @@ const BATCH_DELETE_RETRIES = 5;
  * club/tenant cascades rely on. Keys still unprocessed after the retries are an
  * error, not a shrug: the caller must know the erase did NOT complete.
  */
-async function batchDelete(keys: Array<{ pk: string; sk: string }>): Promise<void> {
+export async function batchDelete(keys: Array<{ pk: string; sk: string }>): Promise<void> {
   for (let i = 0; i < keys.length; i += 25) {
     let requests = keys.slice(i, i + 25).map((Key) => ({ DeleteRequest: { Key } }));
     for (let attempt = 0; requests.length > 0; attempt++) {
@@ -6498,6 +8732,7 @@ async function batchDelete(keys: Array<{ pk: string; sk: string }>): Promise<voi
  * The erase-tenant CLI removes single-tenant users' accounts separately.
  */
 export async function eraseTenantData(tenant: string): Promise<number> {
+  invalidatePlayerSyncFlag(tenant);
   const config = await getTenantConfig(tenant);
   if (config?.clubSignupLink?.token) await deleteToken(config.clubSignupLink.token);
 
@@ -6557,6 +8792,12 @@ export async function eraseTenantData(tenant: string): Promise<number> {
     for (const r of await listOutboundVeteransRequests(tenant, club.id)) {
       keys.push(outboundVeteransRequestKey(tenant, club.id, r.id));
     }
+    // Postponement requests (ADR 0015): canonical POSTPONE# under the opposing club + mirror
+    // OUTBOUND_POSTPONE# under the requesting club, neither in the gsi1/META listing.
+    const postponements = await listPostponementsForClub(tenant, club.id);
+    for (const r of postponements.inbound) keys.push(postponementKey(tenant, club.id, r.id));
+    for (const r of postponements.outbound)
+      keys.push(outboundPostponementKey(tenant, club.id, r.id));
   }
   for (const s of await listSeries(tenant)) keys.push(seriesKey(tenant, s.id));
   // Season runs are cohort data like series; leaving them behind would strand a
@@ -6564,13 +8805,16 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   for (const r of await listSeasonRuns(tenant)) keys.push(seasonRunKey(tenant, r.id));
   for (const u of await listTenantUsers(tenant)) keys.push(userTenantMarkerKey(u.sub, tenant));
   // Export-audit items sit at pk `TENANT#<t>` (above the `TENANT#<t>#…` prefix sweep),
-  // so enumerate them explicitly like invite markers. Venues share that partition and
-  // the same exposure — miss them and a deleted tenant's ground list survives.
+  // so enumerate them explicitly like invite markers. Player-erasure audit rows, and venues,
+  // share that partition and the same exposure — miss them and they survive the tenant.
   for (const k of await listExportLogKeys(tenant)) keys.push(k);
+  for (const k of await listPlayerEraseLogKeys(tenant)) keys.push(k);
   for (const k of await listVenueKeys(tenant)) keys.push(k);
   // Medicoach sync (ADR 0016): results (may hold a captain's player ref — PII) and the
   // SYNC partition (cursor + audit rows) have no gsi1/META listing; enumerate them.
   for (const k of await listFixtureResultKeys(tenant)) keys.push(k);
+  // Scorecards (FIXSCORECARD#) carry player names and hang off the same results.
+  for (const k of await listFixtureScorecardKeys(tenant)) keys.push(k);
   for (const k of await listSyncPartitionKeys(tenant)) keys.push(k);
   // Umpires carry contact details; officials are per-fixture rows. Neither is in a club
   // partition or the series listing, so enumerate both explicitly.
@@ -6636,17 +8880,26 @@ export async function clearCohort(tenant: string): Promise<number> {
     for (const r of await listOutboundVeteransRequests(tenant, club.id)) {
       keys.push(outboundVeteransRequestKey(tenant, club.id, r.id));
     }
+    // Postponement requests (ADR 0015): canonical + mirror — enumerate both prefixes per club.
+    const postponements = await listPostponementsForClub(tenant, club.id);
+    for (const r of postponements.inbound) keys.push(postponementKey(tenant, club.id, r.id));
+    for (const r of postponements.outbound)
+      keys.push(outboundPostponementKey(tenant, club.id, r.id));
   }
   for (const s of await listSeries(tenant)) keys.push(seriesKey(tenant, s.id));
   for (const r of await listSeasonRuns(tenant)) keys.push(seasonRunKey(tenant, r.id));
   // Results belong to the series being cleared (and may hold a player ref — PII). The SYNC
   // partition goes too: a surviving cursor would stop the next pull re-fetching the results.
   for (const k of await listFixtureResultKeys(tenant)) keys.push(k);
+  // Scorecards (FIXSCORECARD#) carry player names and hang off the same results.
+  for (const k of await listFixtureScorecardKeys(tenant)) keys.push(k);
   for (const k of await listSyncPartitionKeys(tenant)) keys.push(k);
   // Officials hang off the series being cleared; the umpire registry itself is union data,
   // not cohort data, so it stays.
   for (const o of await listFixtureOfficials(tenant))
     keys.push(fixtureOfficialsKey(tenant, o.seriesId, o.fixtureId));
+  // …and so does their appointment-notice ledger (every series is being cleared).
+  for (const k of await listOfficialsNotifyKeys(tenant)) keys.push(k);
 
   // Captain's reports hang off the fixtures being cleared (reports, counters, ledger).
   for (const k of await listCaptainsReportPartitionKeys(tenant)) keys.push(k);
@@ -6816,7 +9069,9 @@ export async function eraseClubData(
   // deleting the VETAFFIL rows, because these records are the ONLY index back to those rows —
   // a crash mid-erase must stay re-runnable. Conditional (only scrub a row STILL pointing here,
   // so a since-moved player isn't clobbered) and best-effort; a moved/removed row just no-ops.
+  const vetAffiliates: string[] = [];
   for (const a of await listVeteransAffiliations(tenant, club.id)) {
+    vetAffiliates.push(a.naturalKey);
     try {
       await ddb.send(
         new UpdateCommand({
@@ -6845,6 +9100,16 @@ export async function eraseClubData(
     keys.push(outboundVeteransRequestKey(tenant, club.id, r.id));
     keys.push(veteransRequestKey(tenant, r.primaryClubId, r.id));
   }
+  // Postponement requests (ADR 0015) likewise span two partitions — delete each counterpart row.
+  const postponements = await listPostponementsForClub(tenant, club.id);
+  for (const r of postponements.inbound) {
+    keys.push(postponementKey(tenant, club.id, r.id));
+    keys.push(outboundPostponementKey(tenant, r.requestingClubId, r.id));
+  }
+  for (const r of postponements.outbound) {
+    keys.push(outboundPostponementKey(tenant, club.id, r.id));
+    keys.push(postponementKey(tenant, r.opposingClubId, r.id));
+  }
 
   await batchDelete(uniqueKeys(keys));
   // S3 purge BEFORE the META delete: the objectKeys are only derivable while the
@@ -6853,6 +9118,17 @@ export async function eraseClubData(
   // idempotent, so running it first changes nothing else.
   await deleteUploadObjects(objectKeys);
   await deleteUploadPrefixes(prefixes);
+
+  // Medicoach player sync (ADR 0019): every person this cascade touched gets a PLAIN change —
+  // never an erase tombstone: club cleanup is not consent-based erasure, and the person may
+  // still be active at another club (veterans). The flush rebuilds an upsert with fewer teams,
+  // or a `remove` when no row is left.
+  await recordPlayerSyncChange(tenant, [
+    ...players.map((p) => p.naturalKey),
+    ...outgoing.map((x) => x.playerNaturalKey),
+    ...inbound.map((x) => x.playerNaturalKey),
+    ...vetAffiliates,
+  ]);
 
   // Sweep DRAFT (unreleased) series so a deleted club doesn't linger in teams[]/fixtures.
   // Released series are left intact (they keep showing "Removed club" — preserves published
@@ -6895,4 +9171,515 @@ export async function eraseClubData(
     series,
     seriesFailed,
   };
+}
+
+// ── Tenant-wide player erasure (admin, POPIA) ──
+
+/** Thrown when a player can't be erased yet because a clearance naming them is still open. */
+export class PlayerErasureBlockedError extends Error {
+  constructor(message = 'resolve or reject the open clearance first') {
+    super(message);
+    this.name = 'PlayerErasureBlockedError';
+  }
+}
+
+/** What a scrubbed name (captain's report, scorecard, correction feedback) reads after erasure. */
+export const ERASED_NAME = '[removed]';
+
+/**
+ * Player erasure could not scrub a cached scorecard (FIXSCORECARD#) or a captain's report's
+ * scorecard correction `feedback` because the row kept changing underneath it (3 contested
+ * conditional writes in a row). Thrown BEFORE anything destructive has run, so the erasure is
+ * aborted with every row and artifact intact and can simply be retried.
+ */
+export class ScorecardScrubContentionError extends Error {
+  readonly code = 'SCORECARD_SCRUB_CONTENTION';
+  constructor(readonly target: 'scorecard' | 'feedback') {
+    super(
+      target === 'scorecard'
+        ? 'a match scorecard changed during erasure — try again'
+        : "a captain's report changed during erasure — try again",
+    );
+    this.name = 'ScorecardScrubContentionError';
+  }
+}
+
+/**
+ * A nested SET whose parent map is gone (e.g. `scorecard.feedback` after a concurrent draft save
+ * REMOVEd `scorecard`): DynamoDB refuses it with a ValidationException rather than a CCF.
+ */
+const isMissingDocumentPath = (err: unknown): boolean => {
+  const e = err as { name?: string; message?: string };
+  return (
+    e.name === 'ValidationException' &&
+    /document path provided in the update expression is invalid/i.test(e.message ?? '')
+  );
+};
+
+const normName = (s: string | undefined | null) =>
+  (s ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+const normEmail = (s: string | undefined | null) => (s ?? '').trim().toLowerCase();
+/** Last 9 digits: `082…`, `+2782…` and `2782…` spellings of one SA cell all compare equal. */
+const normCell = (s: string | undefined | null) => {
+  const d = (s ?? '').replace(/\D/g, '');
+  return d.length >= 9 ? d.slice(-9) : '';
+};
+
+/**
+ * A copy of `card` with every batter / bowler / fall-of-wicket name matching `hit` replaced by
+ * {@link ERASED_NAME}, or null when no name matched (nothing to write).
+ */
+function scrubScorecardNames(
+  card: StoredFixtureScorecard,
+  hit: (name: string | undefined) => boolean,
+): StoredFixtureScorecard | null {
+  if (!card.innings?.length) return null;
+  let changed = false;
+  const swap = (name: string) => {
+    if (!hit(name)) return name;
+    changed = true;
+    return ERASED_NAME;
+  };
+  const innings = card.innings.map((inn) => ({
+    ...inn,
+    batters: inn.batters.map((b) => ({ ...b, name: swap(b.name) })),
+    bowlers: inn.bowlers.map((b) => ({ ...b, name: swap(b.name) })),
+    fallOfWickets: inn.fallOfWickets.map((f) => ({ ...f, batterName: swap(f.batterName) })),
+  }));
+  return changed ? { ...card, innings } : null;
+}
+
+/**
+ * Erase ONE person (by natural key) from every club in the tenant — the admin's POPIA "right to
+ * erasure". The same person in another tenant is untouched (every key is TENANT#-scoped).
+ *
+ * Inventory (all tenant-wide):
+ *  - PLAYER# rows at every club (`findPlayerAcrossClubs`), each removed via {@link deletePlayer}
+ *    (its ID doc(s) in S3, its VETAFFIL# record, the club's playerCount);
+ *  - every clearance naming the person (`listAllClearances`), DELETED OUTRIGHT — canonical +
+ *    mirror — with its artifacts: snapshot ID docs (incl. a window-closed auto-reject's
+ *    pendingPlayer doc, the only pointer to it), certificate PDF + CERT# registry item + the
+ *    clearance's S3 prefix. Deleting rather than scrubbing closes the re-issue gap (a retained
+ *    approved clearance could otherwise mint a fresh certificate full of PII);
+ *  - registration reviews (REGREVIEW#) + any held pendingPlayer ID doc;
+ *  - veterans requests (canonical VETREQ# + OUTBOUND_VETREQ# mirror);
+ *  - captain's reports that NAME the person (full name / email / cell match) are SCRUBBED in
+ *    place, not deleted (the report is the club's and the umpires' record too);
+ *  - pending REPORTOPEN# markers whose captain ref is this person's player ref have that ref
+ *    REMOVED (the marker stays — it is the retry queue for both clubs' reports; with no captain
+ *    ref the scoring side's report goes to the club chair);
+ *  - cached medicoach scorecards (FIXSCORECARD#): batter / bowler / fall-of-wicket names that
+ *    match the person are SCRUBBED in place, and a scrubbed card is marked `terminal` so the
+ *    sweep never re-fetches the name from medicoach;
+ *  - a captain's report's scorecard correction `feedback`: the person's name is replaced
+ *    (case-insensitive, whole words), conditional on the text being unchanged
+ *    (`reportScorecardFeedbackScrubbed`).
+ *
+ * Gate: a pending clearance naming the person, or any `clearance-pending` row, throws
+ * {@link PlayerErasureBlockedError} BEFORE anything is touched. Returns null when nothing in any
+ * category exists (a clean 404 — and the re-run of a completed erasure).
+ *
+ * Ordering is the re-runnable invariant: the scorecard + correction-feedback scrubs run FIRST,
+ * while every row naming the person (and so every spelling of their name) is still intact; then
+ * S3 (object keys are only derivable while the rows naming them exist), then the clearance/
+ * review/request rows, then the captain's-report name/contact scrub, and the PLAYER# rows LAST —
+ * while any of them survives, a re-run finds the person again and finishes the job. A scorecard
+ * or report feedback that keeps changing underneath its scrub (3 contested writes) throws
+ * {@link ScorecardScrubContentionError} — never a silent skip that the audit counts would hide —
+ * and because nothing destructive has run yet, the erasure aborts intact and a retry has full
+ * name fidelity (including a person with no PLAYER# rows). The PII-free audit row (actor +
+ * counts) is written once everything landed.
+ */
+export async function erasePlayerData(
+  tenant: string,
+  naturalKey: string,
+  opts: { by: string; at?: string },
+): Promise<PlayerErasureCounts | null> {
+  const at = opts.at ?? new Date().toISOString();
+  // ── Collect ──
+  const hits = await findPlayerAcrossClubs(tenant, naturalKey, '');
+  const rows = (await Promise.all(hits.map((h) => getPlayer(tenant, h.clubId, naturalKey)))).filter(
+    (p): p is PlayerRegistration => p !== null,
+  );
+  const clearances = (await listAllClearances(tenant)).filter(
+    (x) => x.playerNaturalKey === naturalKey,
+  );
+  const reviews = (await listAllReviews(tenant)).filter((r) => r.playerNaturalKey === naturalKey);
+  const vetreqs = (await listAllVeteransRequests(tenant)).filter(
+    (r) => r.playerNaturalKey === naturalKey,
+  );
+  if (!rows.length && !clearances.length && !reviews.length && !vetreqs.length) return null;
+
+  if (
+    rows.some((p) => p.status === 'clearance-pending') ||
+    clearances.some((x) => x.status === 'pending')
+  ) {
+    throw new PlayerErasureBlockedError();
+  }
+
+  const keys: Array<{ pk: string; sk: string }> = [];
+  const objectKeys: string[] = [];
+  const prefixes: string[] = [];
+  // Who to look for in captain's reports: every spelling of the person the inventory holds.
+  const people: Array<
+    Partial<Pick<PlayerRegistration, 'firstName' | 'lastName' | 'email' | 'cell'>>
+  > = [...rows];
+  const names = new Set<string>();
+
+  let certificates = 0;
+  for (const x of clearances) {
+    keys.push(clearanceKey(tenant, x.fromClubId, x.id));
+    keys.push(inboundClearanceKey(tenant, x.toClubId, x.id));
+    // The list is snapshot-stripped; the canonical's rejectSnapshot is where a rejected
+    // clearance's ID docs (and a window-closed one's pendingPlayer doc) are named.
+    const raw = (await getClearanceRaw(tenant, x.fromClubId, x.id)) ?? x;
+    objectKeys.push(...clearanceDocObjectKeys(raw));
+    const before = keys.length;
+    collectCertificateArtifacts(tenant, raw, keys, prefixes);
+    certificates += keys.length - before;
+    names.add(normName(x.playerName));
+    for (const p of [raw.rejectSnapshot?.destRow, raw.rejectSnapshot?.pendingPlayer]) {
+      if (p) people.push(p);
+    }
+  }
+  for (const r of reviews) {
+    keys.push(registrationReviewKey(tenant, r.destClubId, r.id));
+    for (const k of [
+      r.pendingPlayer?.idDocMeta?.objectKey,
+      r.pendingPlayer?.previousIdDocMeta?.objectKey,
+    ])
+      if (k) objectKeys.push(k);
+    names.add(normName(r.playerName));
+    if (r.pendingPlayer) people.push(r.pendingPlayer);
+  }
+  for (const r of vetreqs) {
+    keys.push(veteransRequestKey(tenant, r.primaryClubId, r.id));
+    keys.push(outboundVeteransRequestKey(tenant, r.veteransClubId, r.id));
+    names.add(normName(r.playerName));
+  }
+  const emails = new Set<string>();
+  const cells = new Set<string>();
+  for (const p of people) {
+    names.add(normName(`${p.firstName ?? ''} ${p.lastName ?? ''}`));
+    emails.add(normEmail(p.email));
+    cells.add(normCell(p.cell));
+  }
+  names.delete('');
+  emails.delete('');
+  cells.delete('');
+
+  // ── Scorecard scrubs FIRST, before anything destructive ──
+  // Every row naming the person is still intact here, so the name set is complete; a contention
+  // throw below aborts the erasure with nothing deleted (safe to retry).
+  const nameHit = (s: string | undefined) => !!s && names.has(normName(s));
+
+  // ── Cached medicoach scorecards: scrub batter / bowler / fall-of-wicket names ──
+  // A modified card is also marked `terminal` so the sweep never re-fetches it (and with it the
+  // name) from medicoach. Conditional on the card not having been replaced meanwhile; a
+  // replaced card is re-read and scrubbed afresh.
+  let scorecardsScrubbed = 0;
+  for (const listed of await listFixtureScorecards(tenant)) {
+    let card: StoredFixtureScorecard | null = listed;
+    let settled = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const scrubbed = card && scrubScorecardNames(card, nameHit);
+      if (!card || !scrubbed) {
+        settled = true; // deleted meanwhile, or nothing (left) to scrub
+        break;
+      }
+      try {
+        await ddb.send(
+          new PutCommand({
+            TableName: TABLE,
+            Item: {
+              ...scrubbed,
+              terminal: true,
+              ...fixtureScorecardKey(tenant, card.seriesId, card.fixtureId),
+            },
+            ConditionExpression: 'fetchedAt = :f',
+            ExpressionAttributeValues: { ':f': card.fetchedAt },
+          }),
+        );
+        scorecardsScrubbed++;
+        settled = true;
+        break;
+      } catch (err: unknown) {
+        if (!isCcf(err)) throw err;
+        card = await getFixtureScorecard(tenant, card.seriesId, card.fixtureId);
+      }
+    }
+    // Out of retries: only a card that STILL names the person is a failure.
+    if (!settled && card && scrubScorecardNames(card, nameHit)) {
+      throw new ScorecardScrubContentionError('scorecard');
+    }
+  }
+
+  // Whole-word name matcher for free text (a captain's scorecard correction feedback).
+  const namePatterns = [...names].map(
+    (n) =>
+      new RegExp(
+        `(?<![\\p{L}\\p{N}])${n
+          .split(' ')
+          .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+          .join('\\s+')}(?![\\p{L}\\p{N}])`,
+        'giu',
+      ),
+  );
+  const scrubText = (s: string) => namePatterns.reduce((t, re) => t.replace(re, ERASED_NAME), s);
+  const feedbackNamesPerson = (r: CaptainsReport | null) => {
+    const fb = r?.scorecard?.feedback;
+    return !!fb && scrubText(fb) !== fb;
+  };
+
+  // ── Captain's report scorecard correction feedback: the captain's free text may name them ──
+  // Still before anything destructive (it can throw). Conditional on the feedback being
+  // unchanged: a concurrent draft save that REPLACES it fails the condition, one that REMOVES
+  // `scorecard` makes the nested SET a missing-path ValidationException — either way the report
+  // is re-read and judged afresh (feedback gone, or now clean, is settled).
+  const feedbackScrubbedReports = new Set<string>();
+  for (const listed of await listCaptainsReports(tenant)) {
+    let r: CaptainsReport | null = listed;
+    let settled = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (!r || !feedbackNamesPerson(r)) {
+        settled = true; // deleted meanwhile, or nothing (left) to scrub
+        break;
+      }
+      const old = r.scorecard!.feedback!;
+      try {
+        await ddb.send(
+          new UpdateCommand({
+            TableName: TABLE,
+            Key: reportKeyOf(tenant, r),
+            UpdateExpression: 'SET scorecard.feedback = :fb, updatedAt = :now',
+            ConditionExpression:
+              'attribute_exists(scorecard.feedback) AND scorecard.feedback = :old',
+            ExpressionAttributeValues: { ':fb': scrubText(old), ':old': old, ':now': at },
+          }),
+        );
+        feedbackScrubbedReports.add(r.id);
+        settled = true;
+        break;
+      } catch (err: unknown) {
+        if (!isCcf(err) && !isMissingDocumentPath(err)) throw err;
+        r = await getCaptainsReport(tenant, r.seriesId, r.fixtureId, r.clubId);
+      }
+    }
+    // Out of retries: only a report whose feedback STILL names the person is a failure.
+    if (!settled && feedbackNamesPerson(r)) {
+      throw new ScorecardScrubContentionError('feedback');
+    }
+  }
+
+  // Row docs are purged by deletePlayer itself; counted here so the total is truthful.
+  const rowDocs = rows.flatMap((p) =>
+    [p.idDocMeta?.objectKey, p.previousIdDocMeta?.objectKey].filter((k): k is string => !!k),
+  );
+  const uniqueObjects = [...new Set(objectKeys)];
+
+  // ── S3 (artifacts named only by the rows about to go) ──
+  await deleteUploadObjects(uniqueObjects);
+  await deleteUploadPrefixes(prefixes);
+
+  // ── Clearance / review / request rows ──
+  const unique = uniqueKeys(keys);
+  if (unique.length) await batchDelete(unique);
+
+  // ── Captain's reports: scrub name / contact mentions in place (feedback was scrubbed above) ──
+  const nameScrubbedReports = new Set<string>();
+  for (const r of await listCaptainsReports(tenant)) {
+    const contact = r.recipientContact;
+    const contactHit =
+      !!contact &&
+      ((!!contact.email && emails.has(normEmail(contact.email))) ||
+        (!!contact.cell && cells.has(normCell(contact.cell))));
+    const sets: string[] = [];
+    const removes: string[] = [];
+    const values: Record<string, unknown> = {};
+    if (nameHit(r.captainName)) {
+      sets.push('captainName = :erased');
+    }
+    if (nameHit(r.recipient?.name)) sets.push('recipient.#rn = :erased');
+    if (nameHit(r.recipient?.forwardedBy?.name)) sets.push('recipient.forwardedBy.#rn = :erased');
+    if (nameHit(r.submittedBy) || (!!r.submittedBy && emails.has(normEmail(r.submittedBy)))) {
+      sets.push('submittedBy = :erased');
+    }
+    // The stored contact is the recipient's — drop it when it is this person's, or when the
+    // recipient IS this person by name.
+    if (contact && (contactHit || nameHit(r.recipient?.name))) removes.push('recipientContact');
+    if (!sets.length && !removes.length) continue;
+    if (sets.some((x) => x.includes(':erased'))) values[':erased'] = ERASED_NAME;
+    values[':now'] = at;
+    sets.push('updatedAt = :now');
+    const usesRn = sets.some((s) => s.includes('#rn'));
+    try {
+      await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: reportKeyOf(tenant, r),
+          UpdateExpression: `SET ${sets.join(', ')}${removes.length ? ` REMOVE ${removes.join(', ')}` : ''}`,
+          ConditionExpression: 'attribute_exists(pk)',
+          ...(usesRn ? { ExpressionAttributeNames: { '#rn': 'name' } } : {}),
+          ExpressionAttributeValues: values,
+        }),
+      );
+      nameScrubbedReports.add(r.id);
+    } catch (err: unknown) {
+      if (!isCcf(err)) throw err; // deleted concurrently — nothing left to scrub
+    }
+  }
+  // A report scrubbed by both passes counts once.
+  const captainsReportsScrubbed = new Set([...feedbackScrubbedReports, ...nameScrubbedReports])
+    .size;
+  const reportScorecardFeedbackScrubbed = feedbackScrubbedReports.size;
+
+  // ── Pending report-open markers addressed to this person's player ref ──
+  // Scrub the ref, never delete the marker: it is the retry queue that opens BOTH clubs' reports
+  // for the fixture. Without a captain ref the scoring side's report falls back to the chair.
+  const ref = medicoachRefs.player(tenant, naturalKey);
+  let reportOpenMarkers = 0;
+  for (const m of await listReportOpenMarkers(tenant)) {
+    if (m.captainRef !== ref) continue;
+    if (await scrubReportOpenMarkerCaptainRef(tenant, m.ref)) reportOpenMarkers++;
+  }
+
+  // ── PLAYER# rows last (the re-run anchor) ──
+  for (const p of rows) await deletePlayer(tenant, p);
+  // Medicoach player sync (ADR 0019): an `erase` tombstone (after the row deletes, whose own
+  // change hooks it replaces) and the person's PLAYERREVIEW#/PLAYERDISTINCT# rows.
+  await recordPlayerSyncErase(tenant, naturalKey, new Date().toISOString());
+
+  const counts: PlayerErasureCounts = {
+    playerRows: rows.length,
+    clearances: clearances.length,
+    registrationReviews: reviews.length,
+    veteransRequests: vetreqs.length,
+    // Distinct objects across both sets: a snapshot destRow can name the same key as a live row.
+    documents: new Set([...uniqueObjects, ...rowDocs]).size,
+    certificates,
+    captainsReportsScrubbed,
+    scorecardsScrubbed,
+    reportScorecardFeedbackScrubbed,
+    reportOpenMarkers,
+  };
+  await putPlayerEraseLog(tenant, {
+    id: randomUUID(),
+    kind: 'player-erasure',
+    by: opts.by,
+    at,
+    counts,
+  });
+  return counts;
+}
+
+// ── Player-row writes + the medicoach player-sync hook (ADR 0019) ──
+// Every repo write that changes a PLAYER# row is wrapped here so the change reaches the
+// medicoach player outbox from routes AND import CLIs alike (`recordPlayerSyncChange` is a
+// no-op unless the tenant has the player sync on, and never fails the write). The wrapped
+// implementations (`…Unsynced`) carry the full contracts in their own docs above.
+
+/** {@link createPlayerUnsynced} + the player-sync hook. */
+export async function createPlayer(tenant: string, player: PlayerRegistration): Promise<void> {
+  await createPlayerUnsynced(tenant, player);
+  await recordPlayerSyncChange(tenant, player.naturalKey);
+}
+
+/** {@link setPlayerTeamIfAbsentUnsynced} + the player-sync hook (only when it wrote). */
+export async function setPlayerTeamIfAbsent(
+  tenant: string,
+  clubId: string,
+  naturalKey: string,
+  team: string,
+): Promise<boolean> {
+  const wrote = await setPlayerTeamIfAbsentUnsynced(tenant, clubId, naturalKey, team);
+  if (wrote) await recordPlayerSyncChange(tenant, naturalKey);
+  return wrote;
+}
+
+/** {@link deletePlayerUnsynced} + the player-sync hook. */
+export async function deletePlayer(
+  tenant: string,
+  player: PlayerRegistration,
+  opts: { keepDocs?: boolean } = {},
+): Promise<void> {
+  await deletePlayerUnsynced(tenant, player, opts);
+  await recordPlayerSyncChange(tenant, player.naturalKey);
+}
+
+/** {@link updatePlayerUnsynced} + the player-sync hook. */
+export async function updatePlayer(
+  tenant: string,
+  clubId: string,
+  naturalKey: string,
+  patch: Partial<PlayerRegistration>,
+  outPreImage?: { value?: PlayerRegistration },
+): Promise<PlayerRegistration> {
+  const next = await updatePlayerUnsynced(tenant, clubId, naturalKey, patch, outPreImage);
+  await recordPlayerSyncChange(tenant, naturalKey);
+  return next;
+}
+
+/** {@link createClearanceUnsynced} + the player-sync hook. */
+export async function createClearance(tenant: string, c: PlayerClearance): Promise<void> {
+  await createClearanceUnsynced(tenant, c);
+  await recordPlayerSyncChange(tenant, c.playerNaturalKey);
+}
+
+/** {@link createPlayerWithClearanceUnsynced} + the player-sync hook. */
+export async function createPlayerWithClearance(
+  tenant: string,
+  player: PlayerRegistration,
+  c: PlayerClearance,
+): Promise<void> {
+  await createPlayerWithClearanceUnsynced(tenant, player, c);
+  await recordPlayerSyncChange(tenant, player.naturalKey);
+}
+
+/** {@link createPlayerWithSourcelessClearanceUnsynced} + the player-sync hook. */
+export async function createPlayerWithSourcelessClearance(
+  tenant: string,
+  player: PlayerRegistration,
+  c: PlayerClearance,
+): Promise<void> {
+  await createPlayerWithSourcelessClearanceUnsynced(tenant, player, c);
+  await recordPlayerSyncChange(tenant, player.naturalKey);
+}
+
+/**
+ * {@link resolveClearanceUnsynced} + the player-sync hook. Source and destination rows share
+ * the person's natural key, so the one change moves them between teams.
+ */
+export async function resolveClearance(
+  ...args: Parameters<typeof resolveClearanceUnsynced>
+): Promise<PlayerClearance> {
+  const c = await resolveClearanceUnsynced(...args);
+  await recordPlayerSyncChange(args[0], c.playerNaturalKey);
+  return c;
+}
+
+/** {@link rejectClearanceUnsynced} (incl. the transfer-window auto-reject) + the hook. */
+export async function rejectClearance(
+  ...args: Parameters<typeof rejectClearanceUnsynced>
+): Promise<PlayerClearance> {
+  const c = await rejectClearanceUnsynced(...args);
+  await recordPlayerSyncChange(args[0], c.playerNaturalKey);
+  return c;
+}
+
+/** {@link reopenClearanceUnsynced} + the player-sync hook. */
+export async function reopenClearance(
+  ...args: Parameters<typeof reopenClearanceUnsynced>
+): Promise<PlayerClearance> {
+  const c = await reopenClearanceUnsynced(...args);
+  await recordPlayerSyncChange(args[0], c.playerNaturalKey);
+  return c;
+}
+
+/** {@link reassignClearanceSourceUnsynced} + the player-sync hook. */
+export async function reassignClearanceSource(
+  ...args: Parameters<typeof reassignClearanceSourceUnsynced>
+): Promise<PlayerClearance> {
+  const c = await reassignClearanceSourceUnsynced(...args);
+  await recordPlayerSyncChange(args[0], c.playerNaturalKey);
+  return c;
 }

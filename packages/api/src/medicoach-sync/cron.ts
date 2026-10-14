@@ -1,6 +1,6 @@
 /**
  * Cron entry point for the medicoach sync (ADR 0016): one `sst.aws.Cron` at
- * `rate(15 minutes)`, all day. For every tenant with `features.medicoachSync`, one after
+ * `cron(0/15 * * * ? *)` (on the quarter hour, so a run lands at 18:00 SAST), all day. For every tenant with `features.medicoachSync`, one after
  * another: flush the schedule outbox, pull, retry pending captain's reports (`runTenantSync`).
  * A failing tenant never stops the others.
  *
@@ -15,8 +15,13 @@ import { medicoachSyncSecret, medicoachSyncUrl } from '../env.js';
 import type { SyncRunSummary } from './puller.js';
 import { runTenantSync } from './run.js';
 
+/** The cron Lambda runs up to 5 minutes; the report drain stops after about 4. */
+export const CRON_REPORT_BUDGET_MS = 4 * 60_000;
+
 /** Run the puller for every sync-enabled tenant. Exported for tests and local runs. */
 export async function runAllTenants(): Promise<SyncRunSummary[]> {
+  // One deadline for the whole invocation (all tenants): leftovers stay queued.
+  const deadlineMs = Date.now() + CRON_REPORT_BUDGET_MS;
   const tenants = (await repo.listTenants()).filter((t) => hasFeature(t, 'medicoachSync'));
   const url = medicoachSyncUrl();
   const secret = medicoachSyncSecret();
@@ -24,7 +29,7 @@ export async function runAllTenants(): Promise<SyncRunSummary[]> {
   const failures: string[] = [];
   for (const t of tenants) {
     try {
-      const summary = await runTenantSync(t.tenant, 'cron', { repo, url, secret });
+      const summary = await runTenantSync(t.tenant, 'cron', { repo, url, secret, deadlineMs });
       out.push(summary);
       console.log(
         `[medicoach-sync] ${t.tenant}: ${summary.status} pages=${summary.pages} fixtures=${summary.fixtures} ${JSON.stringify(summary.counts)}`,

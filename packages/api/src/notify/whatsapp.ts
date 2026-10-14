@@ -15,7 +15,9 @@
  * Dry-run: NOTIFY_DRY_RUN=1 or missing token/phone-id → log + synthetic id.
  */
 import { randomUUID } from 'node:crypto';
-import { WHATSAPP_TEMPLATES } from './whatsapp-templates.js';
+import { readFile } from 'node:fs/promises';
+import { basename } from 'node:path';
+import { WHATSAPP_TEMPLATES, type WhatsAppTemplateDefinition } from './whatsapp-templates.js';
 
 const TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
@@ -31,11 +33,19 @@ const RATE_LIMIT_CODE = 130429;
 const MAX_RETRIES = 3;
 const BACKOFF_MS = 1000;
 
-/** Typed failure so the orchestrator can record the provider's reason. */
+/**
+ * Typed failure so the orchestrator can record the provider's reason. `code` is Meta's error
+ * code when the Graph API returned one (e.g. 130429 rate limit, 131026 undeliverable);
+ * `httpStatus` is the HTTP status of the failed call.
+ */
 export class WhatsAppError extends Error {
-  constructor(message: string) {
+  readonly code?: number;
+  readonly httpStatus?: number;
+  constructor(message: string, details: { code?: number; httpStatus?: number } = {}) {
     super(message);
     this.name = 'WhatsAppError';
+    if (details.code !== undefined) this.code = details.code;
+    if (details.httpStatus !== undefined) this.httpStatus = details.httpStatus;
   }
 }
 
@@ -73,6 +83,63 @@ export function urlButtonComponent(suffix: string) {
 }
 
 /**
+ * A VIDEO header's media: either a public HTTPS `link` (Meta fetches it at send time, so it must
+ * serve byte ranges) or the `id` of media already uploaded to Meta (see uploadWhatsAppMedia) —
+ * Meta-hosted media has proved the more reliable of the two.
+ */
+export type VideoRef = { link: string } | { id: string };
+
+/**
+ * The Cloud API component for a VIDEO media header: one video parameter carrying the ref. A link
+ * is passed through whole — never `cleanParam`ed (truncating a URL would break it). Exported so
+ * the tests can assert the shape.
+ */
+export function videoHeaderComponent(ref: VideoRef) {
+  const video = 'id' in ref ? { id: ref.id } : { link: ref.link };
+  return { type: 'header', parameters: [{ type: 'video', video }] };
+}
+
+/**
+ * Upload a local media file to Meta (Graph `/{PHONE_NUMBER_ID}/media`) and return its media id,
+ * for use as a `{ id }` VideoRef. Same token / phone-number id / dry-run gate as the senders: in
+ * dry-run nothing is read or uploaded and a synthetic `dry-run-media-<uuid>` id is returned.
+ */
+export async function uploadWhatsAppMedia(
+  filePath: string,
+  mimeType = 'video/mp4',
+): Promise<{ mediaId: string }> {
+  if (WHATSAPP_DRY_RUN) {
+    console.log(`[notify:whatsapp dry-run] would upload ${filePath} (${mimeType}) to Meta`);
+    return { mediaId: `dry-run-media-${randomUUID()}` };
+  }
+  const bytes = await readFile(filePath);
+  const form = new FormData();
+  form.append('messaging_product', 'whatsapp');
+  form.append('type', mimeType);
+  form.append('file', new Blob([bytes], { type: mimeType }), basename(filePath));
+  const res = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${PHONE_NUMBER_ID}/media`, {
+    method: 'POST',
+    // Never log this header — it carries the long-lived Meta token.
+    headers: { authorization: `Bearer ${TOKEN}` },
+    body: form,
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    id?: string;
+    error?: { code?: number; message?: string };
+  };
+  if (!res.ok || !data.id) {
+    throw new WhatsAppError(
+      `WhatsApp media upload failed (${data.error?.code ?? res.status}): ${data.error?.message ?? res.statusText}`,
+      {
+        ...(data.error?.code !== undefined ? { code: data.error.code } : {}),
+        httpStatus: res.status,
+      },
+    );
+  }
+  return { mediaId: data.id };
+}
+
+/**
  * POST a pre-approved template message to the Cloud API with rate-limit retry.
  * Shared by the staff-invite and fixtures senders so the auth/retry/dry-run
  * handling lives in exactly one place.
@@ -85,8 +152,13 @@ async function sendTemplate(
   dryRunLabel: string,
   /** The dynamic suffix of the template's URL button (index 0), if it has one. Never logged. */
   urlButtonSuffix?: string,
+  /** Media for a VIDEO-header template's header (see videoHeaderComponent). */
+  headerVideo?: VideoRef,
 ): Promise<{ messageId: string }> {
-  const components: Array<Record<string, unknown>> = [{ type: 'body', parameters: params }];
+  const components: Array<Record<string, unknown>> = [];
+  if (headerVideo !== undefined) components.push(videoHeaderComponent(headerVideo));
+  // A zero-param template carries no body component (Meta rejects an empty parameter list).
+  if (params.length > 0) components.push({ type: 'body', parameters: params });
   if (urlButtonSuffix !== undefined) components.push(urlButtonComponent(urlButtonSuffix));
   const payload = {
     messaging_product: 'whatsapp',
@@ -129,6 +201,7 @@ async function sendTemplate(
     }
     throw new WhatsAppError(
       `WhatsApp send failed (${code ?? res.status}): ${data.error?.message ?? res.statusText}`,
+      { ...(code !== undefined ? { code } : {}), httpStatus: res.status },
     );
   }
 }
@@ -254,10 +327,12 @@ export interface ClearanceWhatsAppInput {
   fromClubName: string;
   playerName: string;
   toClubName: string;
+  /** Deep link to the clearance in the chair's club portal ({{5}} of the template). Required. */
+  portalLink: string;
 }
 
 /**
- * Build the four positional body params for `club_clearance_pending`, in order:
+ * Build the first four positional body params of `club_clearance_pending_v2`, in order:
  * {{1}} chair name (fallback 'there'), {{2}} from-club, {{3}} player, {{4}} to-club.
  * Every param rides through cleanParam — the player name arrives from the PUBLIC register
  * form as free text (Meta rejects newlines/tabs/4+ spaces). Exported so the param
@@ -275,23 +350,155 @@ export function clearanceParams(
 }
 
 /**
- * Clearance-pending heads-up to the FROM-club chairman: a player wants to leave and
- * the club must approve or reject. No link in the body — the chair may hold no portal
- * login (chair invites were removed with admin onboarding), so the copy points at the
- * club portal / union office rather than telling the recipient to sign in. Uses the
- * `clearancePending` registry entry.
+ * Build the five positional body params for `club_clearance_pending_v2`: the name params
+ * ({@link clearanceParams}) plus {{5}} the clearance deep link. The link skips cleanParam (as
+ * `fixtureReminderParams`' portal link does) — it is server-built from the tenant origin, never
+ * free text, and truncating it would break it.
+ */
+export function clearanceV2Params(
+  input: Pick<
+    ClearanceWhatsAppInput,
+    'chairName' | 'fromClubName' | 'playerName' | 'toClubName' | 'portalLink'
+  >,
+): TemplateParam[] {
+  return [...clearanceParams(input), { type: 'text', text: input.portalLink }];
+}
+
+/**
+ * Which clearance-pending template a send uses, and its params: `clearancePendingV2` — the only
+ * clearance template since v1 (`club_clearance_pending`) was retired in code on 7 Oct 2026 — when
+ * the notice carries a link; null when it does not. {{5}} is the link and Meta rejects an empty
+ * param, so a null pick means the caller skips the WhatsApp channel (sendClearanceWhatsAppChannel
+ * in notify/index.ts records it `skipped`). Exported so tests can assert both sides.
+ */
+export function clearanceTemplateFor(
+  input: Pick<
+    ClearanceWhatsAppInput,
+    'chairName' | 'fromClubName' | 'playerName' | 'toClubName'
+  > & {
+    portalLink?: string;
+  },
+): { key: 'clearancePendingV2'; params: TemplateParam[] } | null {
+  if (!input.portalLink) return null;
+  return {
+    key: 'clearancePendingV2',
+    params: clearanceV2Params({ ...input, portalLink: input.portalLink }),
+  };
+}
+
+/**
+ * Clearance-pending heads-up to the FROM-club chairman: a player wants to leave and the club must
+ * approve or reject. Sends `club_clearance_pending_v2` with the portal deep link, which is
+ * required: a link-less notice never reaches here — the caller skips the channel and records why
+ * (sendClearanceWhatsAppChannel in notify/index.ts). The copy keeps the "contact your union
+ * office" fallback, since the chair may hold no portal login. The ClearanceReminders cron's
+ * WhatsApp channel gate reads this template's registry status (crons/clearance-reminders.ts).
  */
 export async function sendClearanceWhatsApp(
   input: ClearanceWhatsAppInput,
 ): Promise<{ messageId: string }> {
   const { to, fromClubName } = input;
-  const { name, lang } = WHATSAPP_TEMPLATES.clearancePending;
+  const { name, lang } = WHATSAPP_TEMPLATES.clearancePendingV2;
   return sendTemplate(
     to,
     name,
     lang,
-    clearanceParams(input),
+    clearanceV2Params(input),
     `clearance notice for ${fromClubName}`,
+  );
+}
+
+export interface FixtureReminderWhatsAppInput {
+  to: string; // already E.164 (see toE164)
+  chairName: string;
+  clubName: string;
+  /** Human date label, e.g. "Sat 2026-11-07". */
+  dateLabel: string;
+  portalLink: string;
+}
+
+/**
+ * Build the four positional body params for `fixture_reminder`, in order: {{1}} chair name
+ * (fallback 'there'), {{2}} club name, {{3}} fixture date, {{4}} portal link. Exported so the
+ * param order/count can be asserted against the registry directly.
+ */
+export function fixtureReminderParams(
+  input: Pick<FixtureReminderWhatsAppInput, 'chairName' | 'clubName' | 'dateLabel' | 'portalLink'>,
+): TemplateParam[] {
+  return [
+    { type: 'text', text: cleanParam(input.chairName || 'there') },
+    { type: 'text', text: cleanParam(input.clubName) },
+    { type: 'text', text: cleanParam(input.dateLabel) },
+    { type: 'text', text: input.portalLink },
+  ];
+}
+
+/**
+ * Scheduled fixture reminder to a club chair. Uses the `fixtureReminder` registry entry. The
+ * caller (the FixtureReminders cron) only reaches this once that entry is "registered".
+ */
+export async function sendFixtureReminderWhatsApp(
+  input: FixtureReminderWhatsAppInput,
+): Promise<{ messageId: string }> {
+  const { to, clubName } = input;
+  const { name, lang } = WHATSAPP_TEMPLATES.fixtureReminder;
+  return sendTemplate(
+    to,
+    name,
+    lang,
+    fixtureReminderParams(input),
+    `fixture reminder for ${clubName}`,
+  );
+}
+
+export interface OfficialAppointedWhatsAppInput {
+  to: string; // already E.164 (see toE164)
+  officialName: string;
+  /** 'umpire' | 'referee'. */
+  roleLabel: string;
+  orgName: string;
+  /** "Umzinto CC v African Warriors · Premier League". */
+  matchLine: string;
+  /** "Sat 2026-11-15, 09:00 at Kingsmead". */
+  whenWhere: string;
+}
+
+/**
+ * Build the five positional body params for `official_appointed`, in order: {{1}} official
+ * name (fallback 'there'), {{2}} role, {{3}} org name, {{4}} match line, {{5}} when and where.
+ * Exported so the param order/count can be asserted against the registry directly.
+ */
+export function officialAppointedParams(
+  input: Pick<
+    OfficialAppointedWhatsAppInput,
+    'officialName' | 'roleLabel' | 'orgName' | 'matchLine' | 'whenWhere'
+  >,
+): TemplateParam[] {
+  return [
+    { type: 'text', text: cleanParam(input.officialName || 'there') },
+    { type: 'text', text: cleanParam(input.roleLabel) },
+    { type: 'text', text: cleanParam(input.orgName) },
+    { type: 'text', text: cleanParam(input.matchLine) },
+    { type: 'text', text: cleanParam(input.whenWhere) },
+  ];
+}
+
+/**
+ * Appointment notice to an umpire/referee. Uses the `officialAppointed` registry entry and
+ * throws `WhatsAppTemplatePendingError` until it is "registered" (the OfficialNotices cron
+ * already skips the channel before then).
+ */
+export async function sendOfficialAppointedWhatsApp(
+  input: OfficialAppointedWhatsAppInput,
+): Promise<{ messageId: string }> {
+  const def = WHATSAPP_TEMPLATES.officialAppointed;
+  assertTemplateSendable(def);
+  return sendTemplate(
+    input.to,
+    def.name,
+    def.lang,
+    officialAppointedParams(input),
+    `appointment notice for ${input.officialName || 'an official'} (${input.roleLabel})`,
   );
 }
 
@@ -344,10 +551,237 @@ export async function sendCaptainsReportDueWhatsApp(
   );
 }
 
-/** No approved captain's-report template in Meta: the channel is skipped, not failed. */
+export interface CaptainsReportOpsDigestWhatsAppInput {
+  to: string; // already E.164 (see toE164)
+  recipientName: string;
+  /** "Dolphins: 3 new results, 6 reports opened, 6 notices sent, 0 failed" */
+  summary: string;
+}
+
+/**
+ * Build the two body params for `captains_report_ops_digest_v2`, in order: {{1}} recipient
+ * name (fallback 'there'), {{2}} the one-line run summary (bounded at 300 chars).
+ */
+export function captainsReportOpsDigestParams(
+  input: Pick<CaptainsReportOpsDigestWhatsAppInput, 'recipientName' | 'summary'>,
+): TemplateParam[] {
+  return [
+    { type: 'text', text: cleanParam(input.recipientName || 'there') },
+    { type: 'text', text: cleanParam(input.summary, 300) },
+  ];
+}
+
+/**
+ * The sync run's ops digest to the union-admin cell (body-only, no button). Throws
+ * `WhatsAppTemplatePendingError` while the registry entry is not `registered`.
+ */
+export async function sendCaptainsReportOpsDigestWhatsApp(
+  input: CaptainsReportOpsDigestWhatsAppInput,
+): Promise<{ messageId: string }> {
+  const { name, lang } = WHATSAPP_TEMPLATES.captainsReportOpsDigest;
+  // Widened: the `as const` literal would make the gate a type error while it is 'pending'.
+  const status = WHATSAPP_TEMPLATES.captainsReportOpsDigest
+    .status as WhatsAppTemplateDefinition['status'];
+  if (status !== 'registered') throw new WhatsAppTemplatePendingError();
+  return sendTemplate(
+    input.to,
+    name,
+    lang,
+    captainsReportOpsDigestParams(input),
+    "captain's report ops digest",
+  );
+}
+
+// ── Dolphins welcome broadcast (one-off CLI: send-dolphins-welcome-broadcast.ts) ──
+
+/** Registry status, widened: the `as const` literal would make the gate a type error while 'pending'. */
+const statusOf = (def: WhatsAppTemplateDefinition): WhatsAppTemplateDefinition['status'] =>
+  def.status;
+
+/**
+ * Options for the dolphins senders. `allowPending` skips the registry-status gate — ONLY for the
+ * video-header experiment CLI, when Meta has approved a template before its registry entry is
+ * flipped to 'registered'.
+ */
+export interface DolphinsSendOptions {
+  allowPending?: boolean;
+}
+
+/** The registry-status send gate (exported for tests). Throws unless registered or allowPending. */
+export const assertTemplateSendable = (
+  def: WhatsAppTemplateDefinition,
+  opts?: DolphinsSendOptions,
+): void => {
+  if (statusOf(def) !== 'registered' && !opts?.allowPending) {
+    throw new WhatsAppTemplatePendingError(def.name);
+  }
+};
+
+/** {{1}} for `dolphins_staff_welcome`: the recipient's name (fallback 'Club Representative'). */
+export function dolphinsStaffWelcomeParams(input: { name: string }): TemplateParam[] {
+  return [{ type: 'text', text: cleanParam(input.name || 'Club Representative') }];
+}
+
+/** {{1}} for `dolphins_player_welcome`: the player's first name (fallback 'player'). */
+export function dolphinsPlayerWelcomeParams(input: { firstName: string }): TemplateParam[] {
+  return [{ type: 'text', text: cleanParam(input.firstName || 'player') }];
+}
+
+/** `dolphins_player_fyi` has no body params. */
+export function dolphinsPlayerFyiParams(): TemplateParam[] {
+  return [];
+}
+
+/**
+ * Staff welcome (VIDEO header = the live-scoring tutorial). Throws
+ * `WhatsAppTemplatePendingError` while the registry entry is not `registered`.
+ */
+export async function sendDolphinsStaffWelcomeWhatsApp(
+  to: string,
+  name: string,
+  videoRef: VideoRef,
+  opts?: DolphinsSendOptions,
+): Promise<{ messageId: string }> {
+  const def = WHATSAPP_TEMPLATES.dolphinsStaffWelcome;
+  assertTemplateSendable(def, opts);
+  return sendTemplate(
+    to,
+    def.name,
+    def.lang,
+    dolphinsStaffWelcomeParams({ name }),
+    'dolphins staff welcome',
+    undefined,
+    videoRef,
+  );
+}
+
+/**
+ * Player welcome (VIDEO header = the scouting-pipeline video). Throws
+ * `WhatsAppTemplatePendingError` while the registry entry is not `registered`.
+ */
+export async function sendDolphinsPlayerWelcomeWhatsApp(
+  to: string,
+  firstName: string,
+  videoRef: VideoRef,
+  opts?: DolphinsSendOptions,
+): Promise<{ messageId: string }> {
+  const def = WHATSAPP_TEMPLATES.dolphinsPlayerWelcome;
+  assertTemplateSendable(def, opts);
+  return sendTemplate(
+    to,
+    def.name,
+    def.lang,
+    dolphinsPlayerWelcomeParams({ firstName }),
+    'dolphins player welcome',
+    undefined,
+    videoRef,
+  );
+}
+
+/**
+ * Staff FYI copy of the player message (VIDEO header = the scouting-pipeline video), sent after
+ * the staff welcome. Throws `WhatsAppTemplatePendingError` while not `registered`.
+ */
+export async function sendDolphinsPlayerFyiWhatsApp(
+  to: string,
+  videoRef: VideoRef,
+  opts?: DolphinsSendOptions,
+): Promise<{ messageId: string }> {
+  const def = WHATSAPP_TEMPLATES.dolphinsPlayerFyi;
+  assertTemplateSendable(def, opts);
+  return sendTemplate(
+    to,
+    def.name,
+    def.lang,
+    dolphinsPlayerFyiParams(),
+    'dolphins player FYI',
+    undefined,
+    videoRef,
+  );
+}
+
+// ── EMCU scorer broadcast (one-off CLI: send-emcu-scorer-broadcast.ts) ──
+// Both templates carry a VIDEO header and two STATIC URL buttons (App Store / Google Play):
+// static buttons need no send-time component, so these senders pass no button suffix.
+
+/**
+ * The three body params for `emcu_scorer_accounts_notice`, in order: {{1}} chair name (fallback
+ * 'Chairperson'), {{2}} club name, {{3}} the chair email the logins were sent to. Every param
+ * rides through cleanParam (an email address has no whitespace, so it passes unchanged).
+ * NEVER a password — logins go by email only.
+ */
+export function emcuScorerAccountsNoticeParams(input: {
+  chairName: string;
+  clubName: string;
+  chairEmail: string;
+}): TemplateParam[] {
+  return [
+    { type: 'text', text: cleanParam(input.chairName || 'Chairperson') },
+    { type: 'text', text: cleanParam(input.clubName) },
+    { type: 'text', text: cleanParam(input.chairEmail) },
+  ];
+}
+
+/** The one body param for `emcu_player_scoring` (10 Oct 2026 edit): {{1}} first name (fallback 'player'). */
+export function emcuPlayerScoringParams(input: { firstName: string }): TemplateParam[] {
+  return [{ type: 'text', text: cleanParam(input.firstName || 'player') }];
+}
+
+/**
+ * EMCU chair notice (VIDEO header = the staff live-scoring video): "your club's scorer accounts
+ * have been emailed to {{3}}". Throws `WhatsAppTemplatePendingError` while not `registered`.
+ */
+export async function sendEmcuScorerAccountsNoticeWhatsApp(
+  to: string,
+  input: { chairName: string; clubName: string; chairEmail: string },
+  videoRef: VideoRef,
+  opts?: DolphinsSendOptions,
+): Promise<{ messageId: string }> {
+  const def = WHATSAPP_TEMPLATES.emcuScorerAccountsNotice;
+  assertTemplateSendable(def, opts);
+  return sendTemplate(
+    to,
+    def.name,
+    def.lang,
+    emcuScorerAccountsNoticeParams(input),
+    'EMCU scorer accounts notice',
+    undefined,
+    videoRef,
+  );
+}
+
+/**
+ * EMCU player notice (VIDEO header = the staff live-scoring video). Throws
+ * `WhatsAppTemplatePendingError` while not `registered`.
+ */
+export async function sendEmcuPlayerScoringWhatsApp(
+  to: string,
+  input: { firstName: string },
+  videoRef: VideoRef,
+  opts?: DolphinsSendOptions,
+): Promise<{ messageId: string }> {
+  const def = WHATSAPP_TEMPLATES.emcuPlayerScoring;
+  assertTemplateSendable(def, opts);
+  return sendTemplate(
+    to,
+    def.name,
+    def.lang,
+    emcuPlayerScoringParams(input),
+    'EMCU player scoring notice',
+    undefined,
+    videoRef,
+  );
+}
+
+/** No approved template in Meta for this send: the channel is skipped, not failed. */
 export class WhatsAppTemplatePendingError extends Error {
-  constructor() {
-    super("no captain's report WhatsApp template is approved yet");
+  /** `templateName` absent ⇒ the captain's-report wording (the original and default use). */
+  constructor(templateName?: string) {
+    super(
+      templateName
+        ? `WhatsApp template ${templateName} is not approved in Meta yet`
+        : "no captain's report WhatsApp template is approved yet",
+    );
     this.name = 'WhatsAppTemplatePendingError';
   }
 }

@@ -29,8 +29,8 @@
  *     never touched, so every pre-existing ref and teamRefs list stays byte-identical.
  */
 import { createHash } from 'node:crypto';
-import { clubTeamsForLeague, isVeteransLeague } from '../../engine/src/leagues.js';
-import { slotSource } from '../../engine/src/formats.js';
+import { clubTeamsForLeague } from '../../engine/src/leagues.js';
+import { isSlotRef, slotSource } from '../../engine/src/formats.js';
 import {
   BUNDLE_SCHEMA,
   BUNDLE_VERSION,
@@ -67,6 +67,13 @@ import type {
   VeteransAffiliation,
 } from './types.js';
 import { resolveVertical } from './vertical.js';
+import {
+  civilDateAt,
+  desiredTeamRefs,
+  fanOutContext,
+  isExcludedLeagueKey,
+  unclassifiedLeagueKeys,
+} from './medicoach-sync/player-placement.js';
 
 /* ─────────────────────────── Inputs / outputs ─────────────────────────── */
 
@@ -156,6 +163,17 @@ export interface ExportSummary {
     };
     /** Club squad teams created (one per club that needed one). */
     squadTeams: number;
+    /**
+     * Fan-out placement (present only for a tenant with `placement.fanOut`): players given
+     * fan-out sides, the memberships added, rows lacking gender/dob (legacy placement only),
+     * and in-scope leagues the recipe leaves unclassified (they never fan out).
+     */
+    fanOut?: {
+      playersFannedOut: number;
+      memberships: number;
+      placementDataGaps: number;
+      unclassifiedLeagues: string[];
+    };
   };
   veterans: {
     playersWithVeteransClub: number;
@@ -213,9 +231,8 @@ export function slugify(s: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
-export function isExcludedLeagueKey(key: string): boolean {
-  return key === 'demo' || key.startsWith('seed-');
-}
+/** Shared with the player sync's placement context (ADR 0019). */
+export { isExcludedLeagueKey };
 
 /* ─────────────────────────── PII masking ───────────────────────────
    Everything the CLI prints goes through these (or is a count/id). */
@@ -535,7 +552,8 @@ export function scheduledInstant(date: string, time: string | undefined, offset:
 /**
  * Map one stored fixture. Status: cancelled → skip; postponed → scheduled with a note
  * (its stored date is already the rescheduled one); anything else → scheduled with the
- * source status kept for the results backfill. A `win:`/`lose:` side is a slot; a concrete
+ * source status kept for the results backfill. A `win:`/`lose:` side is a slot; a `pos:`/`tbd:`
+ * side skips the fixture (`unresolved-side`); a concrete
  * side is a teamRef (smart club materialises a knockout side by replacing the slot).
  */
 export function mapFixture(f: SourceFixture, ctx: FixtureContext): FixtureOutcome {
@@ -557,6 +575,9 @@ export function mapFixture(f: SourceFixture, ctx: FixtureContext): FixtureOutcom
           ofFixtureRef: refs.fixture(ctx.tenant, ctx.seriesId, src.fixtureId),
         },
       };
+    // A `pos:`/`tbd:` placeholder names neither a team nor a fixture to wait on: the fixture is
+    // skipped as unresolved until the admin sets the team (ADR 0018).
+    if (isSlotRef(id)) return null;
     const team = ctx.resolveTeam(id);
     return team ? { ref: team.ref, ground: team.ground } : null;
   };
@@ -1544,11 +1565,31 @@ function buildPlayers(
     return t;
   };
   const includeInactive = input.options?.includeInactivePlayers === true;
-  const leagueKeys = new Set(leagues.map((l) => l.key));
-  const affiliationLeagues = leagues.filter((l) => !l.fixturesOnly);
-  const veteransLeagueKeys = leagues
-    .filter((l) => isVeteransLeague({ key: l.key, label: l.label }))
-    .map((l) => l.key);
+  // Shared with the player sync (ADR 0019) so the two paths can never place a player apart.
+  // Fan-out ages are taken at the bundle's generatedAt, on the tenant's civil date — the same
+  // rule the sync applies to its run instant.
+  // (Computed only for a fan-out tenant: the legacy path never reads a date.)
+  let fanOut: ReturnType<typeof fanOutContext>;
+  if (input.recipes.placement?.fanOut) {
+    const at = new Date(input.options?.generatedAt ?? Date.now());
+    const evalAt = Number.isNaN(at.getTime()) ? new Date() : at;
+    fanOut = fanOutContext(input.recipes, civilDateAt(evalAt, input.recipes.utcOffset || '+02:00'));
+  }
+  const placementCtx = {
+    leagues,
+    clubsById,
+    sidesOf: (clubId: string, leagueKey: string) =>
+      sidesOf(clubId, leagueKey).map((t) => t.externalRef),
+    squadRef: (clubId: string) => squadOf(clubId).externalRef,
+    ...(fanOut ? { fanOut } : {}),
+  };
+  if (fanOut)
+    summary.players.fanOut = {
+      playersFannedOut: 0,
+      memberships: 0,
+      placementDataGaps: 0,
+      unclassifiedLeagues: unclassifiedLeagueKeys(placementCtx),
+    };
 
   // Pick one row per naturalKey: active beats non-active, then the newest registration.
   const chosen = new Map<string, PlayerRegistration>();
@@ -1586,22 +1627,9 @@ function buildPlayers(
   for (const p of chosen.values()) {
     // Rows are read per club in clubsById, so the institution always exists.
     const inst = institutions.get(p.clubId)!;
-    const teamRefs: string[] = [];
-
-    // Main club side: the registered league, else the club's only affiliation league.
-    let leagueKey = p.team && leagueKeys.has(p.team) ? p.team : undefined;
-    let candidateCount = 0;
-    if (!p.team) {
-      const club = clubsById.get(p.clubId);
-      const candidates = (club?.leagues ?? []).filter((k) =>
-        affiliationLeagues.some((l) => l.key === k),
-      );
-      candidateCount = candidates.length;
-      if (candidates.length === 1) leagueKey = candidates[0];
-    }
-    const sides = leagueKey ? sidesOf(p.clubId, leagueKey) : [];
-    if (sides.length === 1) teamRefs.push(sides[0].externalRef);
-    else if (sides.length > 1) summary.players.ambiguousSide++;
+    const placed = desiredTeamRefs(p, placementCtx);
+    const teamRefs = placed.teamRefs;
+    summary.players.ambiguousSide += placed.ambiguousSides;
 
     // Veterans second club.
     let veteransInstitutionRef: string | undefined;
@@ -1609,37 +1637,20 @@ function buildPlayers(
       summary.veterans.playersWithVeteransClub++;
       const vInst = institutions.get(p.veteransClubId);
       if (vInst) veteransInstitutionRef = vInst.externalRef;
-      let resolved = false;
-      for (const k of veteransLeagueKeys) {
-        const vs = sidesOf(p.veteransClubId, k);
-        if (vs.length === 1 && !teamRefs.includes(vs[0].externalRef)) {
-          teamRefs.push(vs[0].externalRef);
-          resolved = true;
-        } else if (vs.length > 1) summary.players.ambiguousSide++;
-      }
-      if (resolved) summary.veterans.resolvedVeteransTeam++;
+      if (placed.veteransResolved) summary.veterans.resolvedVeteransTeam++;
     }
 
-    // Fallback placement, ONLY for a player the rules above left without any team: an
-    // already-placed player keeps exactly the teamRefs earlier exports gave it.
-    const placement = summary.players.placement;
-    if (sides.length === 1) placement.singleSide++;
-    else if (teamRefs.length) placement.veteransOnly++;
-    else if (sides.length > 1) {
-      for (const s of sides) teamRefs.push(s.externalRef);
-      placement.allSidesOfAmbiguous++;
-    } else {
-      teamRefs.push(squadOf(p.clubId).externalRef);
-      placement.clubSquad++;
-      const why = summary.players.clubSquadReasons;
-      if (p.team && !leagueKey) why.leagueNotExported++;
-      else if (leagueKey) why.noSideInLeague++;
-      else if (candidateCount > 1) why.multipleCandidateLeagues++;
-      else why.noRegisteredLeague++;
-    }
+    summary.players.placement[placed.placement]++;
+    if (placed.clubSquadReason) summary.players.clubSquadReasons[placed.clubSquadReason]++;
 
     if (teamRefs.length) summary.players.withTeam++;
     else summary.players.noTeam++;
+    const fanSummary = summary.players.fanOut;
+    if (fanSummary) {
+      if (placed.fanOutTeamRefs.length) fanSummary.playersFannedOut++;
+      fanSummary.memberships += placed.fanOutTeamRefs.length;
+      if (placed.placementDataGap) fanSummary.placementDataGaps++;
+    }
 
     const player: BundlePlayer = {
       externalRef: refs.player(tenant, p.naturalKey),
@@ -1661,6 +1672,8 @@ function buildPlayers(
       ...(typeof p.isWk === 'boolean' ? { isWk: p.isWk } : {}),
       ...(optStr(p.position) ? { position: optStr(p.position) } : {}),
       teamRefs,
+      // Fan-out tenants only (same split the sync pushes): ADD-ONLY sides, disjoint from teamRefs.
+      ...(fanOut ? { fanOutTeamRefs: placed.fanOutTeamRefs } : {}),
       ...(veteransInstitutionRef ? { veteransInstitutionRef } : {}),
     };
     out.push(player);

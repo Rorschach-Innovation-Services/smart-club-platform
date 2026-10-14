@@ -1777,6 +1777,25 @@ describe('public registration ID-doc upload-url', () => {
     assert.equal(body.contentType, 'application/pdf');
     assert.match(body.objectKey, /-id\.pdf$/);
   });
+
+  test('local uploads mode: a local/ key and a PUT to this server’s /local-uploads sink', async () => {
+    // dev:local has no S3 bucket — without this branch the public flow 500s at the presign.
+    const prev = process.env.LOCAL_UPLOADS_DIR;
+    process.env.LOCAL_UPLOADS_DIR = '/tmp/never-written-by-this-test';
+    try {
+      const res = await app.request(
+        'http://localhost/register/regclub/id-doc/upload-url?t=reg-upload-token',
+        { method: 'POST', body: JSON.stringify({ contentType: 'image/png' }) },
+      );
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { uploadUrl: string; objectKey: string };
+      assert.match(body.objectKey, /^local\/dolphins\/regclub\/reg-[0-9a-f-]+-id\.png$/);
+      assert.equal(body.uploadUrl, `http://localhost/local-uploads/${body.objectKey}`);
+    } finally {
+      if (prev === undefined) delete process.env.LOCAL_UPLOADS_DIR;
+      else process.env.LOCAL_UPLOADS_DIR = prev;
+    }
+  });
 });
 
 describe('POST /register/:clubId (public self-registration body)', () => {
@@ -6955,7 +6974,10 @@ describe('Clearance chairman notice (comm log + channels)', () => {
     assert.equal(email?.to, 'chair@ntc.test');
     assert.equal(email?.by, 'admin@test', 'attributed to the requesting rep');
     assert.equal(email?.idempotencyKey, `clearance-${clearance.id}-email`);
-    assert.equal(wa?.status, 'sent');
+    // The only clearance template (club_clearance_pending_v2) carries the link, and this env has
+    // no canonical origin (like a dev stage), so WhatsApp is skipped — recorded, with why.
+    assert.equal(wa?.status, 'skipped');
+    assert.equal(wa?.error, 'no portal link for this tenant');
     assert.equal(wa?.to, '27835556666', 'cell normalized to E.164');
   });
 
@@ -7147,7 +7169,7 @@ describe('Clearance chairman notice (comm log + channels)', () => {
     assert.ok(events.every((e) => e.status === 'skipped'));
   });
 
-  test('declaring a DIRECTORY previous club opens the clearance with no notice (no chairman on file)', async () => {
+  test('declaring a DIRECTORY previous club opens the clearance with no SOURCE notice (no chairman on file)', async () => {
     const cfg = await repo.getTenantConfig('dolphins');
     assert.ok(cfg, 'precondition: tenant config exists');
     await repo.putTenantConfig({
@@ -7184,8 +7206,8 @@ describe('Clearance chairman notice (comm log + channels)', () => {
       (x) => x.playerName === 'Dumi Zwane',
     );
     assert.ok(opened?.fromClubDirectory, 'the clearance is flagged as directory-sourced');
-    // No Club record exists for a directory entry, so there is nowhere a notice could have
-    // landed — the skip branch is exactly "no on-system source club".
+    // No Club record exists for a directory entry, so there is nowhere a source notice could
+    // have landed (the destination + admin fan-out is covered in clearance-notify.int.test).
     assert.equal(await repo.getClub('dolphins', 'ntc-dir-prev'), null);
   });
 });
@@ -7723,10 +7745,11 @@ describe('Clearance resolved notice (union reject / override → both clubs)', (
       ).status,
       200,
     );
-    // Reopen → version 2.
+    // Reopen → version 2. A localhost Origin gives the notices a link (no canonical origin here),
+    // which the source's WhatsApp template needs.
     const reopened = await app.request('/admin/clearances/crv-r-clr/reopen', {
       method: 'POST',
-      headers: headers(ADMIN),
+      headers: { ...headers(ADMIN), origin: 'http://localhost:5173' },
       body: JSON.stringify({ fromClubId: 'crv-r-src' }),
     });
     assert.equal(reopened.status, 200);

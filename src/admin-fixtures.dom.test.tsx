@@ -111,7 +111,14 @@ const openEditor = async (user: ReturnType<typeof userEvent.setup>, rowText: Reg
   await user.click(within(row).getByTitle('Edit fixture'));
 };
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  window.history.replaceState(null, '', '/admin/fixtures');
+});
+// Leagues & tournaments opens on its table; `?series=` lands on one series' page (its
+// fixtures, release bar and status), as a link from elsewhere does.
+const openOn = (seriesId: string) =>
+  window.history.replaceState(null, '', `/admin/fixtures?series=${seriesId}`);
 
 describe('the venue picker', () => {
   const allocated = () =>
@@ -563,6 +570,243 @@ describe('a knockout side that is still a forward reference', () => {
   });
 });
 
+describe('knockout Set team / revert (ADR 0018)', () => {
+  const ko = (f2: Record<string, unknown>) =>
+    series({
+      teams: ['spartan', 'tongaat'],
+      fixtures: [
+        { id: 'f1', round: 1, date: '2026-09-12', home: 'spartan', away: 'tongaat' },
+        { id: 'f2', round: 2, date: '2026-09-19', ...f2 },
+      ],
+    } as Partial<Series>);
+
+  const renderKo = (s: Series, onSetSide: ReturnType<typeof vi.fn>) => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <FixtureTable
+        series={s}
+        clubs={clubs}
+        onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
+        onDeleteSeries={vi.fn()}
+        onDuplicateSeries={vi.fn()}
+        onAskRelease={vi.fn()}
+        onAskRecall={vi.fn()}
+        onAskReveal={vi.fn()}
+        onApprove={vi.fn()}
+        onUnapprove={vi.fn()}
+        onAllocateVenues={vi.fn()}
+        onCheckClashes={vi.fn().mockResolvedValue({ results: [] })}
+        onSetSide={onSetSide}
+        toast={vi.fn()}
+      />,
+    );
+    return user;
+  };
+  const openKo = async (user: ReturnType<typeof userEvent.setup>, text: RegExp) => {
+    const row = screen.getAllByRole('row').find((r) => text.test(r.textContent ?? ''))!;
+    await user.click(within(row).getByTitle('Edit fixture'));
+  };
+
+  it('a tbd: side reads as its words and Set team sends the picked team to the server', async () => {
+    const onSetSide = vi.fn().mockResolvedValue(undefined);
+    const user = renderKo(ko({ home: 'win:f1', away: 'tbd:Best%203rd%20place' }), onSetSide);
+    await openKo(user, /best 3rd place/i);
+
+    const away = screen.getByLabelText(/away \(visitors\)/i) as HTMLInputElement;
+    expect(away).toBeDisabled();
+    expect(away.value).toBe('Best 3rd place');
+    const picker = screen.getByRole('combobox', { name: /team to set as away/i });
+    // Series teams first, then every other club side grouped by club.
+    const groups = Array.from(picker.querySelectorAll('optgroup')).map((g) => g.label);
+    expect(groups).toEqual(['In this series', 'Ilembe CC']);
+    await user.selectOptions(picker, 'ilembe');
+    await user.click(screen.getByRole('button', { name: /set away team/i }));
+    expect(onSetSide).toHaveBeenCalledWith('s1', 'f2', 'away', 'ilembe');
+    // No revert before anything is set.
+    expect(screen.queryByRole('button', { name: /revert away/i })).toBeNull();
+  });
+
+  it('a side set from a placeholder shows the team, the placeholder, and reverts', async () => {
+    const onSetSide = vi.fn().mockResolvedValue(undefined);
+    const user = renderKo(
+      ko({ home: 'win:f1', away: 'tongaat', slots: { away: 'tbd:Best%203rd%20place' } }),
+      onSetSide,
+    );
+    await openKo(user, /winner/i);
+    expect((screen.getByLabelText(/away \(visitors\)/i) as HTMLInputElement).value).toBe(
+      'Tongaat CC',
+    );
+    expect(screen.getByText(/placeholder: best 3rd place/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /revert away to placeholder/i }));
+    expect(onSetSide).toHaveBeenCalledWith('s1', 'f2', 'away', null);
+  });
+
+  it('a clash refusal from the server shows the clash panel inline', async () => {
+    const clash: Clash = {
+      fixtureId: 'f2',
+      round: 2,
+      ground: 'Spartan Park',
+      date: '2026-09-19',
+      home: 'Spartan Sporting CC',
+      away: 'Winner of Round 1',
+      with: { seriesId: 's9', seriesName: 'Other league', fixtureId: 'f4', round: 3 },
+    };
+    const onSetSide = vi.fn().mockRejectedValue(
+      new ApiError(409, 'Change blocked — 1 venue clash(es)', 'venue_clash', {
+        clashes: [clash],
+      }),
+    );
+    const user = renderKo(ko({ home: 'pos:s-g-a:1', away: 'win:f1' }), onSetSide);
+    await openKo(user, /group a/i);
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: /team to set as home/i }),
+      'spartan',
+    );
+    await user.click(screen.getByRole('button', { name: /set home team/i }));
+    expect(await screen.findByText(/change blocked — not saved/i)).toBeInTheDocument();
+  });
+
+  // A club with two named sides, for the participant-series picker.
+  const rosterClub = {
+    id: 'ilembe',
+    name: 'Ilembe CC',
+    leagues: ['premier'],
+    leagueTeams: { premier: 2 },
+    teamRosters: {
+      premier: [
+        { id: 'tm_il_a', name: 'Ilembe A' },
+        { id: 'tm_il_b', name: 'Ilembe B' },
+      ],
+    },
+    ground: { venue: 'KwaDukuza Stadium' },
+  } as unknown as Club;
+
+  it('(13) a legacy series (no participants) offers one option per club — club ids only', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <FixtureTable
+        series={ko({ home: 'win:f1', away: 'tbd:Best%203rd%20place' })}
+        clubs={[...clubs.filter((c) => c.id !== 'ilembe'), rosterClub]}
+        onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
+        onDeleteSeries={vi.fn()}
+        onDuplicateSeries={vi.fn()}
+        onAskRelease={vi.fn()}
+        onAskRecall={vi.fn()}
+        onAskReveal={vi.fn()}
+        onApprove={vi.fn()}
+        onUnapprove={vi.fn()}
+        onAllocateVenues={vi.fn()}
+        onCheckClashes={vi.fn().mockResolvedValue({ results: [] })}
+        onSetSide={vi.fn().mockResolvedValue(undefined)}
+        toast={vi.fn()}
+      />,
+    );
+    await openKo(user, /best 3rd place/i);
+    const picker = screen.getByRole('combobox', { name: /team to set as away/i });
+    const values = Array.from(picker.querySelectorAll('option')).map((o) => o.value);
+    expect(values).toEqual(['', 'spartan', 'tongaat', 'ilembe']);
+  });
+
+  it('(13) a participant series offers each named side of an outside club', async () => {
+    const user = userEvent.setup();
+    const s = {
+      ...ko({ home: 'win:f1', away: 'tbd:Best%203rd%20place' }),
+      participants: [
+        { teamId: 'spartan', clubId: 'spartan', name: 'Spartan Sporting CC' },
+        { teamId: 'tongaat', clubId: 'tongaat', name: 'Tongaat CC' },
+      ],
+    } as unknown as Series;
+    renderWithProviders(
+      <FixtureTable
+        series={s}
+        clubs={[...clubs.filter((c) => c.id !== 'ilembe'), rosterClub]}
+        onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
+        onDeleteSeries={vi.fn()}
+        onDuplicateSeries={vi.fn()}
+        onAskRelease={vi.fn()}
+        onAskRecall={vi.fn()}
+        onAskReveal={vi.fn()}
+        onApprove={vi.fn()}
+        onUnapprove={vi.fn()}
+        onAllocateVenues={vi.fn()}
+        onCheckClashes={vi.fn().mockResolvedValue({ results: [] })}
+        onSetSide={vi.fn().mockResolvedValue(undefined)}
+        toast={vi.fn()}
+      />,
+    );
+    await openKo(user, /best 3rd place/i);
+    const picker = screen.getByRole('combobox', { name: /team to set as away/i });
+    const values = Array.from(picker.querySelectorAll('option')).map((o) => o.value);
+    expect(values).toEqual(['', 'spartan', 'tongaat', 'tm_il_a', 'tm_il_b']);
+  });
+
+  it('(14) on a medicoach-synced fixture a win: side keeps Set team, with override copy (ADR 0022 §7)', async () => {
+    const onSetSide = vi.fn().mockResolvedValue(undefined);
+    const user = renderKo(
+      ko({ home: 'win:f1', away: 'tbd:Best%203rd%20place', syncMapped: true }),
+      onSetSide,
+    );
+    await openKo(user, /best 3rd place/i);
+    expect(screen.getByText(/filled by the medicoach sync/i)).toBeInTheDocument();
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: /team to set as home/i }),
+      'ilembe',
+    );
+    await user.click(screen.getByRole('button', { name: /set home team/i }));
+    expect(onSetSide).toHaveBeenCalledWith('s1', 'f2', 'home', 'ilembe');
+    expect(screen.getByRole('combobox', { name: /team to set as away/i })).toBeInTheDocument();
+  });
+
+  it('(14) a sync-resolved side warns that Set team overrides Match Centre', async () => {
+    const user = renderKo(
+      ko({
+        home: 'spartan',
+        away: 'tbd:Best%203rd%20place',
+        slots: { home: 'win:f1' },
+        syncMapped: true,
+      }),
+      vi.fn().mockResolvedValue(undefined),
+    );
+    await openKo(user, /best 3rd place/i);
+    expect(
+      screen.getAllByText(
+        /match centre resolved this side as spartan sporting cc; your choice overrides it until you revert/i,
+      ).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText(/manual override/i)).toBeNull();
+  });
+
+  it('(14) a manually overridden side on a synced series carries the divergence badge', async () => {
+    const user = renderKo(
+      ko({
+        home: 'ilembe',
+        away: 'tbd:x',
+        slots: { home: 'win:f1' },
+        slotsManual: { home: true },
+        syncMapped: true,
+      }),
+      vi.fn().mockResolvedValue(undefined),
+    );
+    await openKo(user, /ilembe/i);
+    expect(screen.getByText('Manual override')).toBeInTheDocument();
+    expect(screen.getByText(/match centre may differ until you revert/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /revert home to placeholder/i })).toBeInTheDocument();
+  });
+
+  it('(6) a stale-version refusal shows the refresh message inline', async () => {
+    const { SERIES_CONFLICT_MESSAGE, SERIES_CONFLICT_FRIENDLY } = await import('./api');
+    const onSetSide = vi.fn().mockRejectedValue(new ApiError(409, SERIES_CONFLICT_MESSAGE));
+    const user = renderKo(ko({ home: 'win:f1', away: 'tbd:Best%203rd%20place' }), onSetSide);
+    await openKo(user, /best 3rd place/i);
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: /team to set as away/i }),
+      'ilembe',
+    );
+    await user.click(screen.getByRole('button', { name: /set away team/i }));
+    expect(await screen.findByText(SERIES_CONFLICT_FRIENDLY)).toBeInTheDocument();
+  });
+});
+
 describe('a tenant with no series still gets the season machinery', () => {
   // Generating a season stage is what CREATES the first series. Gating the whole page on
   // allSeries.length hid the only way in — the exact tenant state after clear-cohort or a
@@ -595,13 +839,15 @@ describe('a tenant with no series still gets the season machinery', () => {
       />,
     );
 
-  it('renders the venues registry, the Start-a-season flow and the scoped series empty state', () => {
+  it('renders the venues registry, the Start-a-season flow and the empty competitions table', () => {
     renderPage();
     expect(screen.getByRole('heading', { name: /venues/i })).toBeTruthy();
     expect(screen.getByText(/no season running/i)).toBeTruthy();
-    // The header action, the Seasons card's CTA and the series empty state.
-    expect(screen.getAllByRole('button', { name: /^start a season$/i })).toHaveLength(3);
-    expect(screen.getByText(/no series yet/i)).toBeTruthy();
+    // The header action and the Seasons card's CTA. The empty table offers Create instead.
+    expect(screen.getAllByRole('button', { name: /^start a season$/i })).toHaveLength(2);
+    expect(screen.getByText(/no leagues or tournaments yet/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: '+ Create league' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '+ Create tournament' })).toBeTruthy();
   });
 
   // The page header's button is always there; what must not appear is the Seasons card's
@@ -618,8 +864,8 @@ describe('a tenant with no series still gets the season machinery', () => {
   it('reports a failed season-setup fetch rather than rendering it as an empty season list', () => {
     renderPage({ structuresFailed: true });
     expect(screen.queryByText(/no season running/i)).toBeNull();
-    // Header + the series empty state; the Seasons card offers none.
-    expect(screen.getAllByRole('button', { name: /^start a season$/i })).toHaveLength(2);
+    // The header only; the Seasons card offers none, and the series empty state never does.
+    expect(screen.getAllByRole('button', { name: /^start a season$/i })).toHaveLength(1);
     expect(screen.getByText(/couldn.t load the season setup/i)).toBeTruthy();
   });
 
@@ -632,18 +878,15 @@ describe('a tenant with no series still gets the season machinery', () => {
     expect(screen.queryByText(/one-off series/i)).toBeNull();
   });
 
-  // Quick start is gone: seasons run on the operator's setup, and a one-off cup is an
-  // operator-created structure — the page says so rather than pointing at a template.
-  it('hands one-off cups to the operator and never mentions quick start', () => {
+  // ADR 0022: the union creates its own leagues and tournaments here; operator seasons still
+  // run stage by stage. Quick start stays gone.
+  it('says where leagues and tournaments are made and never mentions quick start', () => {
     renderPage();
-    expect(screen.getByText(/on the setup your platform operator created for it/i)).toBeTruthy();
     expect(
-      screen.getByText(/your operator can add a One-off tournament structure for it/i),
+      screen.getByText(/create a league or tournament under leagues & tournaments/i),
     ).toBeTruthy();
     expect(
-      screen.getByText(
-        /For a one-off cup or festival, your operator can add a One-off tournament structure\./,
-      ),
+      screen.getByText(/seasons your platform operator set up run stage by stage/i),
     ).toBeTruthy();
     expect(screen.queryByText(/quick-start|quick start/i)).toBeNull();
   });
@@ -710,8 +953,8 @@ describe('the "Start a season" launcher — one entry point, routed by league', 
     { id: 'c2', name: 'Club 2', affiliation: 'complete', leagues: ['premier', 'friendlies'] },
   ] as unknown as Club[];
 
-  // What belongs to THIS boundary is the routing decision: a set-up league gets the season
-  // form, one without is listed disabled with the hand-off to the operator. No third path.
+  // What belongs to THIS boundary is the routing decision: a ready league can start in the
+  // same modal, one without setup is listed disabled with the hand-off to the operator.
   const renderPage = () => ({
     ...renderWithProviders(
       <AdminFixtures
@@ -738,27 +981,24 @@ describe('the "Start a season" launcher — one entry point, routed by league', 
     ),
   });
 
-  // Two buttons open the same launcher with no series yet (the header action and the
-  // empty-state CTA) — either proves the wiring, so the first one found is enough.
+  // Two buttons open the same modal with no series yet (the header action and the Seasons
+  // card's empty-state CTA) — either proves the wiring, so the first one found is enough.
   const openLauncher = async (user: ReturnType<typeof userEvent.setup>) =>
     user.click(screen.getAllByRole('button', { name: /^start a season$/i })[0]);
 
   const launcher = () => screen.getByRole('dialog', { name: /^start a season$/i });
-  const continueBtn = () => within(launcher()).getByRole('button', { name: /continue/i });
 
-  it('routes a season-capable league straight to the season form, in the same modal', async () => {
+  // One step: the league, the season and Start season are in the modal that opens — the
+  // old Continue → second form (which asked for the league again) is gone.
+  it('offers a ready league, the season label and Start season in the one modal', async () => {
     const user = userEvent.setup();
     renderPage();
     await openLauncher(user);
 
-    await user.selectOptions(
-      within(launcher()).getByRole('combobox', { name: 'League' }),
-      'premier',
-    );
-    await user.click(continueBtn());
-
-    expect(screen.getByRole('button', { name: /^start season$/i })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /continue/i })).toBeNull();
+    expect(within(launcher()).getByRole('combobox', { name: 'League' })).toHaveValue('premier');
+    expect(within(launcher()).getByRole('textbox', { name: 'Season' })).toBeTruthy();
+    expect(within(launcher()).getByRole('button', { name: /^start season$/i })).toBeEnabled();
+    expect(within(launcher()).queryByRole('button', { name: /continue/i })).toBeNull();
   });
 
   it('lists a league with no setup disabled, with the hand-off to the operator', async () => {
@@ -767,7 +1007,10 @@ describe('the "Start a season" launcher — one entry point, routed by league', 
     await openLauncher(user);
 
     const select = within(launcher()).getByRole('combobox', { name: 'League' });
-    expect(within(select).getByRole('option', { name: 'Friendlies' })).toBeDisabled();
+    // Disabled, with its reason in the option itself.
+    expect(
+      within(select).getByRole('option', { name: 'Friendlies — not set up by your operator' }),
+    ).toBeDisabled();
     expect(
       within(launcher()).getByText(
         'Friendlies has no season setup. Ask your operator to set this league up.',
@@ -792,9 +1035,9 @@ describe('the "Start a season" launcher — one entry point, routed by league', 
     expect(within(launcher()).queryByRole('radio', { name: /^one-off tournament/i })).toBeNull();
   });
 
-  it('groups the league select by whether the operator set it up', async () => {
-    // `leagues` above has one set-up league ('premier') and one without ('friendlies'),
-    // so both optgroups should render.
+  it('groups the league select by readiness', async () => {
+    // `leagues` above has one ready league ('premier') and one without setup
+    // ('friendlies'), so both optgroups should render.
     const user = userEvent.setup();
     renderPage();
     await openLauncher(user);
@@ -803,7 +1046,7 @@ describe('the "Start a season" launcher — one entry point, routed by league', 
     const groups = Array.from(select.querySelectorAll('optgroup')).map((g) =>
       g.getAttribute('label'),
     );
-    expect(groups).toEqual(['Set up by your operator', 'Not set up yet — ask your operator']);
+    expect(groups).toEqual(['Ready to start', 'Needs operator setup']);
   });
 });
 
@@ -954,6 +1197,7 @@ describe('progressive release — withhold at release, reveal later (ADR 0011)',
   ) => {
     const onSetReleased = spies.onSetReleased ?? vi.fn();
     const onReveal = spies.onReveal ?? vi.fn();
+    openOn(s.id);
     renderWithProviders(
       <AdminFixtures
         clubs={clubs}
@@ -1021,8 +1265,9 @@ describe('progressive release — withhold at release, reveal later (ADR 0011)',
   });
 });
 
-describe('one release bar — the header and the cards show status only', () => {
-  const renderPage = (all: Series[]) =>
+describe('one release bar — the series page shows status only above it', () => {
+  const renderPage = (all: Series[]) => (
+    openOn(all[0].id),
     renderWithProviders(
       <AdminFixtures
         clubs={clubs}
@@ -1046,12 +1291,14 @@ describe('one release bar — the header and the cards show status only', () => 
         onDeleteSeasonRun={vi.fn()}
         onGenerateStageSeries={vi.fn()}
       />,
-    );
+    )
+  );
 
-  const header = () => document.querySelector('.page-head') as HTMLElement;
+  // The status pills sit beside the series' name, above its fixtures and release bar.
+  const header = () => document.querySelector('.cmp-title-row') as HTMLElement;
   const bar = () => document.querySelector('.fix-release-bar') as HTMLElement;
 
-  it('offers Approve once, in the release bar, with the header showing a Draft pill', () => {
+  it('offers Approve once, in the release bar, with the title showing a Draft pill', () => {
     renderPage([series(), series({ id: 's2', name: 'EMCU Premier · 2026/27' })]);
 
     expect(screen.getAllByRole('button', { name: /approve fixtures/i })).toHaveLength(1);
@@ -1078,8 +1325,8 @@ describe('one release bar — the header and the cards show status only', () => 
     expect(within(header()).getByText('Released')).toBeTruthy();
     expect(within(header()).getByText('Withheld venues')).toBeTruthy();
     expect(within(header()).getByText('Withheld times')).toBeTruthy();
-    // The cards carry no action buttons of their own any more.
-    expect(document.querySelector('.series-card-cta')).toBeNull();
+    // The competitions table carries no release actions of its own.
+    expect(document.querySelector('.cmp-tbl')).toBeNull();
     // Released has no next lifecycle step, so no button on the bar is filled: the reveals
     // are outline actions, like Recall.
     expect(bar().querySelectorAll('.btn:not(.btn-outline)')).toHaveLength(0);
@@ -1116,10 +1363,11 @@ describe('series outside every season stage are labelled for what they are', () 
         allLeagues={[]}
       />,
     );
+  // One row per series in the Leagues & tournaments table.
   const cardNamed = (name: string) =>
     screen
       .getAllByText(name)
-      .map((el) => el.closest('.series-card'))
+      .map((el) => el.closest('tr.cmp-row'))
       .find(Boolean) as HTMLElement;
 
   it('marks an imported schedule, a stand-alone series, and nothing on a season-stage series', () => {
@@ -1136,6 +1384,7 @@ describe('series outside every season stage are labelled for what they are', () 
     expect(
       within(cardNamed('Season stage')).queryByText(/imported schedule|stand-alone/i),
     ).toBeNull();
+    expect(within(cardNamed('Season stage')).getByText('Season')).toBeTruthy();
 
     const pill = within(cardNamed('Hand-made cup')).getByText('Stand-alone series');
     expect(pill.closest('[title]')).toHaveAttribute(
@@ -1153,6 +1402,7 @@ describe('release fires exactly one success toast', () => {
   const renderPage = (s: Series) => {
     const toast = vi.fn();
     const onSetReleased = vi.fn().mockResolvedValue(undefined);
+    openOn(s.id);
     renderWithProviders(
       <AdminFixtures
         clubs={clubs}
@@ -1202,6 +1452,7 @@ describe('recall fires no false success toast when the recall fails', () => {
   const renderPage = (s: Series) => {
     const toast = vi.fn();
     const onSetReleased = vi.fn().mockRejectedValue(new Error('series changed; refetch'));
+    openOn(s.id);
     renderWithProviders(
       <AdminFixtures
         clubs={clubs}
@@ -1288,15 +1539,102 @@ describe('the venue-reason marker in the fixture table', () => {
   it('shows no pill for a routine allocated/Union-T20 ground', () => {
     const reason = 'Union T20 schedule — exact venue';
     setup(moved({ venueReason: reason }));
-    // The reason still reads in the suburb line, but no compact pill (no titled marker).
+    // The reason still reads as a note under the venue, but no compact pill (no titled marker).
     expect(screen.queryByTitle(reason)).toBeNull();
     expect(screen.queryByText('moved')).toBeNull();
     expect(screen.queryByText('directive')).toBeNull();
+  });
+
+  it('keeps the suburb line and shows the reason as a separate note, never in its place', () => {
+    const reason = 'Union reminder fixtures upload';
+    setup(moved({ venueReason: reason }));
+    expect(document.querySelector('.fix-row-venue-suburb')).toHaveTextContent('Mount Edgecombe');
+    expect(document.querySelector('.fix-row-venue-note')).toHaveTextContent(reason);
   });
 
   it('shows no pill when the fixture is on its home ground', () => {
     const reason = 'Moved to avoid ground clash — Kingsmead Stadium';
     setup(moved({ venueStatus: 'home', venueReason: reason }));
     expect(screen.queryByText('moved')).toBeNull();
+  });
+});
+
+describe('approve, duplicate and delete toast success only after the write lands', () => {
+  // main.tsx returns these writes unswallowed (withToast surfaces the error), so the page
+  // must chain its success toast off a resolved write — never toast before or on failure.
+  const renderPage = (s: Series, handlers: Record<string, ReturnType<typeof vi.fn>>) => {
+    const toast = vi.fn();
+    openOn(s.id);
+    renderWithProviders(
+      <AdminFixtures
+        clubs={clubs}
+        allSeries={[s]}
+        onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
+        onDeleteSeries={handlers.onDeleteSeries ?? vi.fn().mockResolvedValue(undefined)}
+        onDuplicateSeries={handlers.onDuplicateSeries ?? vi.fn().mockResolvedValue(undefined)}
+        onSetReleased={vi.fn()}
+        onReveal={vi.fn()}
+        onSetApproved={handlers.onSetApproved ?? vi.fn().mockResolvedValue(undefined)}
+        toast={toast}
+        allVenues={[]}
+        allSeasonRuns={[]}
+        allLeagues={[]}
+        tenantConfig={{ structures: [], calendars: [] } as unknown as TenantConfig}
+        onSaveVenue={vi.fn()}
+        onDeleteVenue={vi.fn()}
+        onAllocateVenues={vi.fn()}
+        onCreateSeasonRun={vi.fn()}
+        onPatchSeasonRun={vi.fn()}
+        onDeleteSeasonRun={vi.fn()}
+        onGenerateStageSeries={vi.fn()}
+      />,
+    );
+    return toast;
+  };
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it('a failed approval does not toast "approved"', async () => {
+    const user = userEvent.setup();
+    const onSetApproved = vi.fn().mockRejectedValue(new Error('series changed; refetch'));
+    const toast = renderPage(series({ approved: false } as Partial<Series>), { onSetApproved });
+    await user.click(screen.getByRole('button', { name: /approve fixtures/i }));
+    expect(onSetApproved).toHaveBeenCalledWith('s1', true);
+    await settle();
+    expect(toast).not.toHaveBeenCalledWith(expect.stringMatching(/approved/i));
+  });
+
+  it('a successful approval toasts once it resolves', async () => {
+    const user = userEvent.setup();
+    const toast = renderPage(series({ approved: false } as Partial<Series>), {});
+    await user.click(screen.getByRole('button', { name: /approve fixtures/i }));
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(expect.stringMatching(/approved — ready to release/)),
+    );
+  });
+
+  it('duplicate toasts only after the write resolves, and not on failure', async () => {
+    const user = userEvent.setup();
+    let resolve!: () => void;
+    const onDuplicateSeries = vi.fn(() => new Promise<void>((r) => (resolve = r)));
+    const toast = renderPage(series(), { onDuplicateSeries });
+    await user.click(screen.getByRole('button', { name: /^duplicate$/i }));
+    await settle();
+    expect(toast).not.toHaveBeenCalledWith('Series duplicated');
+    resolve();
+    await waitFor(() => expect(toast).toHaveBeenCalledWith('Series duplicated'));
+  });
+
+  it('a failed duplicate or delete fires no success toast', async () => {
+    const user = userEvent.setup();
+    const onDuplicateSeries = vi.fn().mockRejectedValue(new Error('boom'));
+    const onDeleteSeries = vi.fn().mockRejectedValue(new Error('boom'));
+    const toast = renderPage(series(), { onDuplicateSeries, onDeleteSeries });
+    await user.click(screen.getByRole('button', { name: /^duplicate$/i }));
+    await user.click(screen.getByRole('button', { name: /delete series/i }));
+    await user.click(screen.getByRole('button', { name: /yes, continue/i }));
+    expect(onDeleteSeries).toHaveBeenCalledWith('s1');
+    await settle();
+    expect(toast).not.toHaveBeenCalledWith('Series duplicated');
+    expect(toast).not.toHaveBeenCalledWith('Series deleted');
   });
 });

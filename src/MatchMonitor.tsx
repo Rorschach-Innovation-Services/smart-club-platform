@@ -28,6 +28,7 @@ import {
   scoreLines,
   sortRows,
   totals,
+  undoText,
   type BoardFlag,
   type FlagKey,
   type MonitorPhase,
@@ -465,7 +466,11 @@ export function MatchMonitor({
                   <strong>{rows.reduce((n, r) => n + r.playersAdded, 0)}</strong> added during play
                 </span>
                 <span>
-                  <strong>{rows.reduce((n, r) => n + (r.undoCount ?? 0), 0)}</strong> undos
+                  <strong>
+                    {rows.some((r) => r.undoApprox) ? '~' : ''}
+                    {rows.reduce((n, r) => n + (r.undoCount ?? 0), 0)}
+                  </strong>{' '}
+                  undos
                 </span>
                 {rows.length - sum.matches > 0 && (
                   <span>
@@ -750,7 +755,7 @@ function GameRow({ r, onOpen }: { r: MonitorRow; onOpen: () => void }) {
             <div className={`mm-strong${r.flags.some((f) => f.key === 'undo') ? ' mm-late' : ''}`}>
               {r.undoCount === null
                 ? 'Undo —'
-                : `${r.undoCount} undo${r.undoCount === 1 ? '' : 's'}`}
+                : `${undoText(r)} undo${r.undoCount === 1 ? '' : 's'}`}
             </div>
             <div className={`ump-sub${r.ineligible ? ' mm-alert-text' : ''}`}>
               {r.playersAdded} added
@@ -968,7 +973,7 @@ function GameDetail({
               <li>
                 <span>Undo pressed</span>
                 <strong className={r.flags.some((f) => f.key === 'undo') ? 'mm-late' : ''}>
-                  {r.undoCount === null ? 'not reported' : `${r.undoCount} times`}
+                  {r.undoCount === null ? 'not reported' : `${undoText(r)} times`}
                 </strong>
               </li>
               <li>

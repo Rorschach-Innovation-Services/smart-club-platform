@@ -1771,6 +1771,10 @@ interface StoredFixture {
   venueId?: string;
   venueLocked?: boolean;
   venueReason?: string;
+  /** Postponement bookkeeping (ADR 0015) — read only to describe a postponed fixture; never a
+   * gate on its own (see diffAdminEdits). */
+  originalDate?: string;
+  postponementId?: string;
 }
 
 /** The id every stored series carries a slug from, or undefined for a foreign id
@@ -2300,10 +2304,15 @@ function isImportAuthoredReason(reason: string | undefined): boolean {
  * Date/time is informational-only: a date or time change on a matched row can't be told
  * apart from an admin (or medicoach) correction, so it is surfaced, never gated.
  *
+ * A `postponed` fixture (ADR 0015 — moved by chair agreement or an admin ruling) is a date
+ * change, so it follows the same rule: informational, never genuine. Its bookkeeping fields
+ * (`originalDate`, `postponementId`) are not compared at all — the note just names the move so
+ * the operator knows a re-import resets it to the sheet's date.
+ *
  * `syncOwned` (tenant has `features.medicoachSync`): medicoach owns results, so a
  * `completed` status is the sync's, not an admin edit, and never gates. Sync-owned
  * fields (syncRef, schedule.changedAt) are carried over, never compared. */
-function diffAdminEdits(
+export function diffAdminEdits(
   existing: Series,
   incoming: Series,
   opts: { syncOwned?: boolean } = {},
@@ -2315,7 +2324,11 @@ function diffAdminEdits(
   const incomingById = new Map(incomingFixtures.map((f) => [f.id, f]));
   for (const f of existingFixtures) {
     const syncCompleted = opts.syncOwned && f.status === 'completed';
-    if (f.status && f.status !== 'scheduled' && !syncCompleted)
+    if (f.status === 'postponed')
+      informational.push(
+        `${existing.id}: fixture ${f.id} is postponed (originally ${f.originalDate ?? 'unknown'}, now ${f.date ?? 'undated'}) — a re-import resets it to the sheet date`,
+      );
+    else if (f.status && f.status !== 'scheduled' && !syncCompleted)
       genuine.push(`${existing.id}: fixture ${f.id} has status "${f.status}"`);
     const handSetVenue = f.venueOverride || f.venueId || f.venueLocked;
     if (handSetVenue && !isImportAuthoredReason(f.venueReason))

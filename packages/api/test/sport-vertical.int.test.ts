@@ -166,6 +166,42 @@ async function register(clubId: string, extra: Record<string, unknown>) {
   });
 }
 
+/** A chair/admin portal registration (POST /clubs/:id/players) with the same base identity. */
+async function portalRegister(
+  tenant: string,
+  auth: string,
+  clubId: string,
+  extra: Record<string, unknown>,
+) {
+  const tenantCfg = await repo.getTenantConfig(tenant);
+  return app.request(`/clubs/${clubId}/players`, {
+    method: 'POST',
+    headers: headers(auth, tenant),
+    body: JSON.stringify({
+      firstName: 'Cam',
+      lastName: 'Portal',
+      idType: 'passport',
+      dob: '2000-01-01',
+      nationality: 'South African',
+      race: 'African',
+      gender: 'Male',
+      cell: '0820000003',
+      team: tenantCfg?.leagues?.[0]?.key ?? 'u15',
+      district: 'North',
+      ...extra,
+    }),
+  });
+}
+
+const CRICKET_PROFILE = {
+  battingHand: 'Left',
+  bowlingHand: 'Right',
+  battingType: 'Top order',
+  bowlerType: 'Fast',
+  isAllRounder: true,
+  isWk: true,
+};
+
 const findPlayer = async (tenant: string, clubId: string, idNumber: string) =>
   (await repo.listPlayers(tenant, clubId)).find((p) => p.idNumber === idNumber);
 
@@ -470,6 +506,42 @@ describe('registration with the clearances module off (football)', () => {
     assert.equal(ok.status, 201);
     assert.equal(((await ok.json()) as { position?: string }).position, 'Goalkeeper');
   });
+
+  test('posted cricket playing-profile fields are not stored on a positions tenant', async () => {
+    const res = await register('fc-a', {
+      idNumber: 'FC009',
+      position: 'Striker',
+      battingHand: 'Left',
+      bowlingHand: 'Right',
+      battingType: 'Top order',
+      bowlerType: 'Fast',
+      isAllRounder: true,
+      isWk: true,
+    });
+    assert.equal(res.status, 201);
+    const p = await findPlayer('fc', 'fc-a', 'FC009');
+    assert.equal(p?.position, 'Striker');
+    assert.equal(p?.battingHand, undefined);
+    assert.equal(p?.bowlingHand, undefined);
+    assert.equal(p?.battingType, undefined);
+    assert.equal(p?.bowlerType, undefined);
+    assert.equal(p?.isAllRounder, undefined);
+    assert.equal(p?.isWk, undefined);
+  });
+
+  test('the chair route also drops posted cricket playing-profile fields on a positions tenant', async () => {
+    const res = await portalRegister('fc', FC_ADMIN, 'fc-a', {
+      idNumber: 'FC010',
+      position: 'Striker',
+      ...CRICKET_PROFILE,
+    });
+    assert.equal(res.status, 201);
+    const p = await findPlayer('fc', 'fc-a', 'FC010');
+    assert.equal(p?.position, 'Striker');
+    for (const k of Object.keys(CRICKET_PROFILE)) {
+      assert.equal(p?.[k as keyof typeof p], undefined, k);
+    }
+  });
 });
 
 describe('registration with the clearances module on (cricket) is unchanged', () => {
@@ -513,5 +585,111 @@ describe('registration with the clearances module on (cricket) is unchanged', ()
     const src = await findPlayer('dolphins', 'dv-b', 'DV002');
     assert.notEqual(src?.status, 'inactive');
     assert.equal(src?.transferNote, undefined);
+  });
+
+  test('cricket playing-profile fields are still stored on a cricket tenant', async () => {
+    const res = await register('dv-a', {
+      idNumber: 'DV004',
+      battingHand: 'Left',
+      bowlerType: 'Fast',
+      isWk: true,
+    });
+    assert.equal(res.status, 201);
+    const p = await findPlayer('dolphins', 'dv-a', 'DV004');
+    assert.equal(p?.battingHand, 'Left');
+    assert.equal(p?.bowlerType, 'Fast');
+    assert.equal(p?.isWk, true);
+    assert.equal(p?.isAllRounder, false);
+  });
+
+  test('the chair route still stores cricket playing-profile fields on a cricket tenant', async () => {
+    const res = await portalRegister('dolphins', DOL_ADMIN, 'dv-a', {
+      idNumber: 'DV005',
+      ...CRICKET_PROFILE,
+    });
+    assert.equal(res.status, 201);
+    const p = await findPlayer('dolphins', 'dv-a', 'DV005');
+    for (const [k, v] of Object.entries(CRICKET_PROFILE)) {
+      assert.equal(p?.[k as keyof typeof p], v, k);
+    }
+  });
+});
+
+describe('POST /clubs/:id/exco — required office bearers + per-role merge', () => {
+  const role = (who: string) => ({ name: `${who} Person`, cell: '0821112222', email: `${who}@x` });
+  const postExco = (tenant: string, auth: string, clubId: string, body: unknown) =>
+    app.request(`/clubs/${clubId}/exco`, {
+      method: 'POST',
+      headers: headers(auth, tenant),
+      body: JSON.stringify(body),
+    });
+
+  test('football: a roster without the Director of Academics is 400 and nothing is written', async () => {
+    await repo.createClub('fc', mkClub('fc-exco-a', 'Exco A High'));
+    const res = await postExco('fc', FC_ADMIN, 'fc-exco-a', {
+      chair: role('Principal'),
+      sec: role('Sport'),
+      tre: role('Football'),
+    });
+    assert.equal(res.status, 400);
+    assert.match(JSON.stringify(await res.json()), /Director of Academics/);
+    assert.equal((await repo.getClub('fc', 'fc-exco-a'))?.exco, undefined);
+  });
+
+  test('football: a full roster saves; a name-only edit keeps the stored chair governance fields', async () => {
+    await repo.createClub('fc', {
+      ...mkClub('fc-exco-b', 'Exco B High'),
+      exco: {
+        chair: {
+          ...role('Principal'),
+          idNumber: '8001015009087',
+          termStart: '2024-01-01',
+          termEnd: '2027-12-31',
+        },
+      },
+    });
+    const res = await postExco('fc', FC_ADMIN, 'fc-exco-b', {
+      chair: { name: 'New Principal', cell: '0821112222', email: 'p@x', gender: '', race: '' },
+      sec: role('Sport'),
+      tre: role('Football'),
+      vc: role('Academics'),
+    });
+    assert.equal(res.status, 200);
+    const chair = (await repo.getClub('fc', 'fc-exco-b'))?.exco?.chair as Record<string, unknown>;
+    assert.equal(chair.name, 'New Principal');
+    assert.equal(chair.idNumber, '8001015009087', 'stored governance field survives the merge');
+    assert.equal(chair.termEnd, '2027-12-31');
+  });
+
+  test('null clears a non-required role entirely; nulling or blanking a required role is 400', async () => {
+    await repo.createClub('dolphins', {
+      ...mkClub('dv-exco', 'Exco CC'),
+      exco: {
+        chair: role('Chair'),
+        sec: role('Sec'),
+        tre: role('Tre'),
+        vc: { ...role('Vice'), gender: 'Female' },
+      },
+    });
+    // Cricket's Vice-Chair stays optional: null removes the whole role (POPIA erasure).
+    const cleared = await postExco('dolphins', DOL_ADMIN, 'dv-exco', { vc: null });
+    assert.equal(cleared.status, 200);
+    const exco = (await repo.getClub('dolphins', 'dv-exco'))?.exco as Record<string, unknown>;
+    assert.equal('vc' in exco, false);
+    assert.equal((exco.chair as { name: string }).name, 'Chair Person', 'absent roles are kept');
+
+    // The combined stored+incoming roster must still carry every required role.
+    assert.equal((await postExco('dolphins', DOL_ADMIN, 'dv-exco', { sec: null })).status, 400);
+    assert.equal(
+      (await postExco('dolphins', DOL_ADMIN, 'dv-exco', { tre: { email: '  ' } })).status,
+      400,
+    );
+    assert.equal((await postExco('dolphins', DOL_ADMIN, 'dv-exco', ['nope'])).status, 400);
+    const after = (await repo.getClub('dolphins', 'dv-exco'))?.exco as Record<string, unknown>;
+    assert.equal(
+      (after.sec as { name: string }).name,
+      'Sec Person',
+      'rejected saves write nothing',
+    );
   });
 });

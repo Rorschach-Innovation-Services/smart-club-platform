@@ -52,6 +52,9 @@ const isoDay = (offsetDays: number) =>
 /** Yesterday: always inside the 7-day window, so the link is live. */
 const MATCH_DATE = isoDay(-1);
 const GO_LIVE = isoDay(-30);
+/** Fixtures nobody pulls a result for: dated outside the match-day opener's lookback, so the
+ * 18:00 run does not open (and notify) them on its own. */
+const BYSTANDER = { date: isoDay(-4) };
 const CAPTAIN_KEY = '0'.repeat(64); // the example's captainRef natural key
 
 let ddb: Server;
@@ -171,11 +174,16 @@ async function seed(goLive: string | null = GO_LIVE) {
   );
   await repo.putSeries(
     'dolphins',
-    series('s-planb-promotion-men-t20-g2', 'promotion', ['c', 'd'], [fx('f7', 'c', 'd')]),
+    series(
+      's-planb-promotion-men-t20-g2',
+      'promotion',
+      ['c', 'd'],
+      [fx('f7', 'c', 'd', BYSTANDER)],
+    ),
   );
   await repo.putSeries(
     'dolphins',
-    series('s-planb-premier-men-t20-g2', 'premier', ['c', 'd'], [fx('f1', 'c', 'd')]),
+    series('s-planb-premier-men-t20-g2', 'premier', ['c', 'd'], [fx('f1', 'c', 'd', BYSTANDER)]),
   );
   await repo.createUmpire('dolphins', {
     id: 'u-ngubane',
@@ -257,6 +265,9 @@ async function resetTable() {
 before(async () => {
   ddb = await startDynalite(DDB_PORT, TABLE);
   app = (await import('../src/index.js')).app;
+  // Dates here follow the real clock: hold the 18:00 SAST notice window open (the gate has
+  // its own tests in captains-report-1800-gate.int.test.ts).
+  (await import('../src/captains-reports.js')).setReportNoticeWindowOverride(() => true);
   repo = await import('../src/repo.js');
   puller = await import('../src/medicoach-sync/puller.js');
   contract = await import('../src/medicoach-sync-contract.js');
@@ -769,6 +780,115 @@ describe('the reminder', () => {
     });
     assert.equal(summary.reminders?.sent, 2);
     assert.equal(notices.filter((n) => n.reminder).length, 2);
+  });
+});
+
+// ── 5b. The ops digest after a sync run ──
+describe('the ops digest after a sync run', () => {
+  type DigestInput = import('../src/notify/whatsapp.js').CaptainsReportOpsDigestWhatsAppInput;
+  const digests: DigestInput[] = [];
+  const DIGEST_CELL = '0820000000'; // placeholder, never a real number
+  const syncRun = async (over: Record<string, unknown> = {}) => {
+    const { runTenantSync } = await import('../src/medicoach-sync/run.js');
+    return runTenantSync('dolphins', 'cron', {
+      repo,
+      url: stubUrl,
+      secret: SECRET,
+      log: () => {},
+      captainsReports: capture,
+      opsDigestCell: () => DIGEST_CELL,
+      sendOpsDigest: async (input) => {
+        digests.push(input);
+      },
+      ...over,
+    });
+  };
+  beforeEach(() => {
+    digests.length = 0;
+  });
+
+  test('a run that opens reports sends ONE digest with the run counts', async () => {
+    page = liveResultPage('live');
+    const summary = await syncRun();
+    assert.equal(summary.status, 'ok');
+    assert.equal(digests.length, 1);
+    assert.equal(digests[0].to, '27820000000'); // toE164: digits, no '+'
+    assert.equal(digests[0].recipientName, 'Union admin');
+    assert.equal(
+      digests[0].summary,
+      'Dolphins: 1 new results, 2 reports opened, 2 notices sent, 0 failed',
+    );
+  });
+
+  test('with the player sync on, the digest also counts players waiting on an admin', async () => {
+    const cfg = (await repo.getTenantConfig('dolphins'))!;
+    await repo.putTenantConfig({
+      ...cfg,
+      features: { ...cfg.features, medicoachSync: true },
+      integrations: { medicoach: { ...cfg.integrations?.medicoach, playerSync: true } },
+    });
+    await repo.putPlayerReview('dolphins', {
+      naturalKey: 'nk-digest',
+      reason: 'medicoach-needs-review',
+      detectedAt: new Date().toISOString(),
+      playerName: 'Digest Person',
+      dob: null,
+      clubName: null,
+      candidates: [],
+    });
+    try {
+      page = liveResultPage('live');
+      await syncRun();
+      assert.equal(digests.length, 1);
+      assert.match(digests[0].summary, /0 failed; 1 players to review$/);
+    } finally {
+      await repo.deletePlayerReview('dolphins', 'nk-digest');
+      await repo.putTenantConfig(cfg);
+    }
+  });
+
+  test('a quiet run sends nothing', async () => {
+    page = liveResultPage('live');
+    await syncRun();
+    digests.length = 0;
+    page = { ...(page as object), fixtures: [], hasMore: false };
+    await syncRun();
+    assert.equal(digests.length, 0);
+  });
+
+  test('failed notices are counted once each (the report retry is unchanged)', async () => {
+    respond = (n) => n.channels.map((channel) => ({ channel, status: 'failed', error: 'down' }));
+    page = liveResultPage('live');
+    const summary = await syncRun();
+    assert.equal(digests.length, 1);
+    assert.match(digests[0].summary, /2 reports opened, 0 notices sent, 2 failed$/);
+    assert.equal(summary.reports?.retried, 1, 'the REPORTOPEN# marker is still retried');
+  });
+
+  test('no cell configured: the digest is off', async () => {
+    page = liveResultPage('live');
+    await syncRun({ opsDigestCell: () => null });
+    assert.equal(digests.length, 0);
+  });
+
+  test('a digest failure never fails the sync run', async () => {
+    page = liveResultPage('live');
+    const summary = await syncRun({
+      sendOpsDigest: async () => {
+        throw new Error('meta down');
+      },
+    });
+    assert.equal(summary.status, 'ok');
+    assert.equal((await reportsOf()).length, 2);
+  });
+
+  test('the real sender (dry-run without credentials) never disturbs the run', async () => {
+    // Template registered 6 Oct 2026: the real sender now dry-runs here (no WhatsApp env
+    // in tests) instead of throwing template-pending; the run must stay ok either way.
+    page = liveResultPage('live');
+    const summary = await syncRun({ sendOpsDigest: undefined });
+    assert.equal(summary.status, 'ok');
+    assert.equal(digests.length, 0);
   });
 });
 

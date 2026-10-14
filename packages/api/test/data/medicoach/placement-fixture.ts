@@ -147,3 +147,118 @@ export function placementInputs(): BuildInputs {
     options: { generatedAt: '2026-10-02T00:00:00.000Z' },
   };
 }
+
+/* ─────────────── Fan-out fixture (recipe `placement.fanOut`, explicit categories) ─────────────── */
+
+/**
+ * One club, `big`, with a side in every kind of league the fan-out rules distinguish:
+ *   premier          senior-open, single side (the registration league of most rows)
+ *   emcuD1           senior-open, TWO lettered sides with no roster → `tm_big_emcuD1_<n>`
+ *   premierWomen     womens
+ *   veterans-premier veterans
+ *   emcuU11          junior (group Juniors) — never fans out
+ *   kcSat, snT20     REAL Dolphins sub-union keys, unclassified — never fan out
+ *   cup              classified senior-open but fixtures-only — never fans out
+ *   promotion-women-s-league  classified womens but excluded by recipe — never fans out
+ * plus `small` (premier + emcuD1 single side) for the per-person union across clubs.
+ * The Dolphins seed's real labels are used so the classifier lint reads them as in prod.
+ */
+export const FAN_GENERATED_AT = '2026-10-02T23:30:00.000Z'; // SAST civil date 2026-10-03
+export const FAN_EVAL_DATE = '2026-10-03';
+
+const fanConfig = {
+  tenant: T,
+  branding: { name: 'Acme Union' },
+  leagues: [
+    { key: 'premier', label: 'Premier League', group: 'Overarching Leagues' },
+    { key: 'premierWomen', label: 'Premier Women’s League', group: 'Overarching Leagues' },
+    { key: 'veterans-premier', label: 'Veterans Premier', group: 'Overarching Leagues' },
+    { key: 'emcuD1', label: 'EMCU Division 1', group: 'EMCU Divisions' },
+    { key: 'emcuU11', label: 'Under 11', group: 'Juniors' },
+    { key: 'kcSat', label: 'KZN SU King Cetshwayo Saturday League', group: 'King Cetshwayo' },
+    { key: 'snT20', label: 'KZN SU Southern Natal T20', group: 'Southern Natal' },
+    { key: 'cup', label: 'Cup', group: 'Overarching Leagues', fixturesOnly: true },
+    {
+      key: 'promotion-women-s-league',
+      label: 'Promotion Women’s League',
+      group: 'Overarching Leagues',
+    },
+  ],
+  calendars: [
+    {
+      id: 'cal',
+      label: '2026/27',
+      blocks: [{ id: 'b1', label: 'B1', start: '2026-09-01', end: '2027-03-31' }],
+    },
+  ],
+} as unknown as TenantConfig;
+
+const fanClubs: Club[] = [
+  {
+    id: 'big',
+    name: 'Big CC',
+    leagues: [
+      'premier',
+      'premierWomen',
+      'veterans-premier',
+      'emcuD1',
+      'emcuU11',
+      'kcSat',
+      'snT20',
+      'cup',
+      'promotion-women-s-league',
+    ],
+    leagueTeams: { emcuD1: 2 },
+  },
+  { id: 'small', name: 'Small CC', leagues: ['premier', 'emcuD1'] },
+].map((c) => ({ district: 'North', ground: { venue: `${c.name} Oval` }, ...c }) as unknown as Club);
+
+export const fanPlayer = (p: Partial<PlayerRegistration>): PlayerRegistration =>
+  player({ clubId: 'big', team: 'premier', gender: 'Male', dob: '1990-06-01', ...p });
+
+export const FAN_PLAYERS: PlayerRegistration[] = [
+  fanPlayer({ naturalKey: 'nk-man' }),
+  // Turns 15 ON the eval date (SAST) — fans out; the exporter and the sync must agree.
+  fanPlayer({ naturalKey: 'nk-boy-15', dob: '2011-10-03', isMinor: true }),
+  fanPlayer({ naturalKey: 'nk-boy-14', dob: '2011-10-04', isMinor: true }),
+  fanPlayer({ naturalKey: 'nk-woman', gender: 'Female', team: 'premierWomen' }),
+  fanPlayer({ naturalKey: 'nk-girl-14', gender: 'F', team: 'premierWomen', dob: '2012-01-01' }),
+  fanPlayer({ naturalKey: 'nk-vet', dob: '1980-01-01' }), // 46, no veteransClubId
+  fanPlayer({ naturalKey: 'nk-nogender', gender: undefined }),
+  fanPlayer({ naturalKey: 'nk-nodob', dob: '' }),
+  fanPlayer({ naturalKey: 'nk-small', clubId: 'small' }),
+];
+
+export const FAN_RECIPES = {
+  tenant: T,
+  utcOffset: '+02:00',
+  leagues: {
+    premier: { category: 'senior-open', competitions: {} },
+    emcuD1: { category: 'senior-open', competitions: {} },
+    premierWomen: { category: 'womens', competitions: {} },
+    'veterans-premier': { category: 'veterans', competitions: {} },
+    emcuU11: { category: 'junior', competitions: {} },
+    cup: { category: 'senior-open', competitions: {} },
+    'promotion-women-s-league': { category: 'womens', competitions: {} },
+  },
+  excludeLeagues: { 'promotion-women-s-league': 'not yet created' },
+  placement: { fanOut: true },
+} as const;
+
+export function fanOutInputs(over: { fanOut?: boolean } = {}): BuildInputs {
+  const recipes = JSON.parse(JSON.stringify(FAN_RECIPES));
+  if (over.fanOut === false) delete recipes.placement;
+  return {
+    tenant: T,
+    config: fanConfig,
+    clubs: fanClubs,
+    playersByClub: new Map([
+      ['big', FAN_PLAYERS.filter((p) => p.clubId === 'big')],
+      ['small', FAN_PLAYERS.filter((p) => p.clubId === 'small')],
+    ]),
+    series: [],
+    seasonRuns: [],
+    recipes,
+    options: { generatedAt: FAN_GENERATED_AT },
+  };
+}

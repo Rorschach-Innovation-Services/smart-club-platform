@@ -203,6 +203,186 @@ describe('in-season clash gate — PATCH /series/:id', () => {
     assert.equal(after!.version, before!.version);
   });
 
+  test('a released edit onto a ground an UNDATED (dateTbc) postponement held saves; legacy and rescheduled ones refuse', async () => {
+    await putReleased('pp-a', [
+      fixture({ id: 'f1', venueName: 'Postponed Oval', status: 'postponed', dateTbc: true }),
+    ]);
+    await putReleased('pp-b', [
+      fixture({ id: 'f1', home: 'away-club', away: 'home-club', venueName: 'PP Elsewhere' }),
+    ]);
+    const b = await repo.getSeries('dolphins', 'pp-b');
+    const ok = await patch('pp-b', {
+      version: b!.version,
+      fixtures: [
+        fixture({ id: 'f1', home: 'away-club', away: 'home-club', venueName: 'Postponed Oval' }),
+      ],
+    });
+    assert.equal(ok.status, 200);
+
+    // Old prod data: postponed, no originalDate, no dateTbc — still BOOKS its slot.
+    await putReleased('pp-legacy', [
+      fixture({ id: 'f1', venueName: 'Legacy Oval', status: 'postponed' }),
+    ]);
+    await putReleased('pp-legacy-b', [
+      fixture({ id: 'f1', home: 'away-club', away: 'home-club', venueName: 'PP Elsewhere 3' }),
+    ]);
+    const lb = await repo.getSeries('dolphins', 'pp-legacy-b');
+    const legacy = await patch('pp-legacy-b', {
+      version: lb!.version,
+      fixtures: [
+        fixture({ id: 'f1', home: 'away-club', away: 'home-club', venueName: 'Legacy Oval' }),
+      ],
+    });
+    assert.equal(legacy.status, 409);
+    assert.equal(((await legacy.json()) as { code: string }).code, 'venue_clash');
+
+    await putReleased('pp-c', [
+      fixture({
+        id: 'f1',
+        venueName: 'Rescheduled Oval',
+        status: 'postponed',
+        originalDate: '2026-09-20',
+      }),
+    ]);
+    await putReleased('pp-d', [
+      fixture({ id: 'f1', home: 'away-club', away: 'home-club', venueName: 'PP Elsewhere 2' }),
+    ]);
+    const d = await repo.getSeries('dolphins', 'pp-d');
+    const refused = await patch('pp-d', {
+      version: d!.version,
+      fixtures: [
+        fixture({ id: 'f1', home: 'away-club', away: 'home-club', venueName: 'Rescheduled Oval' }),
+      ],
+    });
+    assert.equal(refused.status, 409);
+    assert.equal(((await refused.json()) as { code: string }).code, 'venue_clash');
+  });
+
+  test('a one-save "postpone to a new date" stamps originalDate and books the new slot', async () => {
+    await putReleased('rp-a', [fixture({ id: 'f1', date: '2026-10-04', venueName: 'Busy Oval' })]);
+    await putReleased('rp-b', [
+      fixture({ id: 'f1', home: 'away-club', away: 'home-club', venueName: 'Quiet Oval' }),
+    ]);
+    // Postponed AND moved onto rp-a's slot in one write: refused, not exempt.
+    const b = await repo.getSeries('dolphins', 'rp-b');
+    const refused = await patch('rp-b', {
+      version: b!.version,
+      fixtures: [
+        fixture({
+          id: 'f1',
+          home: 'away-club',
+          away: 'home-club',
+          venueName: 'Busy Oval',
+          date: '2026-10-04',
+          status: 'postponed',
+        }),
+      ],
+    });
+    assert.equal(refused.status, 409);
+    assert.equal(((await refused.json()) as { code: string }).code, 'venue_clash');
+
+    // Postponed to a free date: saves, recording the date it left.
+    const ok = await patch('rp-b', {
+      version: b!.version,
+      fixtures: [
+        fixture({
+          id: 'f1',
+          home: 'away-club',
+          away: 'home-club',
+          venueName: 'Quiet Oval',
+          date: '2026-10-11',
+          status: 'postponed',
+        }),
+      ],
+    });
+    assert.equal(ok.status, 200);
+    const stored = (await repo.getSeries('dolphins', 'rp-b'))!.fixtures[0] as Fixture;
+    assert.equal(stored.originalDate, '2026-09-27');
+
+    // Moved again: originalDate keeps pointing at the first schedule.
+    const again = await patch('rp-b', {
+      version: (await repo.getSeries('dolphins', 'rp-b'))!.version,
+      fixtures: [{ ...stored, originalDate: undefined, date: '2026-10-18' }],
+    });
+    assert.equal(again.status, 200);
+    const twice = (await repo.getSeries('dolphins', 'rp-b'))!.fixtures[0] as Fixture;
+    assert.equal(twice.originalDate, '2026-09-27');
+  });
+
+  test('reinstating a postponement clears originalDate and the undated dateTbc', async () => {
+    await putReleased('ri-a', [
+      fixture({ id: 'f1', venueName: 'Reinstate Oval', status: 'postponed', dateTbc: true }),
+      fixture({
+        id: 'f2',
+        round: 2,
+        date: '2026-10-11',
+        venueName: 'Reinstate Oval',
+        status: 'postponed',
+        originalDate: '2026-10-04',
+      }),
+    ]);
+    const cur = (await repo.getSeries('dolphins', 'ri-a'))!;
+    // The editor sends whole fixtures back, stale bookkeeping included.
+    const res = await patch('ri-a', {
+      version: cur.version,
+      fixtures: (cur.fixtures as Fixture[]).map((f) => ({ ...f, status: 'scheduled' })),
+    });
+    assert.equal(res.status, 200);
+    const [f1, f2] = (await repo.getSeries('dolphins', 'ri-a'))!.fixtures as Fixture[];
+    assert.equal(f1.status, 'scheduled');
+    assert.equal(f1.dateTbc, undefined);
+    assert.equal(f1.originalDate, undefined);
+    assert.equal(f2.originalDate, undefined);
+
+    // A LATER status-only postponement of f2 has no stale originalDate to look "rescheduled".
+    const again = (await repo.getSeries('dolphins', 'ri-a'))!;
+    const res2 = await patch('ri-a', {
+      version: again.version,
+      fixtures: (again.fixtures as Fixture[]).map((f) =>
+        f.id === 'f2' ? { ...f, status: 'postponed' } : f,
+      ),
+    });
+    assert.equal(res2.status, 200);
+    const f2b = ((await repo.getSeries('dolphins', 'ri-a'))!.fixtures as Fixture[])[1];
+    assert.equal(f2b.originalDate, undefined);
+  });
+
+  test('re-dating an undated (dateTbc) postponement clears dateTbc, stamps originalDate and books the slot', async () => {
+    await putReleased('rd-busy', [
+      fixture({ id: 'f1', date: '2026-10-18', venueName: 'Redate Oval' }),
+    ]);
+    await putReleased('rd-a', [
+      fixture({
+        id: 'f1',
+        home: 'away-club',
+        away: 'home-club',
+        venueName: 'Redate Oval',
+        status: 'postponed',
+        dateTbc: true,
+      }),
+    ]);
+    const cur = (await repo.getSeries('dolphins', 'rd-a'))!;
+    const stale = cur.fixtures[0] as Fixture;
+    // Onto the busy slot: no longer exempt once it has a date — refused.
+    const refused = await patch('rd-a', {
+      version: cur.version,
+      fixtures: [{ ...stale, date: '2026-10-18' }],
+    });
+    assert.equal(refused.status, 409);
+    assert.equal(((await refused.json()) as { code: string }).code, 'venue_clash');
+
+    const ok = await patch('rd-a', {
+      version: cur.version,
+      fixtures: [{ ...stale, date: '2026-10-25' }],
+    });
+    assert.equal(ok.status, 200);
+    const stored = (await repo.getSeries('dolphins', 'rd-a'))!.fixtures[0] as Fixture;
+    assert.equal(stored.status, 'postponed');
+    assert.equal(stored.date, '2026-10-25');
+    assert.equal(stored.dateTbc, undefined);
+    assert.equal(stored.originalDate, '2026-09-27');
+  });
+
   test('the same clashing edit on a DRAFT series saves (no gate on drafts)', async () => {
     await putReleased('dr-a', [fixture({ id: 'f1', venueName: 'Chatsworth Oval' })]);
     await repo.putSeries(

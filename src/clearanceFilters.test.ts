@@ -6,7 +6,7 @@
  * the team's DISPLAY label (not its slug), the acting/requesting admins, and the id.
  */
 import { describe, it, expect } from 'vitest';
-import { filterClearances } from './clearanceFilters';
+import { filterClearances, readClearanceLinkId, clearanceLinkMissing } from './clearanceFilters';
 import type { PlayerClearance } from './types';
 
 const teamLabel = { premier: 'Premier League' };
@@ -86,5 +86,44 @@ describe('filterClearances', () => {
 
   it('returns an empty list when nothing matches', () => {
     expect(filterClearances(list, 'nonesuch', teamLabel)).toEqual([]);
+  });
+});
+
+describe('readClearanceLinkId — the ?clearance= deep link from a notification', () => {
+  it('returns the id when the link carries one', () => {
+    expect(readClearanceLinkId('?clearance=clr-42')).toBe('clr-42');
+    expect(readClearanceLinkId('?tab=x&clearance=clr-42')).toBe('clr-42');
+  });
+
+  it('decodes and trims the id', () => {
+    expect(readClearanceLinkId('?clearance=%20clr%2F42%20')).toBe('clr/42');
+  });
+
+  it('returns null when there is no link id', () => {
+    expect(readClearanceLinkId('')).toBeNull();
+    expect(readClearanceLinkId('?series=s1')).toBeNull();
+    expect(readClearanceLinkId('?clearance=')).toBeNull();
+    expect(readClearanceLinkId('?clearance=%20%20')).toBeNull();
+  });
+});
+
+describe('clearanceLinkMissing — the "no clearance matches this link" notice gate', () => {
+  const rows = [{ id: 'clr-1' }, { id: 'clr-2' }];
+
+  it('is false when the linked clearance is in the list', () => {
+    expect(clearanceLinkMissing('clr-2', rows)).toBe(false);
+  });
+
+  it('is true when the linked clearance is gone (resolved long ago or erased)', () => {
+    expect(clearanceLinkMissing('clr-9', rows)).toBe(true);
+    expect(clearanceLinkMissing('clr-9', [])).toBe(true);
+  });
+
+  it('matches the id exactly, not as a substring', () => {
+    expect(clearanceLinkMissing('clr', rows)).toBe(true);
+  });
+
+  it('is false when there is no link id at all', () => {
+    expect(clearanceLinkMissing(null, [])).toBe(false);
   });
 });

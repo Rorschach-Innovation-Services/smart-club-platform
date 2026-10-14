@@ -494,6 +494,48 @@ describe('tenant create → list → get → patch', () => {
     assert.equal(dupes.status, 409);
   });
 
+  test('fixtureReminders: operator writes it normalised; tenant admins cannot write or read it', async () => {
+    const put = (body: unknown) =>
+      app.request('/platform/tenants/dolphins', {
+        method: 'PUT',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify({ fixtureReminders: body }),
+      });
+    const ok = await put({ enabled: true, leadDays: [3, 1, 3], channels: ['whatsapp', 'email'] });
+    assert.equal(ok.status, 200);
+    const expected = { enabled: true, leadDays: [1, 3], channels: ['email', 'whatsapp'] };
+    assert.deepEqual((await repo.getTenantConfig('dolphins'))?.fixtureReminders, expected);
+
+    for (const bad of [
+      { enabled: true, leadDays: [0], channels: ['email'] },
+      { enabled: true, leadDays: [31], channels: ['email'] },
+      { enabled: true, leadDays: [1.5], channels: ['email'] },
+      { enabled: true, leadDays: [1, 2, 3, 4, 5], channels: ['email'] },
+      { enabled: true, leadDays: [1], channels: ['sms'] },
+      { enabled: true, leadDays: [1], channels: [] },
+      { enabled: 'yes', leadDays: [1], channels: ['email'] },
+      { enabled: true, leadDays: [1], channels: ['email'], extra: 1 },
+      [],
+    ]) {
+      assert.equal((await put(bad)).status, 400, JSON.stringify(bad));
+    }
+
+    // A tenant admin's PUT /tenant/config silently drops it (operator-only, ADR 0006)...
+    const adminPut = await app.request('/tenant/config', {
+      method: 'PUT',
+      headers: tenantHeaders(DOLPHINS_ADMIN, 'dolphins'),
+      body: JSON.stringify({ fixtureReminders: { enabled: false, leadDays: [], channels: [] } }),
+    });
+    assert.equal(adminPut.status, 200);
+    assert.deepEqual((await repo.getTenantConfig('dolphins'))?.fixtureReminders, expected);
+    // ...and GET /tenant/config does not project it.
+    const read = await app.request('/tenant/config', {
+      headers: tenantHeaders(DOLPHINS_ADMIN, 'dolphins'),
+    });
+    assert.equal(read.status, 200);
+    assert.equal('fixtureReminders' in ((await read.json()) as object), false);
+  });
+
   test('PUT /platform/tenants/:slug on unknown tenant → 404', async () => {
     const res = await app.request('/platform/tenants/ghost', {
       method: 'PUT',
@@ -2528,6 +2570,29 @@ describe('season calendars (ADR 0008)', () => {
     // requiredDocs moved OFF the held-back list with ADR 0009 — served here (and on
     // GET /tenant) so the admin console needs no second source, minus matchHints.
     assert.ok(Array.isArray(body.requiredDocs), 'requiredDocs present for an authed admin');
+  });
+
+  // A save must not echo what a read holds back — the PUT response is the GET projection.
+  test('PUT /tenant/config answers with the same projection as GET', async () => {
+    const stored = await repo.getTenantConfig(T);
+    await repo.putTenantConfig({
+      ...stored!,
+      fixtureReminders: { enabled: true } as never,
+      knownClubs: [{ id: 'k1', name: 'Known CC' }] as never,
+    });
+    const put = await app.request('/tenant/config', {
+      method: 'PUT',
+      headers: tenantHeaders(CAL_ADMIN, T),
+      body: JSON.stringify({ submissionDeadline: '2027-01-31' }),
+    });
+    assert.equal(put.status, 200);
+    const saved = (await put.json()) as Record<string, unknown>;
+    assert.equal(saved.submissionDeadline, '2027-01-31');
+    for (const held of ['fixtureReminders', 'knownClubs', 'adminCount', 'clubSignupLink']) {
+      assert.equal(saved[held], undefined, `${held} must not ride the PUT response`);
+    }
+    const get = await app.request('/tenant/config', { headers: tenantHeaders(CAL_ADMIN, T) });
+    assert.deepEqual(saved, await get.json());
   });
 
   test('GET /tenant/config is not anonymous', async () => {

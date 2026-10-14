@@ -7,6 +7,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Series } from '../src/types.js';
 import {
+  carrySyncOwnedFields,
   reconcileFixtureIds,
   fixtureSyncRef,
   type IdentityFixture,
@@ -216,5 +217,46 @@ describe('stabiliseFixtureIds (importer)', () => {
   test('--allow-sync-break parses', () => {
     assert.equal(parseArgs(['--revert', '--allow-sync-break']).allowSyncBreak, true);
     assert.equal(parseArgs(['--revert']).allowSyncBreak, false);
+  });
+});
+
+describe('carrySyncOwnedFields — knockout slot bookkeeping (ADR 0022 §7)', () => {
+  const stored: IdentityFixture = {
+    id: 'f3',
+    home: 'irene',
+    away: 'pretoria',
+    slots: { home: 'win:f1', away: 'win:f2' },
+    slotsManual: { home: true },
+  };
+
+  test('a rewrite that keeps the filled teams keeps slots and the manual flag', () => {
+    const to = carrySyncOwnedFields<IdentityFixture>(stored, {
+      id: 'f3',
+      home: 'irene',
+      away: 'pretoria',
+    });
+    assert.deepEqual(to.slots, { home: 'win:f1', away: 'win:f2' });
+    assert.deepEqual(to.slotsManual, { home: true });
+  });
+
+  test('a side the rewrite put back to its placeholder drops its slot and flag', () => {
+    const to = carrySyncOwnedFields<IdentityFixture>(stored, {
+      id: 'f3',
+      home: 'win:f1',
+      away: 'pretoria',
+    });
+    assert.deepEqual(to.slots, { away: 'win:f2' });
+    assert.equal(to.slotsManual, undefined, 'never a flagged side showing a placeholder');
+  });
+
+  test('a rewrite that brings its own slots wins', () => {
+    const to = carrySyncOwnedFields<IdentityFixture>(stored, {
+      id: 'f3',
+      home: 'irene',
+      away: 'pretoria',
+      slots: { home: 'win:f9' },
+    });
+    assert.deepEqual(to.slots, { home: 'win:f9' });
+    assert.equal(to.slotsManual, undefined);
   });
 });

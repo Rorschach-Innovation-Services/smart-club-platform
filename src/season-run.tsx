@@ -16,7 +16,7 @@
  * One stage-group becomes one Series, so everything downstream (approval, release, the
  * player broadcast, travel cost) is the existing, tested path.
  */
-import { useEffect, useMemo, useState, useId, type CSSProperties } from 'react';
+import { useEffect, useMemo, useRef, useState, useId, type CSSProperties } from 'react';
 import {
   BoundedNumber,
   Btn,
@@ -41,7 +41,7 @@ import {
   startSeasonErrorMessage,
 } from './error-copy';
 import { HelpLink } from './help/HelpDrawer';
-import { daysBetween, findBlock, formatIsoDate, todayIso } from '../packages/engine/src/calendar';
+import { findBlock, formatIsoDate } from '../packages/engine/src/calendar';
 import { describeEntrants, groupSizes, labelFor } from '../packages/engine/src/entrants';
 import { formatStampDay } from './dates';
 import {
@@ -55,12 +55,14 @@ import { describeStage, describeStructure } from '../packages/engine/src/narrati
 import { materialiseRun, rebaseTargetFor } from '../packages/engine/src/run';
 import { STAGE_KINDS, stageKindFor, stageTitle } from '../packages/engine/src/stage-kinds';
 import { isPoolKnockout, poolPairings, roundsForFormat } from '../packages/engine/src/formats';
-import {
-  findByKey,
-  leagueParticipants,
-  leagueParticipantsWithStatus,
-} from '../packages/engine/src/leagues';
+import { findByKey, leagueParticipantsWithStatus } from '../packages/engine/src/leagues';
 import { affiliationSubmitted, currentSeasonLabel } from './data';
+import {
+  leaguesReadiness,
+  MIN_SIDES,
+  structureFormatLabel,
+  type LeagueReadiness,
+} from './league-readiness';
 import type {
   Club,
   CompetitionStructure,
@@ -207,28 +209,6 @@ const scheduleShape = (s: StageSpec) => ({
   activateFrom: s.schedule.activateFrom,
 });
 
-/** A league is season-capable only once its operator has set it up (`league.setup`). */
-export function seasonCapableLeagues(allLeagues: League[]): League[] {
-  return (allLeagues || []).filter((l) => !!l.setup);
-}
-
-/**
- * A set-up league's calendar when it has fully ended — every block finished before
- * `today` — or `null` when it is still current, has no blocks, or can't be found. A league
- * whose season dates are over has nothing to start a season on until the operator renews
- * them.
- */
-export function endedSetupCalendar(
-  league: League,
-  calendars: SeasonCalendar[],
-  today: string = todayIso(),
-): { label: string; end: string } | null {
-  const cal = calendars.find((c) => c.id === league.setup?.calendarId);
-  if (!cal || cal.blocks.length === 0) return null;
-  if (!cal.blocks.every((b) => daysBetween(b.end, today) > 0)) return null;
-  return { label: cal.label, end: cal.blocks[cal.blocks.length - 1].end };
-}
-
 /**
  * A league's setup resolved against the tenant config: the structure and calendar it
  * names, either undefined when the operator's config no longer has it.
@@ -245,12 +225,7 @@ function resolveSetup(
   };
 }
 
-/** "T20 League · 20 overs" — a structure's name with its overs when it sets them. */
-export function structureFormatLabel(structure: Pick<CompetitionStructure, 'name' | 'overs'>) {
-  return structure.overs ? `${structure.name} · ${structure.overs} overs` : structure.name;
-}
-
-/* ─── Start a season ─── */
+/* ─── Start a season — one modal, routed by league ─── */
 
 /**
  * Body of `POST /season-runs` as the console sends it. The server resolves the league's
@@ -258,225 +233,6 @@ export function structureFormatLabel(structure: Pick<CompetitionStructure, 'name
  * the league and the label.
  */
 export type StartSeasonRunRequest = Pick<SeasonRun, 'id' | 'leagueKey' | 'seasonLabel' | 'version'>;
-
-function StartSeasonForm({
-  clubs,
-  allLeagues,
-  config,
-  existingRuns,
-  onCreate,
-  onClose,
-  toast,
-  initialLeagueKey,
-  onBack,
-}: {
-  clubs: Club[];
-  allLeagues: League[];
-  config: TenantConfig;
-  existingRuns: SeasonRun[];
-  onCreate: (run: StartSeasonRunRequest) => Promise<SeasonRun | void>;
-  onClose: () => void;
-  toast: Toast;
-  /** Preselected by the launcher — the admin already chose this league there. */
-  initialLeagueKey?: string;
-  /** Routes back to the league picker instead of closing outright — see `GenerateFixturesLauncher`. */
-  onBack?: () => void;
-}) {
-  const capable = seasonCapableLeagues(allLeagues);
-  const [leagueKey, setLeagueKey] = useState(initialLeagueKey ?? capable[0]?.key ?? '');
-  const league = capable.find((l) => l.key === leagueKey);
-  const [seasonLabel, setSeasonLabel] = useState(currentSeasonLabel());
-  const [err, setErr] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  // The league's one setup, resolved against config — what the server will freeze.
-  const { structure, calendar } = resolveSetup(league, config);
-  const teams = league
-    ? leagueParticipants(clubs, league.key, { isAffiliated: affiliationSubmitted })
-    : [];
-  // One setup per league, so a league runs one season per label.
-  const duplicate = existingRuns.some(
-    (r) => r.leagueKey === leagueKey && r.seasonLabel.trim() === seasonLabel.trim(),
-  );
-
-  const problems: string[] = [];
-  if (!league) problems.push('Pick a league.');
-  if (league && !structure)
-    problems.push(
-      "This league's setup points at a structure that no longer exists — ask your operator.",
-    );
-  if (league && !calendar)
-    problems.push(
-      "This league's setup points at a calendar that no longer exists — ask your operator.",
-    );
-  if (!seasonLabel.trim()) problems.push('Give the season a label.');
-  if (teams.length < 2)
-    problems.push('At least two affiliated sides must be registered for this league.');
-  if (duplicate) problems.push(SEASON_EXISTS_MESSAGE);
-
-  async function submit() {
-    if (problems.length || busy || !league || !structure || !calendar) return;
-    setErr('');
-    setBusy(true);
-    try {
-      // No snapshots and no stages: the server resolves the league's live setup and
-      // freezes THAT (ADR 0014), so a config this tab cached before an operator edit can
-      // never leak outdated dates into the new season.
-      await onCreate({
-        id: 'run-' + Date.now(),
-        leagueKey: league.key,
-        seasonLabel: seasonLabel.trim(),
-        version: 1,
-      });
-      toast(`${league.label} · ${seasonLabel.trim()} started`);
-      onClose();
-    } catch (e) {
-      if (!(e as { alreadyToasted?: boolean })?.alreadyToasted) {
-        setErr(
-          startSeasonErrorMessage(e) ?? describeError(e, 'Could not start the season — try again'),
-        );
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (capable.length === 0) {
-    return (
-      <div>
-        <p style={{ margin: 0, fontSize: 13, color: 'var(--muted)', lineHeight: 1.6 }}>
-          No league has been set up for a season yet. A league&apos;s <strong>setup</strong> — one
-          structure on one calendar — is created by your platform operator. Ask them to set one up,
-          then start the season here.
-        </p>
-        <div style={{ marginTop: 16 }}>
-          <Btn tone="outline" onClick={onClose}>
-            Close
-          </Btn>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div style={{ display: 'grid', gap: 14 }}>
-      <div className="field">
-        <div className="field-label">
-          League <span className="req">*</span>
-        </div>
-        <select
-          className="field-select"
-          value={leagueKey}
-          onChange={(e) => setLeagueKey(e.target.value)}
-        >
-          {capable.map((l) => (
-            <option key={l.key} value={l.key}>
-              {l.label}
-            </option>
-          ))}
-        </select>
-        {capable.length < allLeagues.length && (
-          <p style={HINT}>Only leagues your platform operator has set up appear here.</p>
-        )}
-      </div>
-
-      <div className="field">
-        <div className="field-label">
-          Season <span className="req">*</span>
-        </div>
-        <input
-          className="field-input"
-          aria-label="Season"
-          value={seasonLabel}
-          onChange={(e) => setSeasonLabel(e.target.value)}
-          placeholder="2026/27"
-          style={{ maxWidth: 200 }}
-        />
-      </div>
-
-      {structure && calendar && (
-        <div
-          style={{
-            border: '1px solid var(--line)',
-            borderRadius: 8,
-            padding: 12,
-            fontSize: 12.5,
-            color: 'var(--muted)',
-            lineHeight: 1.6,
-          }}
-        >
-          <strong style={{ color: 'var(--ink)' }}>{structureFormatLabel(structure)}</strong> (v
-          {structure.version}) · {calendar.label}
-          {calendar.blocks.length > 0 &&
-            ` · ${formatIsoDate(calendar.blocks[0].start)} → ${formatIsoDate(
-              calendar.blocks[calendar.blocks.length - 1].end,
-            )}`}
-          <br />
-          {teams.length} side{teams.length === 1 ? '' : 's'} registered for {league?.label}
-          {/* The GROUP SHAPE, per stage, sized against the real roster, so it reads
-              "2 groups of 6, 6" rather than an abstract count. */}
-          <div style={{ marginTop: 6, display: 'grid', gap: 2 }}>
-            {structure.stages.map((s) => {
-              const plan = s.entrants.kind === 'all-registered' ? undefined : s.entrants.groups;
-              const sizes = groupSizes(plan, teams.length);
-              // A `manual` stage with no plan is not "one group" — it is however many the
-              // admin confirms, which nothing here can predict. Saying "one group of 12"
-              // would assert a shape, which is the opposite of what this line is for.
-              //
-              // `all-registered` says "in one group" in its own description, so adding a
-              // shape clause there reads "one group of 12 · Every registered side, in one
-              // group". The COUNT is the new information; the shape isn't.
-              const shape =
-                !plan && s.entrants.kind === 'manual'
-                  ? 'groups set when you confirm entrants'
-                  : s.entrants.kind === 'all-registered'
-                    ? `${sizes[0]} sides`
-                    : sizes.length === 1
-                      ? `one group of ${sizes[0]}`
-                      : `${sizes.length} groups of ${sizes.join(', ')}`;
-              return (
-                <div key={s.id}>
-                  <strong style={{ color: 'var(--ink)' }}>{s.name}</strong> · {shape} ·{' '}
-                  {describeEntrants(s.entrants)}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {problems.map((p, i) => (
-        <div key={i} style={ERR}>
-          {p}
-        </div>
-      ))}
-      {err && <div style={ERR}>{err}</div>}
-
-      <div style={{ display: 'flex', gap: 8 }}>
-        {/* Once routed here from the league picker there was no way back to it — Cancel
-            closes the whole modal, discarding the league choice too. Matches the wizard's
-            footRow Back/ghost idiom (see `SeasonSetupWizard`). */}
-        {onBack && (
-          <Btn tone="ghost" onClick={onBack} disabled={busy}>
-            Back
-          </Btn>
-        )}
-        <Btn tone="teal" onClick={submit} disabled={!!problems.length || busy}>
-          {busy ? 'Starting…' : 'Start season'}
-        </Btn>
-        <Btn tone="ghost" onClick={onClose}>
-          Cancel
-        </Btn>
-      </div>
-      <div className="sr-next">
-        <div className="sr-next-t">What happens next</div>
-        <NextSteps steps={SEASON_NEXT_STEPS} />
-      </div>
-    </div>
-  );
-}
-
-/* ─── Start a season — the single entry point, routed by league ─── */
 
 /**
  * "12 sides (2 not yet affiliated)" — every side registered for the league, with the ones
@@ -491,21 +247,66 @@ export function registeredSidesLabel(affiliated: number, unaffiliated: number): 
 
 /** The hand-off note for a league with no setup. */
 const NO_SETUP_NOTE = 'Ask your operator to set this league up.';
-/** The hand-off note for a set-up league whose season dates are over. */
-const ENDED_NOTE = "This league's season dates have ended — ask your operator to renew them.";
+
+/** The league select's option groups, in the order they are listed. */
+type LeagueOptionGroup = 'ready' | 'running' | 'needs-setup' | 'needs-sides';
+const OPTION_GROUPS: Array<[LeagueOptionGroup, string]> = [
+  ['ready', 'Ready to start'],
+  ['running', 'Season running — start another season'],
+  ['needs-setup', 'Needs operator setup'],
+  ['needs-sides', 'Needs sides'],
+];
+
+/** Which option group a league falls in: by whether it can start, then by why not. */
+function optionGroupOf(r: LeagueReadiness): LeagueOptionGroup {
+  if (r.canStart) return r.status === 'running' ? 'running' : 'ready';
+  return r.setupProblems.length ? 'needs-setup' : 'needs-sides';
+}
+
+/** The blocking setup problems for a picked league, each with who fixes it. */
+function setupProblemLines(r: LeagueReadiness): string[] {
+  const lines: string[] = [];
+  if (r.setupProblems.includes('no-setup'))
+    lines.push(`${r.league.label} has no season setup yet. ${NO_SETUP_NOTE}`);
+  if (r.setupProblems.includes('structure-missing'))
+    lines.push(
+      "This league's setup points at a structure that no longer exists — ask your operator.",
+    );
+  if (r.setupProblems.includes('calendar-missing'))
+    lines.push(
+      "This league's setup points at a calendar that no longer exists — ask your operator.",
+    );
+  if (r.calendarEnded)
+    lines.push(
+      `This league's season dates have ended — ask your operator to renew them. (${
+        r.calendarEnded.label
+      }, ended ${formatIsoDate(r.calendarEnded.end)}.)`,
+    );
+  return lines;
+}
+
+/** Server refusals that mean this tab's copy of the league setup is out of date. */
+const STALE_SETUP_CODES = new Set(['setup_missing', 'structure_missing', 'calendar_missing']);
 
 /**
- * One button, routed by LEAGUE. Only a league its operator has set up (`league.setup`)
- * can start a season; the rest are listed disabled with the hand-off to the operator. A
- * set-up league whose calendar has fully ended is selectable, so the admin can see why,
- * but cannot continue until the operator renews its dates. A one-off cup or festival is
- * not a separate path: the operator adds a One-off tournament structure for it.
+ * Start a season, in one step: pick the league, name the season, check the summary, start.
+ *
+ * Only a league that can start is selectable. The rest are listed disabled with the reason,
+ * grouped by who has to act: the operator (no setup, a missing structure or calendar,
+ * season dates that have ended) or the clubs (fewer than two affiliated sides). A league
+ * with a season already running stays selectable — the server allows another season under
+ * a different label — and the duplicate-label check says so before anything is sent.
+ *
+ * Opened from a league's row, that league is preselected. On open it asks the host to
+ * refetch the season setup, so what it shows is what the server will freeze.
  */
-export function GenerateFixturesLauncher({
+export function StartSeasonModal({
   clubs,
   allLeagues,
   config,
   existingRuns,
+  allSeries = [],
+  initialLeagueKey,
   onCreateRun,
   onRefreshConfig,
   onClose,
@@ -515,72 +316,116 @@ export function GenerateFixturesLauncher({
   allLeagues: League[];
   config: TenantConfig;
   existingRuns: SeasonRun[];
+  /** For each running season's stage progress. Absent ⇒ no stage reads as released. */
+  allSeries?: Series[];
+  /** Preselect this league — the row the modal was opened from. */
+  initialLeagueKey?: string;
   onCreateRun: (run: StartSeasonRunRequest) => Promise<SeasonRun | void>;
   /**
-   * Refetch tenant config when the launcher opens, so the preview and fit it shows are
-   * built from the calendar and structure the server will freeze — not a copy cached
-   * before an operator edit.
+   * Refetch the season setup (leagues, structures, calendars, runs) when the modal opens,
+   * so the summary is built from what the server will freeze — not a copy cached before an
+   * operator edit. Called again when the server says the setup moved underneath us.
    */
   onRefreshConfig?: () => Promise<unknown> | void;
   onClose: () => void;
   toast: Toast;
 }) {
-  const capable = seasonCapableLeagues(allLeagues);
-  const notSetUp = (allLeagues || []).filter((l) => !l.setup);
-  const [leagueKey, setLeagueKey] = useState(capable[0]?.key ?? '');
-  const [step, setStep] = useState<'pick' | 'season'>('pick');
-  // Once per open (the host mounts the launcher only while it is open). A failed refetch
+  // Once per open (the host mounts the modal only while it is open). A failed refetch
   // leaves the cached config on screen — the server still freezes the live copy.
   useEffect(() => {
     void Promise.resolve(onRefreshConfig?.()).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (step === 'season') {
-    return (
-      <Modal
-        eyebrow="Fixtures · Season"
-        title={
-          <>
-            Start a <em>season</em>
-          </>
-        }
-        onClose={onClose}
-      >
-        <StartSeasonForm
-          clubs={clubs}
-          allLeagues={allLeagues}
-          config={config}
-          existingRuns={existingRuns}
-          initialLeagueKey={leagueKey}
-          onCreate={onCreateRun}
-          onClose={onClose}
-          onBack={() => setStep('pick')}
-          toast={toast}
-        />
-      </Modal>
-    );
-  }
+  const readiness = useMemo(
+    () =>
+      leaguesReadiness(allLeagues || [], {
+        clubs,
+        structures: config.structures ?? [],
+        calendars: config.calendars ?? [],
+        runs: existingRuns,
+        series: allSeries,
+        isAffiliated: affiliationSubmitted,
+      }),
+    [allLeagues, clubs, config, existingRuns, allSeries],
+  );
+  const firstStartable =
+    readiness.find((r) => r.status === 'ready') ?? readiness.find((r) => r.canStart);
+  const firstKey = firstStartable?.league.key;
+  const [leagueKey, setLeagueKey] = useState(initialLeagueKey ?? firstKey ?? '');
+  // Nothing could start when the modal opened, but the refetch on open brought in a setup
+  // the operator has just made: pick it, rather than leave "Pick a league" on screen.
+  useEffect(() => {
+    if (!leagueKey && firstKey) setLeagueKey(firstKey);
+  }, [leagueKey, firstKey]);
+  const [seasonLabel, setSeasonLabel] = useState(currentSeasonLabel());
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  // A second click lands before React re-renders with `busy`, so the guard is a ref.
+  const inFlight = useRef(false);
 
-  // The picked league can vanish (or lose its setup) while the modal is open — changed in
-  // another tab, then this console's own config refetch drops it — which simply reads as
-  // "pick again".
-  const league = capable.find((l) => l.key === leagueKey);
-  const ended = league ? endedSetupCalendar(league, config.calendars ?? []) : null;
+  // The picked league can vanish while the modal is open — deleted in another tab, then
+  // this console's own refetch drops it — which simply reads as "pick a league".
+  const picked = readiness.find((r) => r.league.key === leagueKey);
+  const league = picked?.league;
   const { structure, calendar } = resolveSetup(league, config);
-  // The sides a season would draw on, and how many the affiliation gate holds back — the
-  // admin can still include those per side on Confirm entrants.
-  const pool = league
-    ? leagueParticipantsWithStatus(clubs, league.key, affiliationSubmitted)
-    : undefined;
+  const notSetUp = readiness.filter((r) => r.setupProblems.includes('no-setup'));
+  // One setup per league, so a league runs one season per label.
+  const duplicate = existingRuns.some(
+    (r) => r.leagueKey === leagueKey && r.seasonLabel.trim() === seasonLabel.trim(),
+  );
 
-  function submit() {
-    if (league && !ended) setStep('season');
+  const problems: string[] = [];
+  if (!picked) problems.push('Pick a league.');
+  if (picked) {
+    problems.push(...setupProblemLines(picked));
+    if (picked.sides.affiliated < MIN_SIDES)
+      problems.push(
+        `At least two affiliated sides must be registered for this league (${picked.sides.registered} registered, ${picked.sides.affiliated} affiliated).`,
+      );
   }
+  if (!seasonLabel.trim()) problems.push('Give the season a label.');
+  if (duplicate) problems.push(SEASON_EXISTS_MESSAGE);
+  const canSubmit = !problems.length && !!league && !!structure && !!calendar;
+
+  async function submit() {
+    if (!canSubmit || inFlight.current || !league) return;
+    inFlight.current = true;
+    setErr('');
+    setBusy(true);
+    try {
+      // No snapshots and no stages: the server resolves the league's live setup and
+      // freezes THAT (ADR 0014), so a config this tab cached before an operator edit can
+      // never leak outdated dates into the new season.
+      await onCreateRun({
+        id: 'run-' + Date.now(),
+        leagueKey: league.key,
+        seasonLabel: seasonLabel.trim(),
+        version: 1,
+      });
+      toast(`${league.label} · ${seasonLabel.trim()} started`);
+      onClose();
+    } catch (e) {
+      // Shown inline even when the host has toasted it: the modal stays open, and the
+      // reason belongs next to the button that failed.
+      setErr(
+        startSeasonErrorMessage(e) ?? describeError(e, 'Could not start the season — try again'),
+      );
+      // The server saw a different setup than this tab: refetch, so the summary and the
+      // league list catch up with what the operator changed.
+      if (e instanceof ApiError && e.code && STALE_SETUP_CODES.has(e.code))
+        void Promise.resolve(onRefreshConfig?.()).catch(() => {});
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
+  }
+
+  const affiliatedCount = picked?.sides.affiliated ?? 0;
 
   return (
     <Modal eyebrow="Fixtures" title="Start a season" onClose={onClose}>
-      <div style={{ display: 'grid', gap: 16 }}>
+      <div style={{ display: 'grid', gap: 14 }}>
         <div className="field">
           <div className="field-label">
             League <span className="req">*</span>
@@ -588,80 +433,140 @@ export function GenerateFixturesLauncher({
           <select
             className="field-select"
             aria-label="League"
-            value={league ? leagueKey : ''}
-            onChange={(e) => setLeagueKey(e.target.value)}
+            value={picked ? leagueKey : ''}
+            onChange={(e) => {
+              setLeagueKey(e.target.value);
+              setErr('');
+            }}
           >
-            {!league && (
+            {!picked && (
               <option value="" disabled>
                 Pick a league
               </option>
             )}
-            {capable.length > 0 && (
-              <optgroup label="Set up by your operator">
-                {capable.map((l) => (
-                  <option key={l.key} value={l.key}>
-                    {l.label}
-                  </option>
-                ))}
-              </optgroup>
-            )}
-            {notSetUp.length > 0 && (
-              <optgroup label="Not set up yet — ask your operator">
-                {notSetUp.map((l) => (
-                  <option key={l.key} value={l.key} disabled>
-                    {l.label}
-                  </option>
-                ))}
-              </optgroup>
-            )}
+            {OPTION_GROUPS.map(([group, label]) => {
+              const members = readiness.filter((r) => optionGroupOf(r) === group);
+              if (!members.length) return null;
+              return (
+                <optgroup key={group} label={label}>
+                  {members.map((r) => (
+                    <option key={r.league.key} value={r.league.key} disabled={!r.canStart}>
+                      {r.canStart ? r.league.label : `${r.league.label} — ${r.reason}`}
+                    </option>
+                  ))}
+                </optgroup>
+              );
+            })}
           </select>
           {notSetUp.length > 0 && (
             <p style={HINT}>
               {notSetUp.length === 1
-                ? `${notSetUp[0].label} has no season setup. `
+                ? `${notSetUp[0].league.label} has no season setup. `
                 : `${notSetUp.length} leagues have no season setup. `}
               {NO_SETUP_NOTE}
             </p>
           )}
         </div>
 
-        {league && (
-          <div className="sr-callout">
-            {ended ? (
-              <p>
-                {ENDED_NOTE} ({ended.label}, ended {formatIsoDate(ended.end)}.)
-              </p>
-            ) : (
-              <p>
-                This league is set up by your operator:{' '}
-                {structure ? structureFormatLabel(structure) : 'structure missing'}
-                {calendar ? ` on ${calendar.label}` : ''}.
-              </p>
-            )}
-            {pool && (
-              <p className="sr-callout-sub">
-                {registeredSidesLabel(pool.participants.length, pool.unaffiliated.length)}{' '}
-                registered for {league.label}.
-              </p>
-            )}
-            <HelpLink topic="blocks-vs-stages" />
-          </div>
-        )}
-
-        {capable.length === 0 && (
+        {readiness.length > 0 && !readiness.some((r) => r.league.setup) && (
           <p style={{ margin: 0, fontSize: 13, color: 'var(--muted)', lineHeight: 1.6 }}>
             No league has been set up for a season yet. A league&apos;s setup — one structure on one
             calendar — is created by your platform operator. {NO_SETUP_NOTE}
           </p>
         )}
 
+        <div className="field">
+          <div className="field-label">
+            Season <span className="req">*</span>
+          </div>
+          <input
+            className="field-input"
+            aria-label="Season"
+            value={seasonLabel}
+            onChange={(e) => {
+              setSeasonLabel(e.target.value);
+              setErr('');
+            }}
+            placeholder="2026/27"
+            style={{ maxWidth: 200 }}
+          />
+        </div>
+
+        {picked && structure && calendar && (
+          <div className="sr-callout" aria-label="Season summary">
+            <p>
+              <strong className="sr-callout-k">{structureFormatLabel(structure)}</strong> (v
+              {structure.version}) · {calendar.label}
+              {calendar.blocks.length > 0 &&
+                ` · ${formatIsoDate(calendar.blocks[0].start)} → ${formatIsoDate(
+                  calendar.blocks[calendar.blocks.length - 1].end,
+                )}`}
+            </p>
+            <p className="sr-callout-sub">
+              {registeredSidesLabel(affiliatedCount, picked.sides.registered - affiliatedCount)}{' '}
+              registered for {picked.league.label}
+            </p>
+            {picked.run?.running && (
+              <p className="sr-callout-sub">
+                Season {picked.run.seasonLabel} is already running for this league (
+                {picked.run.progress}). A new season needs a different label.
+              </p>
+            )}
+            {/* The GROUP SHAPE, per stage, sized against the real roster, so it reads
+                "2 groups of 6, 6" rather than an abstract count. */}
+            <div className="sr-callout-sub" style={{ display: 'grid', gap: 2, marginTop: 6 }}>
+              {structure.stages.map((s) => {
+                const plan = s.entrants.kind === 'all-registered' ? undefined : s.entrants.groups;
+                const sizes = groupSizes(plan, affiliatedCount);
+                // A `manual` stage with no plan is not "one group" — it is however many the
+                // admin confirms, which nothing here can predict. Saying "one group of 12"
+                // would assert a shape, which is the opposite of what this line is for.
+                //
+                // `all-registered` says "in one group" in its own description, so adding a
+                // shape clause there reads "one group of 12 · Every registered side, in one
+                // group". The COUNT is the new information; the shape isn't.
+                const shape =
+                  !plan && s.entrants.kind === 'manual'
+                    ? 'groups set when you confirm entrants'
+                    : s.entrants.kind === 'all-registered'
+                      ? `${sizes[0]} sides`
+                      : sizes.length === 1
+                        ? `one group of ${sizes[0]}`
+                        : `${sizes.length} groups of ${sizes.join(', ')}`;
+                return (
+                  <div key={s.id}>
+                    <strong style={{ color: 'var(--ink)' }}>{s.name}</strong> · {shape} ·{' '}
+                    {describeEntrants(s.entrants)}
+                  </div>
+                );
+              })}
+            </div>
+            <HelpLink topic="blocks-vs-stages" />
+          </div>
+        )}
+
+        {problems.map((p, i) => (
+          <div key={i} style={ERR}>
+            {p}
+          </div>
+        ))}
+        {err && (
+          <div role="alert" style={ERR}>
+            {err}
+          </div>
+        )}
+
         <div style={{ display: 'flex', gap: 8 }}>
-          <Btn tone="teal" onClick={submit} disabled={!league || !!ended}>
-            Continue
+          <Btn tone="teal" onClick={submit} disabled={!canSubmit || busy}>
+            {busy ? 'Starting…' : 'Start season'}
           </Btn>
           <Btn tone="ghost" onClick={onClose}>
             Cancel
           </Btn>
+        </div>
+        <div className="sr-next">
+          <div className="sr-next-t">What happens next</div>
+          <NextSteps steps={SEASON_NEXT_STEPS} />
         </div>
       </div>
     </Modal>
@@ -2125,11 +2030,14 @@ export function SeasonRunsPanel({
   structures = [],
   onRebaseRun,
   onFetchRun,
+  initialRunId,
 }: {
   clubs: Club[];
   allLeagues: League[];
   allSeries: Series[];
   runs: SeasonRun[];
+  /** The season to show first — e.g. "Open season" on the Leagues page. Absent ⇒ the first. */
+  initialRunId?: string;
   /**
    * The LIVE structures from tenant config. A run plays its frozen snapshot; comparing
    * against these is how the panel notices the operator has since published a newer
@@ -2150,8 +2058,8 @@ export function SeasonRunsPanel({
    * longer exists" about a structure that is perfectly fine.
    */
   configFailed?: boolean;
-  /** Opens the shared "Generate fixtures" launcher — this panel no longer hosts its own
-   *  Start-season modal, so both the top action and the empty-state CTA route through it. */
+  /** Opens the page's Start a season modal. Offered here only while no season exists —
+   *  with a season on screen, the page header's button is the one entry point. */
   onOpenLauncher: () => void;
   onPatchRun: (id: string, patch: Partial<SeasonRun>) => Promise<void>;
   /**
@@ -2161,7 +2069,7 @@ export function SeasonRunsPanel({
   onGenerate: (run: SeasonRun, stage: StageSpec) => Promise<{ warnings?: string[] } | undefined>;
   onDeleteRun: (id: string) => void;
 }) {
-  const [activeId, setActiveId] = useState<string | null>(null);
+  const [activeId, setActiveId] = useState<string | null>(initialRunId ?? null);
   const [confirming, setConfirming] = useState<{ run: SeasonRun; stage: StageSpec } | null>(null);
   const [busyStage, setBusyStage] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -2475,14 +2383,9 @@ export function SeasonRunsPanel({
       <Card
         title="Seasons"
         sub="Each stage confirms who plays, then generates its fixtures. A stage whose teams depend on earlier results waits for you."
-        action={
-          // Outline, not filled: with a season on screen the stage cards' own buttons are
-          // the work, and a page has one filled button per surface.
-          <Btn tone="outline" size="sm" icon={Icon.Plus} onClick={onOpenLauncher}>
-            Start a season
-          </Btn>
-        }
       >
+        {/* No Start a season here: with a season on screen the stage cards' buttons are the
+            work, and the page header carries the one Start a season entry point. */}
         {runs.length > 1 && (
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
             {runs.map((r) => {

@@ -8,6 +8,8 @@ import {
   releaseErrorMessage,
   SEASON_CHANGED_MESSAGE,
   SEASON_EXISTS_MESSAGE,
+  STRUCTURE_MISSING_MESSAGE,
+  CALENDAR_MISSING_MESSAGE,
   seasonRunConflictMessage,
   seasonRunErrorMessage,
   SETUP_MISSING_MESSAGE,
@@ -116,8 +118,27 @@ describe('startSeasonErrorMessage', () => {
     expect(SEASON_EXISTS_MESSAGE).toBe(startSeasonErrorMessage(err));
   });
 
+  it('sends a setup whose structure or calendar is gone to the operator', () => {
+    const structure = new ApiError(
+      400,
+      "the league's structure no longer exists",
+      'structure_missing',
+    );
+    expect(startSeasonErrorMessage(structure)).toBe(STRUCTURE_MISSING_MESSAGE);
+    expect(STRUCTURE_MISSING_MESSAGE).toMatch(
+      /structure that no longer exists — ask your operator/,
+    );
+    const calendar = new ApiError(
+      400,
+      "the league's calendar no longer exists",
+      'calendar_missing',
+    );
+    expect(startSeasonErrorMessage(calendar)).toBe(CALENDAR_MISSING_MESSAGE);
+    expect(CALENDAR_MISSING_MESSAGE).toMatch(/calendar that no longer exists — ask your operator/);
+  });
+
   it('never shows a code, and leaves every other failure to describeError', () => {
-    for (const code of ['setup_missing', 'season_exists'])
+    for (const code of ['setup_missing', 'structure_missing', 'calendar_missing', 'season_exists'])
       expect(startSeasonErrorMessage(new ApiError(400, 'x', code))).not.toContain(code);
     expect(startSeasonErrorMessage(new ApiError(400, 'unknown league'))).toBeNull();
     expect(startSeasonErrorMessage(new Error('boom'))).toBeNull();

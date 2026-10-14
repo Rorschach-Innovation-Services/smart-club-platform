@@ -153,6 +153,23 @@ const CATALOGUES: Record<string, RequiredDoc[]> = {
       accepts: [...OFFICE],
       matchHints: ['lease', 'mou', 'facility', 'field agreement', 'field use', 'agreement'],
     },
+    {
+      // Added for the Oct 2026 top-up drop (TUT + Pretoria East), which carried
+      // safeguarding-awareness and coaching certificates — one of them a phone photo
+      // (.jpg), which no other titans key accepts. A NEW key, deliberately not a revival
+      // of the archived `safeguarding` key above: that one's minFiles: 2 would flip every
+      // existing club non-compliant. `optional` keeps it out of completion counts, so
+      // adding it changes no club's compliance state.
+      key: 'safeguardingCoaching',
+      name: 'Safeguarding & coaching certificates',
+      desc: 'Safeguarding awareness and coaching certificates for club staff/coaches',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 10,
+      optional: true,
+      accepts: [...OFFICE, ...IMAGE],
+      matchHints: ['safeguarding', 'safe guarding', 'coaching certificate', 'coach evidence'],
+    },
   ],
 
   /**
@@ -332,7 +349,157 @@ const CATALOGUES: Record<string, RequiredDoc[]> = {
       matchHints: ['funding', 'funds', 'transport claim', 'coaching staff', 'trial', 'training'],
     },
   ],
+
+  /**
+   * Lions (Central Gauteng Lions / CGL), from the union's "Club Compliance 2025 and 2026"
+   * folders. A fresh tenant, so no archived legacy keys. Key names reuse the titans/tuskers
+   * ones wherever the meaning matches (constitution, agmMinutes, financials, committee,
+   * memberDatabase, chairmansReport, clubLogo, clubRecords) so cross-tenant tooling stays
+   * consistent. Docs a club may legitimately lack (bank letter, NPO/CIPC registration,
+   * financials, logo) carry allowUnavailable; the BEE certificate, chairman's report and
+   * the catch-all club records are `optional`, never counted towards completion.
+   */
+  lions: [
+    {
+      key: 'constitution',
+      name: 'Club constitution',
+      desc: 'Your club’s adopted constitution',
+      accepts: [...OFFICE],
+      matchHints: ['constitution', 'consti'],
+    },
+    {
+      key: 'agmMinutes',
+      name: 'AGM minutes',
+      desc: 'Agenda and minutes of your most recent annual general meeting',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 6,
+      accepts: [...OFFICE],
+      matchHints: ['agm', 'annual general', 'minutes', 'agenda'],
+    },
+    {
+      key: 'financials',
+      name: 'Financial statements',
+      desc: 'Annual financial statements or treasurer’s reports',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 6,
+      allowUnavailable: true,
+      // Old Parktonians' financials arrived as a slide deck (.pptx) — download-only.
+      accepts: [...OFFICE, 'pptx'],
+      matchHints: ['financ', 'treasurer', 'afs', 'income', 'balance sheet'],
+    },
+    {
+      key: 'committee',
+      // Not keyed `exco` — that key is the on-platform committee FORM (titans precedent).
+      name: 'Club committee',
+      desc: 'Executive committee and office-bearers for the season',
+      accepts: [...SHEET],
+      matchHints: ['committee', 'exco', 'executive', 'office bearers'],
+      role: 'committee',
+    },
+    {
+      key: 'memberDatabase',
+      name: 'Member database',
+      desc: 'Full player/member register for the season',
+      accepts: [...SHEET],
+      // No bare 'register': the classifier matches at word starts, so it would also hit
+      // "registration" (orgRegistration's files).
+      matchHints: ['database', 'databse', 'player list', 'member list', 'members database'],
+      role: 'memberDatabase',
+    },
+    {
+      key: 'chairmansReport',
+      name: 'Chairman’s report',
+      desc: 'Chairperson’s or annual report to the AGM',
+      optional: true,
+      accepts: [...OFFICE],
+      matchHints: ['chairman', 'annual report'],
+    },
+    {
+      key: 'bankConfirmation',
+      name: 'Bank confirmation letter',
+      desc: 'Bank-stamped letter confirming the club’s account details',
+      allowUnavailable: true,
+      // Several clubs sent phone photos of the stamped letter.
+      accepts: ['pdf', ...IMAGE],
+      matchHints: ['bank', 'confirmation of banking', 'bank letter', 'account confirmation'],
+    },
+    {
+      key: 'orgRegistration',
+      name: 'NPO/CIPC registration',
+      desc: 'NPO or CIPC registration certificate',
+      allowUnavailable: true,
+      accepts: ['pdf'],
+      matchHints: ['npo', 'cipc', 'registration certificate', 'npc'],
+    },
+    {
+      key: 'beeCert',
+      name: 'BEE certificate',
+      desc: 'B-BBEE certificate or sworn affidavit',
+      optional: true,
+      accepts: ['pdf'],
+      matchHints: ['bee', 'b-bbee', 'bbbee', 'affidavit'],
+    },
+    {
+      key: 'clubLogo',
+      name: 'Club logo',
+      desc: 'Your club’s logo as an image',
+      optional: true,
+      allowUnavailable: true,
+      accepts: [...IMAGE],
+      matchHints: ['logo'],
+    },
+    {
+      key: 'clubRecords',
+      name: 'Other club records',
+      desc: 'Any other club paperwork the union keeps on file',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 10,
+      optional: true,
+      // No matchHints: a catch-all should land in the intake review table, not win
+      // auto-classification.
+      accepts: [...SHEET, ...IMAGE],
+    },
+  ],
 };
+
+/**
+ * Full-definition diff, per key: added, removed, and — for keys on both sides — every
+ * attribute whose value differs (`attr: <current> → <next>`), plus keys whose ORDER
+ * moved. This script REPLACES the stored catalogue wholesale, so any edit an operator
+ * made in the portal since it was last run (a raised maxFiles, a new accepted format, a
+ * reworded name) is silently reverted by --confirm unless it shows up here first. The
+ * keys-only current/next lines can't show that. Pure — exported for tests.
+ */
+function catalogueDiff(current: RequiredDoc[], next: RequiredDoc[]): string[] {
+  const lines: string[] = [];
+  const curByKey = new Map(current.map((d) => [d.key, d]));
+  const nextByKey = new Map(next.map((d) => [d.key, d]));
+  const fmt = (v: unknown) => (v === undefined ? '(unset)' : JSON.stringify(v));
+  for (const d of next) {
+    const cur = curByKey.get(d.key);
+    if (!cur) {
+      lines.push(`+ ${d.key}: ${JSON.stringify(d)}`);
+      continue;
+    }
+    const before = cur as unknown as Record<string, unknown>;
+    const after = d as unknown as Record<string, unknown>;
+    const changed: string[] = [];
+    for (const a of [...new Set([...Object.keys(before), ...Object.keys(after)])].sort()) {
+      if (JSON.stringify(before[a]) !== JSON.stringify(after[a]))
+        changed.push(`${a}: ${fmt(before[a])} → ${fmt(after[a])}`);
+    }
+    if (changed.length) lines.push(`~ ${d.key}: ${changed.join('; ')}`);
+  }
+  for (const d of current) if (!nextByKey.has(d.key)) lines.push(`- ${d.key}`);
+  const commonCur = current.filter((d) => nextByKey.has(d.key)).map((d) => d.key);
+  const commonNext = next.filter((d) => curByKey.has(d.key)).map((d) => d.key);
+  if (commonCur.join(',') !== commonNext.join(','))
+    lines.push(`order: ${commonCur.join(', ')} → ${commonNext.join(', ')}`);
+  return lines;
+}
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -361,6 +528,12 @@ async function main(): Promise<void> {
   );
   console.log(`   current: ${current.map((d) => d.key).join(', ')}`);
   console.log(`   next:    ${next.map((d) => d.key).join(', ')}`);
+  const diff = catalogueDiff(current, next);
+  console.log(
+    `\n── full-definition diff (current → next; --confirm REPLACES the stored catalogue)`,
+  );
+  if (diff.length === 0) console.log('   (identical — no-op)');
+  for (const line of diff) console.log(`   ${line}`);
 
   // Removing a key any club still holds data for is what the operator route 409s on;
   // surface the same information here rather than discovering it after the write.
@@ -400,4 +573,4 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   });
 }
 
-export { CATALOGUES };
+export { CATALOGUES, catalogueDiff };

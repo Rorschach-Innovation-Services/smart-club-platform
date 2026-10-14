@@ -257,6 +257,10 @@ export default $config({
     const candidateHandleSecret = new sst.Secret('CandidateHandleSecret', '');
     const whatsappAccessToken = new sst.Secret('WhatsappAccessToken', '');
     const whatsappPhoneNumberId = new sst.Secret('WhatsappPhoneNumberId', '');
+    // Union-admin cell for the captain's-report ops digest (one WhatsApp status line after a
+    // sync run with report activity). '' ⇒ the digest is off. Never commit the number:
+    //   sst secret set OpsDigestCell <cell> --stage <stage>
+    const opsDigestCell = new sst.Secret('OpsDigestCell', '');
     // ── Medicoach fixture/result sync (ADR 0016) ── Smart club PULLS from medicoach. The URL
     // is the medicoach API base (e.g. https://api.medicoach.co.za); the secret is the shared
     // HMAC key (== medicoach's SmartClubSyncSecret). Both default to '' and an empty value is
@@ -497,6 +501,7 @@ export default $config({
         candidateHandleSecret,
         whatsappAccessToken,
         whatsappPhoneNumberId,
+        opsDigestCell,
         // POST /integrations/medicoach/sync-now runs the puller in the API Lambda.
         medicoachSyncUrl,
         medicoachSyncSecret,
@@ -562,9 +567,13 @@ export default $config({
         CANDIDATE_HANDLE_SECRET: candidateHandleSecret.value,
         WHATSAPP_ACCESS_TOKEN: whatsappAccessToken.value,
         WHATSAPP_PHONE_NUMBER_ID: whatsappPhoneNumberId.value,
+        // Captain's-report ops digest recipient ("Sync now" runs the same sync) — '' ⇒ off.
+        OPS_DIGEST_CELL: opsDigestCell.value,
         // Medicoach sync (ADR 0016) — empty ⇒ the "Sync now" route dry-runs.
         MEDICOACH_SYNC_URL: medicoachSyncUrl.value,
         MEDICOACH_SYNC_SECRET: medicoachSyncSecret.value,
+        // Player push rows per POST (deploy env; '' ⇒ the contract cap, 50). Clamped 1..50.
+        MEDICOACH_SYNC_BATCH_SIZE: process.env.MEDICOACH_SYNC_BATCH_SIZE ?? '',
         // Template names/languages come from the code registry (whatsapp-templates.ts),
         // not the Lambda env — see the note by the secrets above.
         // Force dry-run regardless of secrets (set NOTIFY_DRY_RUN=1 in the deploy env)
@@ -594,12 +603,104 @@ export default $config({
       copyFiles: [{ from: 'packages/api/src/certificates/fonts', to: 'certificates/fonts' }],
     });
 
+    // ── Fixture reminders cron ── daily 05:00 UTC = 07:00 SAST. Reminds club chairs of upcoming
+    // fixtures for every tenant whose operator enabled `fixtureReminders`. Mirrors the API
+    // function's link + env for exactly what the reminder path touches (DynamoDB, SES, Meta,
+    // Sentry, the canonical-origin map for the portal link) — deliberately NOT the Cognito /
+    // uploads / KMS / candidate-handle grants, which this job never uses (least privilege).
+    new sst.aws.Cron('FixtureReminders', {
+      schedule: 'cron(0 5 * * ? *)',
+      function: {
+        handler: 'packages/api/src/crons/fixture-reminders.handler',
+        link: [table, fromEmail, whatsappAccessToken, whatsappPhoneNumberId],
+        // Same SES grant as the API (SES authorizes by verified identity, not resource ARN).
+        permissions: [{ actions: ['ses:SendEmail', 'ses:SendRawEmail'], resources: ['*'] }],
+        // Sequential sends across every tenant/club, each with provider backoff retries.
+        timeout: '5 minutes',
+        environment: {
+          TABLE_NAME: table.name,
+          STAGE: $app.stage,
+          SENTRY_DSN: sentryDsnApi.value,
+          SENTRY_RELEASE: sentryRelease,
+          // canonicalWebOrigin() (the reminder's portal link) reads these three.
+          WEB_ORIGIN_MAP: JSON.stringify(isProd ? webOriginMap(VANITY) : {}),
+          WILDCARD_ENABLED: wildcardEnabled ? '1' : '',
+          WILDCARD_WEB_SUFFIX: isProd ? WILDCARD_WEB_SUFFIX : '',
+          SES_REGION: 'eu-west-1',
+          FROM_EMAIL: fromEmail.value,
+          WHATSAPP_ACCESS_TOKEN: whatsappAccessToken.value,
+          WHATSAPP_PHONE_NUMBER_ID: whatsappPhoneNumberId.value,
+          NOTIFY_DRY_RUN: process.env.NOTIFY_DRY_RUN ?? '',
+        },
+      },
+    });
+
+    // ── Clearance reminders cron ── daily 05:00 UTC = 07:00 SAST. Nudges the source chair of every
+    // clearance pending ≥ 7 days (again every 7 days) and emails each tenant's admins a digest.
+    // Same least-privilege link/env as FixtureReminders, including the portal-origin vars (each
+    // reminder and digest line carries a deep link to its clearance).
+    new sst.aws.Cron('ClearanceReminders', {
+      schedule: 'cron(0 5 * * ? *)',
+      function: {
+        handler: 'packages/api/src/crons/clearance-reminders.handler',
+        link: [table, fromEmail, whatsappAccessToken, whatsappPhoneNumberId],
+        permissions: [{ actions: ['ses:SendEmail', 'ses:SendRawEmail'], resources: ['*'] }],
+        timeout: '5 minutes',
+        environment: {
+          TABLE_NAME: table.name,
+          STAGE: $app.stage,
+          SENTRY_DSN: sentryDsnApi.value,
+          SENTRY_RELEASE: sentryRelease,
+          // canonicalWebOrigin() (the reminder + digest clearance links) reads these three.
+          WEB_ORIGIN_MAP: JSON.stringify(isProd ? webOriginMap(VANITY) : {}),
+          WILDCARD_ENABLED: wildcardEnabled ? '1' : '',
+          WILDCARD_WEB_SUFFIX: isProd ? WILDCARD_WEB_SUFFIX : '',
+          SES_REGION: 'eu-west-1',
+          FROM_EMAIL: fromEmail.value,
+          WHATSAPP_ACCESS_TOKEN: whatsappAccessToken.value,
+          WHATSAPP_PHONE_NUMBER_ID: whatsappPhoneNumberId.value,
+          NOTIFY_DRY_RUN: process.env.NOTIFY_DRY_RUN ?? '',
+        },
+      },
+    });
+
+    // ── Official appointment notices cron ── every 5 minutes. Drains the queued
+    // NOTIFY#officials ledger rows the two appointment routes enqueue (manual PUT + workbook
+    // confirm) and emails / WhatsApps each newly appointed umpire or referee. Same least-privilege
+    // link/env as FixtureReminders minus the portal-origin vars (the notice carries no link).
+    new sst.aws.Cron('OfficialNotices', {
+      schedule: 'rate(5 minutes)',
+      function: {
+        handler: 'packages/api/src/crons/official-notices.handler',
+        link: [table, fromEmail, whatsappAccessToken, whatsappPhoneNumberId],
+        permissions: [{ actions: ['ses:SendEmail', 'ses:SendRawEmail'], resources: ['*'] }],
+        timeout: '5 minutes',
+        // Rows stay `queued` during the send (no claim step), so two overlapping runs could
+        // double-send the tail of a slow drain. One reserved slot makes runs strictly serial:
+        // a throttled tick is retried later and finds those rows `completed`.
+        concurrency: { reserved: 1 },
+        environment: {
+          TABLE_NAME: table.name,
+          STAGE: $app.stage,
+          SENTRY_DSN: sentryDsnApi.value,
+          SENTRY_RELEASE: sentryRelease,
+          SES_REGION: 'eu-west-1',
+          FROM_EMAIL: fromEmail.value,
+          WHATSAPP_ACCESS_TOKEN: whatsappAccessToken.value,
+          WHATSAPP_PHONE_NUMBER_ID: whatsappPhoneNumberId.value,
+          NOTIFY_DRY_RUN: process.env.NOTIFY_DRY_RUN ?? '',
+        },
+      },
+    });
+
     // ── Medicoach sync puller (ADR 0016) ── One cron, every 15 minutes, all day (user
     // decision: worst-case 15 min delay at ~672 runs a week). It pulls changed fixtures for
     // every tenant with `features.medicoachSync`; a quiet run is a handful of small reads.
     // Dry-runs (logs only) while the MedicoachSync* secrets are empty.
+    // Fixed quarter-hour marks (not a drifting rate) so one run lands at 16:00 UTC = 18:00
+    // SAST, when queued captain's report notices are released (REPORT_NOTICE_HOUR).
     new sst.aws.Cron('MedicoachSyncPuller', {
-      schedule: 'rate(15 minutes)',
+      schedule: 'cron(0/15 * * * ? *)',
       function: {
         handler: 'packages/api/src/medicoach-sync/cron.handler',
         link: [
@@ -609,6 +710,7 @@ export default $config({
           fromEmail,
           whatsappAccessToken,
           whatsappPhoneNumberId,
+          opsDigestCell,
           captainsReportLinkSecret,
         ],
         // A stored result opens captain's reports and emails the link (SES, eu-west-1).
@@ -621,11 +723,15 @@ export default $config({
           SENTRY_RELEASE: sentryRelease,
           MEDICOACH_SYNC_URL: medicoachSyncUrl.value,
           MEDICOACH_SYNC_SECRET: medicoachSyncSecret.value,
+          // Player push rows per POST (deploy env; '' ⇒ the contract cap, 50). Clamped 1..50.
+          MEDICOACH_SYNC_BATCH_SIZE: process.env.MEDICOACH_SYNC_BATCH_SIZE ?? '',
           // Captain's-report notices (same dry-run rules as the API: empty secrets ⇒ log only).
           SES_REGION: 'eu-west-1',
           FROM_EMAIL: fromEmail.value,
           WHATSAPP_ACCESS_TOKEN: whatsappAccessToken.value,
           WHATSAPP_PHONE_NUMBER_ID: whatsappPhoneNumberId.value,
+          // Captain's-report ops digest recipient — '' ⇒ off.
+          OPS_DIGEST_CELL: opsDigestCell.value,
           NOTIFY_DRY_RUN: process.env.NOTIFY_DRY_RUN ?? '',
           CAPTAINS_REPORT_LINK_SECRET: captainsReportLinkSecret.value,
           CAPTAINS_REPORT_LINK_BASE_URL: captainsReportLinkBaseUrl,

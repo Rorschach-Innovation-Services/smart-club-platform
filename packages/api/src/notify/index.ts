@@ -14,15 +14,42 @@ import {
   sendClearanceResolvedEmail,
   sendClearanceReopenedSourceEmail,
   sendClearanceReopenedDestEmail,
+  sendClearanceOpenedDestEmail,
+  sendClearanceOpenedAdminEmail,
+  sendClearanceOpenedAdminSummaryEmail,
+  sendClearanceAutoRejectedAdminEmail,
+  sendClearanceReminderDigestEmail,
   sendVeteransRequestEmail,
   sendVeteransRequestResolvedEmail,
+  sendPostponementEmail,
+  postponementOpenedEmailContent,
+  postponementCounteredEmailContent,
+  postponementAgreedEmailContent,
+  postponementAdminFinalEmailContent,
+  postponementDeclinedEmailContent,
+  fixtureReminderEmailContent,
+  sendFixtureReminderEmail,
+  officialAppointedEmailContent,
+  sendOfficialAppointedEmail,
 } from './email.js';
-import type { TutorialLink, RegLinkOrgCopy } from './email.js';
+import type {
+  TutorialLink,
+  RegLinkOrgCopy,
+  PostponementOpenedEmailInput,
+  PostponementCounteredEmailInput,
+  PostponementAgreedEmailInput,
+  PostponementAdminFinalEmailInput,
+  PostponementDeclinedEmailInput,
+  FixtureReminderLine,
+  ClearanceReminderDigestLine,
+} from './email.js';
 import {
   sendStaffInviteWhatsApp,
   sendFixturesWhatsApp,
   sendRegLinkWhatsApp,
   sendClearanceWhatsApp,
+  sendFixtureReminderWhatsApp,
+  sendOfficialAppointedWhatsApp,
   toE164,
 } from './whatsapp.js';
 
@@ -259,6 +286,8 @@ interface ClearanceCopy {
   fromClubName: string;
   playerName: string;
   toClubName: string;
+  /** Deep link to the clearance in THIS recipient's club portal; absent when no origin resolves. */
+  portalLink?: string;
 }
 
 async function sendClearanceEmailChannel(
@@ -298,16 +327,41 @@ async function sendClearanceWhatsAppChannel(
       error: 'no valid chair cell on file',
     };
   }
+  const { portalLink, ...names } = copy;
+  if (!portalLink) {
+    // The only clearance template (club_clearance_pending_v2) carries the link as {{5}} and Meta
+    // rejects an empty param, so a link-less notice (no canonical origin — e.g. dev stages) skips.
+    return {
+      channel: 'whatsapp',
+      status: 'skipped',
+      to: e164,
+      error: 'no portal link for this tenant',
+    };
+  }
   try {
     const { messageId } = await sendClearanceWhatsApp({
       to: e164,
       chairName: chair.name,
-      ...copy,
+      ...names,
+      portalLink,
     });
     return { channel: 'whatsapp', status: 'sent', to: e164, messageId };
   } catch (err) {
     return { channel: 'whatsapp', status: 'failed', to: e164, error: errMessage(err) };
   }
+}
+
+/**
+ * Whether {@link sendClearanceNotice} could deliver on at least one of `channels` — the exact
+ * per-channel validation it applies (a valid email, or a cell that converts to E.164 when
+ * WhatsApp is a channel). False ⇒ every channel would come back `skipped`.
+ */
+export function hasUsableChairContact(
+  chair: { email?: string; cell?: string },
+  channels: Channel[],
+): boolean {
+  if (channels.includes('email') && EMAIL_RE.test((chair.email ?? '').trim())) return true;
+  return channels.includes('whatsapp') && !!toE164((chair.cell ?? '').trim());
 }
 
 /**
@@ -321,15 +375,23 @@ export async function sendClearanceNotice(args: {
   fromClubName: string;
   playerName: string;
   toClubName: string;
+  /** Deep link to the clearance in the source club's portal; optional, but WhatsApp is recorded
+   *  `skipped` without it (the template's {{5}} is the link). */
+  portalLink?: string;
   channels: Channel[];
 }): Promise<{ results: SendResult[] }> {
-  const { chair, fromClubName, playerName, toClubName, channels } = args;
+  const { chair, fromClubName, playerName, toClubName, portalLink, channels } = args;
   const contact: ChairContact = {
     name: (chair.name ?? '').trim(),
     email: (chair.email ?? '').trim(),
     cell: (chair.cell ?? '').trim(),
   };
-  const copy: ClearanceCopy = { fromClubName, playerName, toClubName };
+  const copy: ClearanceCopy = {
+    fromClubName,
+    playerName,
+    toClubName,
+    ...(portalLink ? { portalLink } : {}),
+  };
   const results = await Promise.all(
     channels.map((channel) =>
       channel === 'email'
@@ -351,6 +413,8 @@ interface ClearanceResolvedCopy {
   reason?: string;
   /** Reject outcome — steers the rejected email copy (see ClearanceResolvedEmailInput). */
   rejectOutcome?: RejectOutcome;
+  /** Deep link to the clearance in THIS recipient's club portal; absent when no origin resolves. */
+  portalLink?: string;
 }
 
 async function sendClearanceResolvedEmailChannel(
@@ -394,8 +458,19 @@ export async function sendClearanceResolvedNotice(args: {
   outcome: 'approved' | 'rejected';
   reason?: string;
   rejectOutcome?: RejectOutcome;
+  /** Deep link to the clearance in THIS chair's club portal (each club gets its own); optional. */
+  portalLink?: string;
 }): Promise<{ results: SendResult[] }> {
-  const { chair, fromClubName, playerName, toClubName, outcome, reason, rejectOutcome } = args;
+  const {
+    chair,
+    fromClubName,
+    playerName,
+    toClubName,
+    outcome,
+    reason,
+    rejectOutcome,
+    portalLink,
+  } = args;
   const contact: ChairContact = {
     name: (chair.name ?? '').trim(),
     email: (chair.email ?? '').trim(),
@@ -408,6 +483,7 @@ export async function sendClearanceResolvedNotice(args: {
     outcome,
     reason,
     rejectOutcome,
+    ...(portalLink ? { portalLink } : {}),
   };
   const results = [await sendClearanceResolvedEmailChannel(contact, copy)];
   return { results };
@@ -478,15 +554,22 @@ export async function sendClearanceReopenedNotice(args: {
   fromClubName: string;
   playerName: string;
   toClubName: string;
+  /** Deep link to the clearance in THIS chair's club portal (each club gets its own); optional. */
+  portalLink?: string;
   channels: Channel[];
 }): Promise<{ results: SendResult[] }> {
-  const { side, chair, fromClubName, playerName, toClubName, channels } = args;
+  const { side, chair, fromClubName, playerName, toClubName, portalLink, channels } = args;
   const contact: ChairContact = {
     name: (chair.name ?? '').trim(),
     email: (chair.email ?? '').trim(),
     cell: (chair.cell ?? '').trim(),
   };
-  const copy: ClearanceCopy = { fromClubName, playerName, toClubName };
+  const copy: ClearanceCopy = {
+    fromClubName,
+    playerName,
+    toClubName,
+    ...(portalLink ? { portalLink } : {}),
+  };
   const results = await Promise.all(
     channels.map((channel): Promise<SendResult> => {
       if (channel === 'email') {
@@ -494,7 +577,8 @@ export async function sendClearanceReopenedNotice(args: {
           ? sendReopenedSourceEmailChannel(contact, copy)
           : sendReopenedDestEmailChannel(contact, copy);
       }
-      // WhatsApp: the source reuses the pending template; the destination has no template at all,
+      // WhatsApp: the source reuses the pending template (club_clearance_pending_v2; skipped when
+      // there is no link — see sendClearanceWhatsAppChannel); the destination has no template at all,
       // so its channel is recorded skipped rather than sent — the comm log must not imply a send.
       if (side === 'source') return sendClearanceWhatsAppChannel(contact, copy);
       return Promise.resolve<SendResult>({
@@ -506,6 +590,133 @@ export async function sendClearanceReopenedNotice(args: {
     }),
   );
   return { results };
+}
+
+// ───────────────── Clearance opened (destination chair + union admins) ─────────────────
+
+/**
+ * Tell the DESTINATION chairman a clearance opened into their club. Email only (there is no
+ * destination WhatsApp template). Non-throwing: a bad/blank chair email becomes a `skipped` /
+ * `failed` result. The caller owns the comm-log append (kind `clearance-inbound`).
+ */
+export async function sendClearanceDestNotice(args: {
+  chair: { name?: string; email?: string; cell?: string };
+  fromClubName: string;
+  playerName: string;
+  toClubName: string;
+  /** Deep link to the clearance in the destination club's portal; optional. */
+  portalLink?: string;
+}): Promise<{ results: SendResult[] }> {
+  const { chair, fromClubName, playerName, toClubName, portalLink } = args;
+  const email = (chair.email ?? '').trim();
+  if (!EMAIL_RE.test(email)) {
+    return {
+      results: [
+        {
+          channel: 'email',
+          status: 'skipped',
+          ...(email ? { to: email } : {}),
+          error: 'no valid chair email on file',
+        },
+      ],
+    };
+  }
+  try {
+    const { messageId } = await sendClearanceOpenedDestEmail({
+      to: email,
+      chairName: (chair.name ?? '').trim(),
+      fromClubName,
+      playerName,
+      toClubName,
+      ...(portalLink ? { portalLink } : {}),
+    });
+    return { results: [{ channel: 'email', status: 'sent', to: email, messageId }] };
+  } catch (err) {
+    return { results: [{ channel: 'email', status: 'failed', to: email, error: errMessage(err) }] };
+  }
+}
+
+/** Send one email per address, sequentially; never throws (each failure becomes a result). */
+async function sendAdminEmails(
+  to: string[],
+  send: (address: string) => Promise<{ messageId: string }>,
+): Promise<{ results: SendResult[] }> {
+  const results: SendResult[] = [];
+  for (const address of to) {
+    if (!EMAIL_RE.test(address)) {
+      results.push({ channel: 'email', status: 'skipped', to: address, error: 'invalid email' });
+      continue;
+    }
+    try {
+      const { messageId } = await send(address);
+      results.push({ channel: 'email', status: 'sent', to: address, messageId });
+    } catch (err) {
+      results.push({ channel: 'email', status: 'failed', to: address, error: errMessage(err) });
+    }
+  }
+  return { results };
+}
+
+/** Tell each tenant admin a clearance opened. Email only; not comm-logged (no club owns it). */
+export async function sendClearanceAdminNotice(args: {
+  to: string[];
+  fromClubName: string;
+  playerName: string;
+  toClubName: string;
+  fromClubDirectory?: boolean;
+  /** Deep link to the clearance in the admin console; optional. */
+  adminLink?: string;
+}): Promise<{ results: SendResult[] }> {
+  const { to, ...copy } = args;
+  return sendAdminEmails(to, (address) => sendClearanceOpenedAdminEmail({ to: address, ...copy }));
+}
+
+/**
+ * Tell each tenant admin, in ONE email, about every clearance a chair bulk registration opened
+ * (the per-creation admin notice is collapsed into this on the bulk routes). Email only; not
+ * comm-logged.
+ */
+export async function sendClearanceAdminSummaryNotice(args: {
+  to: string[];
+  toClubName: string;
+  clearances: Array<{ playerName: string; fromClubName: string; fromClubDirectory?: boolean }>;
+  /** Link to the admin console's clearances list; optional. */
+  adminLink?: string;
+}): Promise<{ results: SendResult[] }> {
+  const { to, ...copy } = args;
+  return sendAdminEmails(to, (address) =>
+    sendClearanceOpenedAdminSummaryEmail({ to: address, ...copy }),
+  );
+}
+
+/** Tell each tenant admin a registration was auto-rejected outside the transfer window. Email only. */
+export async function sendClearanceAutoRejectedAdminNotice(args: {
+  to: string[];
+  fromClubName: string;
+  playerName: string;
+  toClubName: string;
+  reason: string;
+  /** Deep link to the clearance in the admin console; optional. */
+  adminLink?: string;
+}): Promise<{ results: SendResult[] }> {
+  const { to, ...copy } = args;
+  return sendAdminEmails(to, (address) =>
+    sendClearanceAutoRejectedAdminEmail({ to: address, ...copy }),
+  );
+}
+
+/** The ClearanceReminders cron's per-tenant admin digest, one email per admin. */
+export async function sendClearanceReminderDigest(args: {
+  to: string[];
+  orgName: string;
+  nudged: ClearanceReminderDigestLine[];
+  chairless: ClearanceReminderDigestLine[];
+  noContact?: ClearanceReminderDigestLine[];
+}): Promise<{ results: SendResult[] }> {
+  const { to, orgName, nudged, chairless, noContact = [] } = args;
+  return sendAdminEmails(to, (address) =>
+    sendClearanceReminderDigestEmail({ to: address, orgName, nudged, chairless, noContact }),
+  );
 }
 
 // ───────────────────────── Fixtures broadcast ─────────────────────────
@@ -714,4 +925,271 @@ export async function sendVeteransRequestResolvedNotice(args: {
   } catch (err) {
     return { results: [{ channel: 'email', status: 'failed', to: email, error: errMessage(err) }] };
   }
+}
+
+// ───────────────────── Fixture postponement negotiation (ADR 0015) ─────────────────────
+//
+// Email only, same reasoning as the veterans notices (low volume, no WhatsApp template / billed
+// Meta conversation per request). Each function is called once per recipient chair; the caller
+// owns the club lookup, the `{ both }` fan-out on agree/admin-final and the comm-log append.
+// Non-throwing: a bad/blank chair email becomes a `skipped`/`failed` result.
+
+type PostponementChair = { name?: string; email?: string; cell?: string };
+
+async function sendChairPostponementNotice(
+  chair: PostponementChair,
+  render: (chairName: string) => { subject: string; text: string; html: string },
+  label: string,
+): Promise<{ results: SendResult[] }> {
+  const email = (chair.email ?? '').trim();
+  if (!EMAIL_RE.test(email)) {
+    return {
+      results: [
+        {
+          channel: 'email',
+          status: 'skipped',
+          ...(email ? { to: email } : {}),
+          error: 'no valid chair email on file',
+        },
+      ],
+    };
+  }
+  try {
+    const { messageId } = await sendPostponementEmail(
+      email,
+      render((chair.name ?? '').trim()),
+      label,
+    );
+    return { results: [{ channel: 'email', status: 'sent', to: email, messageId }] };
+  } catch (err) {
+    return { results: [{ channel: 'email', status: 'failed', to: email, error: errMessage(err) }] };
+  }
+}
+
+/** Notify the OPPOSING club chairman that the other club asked to postpone their fixture. */
+export function notifyPostponementOpened(
+  args: { chair: PostponementChair } & Omit<PostponementOpenedEmailInput, 'chairName'>,
+): Promise<{ results: SendResult[] }> {
+  const { chair, ...rest } = args;
+  return sendChairPostponementNotice(
+    chair,
+    (chairName) => postponementOpenedEmailContent({ ...rest, chairName }),
+    'postponement-request',
+  );
+}
+
+/** Notify the OTHER club chairman that a side counter-proposed a new date. */
+export function notifyPostponementCountered(
+  args: { chair: PostponementChair } & Omit<PostponementCounteredEmailInput, 'chairName'>,
+): Promise<{ results: SendResult[] }> {
+  const { chair, ...rest } = args;
+  return sendChairPostponementNotice(
+    chair,
+    (chairName) => postponementCounteredEmailContent({ ...rest, chairName }),
+    'postponement-counter',
+  );
+}
+
+/** The resolution notice inputs, discriminated by outcome. */
+export type PostponementResolvedNotice =
+  | ({ outcome: 'agreed' } & Omit<PostponementAgreedEmailInput, 'chairName'>)
+  | ({ outcome: 'admin-final' } & Omit<PostponementAdminFinalEmailInput, 'chairName'>)
+  | Omit<PostponementDeclinedEmailInput, 'chairName'>;
+
+/**
+ * Notify a club chairman that a postponement resolved: `agreed` (fixture moved by chair
+ * agreement) / `admin-final` (union ruling, acknowledge CTA) go to BOTH chairs; `declined` /
+ * `withdrawn` to the counterpart.
+ */
+export function notifyPostponementResolved(
+  args: { chair: PostponementChair } & PostponementResolvedNotice,
+): Promise<{ results: SendResult[] }> {
+  const { chair, ...notice } = args;
+  const render = (chairName: string) => {
+    if (notice.outcome === 'agreed') {
+      const { outcome: _o, ...input } = notice;
+      return postponementAgreedEmailContent({ ...input, chairName });
+    }
+    if (notice.outcome === 'admin-final') {
+      const { outcome: _o, ...input } = notice;
+      return postponementAdminFinalEmailContent({ ...input, chairName });
+    }
+    return postponementDeclinedEmailContent({ ...notice, chairName });
+  };
+  return sendChairPostponementNotice(chair, render, `postponement-${notice.outcome}`);
+}
+
+// ───────────────────── Scheduled fixture reminders (FixtureReminders cron) ─────────────────────
+//
+// One reminder per (club, match date) to the club chair, over the channels the caller passes —
+// the cron has already applied the tenant's channel config, the whatsappInvites flag and the
+// template-registered gate. Non-throwing per channel, like every orchestrator here: a bad/blank
+// contact becomes a `skipped` result and a provider fault a `failed` one, so one channel can never
+// sink the other and the caller always has a full set of results to record.
+
+/** Remind a club chair of the club's fixtures on one date. */
+export async function sendFixtureReminder(args: {
+  chair: { name?: string; email?: string; cell?: string };
+  clubName: string;
+  /** "Sat 2026-11-07". */
+  dateLabel: string;
+  /** Already projected for the club: no withheld time/venue. */
+  fixtures: FixtureReminderLine[];
+  /** Tenant portal origin; required by the WhatsApp template ({{4}}), optional in the email. */
+  portalLink?: string;
+  channels: Channel[];
+}): Promise<{ results: SendResult[] }> {
+  const { chair, clubName, dateLabel, fixtures, portalLink, channels } = args;
+  const chairName = (chair.name ?? '').trim();
+
+  const email = async (): Promise<SendResult> => {
+    const to = (chair.email ?? '').trim();
+    if (!EMAIL_RE.test(to)) {
+      return {
+        channel: 'email',
+        status: 'skipped',
+        ...(to ? { to } : {}),
+        error: 'no valid chair email on file',
+      };
+    }
+    try {
+      const { messageId } = await sendFixtureReminderEmail(
+        to,
+        fixtureReminderEmailContent({
+          chairName,
+          clubName,
+          dateLabel,
+          fixtures,
+          ...(portalLink ? { portalLink } : {}),
+        }),
+      );
+      return { channel: 'email', status: 'sent', to, messageId };
+    } catch (err) {
+      return { channel: 'email', status: 'failed', to, error: errMessage(err) };
+    }
+  };
+
+  const whatsapp = async (): Promise<SendResult> => {
+    const cell = (chair.cell ?? '').trim();
+    const e164 = toE164(cell);
+    if (!e164) {
+      return {
+        channel: 'whatsapp',
+        status: 'skipped',
+        ...(cell ? { to: cell } : {}),
+        error: 'no valid chair cell on file',
+      };
+    }
+    if (!portalLink) {
+      // The template's {{4}} is the portal link and Meta rejects an empty param.
+      return {
+        channel: 'whatsapp',
+        status: 'skipped',
+        to: e164,
+        error: 'no portal link for this tenant',
+      };
+    }
+    try {
+      const { messageId } = await sendFixtureReminderWhatsApp({
+        to: e164,
+        chairName,
+        clubName,
+        dateLabel,
+        portalLink,
+      });
+      return { channel: 'whatsapp', status: 'sent', to: e164, messageId };
+    } catch (err) {
+      return { channel: 'whatsapp', status: 'failed', to: e164, error: errMessage(err) };
+    }
+  };
+
+  const results = await Promise.all(channels.map((ch) => (ch === 'email' ? email() : whatsapp())));
+  return { results };
+}
+
+// ───────────────────── Official appointment notices (OfficialNotices cron) ─────────────────────
+//
+// One notice per (fixture, role, official), over the channels the caller passes (the cron has
+// already applied the whatsappInvites flag and the template-registered gate). Non-throwing per
+// channel. Officials get the real time/venue even when withheld from clubs (ADR 0011 is a
+// club-facing gate).
+
+/** Tell an umpire/referee they were appointed to a fixture. */
+export async function sendOfficialAppointedNotice(args: {
+  official: { name?: string; email?: string; phone?: string };
+  roleLabel: 'umpire' | 'referee' | 'scorer';
+  orgName: string;
+  seriesName: string;
+  /** "Umzinto CC v African Warriors". */
+  fixtureLabel: string;
+  /** "Sat 2026-11-15". */
+  dateLabel: string;
+  time?: string;
+  venue?: string;
+  channels: Channel[];
+}): Promise<{ results: SendResult[] }> {
+  const { official, roleLabel, orgName, seriesName, fixtureLabel, dateLabel, channels } = args;
+  const time = args.time?.trim() || undefined;
+  const venue = args.venue?.trim() || undefined;
+  const officialName = (official.name ?? '').trim();
+
+  const email = async (): Promise<SendResult> => {
+    const to = (official.email ?? '').trim();
+    if (!EMAIL_RE.test(to)) {
+      return {
+        channel: 'email',
+        status: 'skipped',
+        ...(to ? { to } : {}),
+        error: 'no valid official email on file',
+      };
+    }
+    try {
+      const { messageId } = await sendOfficialAppointedEmail(
+        to,
+        officialAppointedEmailContent({
+          officialName,
+          roleLabel,
+          orgName,
+          seriesName,
+          fixtureLabel,
+          dateLabel,
+          ...(time ? { time } : {}),
+          ...(venue ? { venue } : {}),
+        }),
+        roleLabel,
+      );
+      return { channel: 'email', status: 'sent', to, messageId };
+    } catch (err) {
+      return { channel: 'email', status: 'failed', to, error: errMessage(err) };
+    }
+  };
+
+  const whatsapp = async (): Promise<SendResult> => {
+    const cell = (official.phone ?? '').trim();
+    const e164 = toE164(cell);
+    if (!e164) {
+      return {
+        channel: 'whatsapp',
+        status: 'skipped',
+        ...(cell ? { to: cell } : {}),
+        error: 'no valid official cell on file',
+      };
+    }
+    try {
+      const { messageId } = await sendOfficialAppointedWhatsApp({
+        to: e164,
+        officialName,
+        roleLabel,
+        orgName,
+        matchLine: `${fixtureLabel} · ${seriesName}`,
+        whenWhere: `${dateLabel}, ${time ?? 'time TBC'} at ${venue ?? 'venue TBC'}`,
+      });
+      return { channel: 'whatsapp', status: 'sent', to: e164, messageId };
+    } catch (err) {
+      return { channel: 'whatsapp', status: 'failed', to: e164, error: errMessage(err) };
+    }
+  };
+
+  const results = await Promise.all(channels.map((ch) => (ch === 'email' ? email() : whatsapp())));
+  return { results };
 }

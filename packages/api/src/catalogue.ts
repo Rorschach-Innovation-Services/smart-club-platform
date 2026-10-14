@@ -116,9 +116,11 @@ export function docKeyForRole(
  * Every uploadable format → its exact MIME type (mirror of DOC_FORMAT_MIME in the
  * frontend's data.ts). Word covers Google Docs (exports .docx/.pdf); the spreadsheet
  * trio exists for catalogues whose docs are filled-in workbooks (league entry forms,
- * asset registers). `odt` covers LibreOffice-authored minutes, and the image trio covers
- * phone photos/scans of paper forms (proofs of payment, registration forms, logos) —
- * every one opt-in per doc via `accepts`, never part of the legacy default. The
+ * asset registers). `odt` covers LibreOffice-authored minutes, `ppt`/`pptx` cover
+ * slide-deck reports (Lions: a club's financials arrived as a .pptx — download-only, no
+ * inline viewer), and the image trio covers phone photos/scans of paper forms (proofs of
+ * payment, registration forms, logos) — every one opt-in per doc via `accepts`, never
+ * part of the legacy default. The
  * presigned PUT is minted with exactly one of these, so S3 rejects anything else at
  * upload time.
  *
@@ -133,6 +135,8 @@ export const DOC_FORMAT_MIME: Record<DocFormat, string> = {
   xls: 'application/vnd.ms-excel',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   ods: 'application/vnd.oasis.opendocument.spreadsheet',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
   png: 'image/png',

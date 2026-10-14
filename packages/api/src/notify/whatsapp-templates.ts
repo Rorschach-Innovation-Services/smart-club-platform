@@ -40,7 +40,20 @@
  *   "pending"    — NOT yet created/approved in Meta. The sender exists; a real send
  *      is rejected on the missing template until it is created under this name.
  * `status` is documentation, not a runtime gate — nothing here can verify Meta's
- * state, and the send path fails open (attempts the send) for every entry.
+ * state, and the send path fails open (attempts the send) for every entry. The exceptions
+ * are `fixtureReminder` (the FixtureReminders cron skips WhatsApp until it is
+ * "registered"), `officialAppointed` (the OfficialNotices cron's WhatsApp gate), `captainsReportDue` / `captainsReportOpsDigest` (their senders skip the
+ * channel as template-pending until it is "registered"), `clearancePendingV2` (the
+ * ClearanceReminders cron's WhatsApp gate), the three `dolphins*` welcome-broadcast entries and
+ * the two `emcu*` scorer-broadcast entries (their senders throw until "registered") — see those
+ * entries.
+ *
+ * RETIRED: `club_clearance_pending` (the 4-param, link-less v1 clearance template) has NO entry
+ * here since 7 Oct 2026. `club_clearance_pending_v2` is the only clearance template; a clearance
+ * notice with no link skips WhatsApp rather than sending a link-less message.
+ *
+ * RETIRED: `scorecard_confirm_due` (the Monday chair scorecard digest) has NO entry here since
+ * 7 Oct 2026 — scorecards are confirmed inside the captain's report instead. See the runbook.
  */
 
 export type WhatsAppTemplateDefinition = {
@@ -61,6 +74,11 @@ export type WhatsAppTemplateDefinition = {
    * (button index 0). Absent ⇒ a body-only template.
    */
   urlButton?: { urlTemplate: string; suffix: string };
+  /**
+   * A media header registered on the template. `VIDEO` ⇒ the sender supplies a public video
+   * `link` (header component) on every send. Absent ⇒ no header.
+   */
+  header?: { format: 'VIDEO' };
 };
 
 export const WHATSAPP_TEMPLATES = {
@@ -84,21 +102,28 @@ export const WHATSAPP_TEMPLATES = {
   },
 
   /**
-   * Clearance-pending heads-up to the from-club chairman. Body-only Utility
-   * template (no header/buttons/links). LIVE — created under the medicoach WABA on
-   * 4 Aug 2026 and Active (template id 1015867618110855). Body copied verbatim from
-   * docs/runbooks/whatsapp-templates.md; POPIA: names only, never a reject/override
-   * reason. See `sendClearanceWhatsApp`.
+   * Clearance-pending heads-up to the from-club chairman, with a deep link ({{5}}) to the
+   * clearance in the chair's club portal. Body-only Utility template. It replaced the 4-param
+   * `club_clearance_pending` (v1) under a NEW name rather than an in-place edit, which would have
+   * failed every live 4-param send with error 132000 until the edit cleared review; v1 was retired
+   * in code on 7 Oct 2026. The link sits mid-body because Meta rejects a body that ends on a
+   * variable; the "contact your union office" fallback stays (a chair with no portal login can't
+   * get past sign-in). POPIA: names only, never a reject/override reason.
+   *
+   * Approved in Meta 7 Oct 2026 (template id 1076095408549057). The only clearance template:
+   * a notice with no link skips the WhatsApp channel (see `sendClearanceWhatsApp`). This status
+   * IS read at runtime: the ClearanceReminders cron's WhatsApp gate.
    */
-  clearancePending: {
-    name: 'club_clearance_pending',
+  clearancePendingV2: {
+    name: 'club_clearance_pending_v2',
     lang: 'en',
-    paramCount: 4,
-    params: ['chair name', 'from-club name', 'player name', 'to-club name'],
+    paramCount: 5,
+    params: ['chair name', 'from-club name', 'player name', 'to-club name', 'clearance link'],
     bodyText:
       'Hello {{1}},\n\n' +
       "A player clearance is awaiting {{2}}'s review: {{3}} has applied to join {{4}} " +
       'and needs a clearance from your club.\n\n' +
+      'Review it here: {{5}}\n\n' +
       'Please have this reviewed and approved or rejected in your club portal, or ' +
       'contact your union office if you have any questions.',
     status: 'registered',
@@ -108,11 +133,11 @@ export const WHATSAPP_TEMPLATES = {
    * Chair onboarding heads-up sent on affiliation-complete: player-registration
    * link + tutorials URL.
    *
-   * NOT YET CREATED IN META. `bodyText` below is RECONSTRUCTED from the parameter
-   * order (the arity contract), not a transcript. Two URL body variables draw extra
-   * Meta scrutiny — if {{4}} blocks approval, drop it and rely on the email + portal
-   * for tutorials (the email already carries every link), which is a paramCount
-   * change here and in `regLinkParams`. Status flips to "registered" once approved.
+   * Active in Meta (template id 2437210353459453, Utility, last edited 19 Jun 2026;
+   * confirmed in Business Manager 6 Oct 2026 — "Quality pending" is the rating, not
+   * approval state). `bodyText` below is the registered copy, which predates this
+   * registry and differs from the wording the entry originally reconstructed; the
+   * 4-param order is unchanged, so `regLinkParams` is unaffected.
    */
   reglinkReady: {
     name: 'club_reglink_ready',
@@ -120,12 +145,11 @@ export const WHATSAPP_TEMPLATES = {
     paramCount: 4,
     params: ['chair name', 'club name', 'reg link', 'tutorials URL'],
     bodyText:
-      'Hello {{1}},\n\n' +
-      '{{2}} is now set up on the club management portal. Share this ' +
-      'player-registration link with your members so they can register: {{3}}\n\n' +
-      'A short set of how-to videos is here: {{4}}\n\n' +
-      'If you have any questions, please contact your union office.',
-    status: 'pending',
+      "Hi {{1}}, your {{2}} affiliation is approved. Here is your club's " +
+      'player registration link ({{3}}), share it with your players so they ' +
+      'register straight into your club.\n\n' +
+      'New to the app? Visit this link ({{4}}) for quick how-to videos.',
+    status: 'registered',
   },
 
   /**
@@ -151,6 +175,58 @@ export const WHATSAPP_TEMPLATES = {
       'Check your email for the full schedule.\n\n' +
       'If you have any questions, please contact your club.',
     status: 'unverified',
+  },
+
+  /**
+   * Scheduled fixture reminder to a club chair (the FixtureReminders cron), sent N days
+   * before a match day. Body-only Utility template; the fixture detail (opponents, and the
+   * kick-off/ground only when revealed) rides in the email and the portal, never here, so
+   * the template can't leak a withheld time or venue.
+   *
+   * Submitted to Meta 6 Oct 2026 and IN REVIEW (template id 1536264794855191); the
+   * registered copy matches `bodyText` below. Unlike the other entries, this status IS
+   * read at runtime: the cron skips the WhatsApp channel unless it is "registered" (a
+   * daily cron across every tenant would otherwise fail the same send on every run
+   * until approval). Flip to "registered" once Meta approves it.
+   */
+  fixtureReminder: {
+    name: 'fixture_reminder',
+    lang: 'en',
+    paramCount: 4,
+    params: ['chair name', 'club name', 'fixture date', 'portal link'],
+    bodyText:
+      'Hello {{1}},\n\n' +
+      'A reminder that {{2}} has fixtures on {{3}}. ' +
+      'See the match details in your club portal: {{4}}\n\n' +
+      'If you have any questions, please contact your union office.',
+    // Approved in Meta Business Manager 6 Oct 2026.
+    status: 'registered',
+  },
+
+  /**
+   * Appointment notice to an umpire or referee (the OfficialNotices cron), sent once per
+   * (fixture, role, official) when they are appointed. Body-only Utility template, no
+   * header/footer/buttons (officials have no portal login, so there is nothing to link to).
+   * Officials get the REAL kick-off time and ground even when the series withholds them from
+   * clubs — ADR 0011 is a club-facing gate.
+   *
+   * Approved in Meta 12 Oct 2026 (Utility, "Active – Quality pending"; template id
+   * 1982007072467151). The approved copy ends "please contact info@medicoach.co.za" — edited
+   * from the drafted "the union office" during creation — so bodyText mirrors Meta verbatim,
+   * per the registry convention. Like `fixtureReminder`, this status IS read at runtime: the
+   * cron skips the WhatsApp channel unless it is "registered" (email goes out regardless).
+   */
+  officialAppointed: {
+    name: 'official_appointed',
+    lang: 'en',
+    paramCount: 5,
+    params: ['official name', 'role', 'org name', 'match line', 'when and where'],
+    bodyText:
+      'Hello {{1}},\n\n' +
+      'You have been appointed as {{2}} for the following {{3}} fixture:\n\n' +
+      '{{4}}\n{{5}}\n\n' +
+      'If you are unavailable for this appointment, please contact info@medicoach.co.za as soon as possible.',
+    status: 'registered',
   },
 
   /**
@@ -186,6 +262,208 @@ export const WHATSAPP_TEMPLATES = {
       urlTemplate: 'https://platform.club.medicoach.co.za/r/{{1}}',
       suffix: 'signed report token',
     },
+  },
+
+  /**
+   * Captain's-report ops digest: ONE status line to a union-admin cell (the `OpsDigestCell`
+   * secret) after a medicoach sync run that produced report activity — new results, reports
+   * opened, notices sent or failed. Body-only Utility template (no button); {{2}} is a
+   * one-line count summary ("Dolphins: 3 new results, 6 reports opened, 6 notices sent,
+   * 0 failed") with no player, club-contact or link detail.
+   *
+   * Like `captainsReportDue`, this status IS read at runtime: the sender throws
+   * `WhatsAppTemplatePendingError` until it is "registered", and the sync run skips the
+   * digest silently.
+   *
+   * V2 HISTORY: the original `captains_report_ops_digest` (approved 6 Oct 2026, template id
+   * 1516075533660158) was auto-categorized MARKETING by Meta — its body was a greeting plus
+   * one free-text variable, nothing transactional for the classifier to anchor on. Category
+   * is immutable once approved, so this v2 was created fresh as UTILITY with
+   * transaction-anchored copy ("account status notification", "no action is required") and
+   * approved Active on 7 Oct 2026 (template id 29115540798081571). The Marketing v1 was
+   * deleted from the WABA after the v2 registry change deployed (verified gone 8 Oct 2026).
+   */
+  captainsReportOpsDigest: {
+    name: 'captains_report_ops_digest_v2',
+    lang: 'en',
+    paramCount: 2,
+    params: ['recipient name', 'run summary'],
+    bodyText:
+      'Hello {{1}},\n\n' +
+      'Account status notification for your union administrator account.\n\n' +
+      "Latest captain's report processing run: {{2}}.\n\n" +
+      'This is an automated service message. No action is required.',
+    // Approved in Meta as UTILITY on 7 Oct 2026 (v2; v1 was approved-as-Marketing).
+    status: 'registered',
+  },
+
+  /**
+   * Dolphins welcome broadcast, STAFF message (one-off CLI send-dolphins-welcome-broadcast.ts):
+   * chairs, exco, coaches and portal users get the live-scoring tutorial as an inline VIDEO
+   * header plus this body. {{1}} is the recipient's actual name (never "Chairman"). Staff
+   * receive a SECOND message after this one (`dolphinsPlayerFyi`) — one template carries one
+   * video header, and both bodies together would exceed Meta's 1024-char body limit.
+   *
+   * APPROVED in Meta 8 Oct 2026 as **Utility** (template id 1640089817899845) — reworded from
+   * the original Marketing draft (club-setup anchored opener; the "login details" bullet became
+   * "Setup" after Meta flagged it as auth-like). `bodyText` is the approved wording; the lines
+   * below the bullets were not visible in the approval screenshot, so correct them here if a
+   * real send renders differently. This status IS read at runtime: the sender throws
+   * `WhatsAppTemplatePendingError` unless it is "registered".
+   */
+  dolphinsStaffWelcome: {
+    name: 'dolphins_staff_welcome',
+    lang: 'en',
+    paramCount: 1,
+    params: ['recipient name'],
+    bodyText:
+      'Dear {{1}}\n\n' +
+      'Your club is set up on the Dolphins live scoring system, powered by Medicoach. Please ' +
+      'watch the video above to see how match-day scoring works for your club.\n\n' +
+      '✅ Setup: scoring system setup instructions will be sent to you separately\n' +
+      '✅ Before the game: scorer login, match checks, squad confirmation\n' +
+      '✅ Toss and setup: squads, toss, format and innings setup in the app\n' +
+      '✅ During play: ball-by-ball scoring, adding registered or guest players\n' +
+      '✅ End of match: totals checked against the umpire, result signed off\n' +
+      '✅ Safeguards: switch to paper after 5 minutes stuck, with match-day support on hand\n\n' +
+      'Live-scored matches also feed the Dolphins scouting pipeline, where players from clubs, ' +
+      'schools and universities are visible to teams looking for them.',
+    // Approved in Meta as UTILITY on 8 Oct 2026 (id 1640089817899845).
+    status: 'registered',
+    header: { format: 'VIDEO' },
+  },
+
+  /**
+   * Dolphins welcome broadcast, PLAYER message: the scouting-pipeline video as an inline VIDEO
+   * header plus this body. {{1}} is the player's first name. Minors receive it on the
+   * registered contact (typically the guardian's). Runtime-gated on status, as
+   * `dolphinsStaffWelcome`.
+   *
+   * APPROVED in Meta 8 Oct 2026 as **Utility** (template id 2049161739067483). The registered
+   * copy was reworded for Utility (registration-anchored, "for you this season") from the
+   * original Marketing draft; `bodyText` is the approved wording.
+   */
+  dolphinsPlayerWelcome: {
+    name: 'dolphins_player_welcome',
+    lang: 'en',
+    paramCount: 1,
+    params: ['player first name'],
+    bodyText:
+      'Dear {{1}} 🏏\n\n' +
+      'You are registered on the Dolphins scouting pipeline, part of the Medicoach Athlete ' +
+      'Management System. The video above shows how it works for you this season.\n\n' +
+      '📊 Every ball of your matches is scored live and builds your player profile\n' +
+      '⭐ Standout performances are flagged and shortlisted\n' +
+      '🤝 Players are matched to teams that need them: franchises, tournaments and county teams overseas\n\n' +
+      'Your season counts, not just one good day. Keep showing up, keep performing, and make ' +
+      'sure your name is spelled correctly on the team sheet so your stats land on your record.\n\n' +
+      'Good luck this season! 💚',
+    // Approved in Meta as UTILITY on 8 Oct 2026 (id 2049161739067483).
+    status: 'registered',
+    header: { format: 'VIDEO' },
+  },
+
+  /**
+   * Dolphins welcome broadcast, staff FYI: the second staff message — the player video header
+   * plus a trimmed, third-person version of the player message, framed as what every registered
+   * player received. NO body params. Runtime-gated on status, as `dolphinsStaffWelcome`.
+   *
+   * APPROVED in Meta 8 Oct 2026 as **Marketing** (template id 2158879548337539); `bodyText` is
+   * the approved wording (it drops the player message's season paragraph and sign-off).
+   */
+  dolphinsPlayerFyi: {
+    name: 'dolphins_player_fyi',
+    lang: 'en',
+    paramCount: 0,
+    params: [],
+    bodyText:
+      'For your information, this is the message every registered player has received:\n\n' +
+      'Players are registered on the Dolphins scouting pipeline, part of the Medicoach Athlete ' +
+      'Management System. The video above shows how it works for them this season.\n\n' +
+      '📊 Every ball of their matches is scored live and builds their player profile\n' +
+      '⭐ Standout performances are flagged and shortlisted\n' +
+      '🤝 Players are matched to teams that need them: franchises, tournaments and county teams overseas',
+    // Approved in Meta as MARKETING on 8 Oct 2026 (id 2158879548337539).
+    status: 'registered',
+    header: { format: 'VIDEO' },
+  },
+
+  /**
+   * EMCU scorer accounts, CHAIR notice (one-off CLI send-emcu-scorer-broadcast.ts): tells an EMCU
+   * club chair their club's MediCoach scorer logins were EMAILED to {{3}}. NO credentials ride on
+   * WhatsApp — a credentials template was forced toward Meta's Authentication category (fixed OTP
+   * format) and dropped on 9 Oct 2026; logins go by email only. VIDEO header = the staff
+   * live-scoring video (Meta-hosted media id, as the welcome broadcast).
+   *
+   * "4 scorer accounts" is FIXED copy: a club whose credentials file holds a different count has
+   * its WhatsApp leg blocked by the CLI (its email states the real count).
+   *
+   * Buttons (registered in Meta, STATIC — no send-time component; sendTemplate adds a button
+   * component only when a dynamic suffix is passed):
+   *   0. URL "Download for iPhone"  → https://apps.apple.com/us/app/medicoach-ams/id6760149086
+   *   1. URL "Download for Android" → https://play.google.com/store/apps/details?id=co.za.medicoach.app
+   *
+   * APPROVED in Meta 10 Oct 2026 as **Marketing** (not Utility; template id 1622017422982612),
+   * VIDEO header + the two static buttons, body as below. Marketing ⇒ Meta's per-user marketing
+   * frequency cap can refuse a send (error 131049); the CLI records that as `marketing-cap`
+   * (email-only), not a failure. Runtime-gated on status like the dolphins* entries.
+   */
+  emcuScorerAccountsNotice: {
+    name: 'emcu_scorer_accounts_notice',
+    lang: 'en',
+    paramCount: 3,
+    params: ['chair name', 'club name', 'chair email the logins went to'],
+    bodyText:
+      'Dear {{1}}\n\n' +
+      "EMCU matches for {{2}} are scored live on the MediCoach app this season. Your club's 4 " +
+      'scorer accounts have been emailed to {{3}}. Please check your spam folder if you ' +
+      "can't see it.\n\n" +
+      'Give each scorer their own account, one account per match. Watch the video above to see ' +
+      'how scoring works, and download the app using the buttons below or sign in at ' +
+      'https://www.medicoach.co.za/\n\n' +
+      'Need help? Email info@medicoach.co.za',
+    // Approved in Meta as MARKETING on 10 Oct 2026 (id 1622017422982612).
+    status: 'registered',
+    header: { format: 'VIDEO' },
+  },
+
+  /**
+   * EMCU live scoring, PLAYER notice (same CLI, `--audience players`): EMCU clubs' players learn
+   * their matches are scored live on MediCoach and scouted into the provincial pipeline, and are
+   * told to get scorer logins from their club chairperson. {{1}} = first name (no club param since
+   * the 10 Oct edit). VIDEO header = the staff live-scoring video. Same two STATIC app buttons as
+   * `emcuScorerAccountsNotice`.
+   *
+   * APPROVED in Meta 10 Oct 2026 as **Marketing** (template id 1785078815861322), VIDEO header +
+   * the two static buttons. Subject to the 131049 marketing cap, as above. Runtime-gated on status.
+   *
+   * EDITED 10 Oct 2026 (same name and id): new user-supplied body with ONE variable (was 2:
+   * first name + club). Re-review in Meta is in progress; it stays 'registered' because the name is
+   * unchanged and approval is expected before the send. Until the edit clears review, Meta keeps
+   * serving the previously approved 2-param body and a 1-param send fails with error 132000, so
+   * confirm the edit is approved before running the player WhatsApp leg.
+   */
+  emcuPlayerScoring: {
+    name: 'emcu_player_scoring',
+    lang: 'en',
+    paramCount: 1,
+    params: ['player first name'],
+    bodyText:
+      'Dear {{1}} 🏏\n\n' +
+      "We're proud to be professionalising the KZN cricket ecosystem — and you're part of it.\n\n" +
+      'Your matches are now being scored live on the MediCoach app, which means your performances ' +
+      'are actively being scouted into the provincial pipeline. Every run, wicket and catch ' +
+      'counts. 📊\n\n' +
+      '✅ To get started, watch the how-to video above, request your scorer login details from ' +
+      'your club chairperson, and score your games on the app.\n\n' +
+      'So bring your best today — the system is watching, and this is your chance to put your ' +
+      'name forward.\n\n' +
+      'Best of luck out there. 💚🏆\n\n' +
+      'Dolphins × MediCoach\n\n' +
+      'Questions? Email info@medicoach.co.za',
+    // Approved in Meta as MARKETING on 10 Oct 2026 (id 1785078815861322); body edited 10 Oct 2026.
+    status: 'registered',
+    header: { format: 'VIDEO' },
   },
 } as const satisfies Record<string, WhatsAppTemplateDefinition>;
 

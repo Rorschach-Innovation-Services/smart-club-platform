@@ -199,3 +199,133 @@ describe('club "unavailable" declaration rides the shared docMeta machinery', ()
     });
   });
 });
+
+describe('titans catalogue: safeguardingCoaching (Oct 2026 top-up)', () => {
+  const titans = CATALOGUES.titans;
+  const def = titans.find((d) => d.key === 'safeguardingCoaching');
+
+  test('still passes the operator route validator', () => {
+    assert.doesNotThrow(() => validateRequiredDocs(titans));
+  });
+
+  test('is optional, multiFile and accepts images (the PECC coaching cert is a .jpg)', () => {
+    assert.ok(def);
+    assert.equal(def.optional, true);
+    assert.equal(def.multiFile, true);
+    assert.equal(def.minFiles, 1);
+    assert.ok((def.maxFiles ?? 0) >= 2);
+    for (const ext of ['pdf', 'doc', 'docx', 'jpg', 'jpeg', 'png']) {
+      assert.ok(def.accepts?.includes(ext as never), ext);
+    }
+    assert.equal(def.archived, undefined);
+  });
+
+  test('the archived `safeguarding` key is untouched (minFiles 2 would flip every club)', () => {
+    const old = titans.find((d) => d.key === 'safeguarding');
+    assert.deepEqual(old, {
+      key: 'safeguarding',
+      name: 'Safeguarding certificates (retired)',
+      desc: 'Not part of the Titans 2026-27 requirements',
+      multiFile: true,
+      minFiles: 2,
+      maxFiles: 10,
+      allowCourseBooked: true,
+      archived: true,
+    });
+  });
+
+  test('is excluded from completion (optional) but present in the active catalogue', () => {
+    const active = activeRequiredDocs({ requiredDocs: titans });
+    assert.ok(active.some((d) => d.key === 'safeguardingCoaching'));
+  });
+
+  test('every key the titans import writes is in the titans catalogue', async () => {
+    const { TITANS_DOC_KEYS } = await import('../src/titans-import-map.js');
+    const keys = new Set(titans.map((d) => d.key));
+    for (const k of TITANS_DOC_KEYS) assert.ok(keys.has(k), k);
+  });
+});
+
+describe('titans catalogueCoverageProblems — safeguardingCoaching both directions', () => {
+  const base = [
+    'leagueEntry',
+    'assetsRegister',
+    'healthTracker',
+    'memberDatabase',
+    'committee',
+    'constitution',
+    'chairmansReport',
+    'financials',
+  ].map((key) => ({ key, name: key }));
+  const multi = (key: string, maxFiles = 10) => ({
+    key,
+    name: key,
+    multiFile: true,
+    minFiles: 1,
+    maxFiles,
+  });
+
+  test('the shipped titans catalogue satisfies the import', async () => {
+    const { catalogueCoverageProblems } = await import('../src/import-titans-compliance.js');
+    const active = activeRequiredDocs({ requiredDocs: CATALOGUES.titans });
+    assert.deepEqual(catalogueCoverageProblems(active, new Map([['safeguardingCoaching', 2]])), []);
+  });
+
+  test('forward: absent, single-file, or under-capped safeguardingCoaching is a problem', async () => {
+    const { catalogueCoverageProblems } = await import('../src/import-titans-compliance.js');
+    const others = [...base, multi('agm'), multi('facilityAgreement')];
+    const absent = catalogueCoverageProblems(others as never, new Map());
+    assert.ok(absent.some((p) => p.includes('"safeguardingCoaching" is archived or absent')));
+    const single = catalogueCoverageProblems(
+      [...others, { key: 'safeguardingCoaching', name: 's' }] as never,
+      new Map(),
+    );
+    assert.ok(single.some((p) => p.includes('"safeguardingCoaching" is configured single-file')));
+    const capped = catalogueCoverageProblems(
+      [...others, multi('safeguardingCoaching', 1)] as never,
+      new Map([['safeguardingCoaching', 2]]),
+    );
+    assert.ok(capped.some((p) => p.includes('"safeguardingCoaching" allows maxFiles=1')));
+  });
+
+  test('reverse: with safeguardingCoaching multi-file, a single-file key marked multiFile is still caught', async () => {
+    const { catalogueCoverageProblems } = await import('../src/import-titans-compliance.js');
+    const docs = [
+      ...base.filter((d) => d.key !== 'financials'),
+      multi('financials'),
+      multi('agm'),
+      multi('facilityAgreement'),
+      multi('safeguardingCoaching'),
+    ];
+    const problems = catalogueCoverageProblems(docs as never, new Map());
+    assert.ok(problems.some((p) => p.includes('"financials" is configured multiFile')));
+    assert.ok(!problems.some((p) => p.includes('"safeguardingCoaching"')));
+  });
+});
+
+describe('configure-tenant-docs catalogueDiff — full-definition diff', () => {
+  test('reports added keys, changed attributes, removed keys and reordering', async () => {
+    const { catalogueDiff } = await import('../src/configure-tenant-docs.js');
+    const current = [
+      { key: 'a', name: 'A', maxFiles: 6 },
+      { key: 'b', name: 'B' },
+      { key: 'gone', name: 'Gone' },
+    ];
+    const next = [
+      { key: 'b', name: 'B' },
+      { key: 'a', name: 'A', maxFiles: 10, accepts: ['pdf'] },
+      { key: 'new', name: 'New' },
+    ];
+    const lines = catalogueDiff(current as never, next as never);
+    assert.ok(lines.some((l) => l.startsWith('+ new:')));
+    assert.ok(lines.includes('~ a: accepts: (unset) → ["pdf"]; maxFiles: 6 → 10'));
+    assert.ok(lines.includes('- gone'));
+    assert.ok(lines.some((l) => l.startsWith('order: a, b → b, a')));
+    assert.ok(!lines.some((l) => l.startsWith('~ b')));
+  });
+
+  test('an identical catalogue is an empty diff', async () => {
+    const { catalogueDiff } = await import('../src/configure-tenant-docs.js');
+    assert.deepEqual(catalogueDiff(CATALOGUES.titans, CATALOGUES.titans), []);
+  });
+});

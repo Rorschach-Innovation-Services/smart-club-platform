@@ -7,7 +7,8 @@
  * 1. EMAIL_OTP as a first auth factor (`Policies.SignInPolicy.AllowedFirstAuthFactors`)
  *    only exists in pulumi-aws 7.x, but SST 3.19 bundles 6.66.2 — so the IaC can't set
  *    it, and any deploy that issues UpdateUserPool wipes it back to [PASSWORD].
- * 2. SES DEVELOPER email sending (info@medicoach.co.za). COGNITO_DEFAULT caps at
+ * 2. SES DEVELOPER email sending (From sender@medicoach.co.za, via the verified
+ *    medicoach.co.za domain identity). COGNITO_DEFAULT caps at
  *    50 emails/day and sends from no-reply@verificationemail.com, which Gmail
  *    spam-bins — OTP codes never arrive. Cognito requires the SES identity to be in
  *    the POOL'S OWN region (af-south-1; an eu-west-1 ARN is rejected with
@@ -36,8 +37,9 @@ import { userPoolId } from './env.js';
 
 // Cognito only accepts SES identities in the pool's own region.
 const SES_REGION = 'af-south-1';
-const SES_IDENTITY = 'info@medicoach.co.za';
-const FROM_ADDRESS = `Smart Club Platform <${SES_IDENTITY}>`;
+// Domain identity — covers sender@medicoach.co.za; GetEmailIdentity accepts domains too.
+const SES_IDENTITY = 'medicoach.co.za';
+const FROM_ADDRESS = 'Smart Club Platform <sender@medicoach.co.za>';
 
 /** SES af-south-1 is usable for OTP mail only when the identity is verified and the
  * account is out of the sandbox (sandbox rejects unverified recipients). Failures

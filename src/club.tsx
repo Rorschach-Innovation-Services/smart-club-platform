@@ -8,6 +8,7 @@ import {
 } from 'react';
 import type { ReactNode, ChangeEvent, CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
+import { RemindersOptInToggle } from './club-reminders';
 import {
   PlayerFilterBar,
   FilterResultCount,
@@ -95,8 +96,25 @@ import {
   CountUp,
   cqiBand,
   scoreCQI,
+  Modal,
+  ClearanceLinkMissingNotice,
 } from './atoms';
+import { readClearanceLinkId, clearanceLinkMissing } from './clearanceFilters';
 import { useQuery } from '@tanstack/react-query';
+import {
+  RegisterPlayerForm,
+  QuickAddPlayersGrid,
+  ClubRosterUpload,
+  REGISTER_MODE_TITLE,
+} from './club-register';
+import type { RegisterMode } from './club-register';
+import {
+  PostponementsPanel,
+  RequestPostponementModal,
+  PostponedNote,
+  openRequestFor,
+} from './club-postponements';
+import type { ClubPostponements } from './api';
 import {
   getDocUploadUrl,
   uploadToPresigned,
@@ -528,6 +546,7 @@ export function ClubHome({
   requiredDocs = DEFAULT_REQUIRED_DOCS,
   onRenameClub,
   onSaveExco = undefined,
+  onSetRemindersOptIn = undefined,
 }) {
   const [showNameEdit, setShowNameEdit] = useStateC(false);
   const [showExcoForm, setShowExcoForm] = useStateC(false);
@@ -925,6 +944,14 @@ export function ClubHome({
         <GovernanceCard
           club={club}
           onEditLeadership={canEditLeadership ? () => setShowExcoForm(true) : undefined}
+          footer={
+            onSetRemindersOptIn && (
+              <RemindersOptInToggle
+                optedIn={club.remindersOptIn !== false}
+                onChange={onSetRemindersOptIn}
+              />
+            )
+          }
         />
       </div>
 
@@ -936,7 +963,7 @@ export function ClubHome({
           onSave={(members: Record<string, any>) => {
             onSaveExco(members);
             setShowExcoForm(false);
-            const count = Object.values(members).filter((m: any) => m.name).length;
+            const count = Object.values(members).filter((m: any) => m?.name).length;
             toast(
               `${vertical.terms.Exco} updated · ${count} member${count === 1 ? '' : 's'} on record`,
             );
@@ -948,7 +975,7 @@ export function ClubHome({
 }
 
 /* ─── Club Home: chairman governance + venues + coaches summary ─── */
-function GovernanceCard({ club, onEditLeadership = undefined }) {
+function GovernanceCard({ club, onEditLeadership = undefined, footer = undefined }) {
   const vertical = useVertical();
   const chair = club.exco?.chair || {};
   const age = ageFromSaId(chair.idNumber);
@@ -956,12 +983,15 @@ function GovernanceCard({ club, onEditLeadership = undefined }) {
   const ground = club.ground || {};
   const coaches = Array.isArray(club.coaches) ? club.coaches.filter((c) => c && c.name) : [];
   const expCount = (bucket) => coaches.filter((c) => c.yearsExperience === bucket).length;
+  // Chair age / term derive from the cricket-only governance capture (ID number, term end);
+  // other verticals don't collect them, so the rows would only ever read '—'.
   const rows = [
-    [
-      vertical.sport === 'cricket' ? 'Chairman age' : `${vertical.terms.Chair} age`,
-      age != null ? `${age} yrs` : '—',
-    ],
-    ['Term remaining', term.label || '—'],
+    ...(vertical.sport === 'cricket'
+      ? [
+          ['Chairman age', age != null ? `${age} yrs` : '—'],
+          ['Term remaining', term.label || '—'],
+        ]
+      : []),
     ['Primary venue', ground.venue || '—'],
     ['Secondary venue', ground.secondaryVenue || '—'],
     // Optional; shown only when the club recorded it (cricket clubs typically leave it unset).
@@ -1021,6 +1051,7 @@ function GovernanceCard({ club, onEditLeadership = undefined }) {
           </div>
         ))}
       </div>
+      {footer}
     </Card>
   );
 }
@@ -1078,6 +1109,9 @@ export function AffiliationForm({
   const copy = useCopy();
   const vertical = useVertical();
   const terms = vertical.terms;
+  // The chair's ID number and term dates are a cricket-only governance capture; the school
+  // vertical neither collects nor shows them (stored values are left untouched).
+  const collectsChairGovernance = vertical.sport === 'cricket';
   const seasonLabel = useSeasonLabel();
   const [data, setData] = useStateC(() => {
     // Pre-fill exco from club.exco (single source of truth shared with the exco roster doc)
@@ -1427,11 +1461,18 @@ export function AffiliationForm({
       race: data[p + 'Race'],
     });
     return {
+      // Spread the stored chair first: this payload replaces `exco` wholesale on PATCH, so
+      // governance fields the form doesn't collect (or no longer collects) must ride through.
       chair: {
+        ...(club.exco?.chair ?? {}),
         ...pick('chair'),
-        idNumber: data.chairIdNumber.trim(),
-        termStart: data.chairTermStart,
-        termEnd: data.chairTermEnd,
+        ...(collectsChairGovernance
+          ? {
+              idNumber: data.chairIdNumber.trim(),
+              termStart: data.chairTermStart,
+              termEnd: data.chairTermEnd,
+            }
+          : {}),
       },
       sec: pick('sec'),
       tre: pick('tre'),
@@ -1966,7 +2007,7 @@ export function AffiliationForm({
                         </select>
                       </div>
                     </div>
-                    {role.prefix === 'chair' && (
+                    {role.prefix === 'chair' && collectsChairGovernance && (
                       <div className="field-grid-3" style={{ marginTop: 8 }}>
                         <div className="field" style={{ marginBottom: 0 }}>
                           <div className="field-label">ID Number</div>
@@ -2895,18 +2936,28 @@ export function AffiliationForm({
                     icon={Icon.Check}
                     onClick={() => {
                       // Reject malformed SA-IDs before they reach the API (which also guards).
-                      const chairId = data.chairIdNumber.trim();
+                      // Only verticals that collect the chair's ID number (cricket) can hit this.
+                      const chairId = collectsChairGovernance ? data.chairIdNumber.trim() : '';
                       if (chairId && !dobFromSaId(chairId)) {
                         toast(`${terms.Chair} ID number isn't a valid 13-digit RSA ID`, 'warn');
                         setStep(2);
                         return;
                       }
-                      // Chair contact is captured on Step 2, not Step 1's Continue gate, so
-                      // enforce it here. Checked before the reason guard so a user missing both
-                      // fixes Step 2 in one pass. New affiliations only — legacy corrections aren't
-                      // re-blocked (mirrors the reason guard below).
-                      if (!submitted && (!data.chairName || !data.chairCell || !data.chairEmail)) {
-                        toast(`Add the ${terms.chair}’s name, cell and email`, 'warn');
+                      // Office-bearer contacts are captured on Step 2, not Step 1's Continue
+                      // gate, so enforce every role the vertical marks required here. New
+                      // affiliations only — legacy corrections aren't re-blocked.
+                      const missingRole = submitted
+                        ? undefined
+                        : vertical.leadershipRoles.find(
+                            (r) =>
+                              r.required &&
+                              ['Name', 'Cell', 'Email'].some(
+                                (f) => !String(data[r.key + f] ?? '').trim(),
+                              ),
+                          );
+                      if (missingRole) {
+                        const who = missingRole.key === 'chair' ? terms.chair : missingRole.label;
+                        toast(`Add the ${who}’s name, cell and email`, 'warn');
                         setStep(2);
                         return;
                       }
@@ -3063,12 +3114,14 @@ function ExcoFormModal({ club, onClose, onSave, eyebrow = 'Compliance Template' 
           race: s.race || '',
         };
       } else {
+        // Unrecorded roles start blank (the chair's name seeds from the club record) so the
+        // required-role gate can't be satisfied by placeholder contact details.
         init[r.key] = {
-          name: r.key === 'chair' ? club.chair : '',
-          cell: r.key === 'chair' ? '083 786 4098' : '',
-          email: r.key === 'chair' ? 'chair@' + club.id + '.co.za' : '',
-          gender: r.key === 'chair' ? 'Male' : '',
-          race: r.key === 'chair' ? 'Indian' : '',
+          name: r.key === 'chair' ? club.chair || '' : '',
+          cell: '',
+          email: '',
+          gender: '',
+          race: '',
         };
       }
     });
@@ -3419,10 +3472,20 @@ function ExcoFormModal({ club, onClose, onSave, eyebrow = 'Compliance Template' 
               tone="teal"
               icon={Icon.Check}
               disabled={!requiredFilled}
-              onClick={() =>
-                requiredFilled &&
-                onSave({ ...members, additionalMembers: additionalMembers.filter((m) => m.name) })
-              }
+              onClick={() => {
+                if (!requiredFilled) return;
+                // The server merges each role over the stored one; a role left fully blank is
+                // sent as null so a departed office bearer's record is cleared (POPIA erasure).
+                const roles = {};
+                FIXED_EXCO_ROLES.forEach((r) => {
+                  const m = members[r.key];
+                  const blank = ['name', 'cell', 'email', 'gender', 'race'].every(
+                    (f) => !String(m?.[f] ?? '').trim(),
+                  );
+                  roles[r.key] = blank ? null : m;
+                });
+                onSave({ ...roles, additionalMembers: additionalMembers.filter((m) => m.name) });
+              }}
             >
               Submit roster
             </Btn>
@@ -4136,7 +4199,7 @@ export function DocumentsView({
           onSave={(members: Record<string, any>) => {
             onSaveExco(members);
             setShowExcoForm(false);
-            const count = Object.values(members).filter((m: any) => m.name).length;
+            const count = Object.values(members).filter((m: any) => m?.name).length;
             toast(
               `Exco roster ${club.docs.exco ? 'updated' : 'submitted'} · ${count} bearer${count === 1 ? '' : 's'}`,
             );
@@ -4607,6 +4670,9 @@ export function ClubFixturesView({
   onSendFixtures,
   // The tenant's travel-cost defaults (competitionDefaults.travel); a series' own win.
   travel = { costPerKm: DEFAULT_COST_PER_KM, carsPerAwayTrip: DEFAULT_CARS },
+  // This club's postponement requests (ADR 0015). Absent ⇒ no inbox and no Postpone action
+  // (a caller that doesn't wire them, e.g. a test, sees the plain schedule).
+  postponements = undefined,
 }: {
   club;
   allSeries;
@@ -4614,6 +4680,7 @@ export function ClubFixturesView({
   toast;
   onSendFixtures;
   travel?: { costPerKm: number; carsPerAwayTrip: number };
+  postponements?: ClubPostponements;
 }) {
   const copy = useCopy();
   const clubBy = (id) => clubs.find((c) => c.id === id);
@@ -4729,6 +4796,8 @@ export function ClubFixturesView({
   const fixTerms = fixVertical.terms;
   const seasonLabel = useSeasonLabel();
   const [sharing, setSharing] = useStateC(false);
+  // The fixture a Postpone click opened the request modal for.
+  const [postponeFor, setPostponeFor] = useStateC<{ series; fixture } | null>(null);
   const playerCount = club.players || 0;
 
   // Broadcast the released schedule to the club's registered players. The schedule is
@@ -4943,6 +5012,16 @@ export function ClubFixturesView({
         </div>
       </div>
 
+      {postponements && (
+        <PostponementsPanel
+          club={club}
+          postponements={postponements}
+          allSeries={myReleased}
+          clubs={clubs}
+          toast={toast}
+        />
+      )}
+
       {/* Hero KPI band */}
       <div className="club-fix-kpis">
         <div className="club-fix-kpi">
@@ -5110,6 +5189,7 @@ export function ClubFixturesView({
                         <th>H/A</th>
                         <th>Venue</th>
                         {!hideVenue && <th style={{ textAlign: 'right' }}>Distance</th>}
+                        {postponements && <th style={{ width: 150 }}></th>}
                       </tr>
                     </thead>
                     <tbody>
@@ -5216,6 +5296,7 @@ export function ClubFixturesView({
                                   </div>
                                 );
                               })()}
+                              <PostponedNote fixture={f} />
                             </td>
                             <td>
                               {/* Fixed three-column grid — home | vs | away — so the "vs"
@@ -5307,6 +5388,23 @@ export function ClubFixturesView({
                                 )}
                               </td>
                             )}
+                            {postponements && (
+                              <td style={{ textAlign: 'right', paddingRight: 14 }}>
+                                {openRequestFor(postponements, s.id, f.id) ? (
+                                  <Pill tone="gold" dot>
+                                    Postponement open
+                                  </Pill>
+                                ) : f.date >= today && f.status !== 'cancelled' ? (
+                                  <Btn
+                                    tone="ghost"
+                                    size="sm"
+                                    onClick={() => setPostponeFor({ series: s, fixture: f })}
+                                  >
+                                    Postpone
+                                  </Btn>
+                                ) : null}
+                              </td>
+                            )}
                           </tr>
                         );
                       })}
@@ -5327,6 +5425,26 @@ export function ClubFixturesView({
           release. Adjustments to schedule require a {copy.office} sign-off.
         </div>
       )}
+
+      {postponeFor &&
+        (() => {
+          const { series: ps, fixture: pf } = postponeFor;
+          const mineHere = new Set(teamIdsForClub(ps, club.id));
+          const homeName = resolveTeam(ps, pf.home, clubBy).name;
+          const awayName = resolveTeam(ps, pf.away, clubBy).name;
+          return (
+            <RequestPostponementModal
+              club={club}
+              series={ps}
+              fixture={pf}
+              homeName={homeName}
+              awayName={awayName}
+              opponentName={mineHere.has(pf.home) ? awayName : homeName}
+              toast={toast}
+              onClose={() => setPostponeFor(null)}
+            />
+          );
+        })()}
 
       {/* Share-with-players modal — portaled for the same transformed-ancestor
           reason as the certificate-removal confirm. */}
@@ -5422,8 +5540,12 @@ export function ClubPlayersView({
   onAcceptVeteransRequest,
   onDeclineVeteransRequest,
   busyVeteransId,
+  // The tenant's district list for the chair's Register-player form (absent ⇒ the default list).
+  districts = undefined,
 }) {
   const [showLink, setShowLink] = useStateC(false);
+  // Which chair registration surface is open (single form / quick-add grid / spreadsheet).
+  const [registerMode, setRegisterMode] = useStateC<RegisterMode | null>(null);
   const [confirmDelete, setConfirmDelete] = useStateC(null); // the player pending confirmation
   const [selectedPlayer, setSelectedPlayer] = useStateC(null); // row-click detail modal
   const [busyNk, setBusyNk] = useStateC(null); // naturalKey of the row being deleted
@@ -5517,11 +5639,62 @@ export function ClubPlayersView({
           </p>
         </div>
         <div className="ph-actions">
+          <Btn tone="ink" size="sm" icon={Icon.Plus} onClick={() => setRegisterMode('single')}>
+            Register player
+          </Btn>
+          <Btn tone="outline" size="sm" icon={Icon.Users} onClick={() => setRegisterMode('quick')}>
+            Quick add
+          </Btn>
+          <Btn
+            tone="outline"
+            size="sm"
+            icon={Icon.Upload}
+            onClick={() => setRegisterMode('upload')}
+          >
+            Upload spreadsheet
+          </Btn>
           <Btn tone="teal" size="sm" icon={Icon.Mail} onClick={openLink}>
             Registration link
           </Btn>
         </div>
       </div>
+
+      {registerMode && (
+        <Modal
+          eyebrow={`Players · ${club.name}`}
+          title={REGISTER_MODE_TITLE[registerMode]}
+          maxWidth={registerMode === 'single' ? 820 : 1100}
+          dismissable={false}
+          onClose={() => setRegisterMode(null)}
+        >
+          {registerMode === 'single' ? (
+            <RegisterPlayerForm
+              club={club}
+              leagues={leagues}
+              districts={districts}
+              toast={toast}
+              onDone={() => setRegisterMode(null)}
+              onCancel={() => setRegisterMode(null)}
+            />
+          ) : registerMode === 'quick' ? (
+            <QuickAddPlayersGrid
+              club={club}
+              leagues={leagues}
+              toast={toast}
+              onDone={() => setRegisterMode(null)}
+              onCancel={() => setRegisterMode(null)}
+            />
+          ) : (
+            <ClubRosterUpload
+              club={club}
+              leagues={leagues}
+              toast={toast}
+              onDone={() => setRegisterMode(null)}
+              onCancel={() => setRegisterMode(null)}
+            />
+          )}
+        </Modal>
+      )}
 
       {showLink && (
         <RegLinkModal
@@ -5762,8 +5935,8 @@ export function ClubPlayersView({
                   colSpan={positionsMode ? 7 : 8}
                   style={{ padding: 28, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}
                 >
-                  No players registered yet — share the <strong>Registration link</strong> so
-                  players can register themselves.
+                  No players registered yet — <strong>Register</strong> them here, or share the{' '}
+                  <strong>Registration link</strong> so players can register themselves.
                 </td>
               </tr>
             )}
@@ -5956,6 +6129,11 @@ export function RequestPlayerForm({ club, directory, onSubmit, onCancel, busy })
 }
 
 /* ─── Phase 04 · Clearances (club side) ─── */
+// How long the deep-linked card keeps its `linked` ring — matches the `clrLinked` keyframes
+// in index.html, which hold the ring then fade it out before the class comes off.
+const CLEARANCE_LINK_HIGHLIGHT_MS = 4000;
+const clearanceCardDomId = (id: string) => `clearance-${id}`;
+
 export function ClubClearancesView({
   club,
   clearances,
@@ -5966,12 +6144,46 @@ export function ClubClearancesView({
   onOpenRequest,
   busyId,
   onCertificateViewed = undefined,
+  // False while the list is still loading — `clearances` is empty then, so the dead-link
+  // notice would flash (and the scroll-to would have nothing to find) before data lands.
+  clearancesLoaded = true,
 }) {
   const teamLabel = labelByKey(leagues);
   const incoming = clearances?.incoming ?? [];
   const outgoing = clearances?.outbound ?? [];
   const incomingPending = incoming.filter((r) => r.status === 'pending');
   const incomingResolved = incoming.filter((r) => r.status !== 'pending');
+  // `?clearance=<id>` (from a clearance notification email): there is no search box here, and
+  // filtering a nudged chair down to one card would hide the rest of their queue — so the
+  // linked card is scrolled into view and briefly highlighted instead.
+  const [linkId] = useStateC(() =>
+    typeof window !== 'undefined' ? readClearanceLinkId(window.location.search) : null,
+  );
+  const [highlightId, setHighlightId] = useStateC<string | null>(null);
+  const [linkNoticeDismissed, setLinkNoticeDismissed] = useStateC(false);
+  const linkHandledRef = useRefC(false);
+  const linkMissing = clearanceLinkMissing(linkId, [...incoming, ...outgoing]);
+  useEffectC(() => {
+    // Once per mount: a later refetch must not yank the chair back to the card.
+    if (!linkId || !clearancesLoaded || linkMissing || linkHandledRef.current) return;
+    linkHandledRef.current = true;
+    setHighlightId(linkId);
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    document
+      .getElementById(clearanceCardDomId(linkId))
+      ?.scrollIntoView?.({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
+  }, [linkId, clearancesLoaded, linkMissing]);
+  useEffectC(() => {
+    if (!highlightId) return;
+    const t = setTimeout(() => setHighlightId(null), CLEARANCE_LINK_HIGHLIGHT_MS);
+    return () => clearTimeout(t);
+  }, [highlightId]);
+  // Card chrome shared by the three card lists: the DOM id the scroll-to targets, plus the
+  // transient `linked` ring (index.html `.clr-card.linked`) on the deep-linked card.
+  const linkProps = (req: PlayerClearance, cls: string) => ({
+    id: clearanceCardDomId(req.id),
+    className: highlightId === req.id ? `${cls} linked` : cls,
+  });
   // The clearance whose transfer certificate is open in the inline viewer. Both sides of the
   // move may view it — the API presigns off this club's own row (source or destination).
   const [certFor, setCertFor] = useStateC<PlayerClearance | null>(null);
@@ -6024,6 +6236,12 @@ export function ClubClearancesView({
         </div>
       </div>
 
+      {clearancesLoaded && linkMissing && !linkNoticeDismissed && (
+        <div style={{ marginBottom: 14 }}>
+          <ClearanceLinkMissingNotice onDismiss={() => setLinkNoticeDismissed(true)} />
+        </div>
+      )}
+
       <Card title="Incoming requests" sub={`Players asking to leave ${club.name}.`}>
         {incomingPending.length === 0 && incomingResolved.length === 0 && (
           <div
@@ -6041,7 +6259,7 @@ export function ClubClearancesView({
           {incomingPending.map((req) => {
             const busy = busyId === req.id;
             return (
-              <div key={req.id} className="clr-card">
+              <div key={req.id} {...linkProps(req, 'clr-card')}>
                 <div className="clr-card-head">
                   <div>
                     <div className="clr-eyebrow">
@@ -6119,7 +6337,7 @@ export function ClubClearancesView({
           })}
           {incomingResolved.map((req) =>
             req.status === 'rejected' ? (
-              <div key={req.id} className="clr-card resolved">
+              <div key={req.id} {...linkProps(req, 'clr-card resolved')}>
                 <div className="clr-card-head">
                   <div>
                     <div className="clr-eyebrow" style={{ color: 'var(--coral)' }}>
@@ -6131,7 +6349,9 @@ export function ClubClearancesView({
                         ? `Their registration is now at ${club.name}`
                         : req.rejectOutcome === 'stays-at-destination'
                           ? `Stays registered at ${req.toClubName} — ${club.name} was not on the system when this was rejected`
-                          : `Remains registered at ${club.name}`}
+                          : req.rejectOutcome === 'not-registered'
+                            ? `Not registered at ${req.toClubName} — the registration arrived outside the transfer window`
+                            : `Remains registered at ${club.name}`}
                     </div>
                     {req.rejectReason && <div className="clr-note">"{req.rejectReason}"</div>}
                   </div>
@@ -6141,7 +6361,7 @@ export function ClubClearancesView({
                 </div>
               </div>
             ) : (
-              <div key={req.id} className="clr-card resolved">
+              <div key={req.id} {...linkProps(req, 'clr-card resolved')}>
                 <div className="clr-card-head">
                   <div>
                     <div className="clr-eyebrow" style={{ color: 'var(--green)' }}>
@@ -6176,7 +6396,7 @@ export function ClubClearancesView({
         <Card title="Players moving to your club" sub="Awaiting clearance from their current club">
           <div className="clr-list">
             {outgoing.map((req) => (
-              <div key={req.id} className="clr-card incoming">
+              <div key={req.id} {...linkProps(req, 'clr-card incoming')}>
                 <div className="clr-card-head">
                   <div>
                     <div className="clr-eyebrow">
@@ -6208,7 +6428,9 @@ export function ClubClearancesView({
                       <div className="clr-meta">
                         {req.rejectOutcome === 'stays-at-destination'
                           ? `The move was cancelled — ${req.fromClubName} is not on the system, so the player stays registered with your club`
-                          : `The move was cancelled — the player is registered at ${req.fromClubName}`}
+                          : req.rejectOutcome === 'not-registered'
+                            ? 'Not registered — the registration arrived outside the transfer window'
+                            : `The move was cancelled — the player is registered at ${req.fromClubName}`}
                       </div>
                     )}
                     {req.status === 'rejected' && req.rejectReason && (

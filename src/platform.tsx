@@ -33,7 +33,14 @@ import { SeasonSetupWizard } from './platform-season-wizard';
 import { HelpLink, HelpProvider } from './help/HelpDrawer';
 import { TutorialsCard } from './platform-tutorials';
 import { RequiredDocsCard } from './platform-required-docs';
+import { FixtureRemindersCard } from './platform-fixture-reminders';
+import { PlayerSyncCard } from './platform-player-sync';
+import { MedicoachConnectionCard } from './platform-medicoach';
+import { MedicoachConsolePage } from './platform-medicoach-console';
+import { CaptainsReportScorecardsPage } from './platform-captains-report-scorecards';
+import { TransferWindowCard } from './platform-transfer-windows';
 import { DocIntakeWizard } from './platform-intake';
+import { FixtureAmendmentsPage } from './platform-fixture-amendments';
 import { StructureIntakeWizard } from './platform-structure-intake';
 import { RosterIntakeWizard } from './platform-roster-intake';
 import { RepsPage } from './platform-reps';
@@ -41,6 +48,7 @@ import { OnboardingPage, buildOnboardingSteps } from './platform-onboarding';
 import type {
   TenantConfig,
   TenantSummary,
+  MedicoachOverviewRow,
   BrandingCopy,
   DirectoryClub,
   League,
@@ -302,6 +310,38 @@ function SetupChip({ complete }: { complete: boolean }) {
   );
 }
 
+/**
+ * Client-list Match Centre flags (ADR 0020 phase 1) — the daily-visibility fix: an amber
+ * "N awaiting carry" when released fixtures are missing from the Match Centre, and a quiet
+ * "Dry-run" when the sync secrets are unset. Renders nothing for a healthy client.
+ *
+ * Both pills are shown only while the client's sync is switched on: a client with the sync
+ * off is not expected to be in the Match Centre, so neither its (still truthful) count nor the
+ * stage-wide dry-run state is an alert here. The per-client console page keeps listing those
+ * rows, with the sync-off context.
+ */
+function MatchCentreFlags({ row }: { row?: MedicoachOverviewRow }) {
+  const showAwaiting = !!row && row.syncEnabled && row.awaitingTotal > 0;
+  const showDryRun = !!row && row.syncEnabled && row.dryRun;
+  if (!row || (!showAwaiting && !showDryRun)) return null;
+  return (
+    <span style={{ display: 'inline-flex', gap: 6, marginLeft: 6, flexWrap: 'wrap' }}>
+      {showAwaiting && (
+        <span title="Fixtures in Smart Club that the Match Centre has no record of">
+          <Pill tone="gold" dot>
+            {row.awaitingTotal} awaiting carry
+          </Pill>
+        </span>
+      )}
+      {showDryRun && (
+        <span title="Sync secrets not configured — sync runs are silent dry-runs">
+          <Pill tone="muted">Dry-run</Pill>
+        </span>
+      )}
+    </span>
+  );
+}
+
 /** Card — same surface as atoms.Card but with its own save footer wiring. */
 function Panel({
   title,
@@ -460,6 +500,15 @@ export function PlatformPortal({
               </span>
               <span className="ni-label">New client</span>
             </button>
+            <button
+              className={`nav-item ${path === '/platform/captains-report-scorecards' ? 'active' : ''}`}
+              onClick={() => navigate('/platform/captains-report-scorecards')}
+            >
+              <span className="ni-icon">
+                <Icon.Check />
+              </span>
+              <span className="ni-label">Scorecard answers</span>
+            </button>
 
             {hasTenantConsole && (
               <>
@@ -491,12 +540,20 @@ export function PlatformPortal({
               <Route path="/platform" element={<TenantListPage />} />
               <Route path="/platform/new" element={<CreateTenantWizard toast={toastShow} />} />
               <Route
+                path="/platform/captains-report-scorecards"
+                element={<CaptainsReportScorecardsPage />}
+              />
+              <Route
                 path="/platform/tenants/:slug"
                 element={<TenantEditPage toast={toastShow} />}
               />
               <Route
                 path="/platform/tenants/:slug/doc-intake"
                 element={<DocIntakeWizard toast={toastShow} />}
+              />
+              <Route
+                path="/platform/tenants/:slug/fixture-amendments"
+                element={<FixtureAmendmentsPage toast={toastShow} />}
               />
               <Route
                 path="/platform/tenants/:slug/structure-intake"
@@ -510,6 +567,10 @@ export function PlatformPortal({
               <Route
                 path="/platform/tenants/:slug/onboarding"
                 element={<OnboardingPage toast={toastShow} />}
+              />
+              <Route
+                path="/platform/tenants/:slug/medicoach"
+                element={<MedicoachConsolePage toast={toastShow} />}
               />
               <Route path="/platform/tenants/:slug/overview" element={<TenantOverviewPage />} />
               <Route
@@ -589,6 +650,13 @@ function TenantListPage() {
   const navigate = useNavigate();
   const q = useQuery({ queryKey: qk.platformTenants(), queryFn: api.platformListTenants });
   const tenants = q.data ?? [];
+  // Supplementary: if the Match Centre overview fails the list still renders, just unflagged.
+  const mcQ = useQuery({
+    queryKey: qk.platformMedicoachOverview(),
+    queryFn: api.platformMedicoachOverview,
+    retry: 0,
+  });
+  const mcByTenant = new Map((mcQ.data?.tenants ?? []).map((r) => [r.tenant, r]));
 
   return (
     <div>
@@ -690,6 +758,7 @@ function TenantListPage() {
                     </td>
                     <td>
                       <SetupChip complete={!!t.setupCompletedAt} />
+                      <MatchCentreFlags row={mcByTenant.get(t.tenant)} />
                     </td>
                     <td style={{ textAlign: 'right', paddingRight: 18, whiteSpace: 'nowrap' }}>
                       {/* Row click opens settings; this drills into the breakdown. */}
@@ -845,6 +914,20 @@ function TenantEditPage({ toast }: { toast: Toast }) {
           save={save}
           toast={toast}
         />
+        <FixtureRemindersCard
+          key={`fr-${config.tenant}`}
+          config={config}
+          save={save}
+          toast={toast}
+        />
+        <TransferWindowCard key={`tw-${config.tenant}`} config={config} save={save} toast={toast} />
+        <PlayerSyncCard
+          key={`ps-${config.tenant}-${String(config.integrations?.medicoach?.playerSync ?? false)}`}
+          config={config}
+          save={save}
+          toast={toast}
+        />
+        <MedicoachConnectionCard key={`mc-${config.tenant}`} slug={slug} />
         <CopyCard
           key={`cp-${config.tenant}`}
           config={config}
@@ -865,6 +948,20 @@ function TenantEditPage({ toast }: { toast: Toast }) {
           <RequiredDocsCard key={`rd-${config.tenant}`} config={config} save={save} toast={toast} />
         </div>
         <OnboardingCard slug={slug} config={config} navigate={navigate} />
+        <Card
+          title="Fixture amendments"
+          sub="Upload the union's weekly reminder fixtures sheet: preview every venue, time, date and postponement change, then apply it."
+          action={
+            <Btn
+              tone="outline"
+              size="sm"
+              icon={Icon.Upload}
+              onClick={() => navigate(`/platform/tenants/${slug}/fixture-amendments`)}
+            >
+              Upload sheet
+            </Btn>
+          }
+        />
         <ClubDirectoryCard
           key={`kc-${config.tenant}`}
           slug={slug}
