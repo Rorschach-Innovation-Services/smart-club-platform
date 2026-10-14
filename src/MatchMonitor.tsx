@@ -538,6 +538,12 @@ export function MatchMonitor({
               fixture here on this date — likely moved in one system and not the other.
             </p>
           )}
+          {!!q.data?.parseFailures && (
+            <p className="mcs-note">
+              {q.data.parseFailures} game(s) from medicoach couldn&apos;t be read and are left out;
+              the rest are shown.
+            </p>
+          )}
         </>
       )}
 

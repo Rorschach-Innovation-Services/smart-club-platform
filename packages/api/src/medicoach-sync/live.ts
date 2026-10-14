@@ -15,7 +15,9 @@
  * another club, or not registered at all — and the page is sent that STATUS and the name only.
  * The ref (a hashed ID number) never leaves this module and nothing here logs a player.
  */
+import { z } from 'zod';
 import {
+  LiveMatchSchema,
   LiveResponseSchema,
   livePathAndQuery,
   signRequest,
@@ -28,6 +30,27 @@ import { explainSyncError } from './explain.js';
 import { MedicoachSyncError } from './puller.js';
 
 const HTTP_TIMEOUT_MS = 8_000;
+
+/*
+ * In-memory caches, per Lambda container. Concurrent polls usually land on different
+ * containers, so neither is shared; both only cut repeat work inside one warm container.
+ * Deliberately not in DynamoDB: the data is seconds-to-minutes fresh and cheap to rebuild,
+ * and a shared cache would cost a read+write on every poll to save at most a few reads.
+ */
+
+/** Club rosters change rarely; the monitor polls every 30 s. */
+export const ROSTER_TTL_MS = 5 * 60_000;
+const rosterCache = new Map<string, { at: number; rows: Promise<PlayerRegistration[]> }>();
+
+/** A whole day's monitor answer, so a burst of polls for one day makes one medicoach call. */
+export const RESPONSE_TTL_MS = 15_000;
+const responseCache = new Map<string, { at: number; payload: MatchMonitorResponse }>();
+
+/** Forget every cached roster and response (tests, and after a roster import if ever needed). */
+export function resetLiveCaches(): void {
+  rosterCache.clear();
+  responseCache.clear();
+}
 
 /** What the roster says about a player who appeared in a match. */
 export type PlayerCheck =
@@ -75,6 +98,8 @@ export interface MatchMonitorResponse {
   technical?: string;
   matches: MonitorMatch[];
   unmatched: number;
+  /** Live matches medicoach sent that failed the contract and were left out (the rest show). */
+  parseFailures: number;
 }
 
 interface DayFixture {
@@ -161,17 +186,27 @@ const isActive = (p: PlayerRegistration) => (p.status ?? 'active') === 'active';
 
 /**
  * Check every player of the day's live matches against the club rosters. Each roster is read
- * once per call (a club playing twice on one day is read once).
+ * once per ROSTER_TTL_MS in this container (a club playing twice on one day is read once).
  */
 export async function checkPlayers(
   tenant: string,
   matches: Array<Omit<MonitorMatch, 'live'> & { live: LiveMatch | null }>,
   deps: RosterDeps,
 ): Promise<MonitorMatch[]> {
-  const rosters = new Map<string, Promise<PlayerRegistration[]>>();
+  // Each roster is read at most once per ROSTER_TTL_MS: an unregistered player sends
+  // `elsewhere` through every club's roster, and the page asks again every 30 s.
   const roster = (clubId: string) => {
-    if (!rosters.has(clubId)) rosters.set(clubId, deps.listPlayers(tenant, clubId));
-    return rosters.get(clubId)!;
+    const key = `${tenant}|${clubId}`;
+    const hit = rosterCache.get(key);
+    const nowMs = Date.now();
+    if (hit && nowMs - hit.at < ROSTER_TTL_MS) return hit.rows;
+    const rows = deps.listPlayers(tenant, clubId);
+    rosterCache.set(key, { at: nowMs, rows });
+    // A failed read is never cached; the next poll tries again.
+    rows.catch(() => {
+      if (rosterCache.get(key)?.rows === rows) rosterCache.delete(key);
+    });
+    return rows;
   };
   const clubName = new Map(deps.clubs.map((c) => [c.id, c.name]));
   const prefix = `smartclub:${tenant}:player:`;
@@ -232,12 +267,18 @@ export interface LiveDeps {
   fetch?: typeof fetch;
 }
 
-/** Fetch medicoach's live state for one day. Throws `MedicoachSyncError` on any failure. */
+/** The live response with each match left unparsed, so one bad match can't sink the day. */
+const LiveEnvelopeSchema = LiveResponseSchema.extend({ matches: z.array(z.unknown()) });
+
+/**
+ * Fetch medicoach's live state for one day. Throws `MedicoachSyncError` when the request or
+ * the envelope fails; a single match that fails the contract is dropped and counted instead.
+ */
 export async function fetchLiveMatches(
   tenant: string,
   date: string,
   deps: LiveDeps,
-): Promise<LiveMatch[]> {
+): Promise<{ matches: LiveMatch[]; parseFailures: number }> {
   const pq = livePathAndQuery(tenant, date);
   let res: Response;
   try {
@@ -261,7 +302,7 @@ export async function fetchLiveMatches(
   } catch {
     throw new MedicoachSyncError('medicoach answered with a body that is not JSON');
   }
-  const parsed = LiveResponseSchema.safeParse(body);
+  const parsed = LiveEnvelopeSchema.safeParse(body);
   // Paths only: a zod message can echo a value, and a value here may be a player's name/ref.
   if (!parsed.success)
     throw new MedicoachSyncError(
@@ -272,7 +313,15 @@ export async function fetchLiveMatches(
     );
   if (parsed.data.tenant !== tenant)
     throw new MedicoachSyncError('medicoach answered for a different tenant');
-  return parsed.data.matches;
+  const matches: LiveMatch[] = [];
+  let parseFailures = 0;
+  for (const raw of parsed.data.matches) {
+    // Counted, never logged: a failing match may carry a player's name or ref.
+    const one = LiveMatchSchema.safeParse(raw);
+    if (one.success) matches.push(one.data);
+    else parseFailures++;
+  }
+  return { matches, parseFailures };
 }
 
 /**
@@ -290,6 +339,9 @@ export async function buildMatchMonitor(
   },
 ): Promise<MatchMonitorResponse> {
   const now = deps.now ?? (() => new Date());
+  const cacheKey = `${tenant}|${date}`;
+  const cached = responseCache.get(cacheKey);
+  if (cached && now().getTime() - cached.at < RESPONSE_TTL_MS) return cached.payload;
   const day = fixturesOnDate(tenant, input.series, input.clubs, date);
   const base = { date, generatedAt: now().toISOString() };
   if (!deps.url || !deps.secret)
@@ -299,10 +351,12 @@ export async function buildMatchMonitor(
       reachable: false,
       matches: day.map((m) => ({ ...m, live: null })),
       unmatched: 0,
+      parseFailures: 0,
     };
   let live: LiveMatch[];
+  let parseFailures: number;
   try {
-    live = await fetchLiveMatches(tenant, date, deps);
+    ({ matches: live, parseFailures } = await fetchLiveMatches(tenant, date, deps));
   } catch (err) {
     if (!(err instanceof MedicoachSyncError)) throw err;
     return {
@@ -317,11 +371,12 @@ export async function buildMatchMonitor(
       technical: err.message,
       matches: day.map((m) => ({ ...m, live: null })),
       unmatched: 0,
+      parseFailures: 0,
     };
   }
   const byRef = new Map(live.map((l) => [l.ref, l]));
   const refs = new Set(day.map((m) => m.ref));
-  return {
+  const payload: MatchMonitorResponse = {
     ...base,
     dryRun: false,
     reachable: true,
@@ -331,5 +386,9 @@ export async function buildMatchMonitor(
       { listPlayers: deps.listPlayers, clubs: input.clubs },
     ),
     unmatched: live.filter((l) => !refs.has(l.ref)).length,
+    parseFailures,
   };
+  // Only a good answer is reused; a failure is retried on the next poll.
+  responseCache.set(cacheKey, { at: now().getTime(), payload });
+  return payload;
 }

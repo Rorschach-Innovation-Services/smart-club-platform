@@ -20,6 +20,20 @@ import { createServer } from 'node:http';
 import { verifySignature } from '../src/medicoach-sync-contract.js';
 
 const API = process.env.DEMO_API ?? 'http://localhost:3333';
+// It flips features and moves fixtures: never against anything but a local API.
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+{
+  let host = '';
+  try {
+    host = new URL(API).hostname;
+  } catch {
+    // An unparseable DEMO_API is refused below like any non-local one.
+  }
+  if (!LOCAL_HOSTS.has(host)) {
+    console.error(`demo-match-monitor: refusing to run against ${API} — local APIs only.`);
+    process.exit(1);
+  }
+}
 const PORT = Number(process.env.DEMO_STUB_PORT ?? 4799);
 const SECRET = process.env.MEDICOACH_SYNC_SECRET ?? 'local-demo-secret';
 const TENANT = 'dolphins';
@@ -425,6 +439,7 @@ function liveFor(
       medianGapSec: null,
       longGaps: [],
       undoCount: 0,
+      undoCountExact: true,
       players: teamSheets(clubs.home, clubs.away, sc, first, false),
     };
   const i1 = playInnings(r, 1, first, sc);
@@ -499,6 +514,7 @@ function liveFor(
         reason: b.reason,
       })),
     undoCount: sc.undo ?? 0,
+    undoCountExact: true,
     players: teamSheets(clubs.home, clubs.away, sc, first, true),
   };
 }

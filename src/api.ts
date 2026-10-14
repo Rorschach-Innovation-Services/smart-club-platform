@@ -1279,6 +1279,8 @@ export interface MatchMonitorResponse {
   matches: MonitorMatch[];
   /** Live matches medicoach reported for refs smart club has no fixture for on this day. */
   unmatched: number;
+  /** Live matches medicoach sent that failed the contract and were left out. */
+  parseFailures?: number;
 }
 export const getMatchMonitor = (date: string) =>
   request<MatchMonitorResponse>(`/integrations/medicoach/live?date=${encodeURIComponent(date)}`);

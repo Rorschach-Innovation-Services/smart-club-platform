@@ -34,6 +34,7 @@ let ddb: Server;
 let app: (typeof import('../src/index.js'))['app'];
 let repo: typeof import('../src/repo.js');
 let contract: typeof import('../src/medicoach-sync-contract.js');
+let live: typeof import('../src/medicoach-sync/live.js');
 
 // ── Stub medicoach ──
 let stub: Server;
@@ -128,6 +129,7 @@ before(async () => {
   ({ app } = await import('../src/index.js'));
   repo = await import('../src/repo.js');
   contract = await import('../src/medicoach-sync-contract.js');
+  live = await import('../src/medicoach-sync/live.js');
   await startStub();
   await repo.putTenantConfig({
     tenant: T,
@@ -192,6 +194,7 @@ after(async () => {
 });
 
 beforeEach(() => {
+  live.resetLiveCaches();
   process.env.MEDICOACH_SYNC_URL = stubUrl;
   process.env.MEDICOACH_SYNC_SECRET = SECRET;
   httpFail = null;
@@ -313,6 +316,78 @@ describe('match monitor', () => {
     r = (await (await get(`?date=${DAY}`)).json()) as MatchMonitorResponse;
     assert.equal(r.reachable, false);
     assert.match(r.technical!, /contract at generatedAt/);
+  });
+
+  test('one malformed match is dropped and counted; the rest of the day still shows', async () => {
+    body = {
+      version: 1,
+      tenant: T,
+      date: DAY,
+      generatedAt: '2026-10-04T08:42:00.000Z',
+      matches: [liveMatch(REF('s1', 'f1')), liveMatch(REF('s1', 'f2'), { deliveries: -1 })],
+    };
+    const r = (await (await get(`?date=${DAY}`)).json()) as MatchMonitorResponse;
+    assert.equal(r.reachable, true);
+    assert.equal(r.parseFailures, 1);
+    assert.ok(r.matches.find((m) => m.fixtureId === 'f1')!.live);
+    assert.equal(r.matches.find((m) => m.fixtureId === 'f2')!.live, null);
+  });
+
+  test('a repeat poll within the cache window reuses the answer', async () => {
+    await get(`?date=${DAY}`);
+    const r = (await (await get(`?date=${DAY}`)).json()) as MatchMonitorResponse;
+    assert.equal(seen.length, 1);
+    assert.equal(r.reachable, true);
+    live.resetLiveCaches();
+    await get(`?date=${DAY}`);
+    assert.equal(seen.length, 2);
+  });
+
+  test('rosters are read once per cache window, even for an unregistered ref', async () => {
+    const reads: string[] = [];
+    const clubs = [
+      { id: 'a', name: 'Crusaders CC' },
+      { id: 'b', name: 'Umzinto CC' },
+      { id: 'c', name: 'Harlequins CC' },
+    ];
+    const deps = {
+      clubs,
+      listPlayers: async (_t: string, clubId: string) => {
+        reads.push(clubId);
+        return [];
+      },
+    };
+    const day = [
+      {
+        ref: REF('s1', 'f1'),
+        seriesId: 's1',
+        seriesName: 'S',
+        fixtureId: 'f1',
+        home: 'Crusaders',
+        away: 'Umzinto',
+        homeClubId: 'a',
+        awayClubId: 'b',
+        date: DAY,
+        fixtureStatus: 'scheduled' as const,
+        live: contract.LiveMatchSchema.parse(
+          liveMatch(REF('s1', 'f1'), {
+            players: [
+              {
+                side: 'home',
+                name: 'Ghost',
+                ref: `smartclub:${T}:player:nk-none`,
+                addedDuringMatch: false,
+                addedAt: null,
+              },
+            ],
+          }),
+        ),
+      },
+    ];
+    await live.checkPlayers(T, day, deps);
+    assert.deepEqual(reads.sort(), ['a', 'b', 'c']);
+    await live.checkPlayers(T, day, deps);
+    assert.equal(reads.length, 3);
   });
 
   test('with the sync unconfigured it is a dry run with no request made', async () => {
