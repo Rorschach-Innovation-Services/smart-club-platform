@@ -194,7 +194,12 @@ interface Preview {
     alreadyCorrect: number;
     rows: Array<{ rowId: string; outcome: string; changes?: Array<{ field: string }> }>;
   }>;
-  gate: { ok: boolean; introduced: unknown[]; preExisting: unknown[] };
+  gate: {
+    ok: boolean;
+    errors: string[];
+    introduced: Array<{ key: string; fixture: string; with: string }>;
+    preExisting: unknown[];
+  };
   officials?: Array<{ seriesId: string; fixtureId: string; umpires: string[] }>;
   touchedSeries: Array<{ id: string; version: number }>;
 }
@@ -423,7 +428,7 @@ describe('fixture amendments upload — confirm', () => {
     assert.equal((await fixtureOf('fa-skip', 'f3')).venueId, 'v-beta', 'skipped row untouched');
   });
 
-  test('an introduced clash blocks confirm (no bypass), nothing written', async () => {
+  test('an introduced clash blocks confirm until overridden by its key, then applies', async () => {
     await seedTenant('fa-clash');
     // Gamma v Delta onto Beta Park at 09:00, which f1 holds.
     const dataBase64 = await workbook(
@@ -434,15 +439,334 @@ describe('fixture amendments upload — confirm', () => {
       [],
     );
     const pv = (await (await post('fa-clash', 'preview', { dataBase64 })).json()) as Preview;
-    assert.equal(pv.gate.ok, false);
-    assert.ok(pv.gate.introduced.length > 0);
-    const res = await post('fa-clash', 'confirm', { dataBase64, planHash: pv.planHash });
-    assert.equal(res.status, 409);
-    const body = (await res.json()) as { code: string; details: { introduced: unknown[] } };
-    assert.equal(body.code, 'clash_gate');
-    assert.ok(body.details.introduced.length > 0);
+    // `ok` is plan errors only now; the clash blocks through `introduced`.
+    assert.equal(pv.gate.ok, true);
+    assert.deepEqual(pv.gate.errors, []);
+    assert.equal(pv.gate.introduced.length, 1);
+    const [key] = pv.gate.introduced.map((c) => c.key);
+    assert.equal(key, `${SERIES_ID}/f1~${SERIES_ID}/f2|betapark`);
+
+    // No keys, or only a stale/foreign one: refused, nothing written or backed up.
+    for (const overriddenClashKeys of [undefined, [], ['s-x/f9~s-y/f9|elsewhere']]) {
+      const res = await post('fa-clash', 'confirm', {
+        dataBase64,
+        planHash: pv.planHash,
+        ...(overriddenClashKeys ? { overriddenClashKeys } : {}),
+      });
+      assert.equal(res.status, 409);
+      const body = (await res.json()) as {
+        code: string;
+        details: { introduced: Array<{ key: string }> };
+      };
+      assert.equal(body.code, 'clash_gate');
+      assert.deepEqual(
+        body.details.introduced.map((c) => c.key),
+        [key],
+      );
+    }
     assert.equal((await fixtureOf('fa-clash', 'f2')).venueId, 'v-gamma');
     assert.equal(s3Mock.commandCalls(PutObjectCommand).length, 0);
+
+    // The key acknowledged (plus an extra, ignored one): applied, and the backup audits it.
+    const res = await post('fa-clash', 'confirm', {
+      dataBase64,
+      planHash: pv.planHash,
+      overriddenClashKeys: [key, 'extra~key|ignored'],
+    });
+    assert.equal(res.status, 200, await res.clone().text());
+    const out = (await res.json()) as { fixturesAmended: number; clashesOverridden: number };
+    assert.equal(out.fixturesAmended, 1);
+    assert.equal(out.clashesOverridden, 1);
+    assert.equal((await fixtureOf('fa-clash', 'f2')).venueId, 'v-beta');
+    const puts = s3Mock.commandCalls(PutObjectCommand);
+    assert.equal(puts.length, 1);
+    const backup = JSON.parse(String(puts[0].args[0].input.Body)) as {
+      by: string;
+      overriddenClashes: Array<{ key: string; line: string }>;
+    };
+    assert.equal(backup.by, 'operator@platform');
+    assert.deepEqual(
+      backup.overriddenClashes.map((c) => c.key),
+      [key],
+    );
+    assert.match(backup.overriddenClashes[0].line, /^2026-10-11 09:00 Beta Park: .+ — with .+/);
+  });
+
+  test('a clean apply records no overrides', async () => {
+    await seedTenant('fa-clean');
+    const dataBase64 = await baseline();
+    const pv = (await (await post('fa-clean', 'preview', { dataBase64 })).json()) as Preview;
+    const res = await post('fa-clean', 'confirm', { dataBase64, planHash: pv.planHash });
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as { clashesOverridden: number }).clashesOverridden, 0);
+    const backup = JSON.parse(String(s3Mock.commandCalls(PutObjectCommand)[0].args[0].input.Body));
+    assert.equal('overriddenClashes' in backup, false);
+  });
+
+  test('overrides never carry across a changed plan: plan_changed comes first', async () => {
+    await seedTenant('fa-clash-stale');
+    const dataBase64 = await workbook([['Gamma', 'Delta', 'Beta Park']], []);
+    const pv = (await (await post('fa-clash-stale', 'preview', { dataBase64 })).json()) as Preview;
+    const s = (await repo.getSeries('fa-clash-stale', SERIES_ID))!;
+    await repo.putSeries('fa-clash-stale', { ...s, version: s.version + 1 });
+    const res = await post('fa-clash-stale', 'confirm', {
+      dataBase64,
+      planHash: pv.planHash,
+      overriddenClashKeys: pv.gate.introduced.map((c) => c.key),
+    });
+    assert.equal(res.status, 409);
+    assert.equal(((await res.json()) as { code: string }).code, 'plan_changed');
+    assert.equal((await fixtureOf('fa-clash-stale', 'f2')).venueId, 'v-gamma');
+  });
+
+  test('malformed overriddenClashKeys are refused on preview and confirm', async () => {
+    await seedTenant('fa-badkeys');
+    const dataBase64 = await baseline();
+    for (const overriddenClashKeys of [
+      'all',
+      true,
+      [1],
+      ['x'.repeat(401)],
+      Array.from({ length: 201 }, (_, i) => `k${i}`),
+    ])
+      for (const op of ['preview', 'confirm'] as const) {
+        const res = await post('fa-badkeys', op, {
+          dataBase64,
+          planHash: 'x',
+          overriddenClashKeys,
+        });
+        assert.equal(res.status, 400, `${op} ${JSON.stringify(overriddenClashKeys).slice(0, 40)}`);
+      }
+  });
+
+  test('a non-clash plan error still refuses even with every clash overridden', async () => {
+    await seedTenant('fa-planerr');
+    // A DRAFT on Neutral Ground 13:30 that f3 takes from the sheet; its relocation
+    // candidates (Delta Fields, Alpha Oval) are each booked that day by another draft ⇒ no
+    // free ground, a real plan error. The sheet also introduces Gamma v Delta onto Beta Park.
+    await repo.putSeries('fa-planerr', {
+      id: 's-draft',
+      name: 'Women League · T20',
+      leagueKey: 'women',
+      startDate: '2026-10-04',
+      teams: CLUBS.map(([id]) => id),
+      participants: CLUBS.map(([id, name]) => ({ teamId: id, clubId: id, name })),
+      fixtures: [
+        {
+          id: 'd1',
+          round: 1,
+          date: SUN,
+          time: '13:30',
+          home: 'delta',
+          away: 'alpha',
+          venueName: 'Neutral Ground',
+        },
+        {
+          id: 'd2',
+          round: 1,
+          date: SUN,
+          time: '09:00',
+          home: 'gamma',
+          away: 'beta',
+          venueName: 'Alpha Oval',
+        },
+        {
+          id: 'd3',
+          round: 1,
+          date: SUN,
+          time: '09:00',
+          home: 'beta',
+          away: 'alpha',
+          venueName: 'Delta Fields',
+        },
+      ],
+      kind: 'series',
+      approved: true,
+      approvedAt: '2026-09-01T00:00:00.000Z',
+      released: false,
+      releasedAt: null,
+      version: 1,
+    } as unknown as Series);
+    const dataBase64 = await workbook(
+      [
+        ['Alpha', 'Beta', 'Beta Park'],
+        ['Gamma', 'Delta', 'Beta Park'],
+      ],
+      [['Beta', 'Gamma', 'Neutral Ground']],
+    );
+    const body = { dataBase64, relocateDraftClashes: true };
+    const pv = (await (await post('fa-planerr', 'preview', body)).json()) as Preview;
+    assert.equal(pv.gate.ok, false);
+    assert.ok(pv.gate.errors.some((e) => /no free all-day ground/.test(e)));
+    assert.ok(!pv.gate.errors.some((e) => /would introduce/.test(e)));
+    assert.ok(pv.gate.introduced.length > 0);
+    const res = await post('fa-planerr', 'confirm', {
+      ...body,
+      planHash: pv.planHash,
+      overriddenClashKeys: pv.gate.introduced.map((c) => c.key),
+    });
+    assert.equal(res.status, 409);
+    assert.equal(((await res.json()) as { code: string }).code, 'plan_errors');
+    assert.equal(s3Mock.commandCalls(PutObjectCommand).length, 0);
+  });
+
+  test('two series introducing clashes, one pair amended on both sides: one key per pair', async () => {
+    await seedTenant('fa-multi');
+    // A second group of the same competition: the sheet scopes to both.
+    await repo.putSeries('fa-multi', {
+      id: 's-prem2',
+      name: 'Premier League · T20 · Group 2',
+      leagueKey: 'premier',
+      startDate: '2026-10-04',
+      teams: CLUBS.map(([id]) => id),
+      participants: CLUBS.map(([id, name]) => ({ teamId: id, clubId: id, name })),
+      fixtures: [
+        {
+          id: 'g1',
+          round: 2,
+          date: SUN,
+          time: '09:00',
+          home: 'alpha',
+          away: 'gamma',
+          venueId: 'v-alpha',
+          venueName: 'Alpha Oval',
+        },
+        {
+          id: 'g2',
+          round: 2,
+          date: SUN,
+          time: '13:30',
+          home: 'beta',
+          away: 'delta',
+          venueId: 'v-delta',
+          venueName: 'Delta Fields',
+        },
+      ],
+      kind: 'series',
+      approved: true,
+      approvedAt: '2026-09-01T00:00:00.000Z',
+      released: true,
+      releasedAt: '2026-09-01T00:00:00.000Z',
+      version: 3,
+    } as unknown as Series);
+    // f2 onto Alpha Oval 09:00 (g1 holds it); f3 AND g2 both onto Neutral Ground 13:30.
+    const dataBase64 = await workbook(
+      [['Gamma', 'Delta', 'Alpha Oval']],
+      [
+        ['Beta', 'Gamma', 'Neutral Ground'],
+        ['Beta', 'Delta', 'Neutral Ground'],
+      ],
+    );
+    const pv = (await (await post('fa-multi', 'preview', { dataBase64 })).json()) as Preview;
+    assert.equal(pv.gate.ok, true);
+    const keys = pv.gate.introduced.map((c) => c.key).sort();
+    assert.deepEqual(keys, [
+      `${SERIES_ID}/f2~s-prem2/g1|alphaoval`,
+      `${SERIES_ID}/f3~s-prem2/g2|neutralground`,
+    ]);
+    // One key short still blocks.
+    const partial = await post('fa-multi', 'confirm', {
+      dataBase64,
+      planHash: pv.planHash,
+      overriddenClashKeys: keys.slice(0, 1),
+    });
+    assert.equal(partial.status, 409);
+    assert.equal(((await partial.json()) as { code: string }).code, 'clash_gate');
+
+    const res = await post('fa-multi', 'confirm', {
+      dataBase64,
+      planHash: pv.planHash,
+      overriddenClashKeys: keys,
+    });
+    assert.equal(res.status, 200, await res.clone().text());
+    const out = (await res.json()) as { fixturesAmended: number; clashesOverridden: number };
+    assert.equal(out.fixturesAmended, 3);
+    assert.equal(out.clashesOverridden, 2);
+    assert.equal((await fixtureOf('fa-multi', 'f2')).venueId, 'v-alpha');
+    assert.equal((await fixtureOf('fa-multi', 'f3')).venueId, 'v-neutral');
+    const g2 = (
+      (await repo.getSeries('fa-multi', 's-prem2'))!.fixtures as Array<Record<string, unknown>>
+    ).find((f) => f.id === 'g2')!;
+    assert.equal(g2.venueId, 'v-neutral');
+    const backup = JSON.parse(String(s3Mock.commandCalls(PutObjectCommand)[0].args[0].input.Body));
+    assert.deepEqual(
+      (backup.overriddenClashes as Array<{ key: string }>).map((c) => c.key).sort(),
+      keys,
+    );
+  });
+
+  test('a 2-surface ground with a third booking: the reported pairs are what confirm needs', async () => {
+    await seedTenant('fa-surfaces');
+    await repo.putVenue('fa-surfaces', {
+      id: 'v-neutral',
+      name: 'Neutral Ground',
+      homeClubIds: [],
+      surfaces: 2,
+    } as Venue);
+    await repo.putSeries('fa-surfaces', {
+      id: 's-other',
+      name: 'Women League · T20',
+      leagueKey: 'women',
+      startDate: '2026-10-04',
+      teams: CLUBS.map(([id]) => id),
+      participants: CLUBS.map(([id, name]) => ({ teamId: id, clubId: id, name })),
+      fixtures: [
+        {
+          id: 'w1',
+          round: 1,
+          date: SUN,
+          time: '13:30',
+          home: 'alpha',
+          away: 'delta',
+          venueId: 'v-neutral',
+          venueName: 'Neutral Ground',
+        },
+        {
+          id: 'w2',
+          round: 1,
+          date: SUN,
+          time: '13:30',
+          home: 'gamma',
+          away: 'beta',
+          venueId: 'v-neutral',
+          venueName: 'Neutral Ground',
+        },
+      ],
+      kind: 'series',
+      approved: true,
+      approvedAt: '2026-09-01T00:00:00.000Z',
+      released: true,
+      releasedAt: '2026-09-01T00:00:00.000Z',
+      version: 1,
+    } as unknown as Series);
+    // Two bookings fill both surfaces; f3 moving in is the third.
+    const dataBase64 = await workbook([], [['Beta', 'Gamma', 'Neutral Ground']]);
+    const pv = (await (await post('fa-surfaces', 'preview', { dataBase64 })).json()) as Preview;
+    const keys = pv.gate.introduced.map((c) => c.key).sort();
+    // The gate names one holder per direction: from f3's side the first booking (w1), from
+    // the other series' side w2 (the booking that overflows once f3 is in). Two pairs, both
+    // with the amended fixture — never w1~w2, which fit before — and confirm needs both.
+    assert.deepEqual(keys, [
+      `s-other/w1~${SERIES_ID}/f3|neutralground`,
+      `s-other/w2~${SERIES_ID}/f3|neutralground`,
+    ]);
+    const short = await post('fa-surfaces', 'confirm', {
+      dataBase64,
+      planHash: pv.planHash,
+      overriddenClashKeys: keys.slice(1),
+    });
+    assert.equal(short.status, 409);
+    const res = await post('fa-surfaces', 'confirm', {
+      dataBase64,
+      planHash: pv.planHash,
+      overriddenClashKeys: keys,
+    });
+    assert.equal(res.status, 200, await res.clone().text());
+    const backup = JSON.parse(String(s3Mock.commandCalls(PutObjectCommand)[0].args[0].input.Body));
+    assert.deepEqual(
+      (backup.overriddenClashes as Array<{ key: string }>).map((c) => c.key).sort(),
+      keys,
+    );
   });
 
   test('a failed backup aborts before any write', async () => {

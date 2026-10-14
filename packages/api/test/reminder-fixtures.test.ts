@@ -22,6 +22,7 @@ import {
   parseReminderArgs,
   parseReminderGrids,
   parseReminderWorkbook,
+  INTRODUCED_GATE_ERROR_PREFIX,
   planReminderAmendments,
   reminderPreview,
   seriesForCompetition,
@@ -29,7 +30,7 @@ import {
   type ParsedReminderWorkbook,
   type ReminderRow,
 } from '../src/reminder-fixtures.js';
-import { DEFAULT_VENUE_ALIASES } from '../src/venue-clash.js';
+import { clashPairKey, DEFAULT_VENUE_ALIASES } from '../src/venue-clash.js';
 import type { Club, Series, Venue } from '../src/types.js';
 
 const SAMPLE = fileURLToPath(
@@ -756,12 +757,16 @@ describe('planReminderAmendments', () => {
     assert.ok(blocked.gateVerdict.introduced.length > 0);
   });
 
-  test('an introduced clash aborts the plan; a pre-existing one only reports', () => {
+  test('an introduced clash blocks via its pair keys, not the verdict; a pre-existing one only reports', () => {
     // Moving f2 onto Beta Park at 09:00, which released f1 already holds ⇒ introduced.
     const rows = [rowOf({ home: 'Gamma', away: 'Delta', time: '09:00', venue: 'Beta Park' })];
     const rp = plan(parsedOf(rows), [premier()]);
-    assert.equal(rp.gateVerdict.ok, false);
+    // The upload overrides introduced clashes by key, so they no longer fail `ok`...
+    assert.equal(rp.gateVerdict.ok, true);
+    assert.deepEqual(rp.gateVerdict.errors, []);
     assert.equal(rp.gateVerdict.introduced.length > 0, true);
+    assert.equal(rp.introducedPairKeys.length, 1);
+    // ...while the patch planner (and so the CLI) still refuses on its error line.
     assert.ok(rp.plan.errors.some((e) => /introduce/.test(e)));
 
     // A standing released clash on the date (f3 shares Beta Park 13:30 with another series),
@@ -807,6 +812,55 @@ describe('planReminderAmendments', () => {
       assert.equal(c.with, 'Holder Cup · T20: Gamma CC v Alpha CC', 'the ground-holder');
       assert.equal(c.holderDraft, !released);
     }
+  });
+
+  test('pair keys: identical from either side; on every preview clash; one per pair', () => {
+    const rows = [rowOf({ home: 'Gamma', away: 'Delta', time: '13:30', venue: 'Delta Fields' })];
+    const all = [
+      premier({ f4: { date: SAT } }),
+      series('s-hold', 'Holder Cup · T20', true, [
+        {
+          id: 'h1',
+          date: SUN,
+          time: '13:30',
+          home: 'gamma',
+          away: 'alpha',
+          venueName: 'Delta Fields',
+        },
+      ]),
+    ];
+    const rp = plan(parsedOf(rows), all);
+    const [a, b] = rp.plan.gate!.introduced;
+    assert.notEqual(a.subjectSeriesId, b.subjectSeriesId, 'the gate reports both directions');
+    assert.equal(clashPairKey(a, aliases), clashPairKey(b, aliases));
+    assert.deepEqual(rp.introducedPairKeys, [clashPairKey(a, aliases)]);
+    const pv = reminderPreview(rp, all, clubs);
+    assert.deepEqual(
+      pv.gate.introduced.map((c) => c.key),
+      rp.introducedPairKeys,
+    );
+  });
+
+  test('the verdict filter removes exactly the introduced-clash gate line (wording canary)', () => {
+    const rows = [rowOf({ home: 'Gamma', away: 'Delta', time: '09:00', venue: 'Beta Park' })];
+    const rp = plan(parsedOf(rows), [premier()]);
+    // If patch-fixtures rewords this line, the filter silently stops working: fail here.
+    const gateLines = rp.plan.errors.filter((e) => e.startsWith(INTRODUCED_GATE_ERROR_PREFIX));
+    assert.equal(gateLines.length, 1);
+    assert.match(gateLines[0], /^gate: the change would introduce \d+ new venue clash\(es\)$/);
+    assert.deepEqual(
+      rp.gateVerdict.errors,
+      rp.plan.errors.filter((e) => e !== gateLines[0]),
+    );
+  });
+
+  test('planHash ignores override acknowledgments (they are not a plan input)', () => {
+    const rows = [rowOf({ home: 'Gamma', away: 'Delta', time: '09:00', venue: 'Beta Park' })];
+    const a = plan(parsedOf(rows), [premier()]);
+    const b = plan(parsedOf(rows), [premier()], {
+      overriddenClashKeys: a.introducedPairKeys,
+    } as Partial<Parameters<typeof planReminderAmendments>[0]>);
+    assert.equal(a.planHash, b.planHash);
   });
 
   test('skip toggles drop the row from the manifest and change the hash', async () => {

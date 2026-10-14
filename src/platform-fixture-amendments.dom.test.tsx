@@ -160,6 +160,7 @@ function makePreview(over: Partial<api.AmendmentPreview> = {}): api.AmendmentPre
           fixture: 'Railways v Kloof',
           with: 'Premier Women: Dawn v Ilembe',
           holderDraft: false,
+          key: 's-pm/f9~s-pw/g9|crawford nc',
         },
       ],
     },
@@ -225,22 +226,42 @@ const chip = (text: string) =>
     (_, el) => !!el?.classList.contains('pill') && el.textContent?.replace(/\s+/g, ' ') === text,
   );
 
-/** An introduced clash whose ground-holder is (or isn't) a draft fixture. */
+/** An introduced clash on Gledhow (`n` distinguishes pairs). */
+const clash = (n: number, over: Partial<api.AmendmentClash> = {}): api.AmendmentClash => ({
+  date: '2026-10-10',
+  time: '13:00',
+  ground: 'Gledhow',
+  fixture: n === 1 ? 'Ilembe CC v Crusaders CC' : 'Dawn CC v Kloof CC',
+  with: n === 1 ? 'Premier Women: Dawn v Kloof' : 'Reserve League: Berea v Railways',
+  holderDraft: false,
+  key: `s-pm/f${n}~s-pw/g${n}|gledhow`,
+  ...over,
+});
+
+/** An introduced clash whose ground-holder is (or isn't) a draft fixture. Introduced clashes
+ * no longer fail `ok` (that is plan errors only): they block until overridden. */
 const introducedClash = (holderDraft: boolean): api.AmendmentGate => ({
-  ok: false,
-  errors: ['introduced clash'],
-  introduced: [
-    {
-      date: '2026-10-10',
-      time: '13:00',
-      ground: 'Gledhow',
-      fixture: 'Ilembe CC v Crusaders CC',
-      with: 'Premier Women: Dawn v Kloof',
-      holderDraft,
-    },
-  ],
+  ok: true,
+  errors: [],
+  introduced: [clash(1, { holderDraft })],
   preExisting: [],
 });
+
+const twoClashes = (): api.AmendmentGate => ({
+  ok: true,
+  errors: [],
+  introduced: [clash(1), clash(2)],
+  preExisting: [],
+});
+
+const tick = (n: 1 | 2) =>
+  screen.getByRole('checkbox', {
+    name: new RegExp(
+      `apply anyway: .*${n === 1 ? 'Ilembe CC v Crusaders CC' : 'Dawn CC v Kloof CC'}`,
+      'i',
+    ),
+  });
+const overrideAll = () => screen.getByRole('checkbox', { name: /override all/i });
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -327,6 +348,7 @@ describe('FixtureAmendmentsPage', () => {
       file,
       { skipRowIds: ['Premier Men:7'], relocateDraftClashes: false },
       'hash-2',
+      [],
     );
     expect(await screen.findByText(/amended 1 fixture/i)).toBeInTheDocument();
   });
@@ -423,6 +445,7 @@ describe('FixtureAmendmentsPage', () => {
       file,
       { skipRowIds: [], relocateDraftClashes: false },
       'hash-fresh',
+      [],
     );
     expect(await screen.findByText(/amended 2 fixtures/i)).toBeInTheDocument();
   });
@@ -452,6 +475,114 @@ describe('FixtureAmendmentsPage', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(
       /turn on draft relocation below — a draft fixture holds the ground/i,
     );
+  });
+
+  it('per-clash ticks and the derived Override all toggle gate Apply and travel as keys', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.platformFixtureAmendmentsPreview).mockResolvedValue(
+      makePreview({ gate: twoClashes() }),
+    );
+    vi.mocked(api.platformFixtureAmendmentsConfirm).mockResolvedValue({
+      ...okResult,
+      clashesOverridden: 2,
+    });
+    const { toast } = renderPage();
+    const file = await upload();
+
+    expect(applyBtn()).toBeDisabled();
+    expect(overrideAll()).not.toBeChecked();
+    expect((overrideAll() as HTMLInputElement).indeterminate).toBe(false);
+
+    await user.click(tick(1));
+    expect(applyBtn()).toBeDisabled();
+    expect(overrideAll()).not.toBeChecked();
+    expect((overrideAll() as HTMLInputElement).indeterminate).toBe(true);
+
+    await user.click(tick(2));
+    expect(overrideAll()).toBeChecked();
+    expect((overrideAll() as HTMLInputElement).indeterminate).toBe(false);
+    expect(applyBtn()).toBeEnabled();
+    expect(screen.getByRole('alert')).toHaveTextContent(/overriding 2 venue clashes/i);
+
+    // The master toggle clears everything when fully ticked, and ticks all when not.
+    await user.click(overrideAll());
+    expect(tick(1)).not.toBeChecked();
+    expect(tick(2)).not.toBeChecked();
+    expect(applyBtn()).toBeDisabled();
+    await user.click(overrideAll());
+    expect(tick(1)).toBeChecked();
+    expect(tick(2)).toBeChecked();
+    // Ticking never re-previews.
+    expect(api.platformFixtureAmendmentsPreview).toHaveBeenCalledTimes(1);
+
+    await user.click(applyBtn());
+    expect(api.platformFixtureAmendmentsConfirm).toHaveBeenCalledWith(
+      'kzn',
+      file,
+      { skipRowIds: [], relocateDraftClashes: false },
+      'hash-1',
+      ['s-pm/f1~s-pw/g1|gledhow', 's-pm/f2~s-pw/g2|gledhow'],
+    );
+    expect(toast).toHaveBeenCalledWith('Amended 2 fixtures · 2 clashes overridden');
+  });
+
+  it('a re-preview keeps ticks for the same clash, and drops one whose date or time moved', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.platformFixtureAmendmentsPreview)
+      .mockResolvedValueOnce(makePreview({ gate: twoClashes() }))
+      .mockResolvedValueOnce(makePreview({ planHash: 'hash-2', gate: twoClashes() }))
+      .mockResolvedValueOnce(
+        makePreview({
+          planHash: 'hash-3',
+          gate: { ...twoClashes(), introduced: [clash(1), clash(2, { time: '09:30' })] },
+        }),
+      );
+    renderPage();
+    await upload();
+    await user.click(overrideAll());
+    expect(applyBtn()).toBeEnabled();
+
+    // Same clash set (re-preview via the relocation switch): ticks survive.
+    await user.click(screen.getByRole('checkbox', { name: /move clashing draft fixtures/i }));
+    await waitFor(() => expect(applyBtn()).toBeEnabled());
+    expect(tick(1)).toBeChecked();
+    expect(tick(2)).toBeChecked();
+
+    // Pair 2 is now at another time: its tick is cleared, pair 1's stays.
+    await user.click(screen.getByRole('checkbox', { name: /move clashing draft fixtures/i }));
+    await waitFor(() => expect(tick(2)).not.toBeChecked());
+    expect(tick(1)).toBeChecked();
+    expect((overrideAll() as HTMLInputElement).indeterminate).toBe(true);
+    expect(applyBtn()).toBeDisabled();
+  });
+
+  it('on 409 clash_gate the ticks reconcile to the clashes the server reports', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.platformFixtureAmendmentsPreview).mockResolvedValue(
+      makePreview({ gate: introducedClash(false) }),
+    );
+    vi.mocked(api.platformFixtureAmendmentsConfirm).mockRejectedValueOnce(
+      new ApiError(409, 'Blocked — 1 venue clash you have not overridden.', 'clash_gate', {
+        details: twoClashes(),
+      }),
+    );
+    renderPage();
+    await upload();
+    await user.click(tick(1));
+    await user.click(applyBtn());
+
+    await waitFor(() => expect(tick(2)).toBeInTheDocument());
+    expect(tick(1)).toBeChecked();
+    expect(tick(2)).not.toBeChecked();
+    expect(applyBtn()).toBeDisabled();
+  });
+
+  it('renders no Override all toggle when nothing is introduced', async () => {
+    vi.mocked(api.platformFixtureAmendmentsPreview).mockResolvedValue(makePreview());
+    renderPage();
+    await upload();
+    expect(screen.queryByRole('checkbox', { name: /override all/i })).toBeNull();
+    expect(screen.queryByRole('checkbox', { name: /apply anyway/i })).toBeNull();
   });
 
   it('chip values keep their case; the competition is named once; the filename shows once', async () => {

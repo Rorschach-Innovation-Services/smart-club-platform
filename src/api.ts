@@ -1695,8 +1695,11 @@ export interface AmendmentClash {
   with: string;
   /** The ground-holder is a DRAFT fixture — draft relocation could clear the clash. */
   holderDraft: boolean;
+  /** Pair key — sent back in `overriddenClashKeys` to apply an introduced clash anyway. */
+  key: string;
 }
 export interface AmendmentGate {
+  /** No plan errors. Introduced clashes block separately, until each is overridden. */
   ok: boolean;
   errors: string[];
   introduced: AmendmentClash[];
@@ -1754,6 +1757,8 @@ export interface AmendmentConfirmResult {
   backupKey: string;
   fixturesAmended: number;
   draftMoves: number;
+  /** Introduced clashes the operator applied anyway. */
+  clashesOverridden?: number;
   series: Array<{
     seriesId: string;
     seriesName: string;
@@ -1791,12 +1796,19 @@ export const platformFixtureAmendmentsConfirm = async (
   file: File,
   opts: AmendmentOptions,
   planHash: string,
+  overriddenClashKeys: string[],
 ) =>
   request<AmendmentConfirmResult>(
     `/platform/tenants/${encodeURIComponent(slug)}/fixture-amendments/confirm`,
     {
       method: 'POST',
-      body: { filename: file.name, dataBase64: await fileToBase64(file), ...opts, planHash },
+      body: {
+        filename: file.name,
+        dataBase64: await fileToBase64(file),
+        ...opts,
+        planHash,
+        overriddenClashKeys,
+      },
     },
   );
 

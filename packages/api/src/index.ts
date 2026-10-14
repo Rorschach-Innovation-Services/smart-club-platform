@@ -12410,7 +12410,11 @@ app.delete('/platform/tenants/:slug/setup-complete', async (c) => {
    the CLI's own parser, matcher and planner (reminder-fixtures.ts). `preview` writes nothing;
    `confirm` re-plans from the same file and refuses with 409 `plan_changed` (plus the fresh
    preview) when the COMPUTED plan moved since the preview, and 409 `clash_gate` when the plan
-   would introduce a venue clash — that gate has no bypass. Rows that cannot apply (unmatched,
+   would introduce a venue clash the operator has not acknowledged. The override is explicit:
+   `overriddenClashKeys` must name every introduced clash by its pair key (the preview's
+   `gate.introduced[].key`); there is no blanket flag, extra keys are ignored, and the backup
+   records what was overridden and by whom. The keys stay out of the plan hash, so ticking
+   never invalidates a preview. Rows that cannot apply (unmatched,
    ambiguous, unknown ground, played, unknown competition) skip with warnings, never block.
    Writes go through writeSeriesFromSnapshot (version-checked, medicoach outbox). Clubs are
    NOT notified (v1). Same base64 transport as the umpire appointments upload: xlsx, 2 MB. */
@@ -12435,6 +12439,7 @@ async function planFixtureAmendmentsUpload(c: Context<HonoEnv>, slug: string) {
     planHash?: unknown;
     skipRowIds?: unknown;
     relocateDraftClashes?: unknown;
+    overriddenClashKeys?: unknown;
   } | null;
   const filename = typeof body?.filename === 'string' ? body.filename : '';
   const dataBase64 = typeof body?.dataBase64 === 'string' ? body.dataBase64 : '';
@@ -12453,6 +12458,16 @@ async function planFixtureAmendmentsUpload(c: Context<HonoEnv>, slug: string) {
   const relocate = body?.relocateDraftClashes ?? false;
   if (typeof relocate !== 'boolean')
     throw new HttpError(400, 'relocateDraftClashes must be true or false');
+  // Pair keys of introduced clashes the operator acknowledged. Parsed for preview too (and
+  // ignored there) so both routes refuse the same malformed body.
+  const overriddenRaw = body?.overriddenClashKeys ?? [];
+  if (
+    !Array.isArray(overriddenRaw) ||
+    overriddenRaw.length > 200 ||
+    overriddenRaw.some((x) => typeof x !== 'string' || x.length > 400)
+  )
+    throw new HttpError(400, 'overriddenClashKeys must be a list of clash keys');
+  const overridden = new Set(overriddenRaw as string[]);
   const buffer = Buffer.from(dataBase64, 'base64');
   // Every .xlsx is a zip: anything else (an old .xls, a CSV renamed) is refused unread.
   if (buffer.length < 4 || buffer.readUInt32LE(0) !== 0x04034b50)
@@ -12504,7 +12519,18 @@ async function planFixtureAmendmentsUpload(c: Context<HonoEnv>, slug: string) {
       umpires: (o.umpires ?? []).map((u) => u.name),
       ...(o.referee ? { referee: o.referee.name } : {}),
     }));
-  return { rf, config, filename, series, clubs, aliases, rp, preview, planHash: body?.planHash };
+  return {
+    rf,
+    config,
+    filename,
+    series,
+    clubs,
+    aliases,
+    rp,
+    preview,
+    planHash: body?.planHash,
+    overridden,
+  };
 }
 
 app.post('/platform/tenants/:slug/fixture-amendments/preview', async (c) => {
@@ -12515,7 +12541,7 @@ app.post('/platform/tenants/:slug/fixture-amendments/preview', async (c) => {
 app.post('/platform/tenants/:slug/fixture-amendments/confirm', async (c) => {
   const slug = c.req.param('slug');
   const auth = c.get('auth');
-  const { rf, config, filename, series, clubs, aliases, rp, preview, planHash } =
+  const { rf, config, filename, series, clubs, aliases, rp, preview, planHash, overridden } =
     await planFixtureAmendmentsUpload(c, slug);
   if (typeof planHash !== 'string' || planHash !== rp.planHash)
     throw new HttpError(
@@ -12523,10 +12549,12 @@ app.post('/platform/tenants/:slug/fixture-amendments/confirm', async (c) => {
       'The fixtures changed since your preview. Check the updated preview, then confirm again.',
       { code: 'plan_changed', preview },
     );
-  if (rp.gateVerdict.introduced.length)
+  // Every introduced clash must be acknowledged by pair key; extra or stale keys are ignored.
+  const unacked = rp.introducedPairKeys.filter((k) => !overridden.has(k));
+  if (unacked.length)
     throw new HttpError(
       409,
-      `Blocked — the amendments would introduce ${preview.gate.introduced.length} venue clash(es). Untick the rows involved${
+      `Blocked — the amendments would introduce ${unacked.length} venue clash(es) you have not overridden. Tick "Apply anyway" on each clash, or untick the rows involved${
         // Relocation only moves drafts: offer it only when a draft holds a blocking ground.
         preview.gate.introduced.some((x) => x.holderDraft) ? ' (or turn on draft relocation)' : ''
       } and preview again.`,
@@ -12552,6 +12580,14 @@ app.post('/platform/tenants/:slug/fixture-amendments/confirm', async (c) => {
     by: auth?.email ?? 'unknown',
     filename,
     planHash: rp.planHash,
+    ...(preview.gate.introduced.length
+      ? {
+          overriddenClashes: preview.gate.introduced.map((x) => ({
+            key: x.key,
+            line: `${x.date}${x.time ? ` ${x.time}` : ''} ${x.ground}: ${x.fixture} — with ${x.with}`,
+          })),
+        }
+      : {}),
     series: rp.plan.touchedSeriesIds.map((id) => byId.get(id)),
   });
   if (isLocalUploadsMode()) {
@@ -12579,6 +12615,7 @@ app.post('/platform/tenants/:slug/fixture-amendments/confirm', async (c) => {
     fixturesAmended: rp.plan.diffs.filter((d) => d.kind === 'patch' && written.has(d.seriesId))
       .length,
     draftMoves: rp.plan.moves.filter((m) => written.has(m.seriesId)).length,
+    clashesOverridden: preview.gate.introduced.length,
     series: out.results,
     splitSlotRisks: out.splitSlotRisks,
     medicoachSync: hasFeature(config, 'medicoachSync'),

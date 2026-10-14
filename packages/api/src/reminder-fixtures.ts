@@ -16,6 +16,9 @@
  *   3. Planner (`planReminderAmendments`) — `expect` guards from LIVE data, `set` from the
  *      sheet diff, then `planFixturePatches` in introduced-only gate mode, and a `planHash`
  *      over the COMPUTED plan (diffs, moves, gate verdict, skips, series versions).
+ *      Introduced clashes block the upload unless the operator acknowledges each one by its
+ *      pair key (`clashPairKey`) at confirm — an explicit, audited per-clash override. The
+ *      CLI has no such override: it still refuses on `plan.errors`.
  *
  * CLI (dry-run by default):
  *
@@ -49,11 +52,11 @@ import {
 } from './patch-fixtures.js';
 import {
   clashKey,
+  clashPairKey,
   formatClashForHumans,
   groundKey,
   JUNK_GROUND,
   venueAliasesFor,
-  type Clash,
 } from './venue-clash.js';
 import type { Club, ScheduleChangeOrigin, Series, Venue } from './types.js';
 
@@ -819,10 +822,13 @@ export interface PlanReminderInput {
 }
 
 export interface GateVerdict {
+  /** No plan errors. Introduced clashes do NOT make this false — they block separately,
+   * until acknowledged by pair key at confirm. */
   ok: boolean;
-  /** clashKeys the plan would introduce (always blocking). */
+  /** Directional clashKeys the plan would introduce (blocking unless overridden). */
   introduced: string[];
-  /** Every plan error (introduced clashes, relocation failures, guard problems). */
+  /** Plan errors other than the "would introduce N clash(es)" gate line (relocation
+   * failures, guard problems, strict-mode weekend lines). */
   errors: string[];
 }
 
@@ -840,8 +846,16 @@ export interface ReminderPlan {
   appliedRowIds: string[];
   touchedSeriesVersions: Record<string, number>;
   gateVerdict: GateVerdict;
+  /** Pair keys (`clashPairKey`) of the introduced clashes, sorted and deduped — what confirm
+   * requires the operator to acknowledge. Not hashed: `gateVerdict.introduced` pins the set. */
+  introducedPairKeys: string[];
   planHash: string;
 }
+
+/** The `planFixturePatches` error line for introduced clashes. The upload gates those on
+ * `introducedPairKeys` + the operator's acknowledgment instead, so the line is filtered out
+ * of the verdict by prefix (robust to the count interpolation). */
+export const INTRODUCED_GATE_ERROR_PREFIX = 'gate: the change would introduce';
 
 /** Every distinct date the sheet's rows name. */
 const sheetDates = (rows: ReminderRow[]) => [...new Set(rows.map((r) => r.date))].sort();
@@ -890,11 +904,11 @@ export function planReminderAmendments(input: PlanReminderInput): ReminderPlan {
   for (const id of [...plan.touchedSeriesIds].sort())
     touchedSeriesVersions[id] = Number(byId.get(id)?.version ?? 0);
   const introduced = (plan.gate?.introduced ?? []).map((c) => clashKey(c, input.aliases)).sort();
-  const gateVerdict: GateVerdict = {
-    ok: plan.errors.length === 0,
-    introduced,
-    errors: [...plan.errors],
-  };
+  const introducedPairKeys = [
+    ...new Set((plan.gate?.introduced ?? []).map((c) => clashPairKey(c, input.aliases))),
+  ].sort();
+  const errors = plan.errors.filter((e) => !e.startsWith(INTRODUCED_GATE_ERROR_PREFIX));
+  const gateVerdict: GateVerdict = { ok: errors.length === 0, introduced, errors };
   const skipRowIds = [...skip].sort();
   const planHash = reminderPlanHash({
     diffs: plan.diffs,
@@ -914,6 +928,7 @@ export function planReminderAmendments(input: PlanReminderInput): ReminderPlan {
     appliedRowIds: applied.map((m) => m.row.rowId),
     touchedSeriesVersions,
     gateVerdict,
+    introducedPairKeys,
     planHash,
   };
 }
@@ -941,9 +956,16 @@ export interface ClashView {
   with: string;
   /** The ground-holder (`with`) is in a DRAFT series — draft relocation could clear it. */
   holderDraft: boolean;
+  /** `clashPairKey` — what the operator acknowledges to override an introduced clash. */
+  key: string;
 }
 
-const clashView = (c: Clash, released: Set<string>): ClashView => ({
+const clashView = (
+  c: GateClash,
+  released: Set<string>,
+  aliases: Record<string, string>,
+): ClashView => ({
+  key: clashPairKey(c, aliases),
   date: c.date,
   ...(c.time ? { time: c.time } : {}),
   ground: c.ground,
@@ -1137,14 +1159,16 @@ export function reminderPreview(
     gate: {
       ok: rp.gateVerdict.ok,
       errors: rp.gateVerdict.errors,
-      introduced: onePerPair(gate?.introduced ?? [], amended).map((c) => clashView(c, released)),
+      introduced: onePerPair(gate?.introduced ?? [], amended).map((c) =>
+        clashView(c, released, aliases),
+      ),
       // The gate's weekend lists are the AFTER state; drop what the plan itself introduces.
       preExisting: onePerPair(
         [...(gate?.weekendReleased ?? []), ...(gate?.weekendDraftOnly ?? [])].filter(
           (c) => !introducedKeys.has(clashKey(c, aliases)),
         ),
         amended,
-      ).map((c) => clashView(c, released)),
+      ).map((c) => clashView(c, released, aliases)),
     },
     touchedSeries: Object.entries(rp.touchedSeriesVersions).map(([id, version]) => ({
       id,

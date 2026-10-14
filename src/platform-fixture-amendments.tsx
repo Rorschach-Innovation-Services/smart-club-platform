@@ -11,7 +11,9 @@
  * - a confirm against fixtures that moved since the preview is refused (409 `plan_changed`) with
  *   the fresh preview, which replaces the one shown.
  *
- * An INTRODUCED venue clash blocks the whole upload (no bypass); clashes already on the weekend
+ * An INTRODUCED venue clash blocks the whole upload until it is resolved (untick / relocate) or
+ * the operator ticks "Apply anyway" on it (or "Override all"). Ticks never re-preview: they are
+ * sent as explicit clash keys at confirm, which re-checks them. Clashes already on the weekend
  * are reported but never block. Rows that cannot apply (unmatched, ambiguous, unknown ground or
  * competition, played) are listed with their reason and simply skipped.
  */
@@ -52,6 +54,17 @@ const optionsKey = (o: api.AmendmentOptions) =>
 
 const clashLine = (c: api.AmendmentClash) =>
   `${c.date}${c.time ? ` ${c.time}` : ''} at ${c.ground}: ${c.fixture} and ${c.with}`;
+
+/** What a tick was given against. The pair key is date-less, so a tick must not survive the
+ * same pair being double-booked on another day or at another time. */
+const clashWhen = (c: api.AmendmentClash) => `${c.date}|${c.time ?? ''}`;
+
+/** Keep only the ticks whose clash is still introduced, at the same date and time. */
+function reconcileAcks(acked: Record<string, string>, p: api.AmendmentPreview) {
+  const next: Record<string, string> = {};
+  for (const c of p.gate.introduced) if (acked[c.key] === clashWhen(c)) next[c.key] = acked[c.key];
+  return next;
+}
 
 /** Chip values keep their real case (ground and team names); only the label is pill-styled. */
 const CHIP_VALUE = { textTransform: 'none', letterSpacing: 'normal' } as const;
@@ -148,6 +161,9 @@ export function FixtureAmendmentsPage({ toast }: { toast: Toast }) {
   const [skipRowIds, setSkipRowIds] = useState<string[]>([]);
   const [relocate, setRelocate] = useState(false);
   const [preview, setPreview] = useState<api.AmendmentPreview | null>(null);
+  /** Introduced clashes ticked "Apply anyway": pair key → its date|time when ticked. Not an
+   * option: ticking never re-previews. */
+  const [acked, setAcked] = useState<Record<string, string>>({});
   /** The options the shown preview was computed for (Confirm needs it to match the screen). */
   const [previewKey, setPreviewKey] = useState('');
   const [busy, setBusy] = useState<'reading' | 'writing' | null>(null);
@@ -171,6 +187,7 @@ export function FixtureAmendmentsPage({ toast }: { toast: Toast }) {
       const p = await api.platformFixtureAmendmentsPreview(slug, f, o);
       if (mine !== seq.current) return;
       setPreview(p);
+      setAcked((a) => reconcileAcks(a, p));
       setPreviewKey(optionsKey(o));
     } catch (err) {
       if (mine !== seq.current) return;
@@ -190,6 +207,7 @@ export function FixtureAmendmentsPage({ toast }: { toast: Toast }) {
     seq.current++;
     setResult(null);
     setPreview(null);
+    setAcked({});
     setPreviewKey('');
     setSkipRowIds([]);
     setRelocate(false);
@@ -233,15 +251,29 @@ export function FixtureAmendmentsPage({ toast }: { toast: Toast }) {
     setBusy('writing');
     setError(null);
     try {
-      const out = await api.platformFixtureAmendmentsConfirm(slug, file, opts, shown.planHash);
+      const keys = shown.gate.introduced.map((c) => c.key).filter((k) => k in acked);
+      const out = await api.platformFixtureAmendmentsConfirm(
+        slug,
+        file,
+        opts,
+        shown.planHash,
+        keys,
+      );
       setResult({ out, preview: shown });
       setPreview(null);
+      setAcked({});
       // The sheet is done with: a further upload starts from an empty picker.
       if (inputRef.current) inputRef.current.value = '';
       setFile(null);
       setSkipRowIds([]);
       setRelocate(false);
-      toast(`Amended ${plural(out.fixturesAmended, 'fixture')}`);
+      toast(
+        `Amended ${plural(out.fixturesAmended, 'fixture')}${
+          out.clashesOverridden
+            ? ` · ${plural(out.clashesOverridden, 'clash', 'clashes')} overridden`
+            : ''
+        }`,
+      );
     } catch (err) {
       if (!(err instanceof ApiError)) {
         setError("Couldn't apply the amendments. Check your connection.");
@@ -249,12 +281,16 @@ export function FixtureAmendmentsPage({ toast }: { toast: Toast }) {
       }
       const d = err.details ?? {};
       if (err.code === 'plan_changed' && d.preview) {
-        setPreview(d.preview as api.AmendmentPreview);
+        const fresh = d.preview as api.AmendmentPreview;
+        setPreview(fresh);
+        setAcked((a) => reconcileAcks(a, fresh));
         setPreviewKey(currentKey);
         setError(err.message);
         toast('The fixtures changed since your preview — check the updated preview', 'warn');
       } else if (err.code === 'clash_gate' && d.details) {
-        setPreview({ ...shown, gate: d.details as api.AmendmentGate });
+        const next = { ...shown, gate: d.details as api.AmendmentGate };
+        setPreview(next);
+        setAcked((a) => reconcileAcks(a, next));
         setError(err.message);
       } else setError(err.message);
     } finally {
@@ -265,7 +301,10 @@ export function FixtureAmendmentsPage({ toast }: { toast: Toast }) {
   const name = configQ.data?.branding?.name ?? slug;
   const p = preview;
   const fresh = !!p && previewKey === currentKey && busy === null;
-  const blocked = !!p && (p.gate.introduced.length > 0 || !p.gate.ok);
+  // Introduced clashes block until each is ticked "Apply anyway"; `gate.ok` is plan errors only.
+  const unacked = p ? p.gate.introduced.filter((c) => acked[c.key] !== clashWhen(c)) : [];
+  const allAcked = !!p && p.gate.introduced.length > 0 && unacked.length === 0;
+  const blocked = !!p && (unacked.length > 0 || !p.gate.ok);
   const canConfirm = fresh && !blocked && !!p && p.counts.applied > 0;
   const attention = p
     ? p.counts.unmatched +
@@ -342,22 +381,67 @@ export function FixtureAmendmentsPage({ toast }: { toast: Toast }) {
       {p && (
         <>
           {p.gate.introduced.length > 0 && (
-            <div className="insights-callout alert" role="alert" style={{ marginTop: 14 }}>
+            <div
+              className={`insights-callout ${allAcked ? 'warn' : 'alert'}`}
+              role="alert"
+              style={{ marginTop: 14 }}
+            >
               <strong>
-                Blocked — these amendments would introduce{' '}
-                {plural(p.gate.introduced.length, 'venue clash', 'venue clashes')}.
+                {allAcked
+                  ? `Overriding ${plural(p.gate.introduced.length, 'venue clash', 'venue clashes')} — they will be applied anyway.`
+                  : `Blocked — these amendments would introduce ${plural(p.gate.introduced.length, 'venue clash', 'venue clashes')}.`}
               </strong>{' '}
               {p.gate.introduced.some((c) => c.holderDraft)
-                ? 'Nothing can be applied until they are gone: untick the rows involved, or turn on draft relocation below — a draft fixture holds the ground.'
-                : 'Nothing can be applied until they are gone: untick the rows involved.'}
-              <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
-                {p.gate.introduced.map((c, i) => (
-                  <li key={i}>{clashLine(c)}</li>
+                ? 'Untick the rows involved, or turn on draft relocation below — a draft fixture holds the ground.'
+                : 'Untick the rows involved.'}{' '}
+              If the union has confirmed a double-booking, tick &ldquo;Apply anyway&rdquo; on it to
+              apply it as it stands.
+              <div style={{ marginTop: 6 }}>
+                {p.gate.introduced.map((c) => (
+                  <label key={c.key} className="upl-check">
+                    <input
+                      type="checkbox"
+                      checked={acked[c.key] === clashWhen(c)}
+                      disabled={busy === 'writing'}
+                      aria-label={`Apply anyway: ${clashLine(c)}`}
+                      onChange={(e) => {
+                        const on = e.target.checked;
+                        setAcked((a) => {
+                          const next = { ...a };
+                          if (on) next[c.key] = clashWhen(c);
+                          else delete next[c.key];
+                          return next;
+                        });
+                      }}
+                    />
+                    {clashLine(c)}
+                  </label>
                 ))}
-              </ul>
+              </div>
+              <label className="upl-check" style={{ marginTop: 6, fontWeight: 700 }}>
+                <input
+                  type="checkbox"
+                  checked={unacked.length === 0}
+                  ref={(el) => {
+                    if (el)
+                      el.indeterminate =
+                        unacked.length > 0 && unacked.length < p.gate.introduced.length;
+                  }}
+                  disabled={busy === 'writing'}
+                  onChange={() =>
+                    setAcked(
+                      unacked.length === 0
+                        ? {}
+                        : Object.fromEntries(p.gate.introduced.map((c) => [c.key, clashWhen(c)])),
+                    )
+                  }
+                />
+                Override all {plural(p.gate.introduced.length, 'clash', 'clashes')} — apply them
+                anyway
+              </label>
             </div>
           )}
-          {p.gate.introduced.length === 0 && !p.gate.ok && (
+          {!p.gate.ok && (
             <div className="insights-callout alert" role="alert" style={{ marginTop: 14 }}>
               <strong>The plan cannot be applied.</strong>
               <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
@@ -477,7 +561,9 @@ export function FixtureAmendmentsPage({ toast }: { toast: Toast }) {
                 Preview again
               </Btn>
             )}
-            {fresh && blocked && <span className="ump-sub">Resolve the blocking clash first.</span>}
+            {fresh && blocked && (
+              <span className="ump-sub">Resolve or override the blocking clashes first.</span>
+            )}
             {fresh && !blocked && p.counts.applied === 0 && (
               <span className="ump-sub">Nothing to change from this sheet.</span>
             )}
