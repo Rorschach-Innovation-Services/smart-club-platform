@@ -8,6 +8,7 @@
  * console reads the same everywhere.
  */
 import type { LiveGap, MonitorMatch, MonitorPlayer } from './api';
+import { TENANT_UTC_OFFSET_MINUTES, tenantDate } from '../packages/api/src/tenant-time';
 
 export interface MonitorThresholds {
   /** Minutes after the scheduled start before a start counts as late. */
@@ -132,7 +133,7 @@ export function boardFlags(rows: MonitorRow[]): BoardFlag[] {
 }
 
 const MIN = 60_000;
-const SAST_OFFSET_MS = 2 * 60 * MIN;
+const SAST_OFFSET_MS = TENANT_UTC_OFFSET_MINUTES * MIN;
 
 const ms = (iso: string | null | undefined) => {
   const v = iso ? Date.parse(iso) : NaN;
@@ -158,7 +159,7 @@ export function sastClock(iso: string | number | null | undefined): string {
 
 /** Today's date in SAST, YYYY-MM-DD. */
 export function sastToday(nowMs: number = Date.now()): string {
-  return new Date(nowMs + SAST_OFFSET_MS).toISOString().slice(0, 10);
+  return tenantDate(new Date(nowMs));
 }
 
 /** "1 h 05 min", "12 min", "45 s". */
@@ -334,7 +335,7 @@ export function monitorRow(
     });
 
   const undoCount = live?.undoCount ?? null;
-  const undoApprox = undoCount !== null && live?.undoCountExact === false;
+  const undoApprox = undoCount !== null && live?.undoCountExact !== true;
   if (undoCount !== null && undoCount >= t.undoMax)
     flags.push({
       key: 'undo',

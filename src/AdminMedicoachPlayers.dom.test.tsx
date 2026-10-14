@@ -81,7 +81,7 @@ async function renderPage(s: api.MedicoachSyncStatus, reviews: api.MedicoachPlay
     <AdminMedicoachSyncView allSeries={[]} onEditFixture={vi.fn()} onToast={onToast} />,
   );
   // The page opens on the Action board; the Players panel lives on the Sync health tab.
-  await userEvent.click(await screen.findByRole('tab', { name: 'Sync health' }));
+  await userEvent.click(await screen.findByRole('tab', { name: /^Sync health/ }));
   return { onToast };
 }
 
@@ -207,6 +207,8 @@ describe('Players panel', () => {
     const stats = await screen.findByTestId('mcs-stats');
     expect(within(stats).getByText('For your review').nextSibling).toHaveTextContent('2');
     expect(stats).toHaveTextContent('2 player(s) · 1 waiting for a team');
+    // The tab badge counts the same total, though there are no schedule conflicts.
+    expect(screen.getByRole('tab', { name: 'Sync health 3' })).toBeInTheDocument();
   });
 
   it('a push that never reached medicoach says so — not "not accepted"', async () => {

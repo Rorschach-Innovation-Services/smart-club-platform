@@ -59,7 +59,7 @@ export type PlayerCheck =
   | 'not-active' // registered at this club, but inactive or awaiting a clearance
   | 'other-club' // registered and active at a different club
   | 'unregistered' // no registration found
-  | 'unchecked'; // the side has no club yet (a knockout placeholder)
+  | 'unchecked'; // the side has no club yet (a knockout placeholder), or its roster read failed
 
 export interface MonitorPlayer {
   side: 'home' | 'away';
@@ -180,6 +180,8 @@ export function nameKey(name: string): string {
 export interface RosterDeps {
   listPlayers: (tenant: string, clubId: string) => Promise<PlayerRegistration[]>;
   clubs: Pick<Club, 'id' | 'name'>[];
+  /** Injectable clock for the roster cache TTL (tests). */
+  now?: () => Date;
 }
 
 const isActive = (p: PlayerRegistration) => (p.status ?? 'active') === 'active';
@@ -198,7 +200,7 @@ export async function checkPlayers(
   const roster = (clubId: string) => {
     const key = `${tenant}|${clubId}`;
     const hit = rosterCache.get(key);
-    const nowMs = Date.now();
+    const nowMs = (deps.now ?? (() => new Date()))().getTime();
     if (hit && nowMs - hit.at < ROSTER_TTL_MS) return hit.rows;
     const rows = deps.listPlayers(tenant, clubId);
     rosterCache.set(key, { at: nowMs, rows });
@@ -226,12 +228,24 @@ export async function checkPlayers(
     clubId: string | undefined,
   ): Promise<Pick<MonitorPlayer, 'check' | 'otherClub'>> => {
     if (!clubId) return { check: 'unchecked' };
-    const rows = await roster(clubId);
+    let rows: PlayerRegistration[];
+    try {
+      rows = await roster(clubId);
+    } catch {
+      // A failed roster read degrades this player to unchecked rather than sinking the day.
+      // Nothing is logged: the player's name/ref must not reach the logs.
+      return { check: 'unchecked' };
+    }
     const key = p.ref?.startsWith(prefix) ? p.ref.slice(prefix.length) : null;
     if (key) {
       const row = rows.find((r) => r.naturalKey === key);
       if (row) return { check: isActive(row) ? 'registered' : 'not-active' };
-      const other = await elsewhere(key, clubId);
+      let other: string | null;
+      try {
+        other = await elsewhere(key, clubId);
+      } catch {
+        return { check: 'unchecked' };
+      }
       return other
         ? { check: 'other-club', otherClub: clubName.get(other) ?? other }
         : { check: 'unregistered' };
@@ -313,6 +327,8 @@ export async function fetchLiveMatches(
     );
   if (parsed.data.tenant !== tenant)
     throw new MedicoachSyncError('medicoach answered for a different tenant');
+  if (parsed.data.date !== date)
+    throw new MedicoachSyncError('medicoach answered for a different date');
   const matches: LiveMatch[] = [];
   let parseFailures = 0;
   for (const raw of parsed.data.matches) {
@@ -383,7 +399,7 @@ export async function buildMatchMonitor(
     matches: await checkPlayers(
       tenant,
       day.map((m) => ({ ...m, live: byRef.get(m.ref) ?? null })),
-      { listPlayers: deps.listPlayers, clubs: input.clubs },
+      { listPlayers: deps.listPlayers, clubs: input.clubs, now },
     ),
     unmatched: live.filter((l) => !refs.has(l.ref)).length,
     parseFailures,

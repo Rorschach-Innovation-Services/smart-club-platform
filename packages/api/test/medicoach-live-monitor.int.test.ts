@@ -343,51 +343,168 @@ describe('match monitor', () => {
     assert.equal(seen.length, 2);
   });
 
+  /** One live f1 for `tenant` (a slug no route test uses, so the roster cache can't leak). */
+  const dayFor = (tenant: string, players: unknown[]) => [
+    {
+      ref: `smartclub:${tenant}:fixture:s1:f1`,
+      seriesId: 's1',
+      seriesName: 'S',
+      fixtureId: 'f1',
+      home: 'Crusaders',
+      away: 'Umzinto',
+      homeClubId: 'a',
+      awayClubId: 'b',
+      date: DAY,
+      fixtureStatus: 'scheduled' as const,
+      live: contract.LiveMatchSchema.parse(
+        liveMatch(`smartclub:${tenant}:fixture:s1:f1`, { players }),
+      ),
+    },
+  ];
+  const CLUBS = [
+    { id: 'a', name: 'Crusaders CC' },
+    { id: 'b', name: 'Umzinto CC' },
+    { id: 'c', name: 'Harlequins CC' },
+  ];
+  const ghost = (tenant: string) => ({
+    side: 'home',
+    name: 'Ghost',
+    ref: `smartclub:${tenant}:player:nk-none`,
+    addedDuringMatch: false,
+    addedAt: null,
+  });
+
   test('rosters are read once per cache window, even for an unregistered ref', async () => {
+    const TT = 'roster-window';
     const reads: string[] = [];
-    const clubs = [
-      { id: 'a', name: 'Crusaders CC' },
-      { id: 'b', name: 'Umzinto CC' },
-      { id: 'c', name: 'Harlequins CC' },
-    ];
+    let clock = Date.parse('2026-10-04T08:00:00.000Z');
     const deps = {
-      clubs,
+      clubs: CLUBS,
+      now: () => new Date(clock),
       listPlayers: async (_t: string, clubId: string) => {
         reads.push(clubId);
         return [];
       },
     };
-    const day = [
-      {
-        ref: REF('s1', 'f1'),
-        seriesId: 's1',
-        seriesName: 'S',
-        fixtureId: 'f1',
-        home: 'Crusaders',
-        away: 'Umzinto',
-        homeClubId: 'a',
-        awayClubId: 'b',
-        date: DAY,
-        fixtureStatus: 'scheduled' as const,
-        live: contract.LiveMatchSchema.parse(
-          liveMatch(REF('s1', 'f1'), {
-            players: [
-              {
-                side: 'home',
-                name: 'Ghost',
-                ref: `smartclub:${T}:player:nk-none`,
-                addedDuringMatch: false,
-                addedAt: null,
-              },
-            ],
-          }),
-        ),
-      },
-    ];
-    await live.checkPlayers(T, day, deps);
+    const day = dayFor(TT, [ghost(TT)]);
+    await live.checkPlayers(TT, day, deps);
     assert.deepEqual(reads.sort(), ['a', 'b', 'c']);
-    await live.checkPlayers(T, day, deps);
+    clock += live.ROSTER_TTL_MS - 1;
+    await live.checkPlayers(TT, day, deps);
     assert.equal(reads.length, 3);
+    // Past the window (on the injected clock, no sleeping) every roster is read again.
+    clock += 1;
+    await live.checkPlayers(TT, day, deps);
+    assert.equal(reads.length, 6);
+  });
+
+  test('a failed roster read is not cached: the next call retries it', async () => {
+    const TT = 'roster-evict';
+    const reads: string[] = [];
+    let fail = true;
+    const deps = {
+      clubs: CLUBS,
+      listPlayers: async (_t: string, clubId: string) => {
+        reads.push(clubId);
+        if (fail) throw new Error('dynamo unavailable');
+        return [];
+      },
+    };
+    const day = dayFor(TT, [
+      { side: 'away', name: 'Nobody', ref: null, addedDuringMatch: false, addedAt: null },
+    ]);
+    const first = await live.checkPlayers(TT, day, deps);
+    assert.equal(first[0].live!.players[0].check, 'unchecked');
+    assert.deepEqual(reads, ['b']);
+    fail = false;
+    const second = await live.checkPlayers(TT, day, deps);
+    assert.deepEqual(reads, ['b', 'b'], 'the rejected read was evicted, not re-awaited');
+    assert.equal(second[0].live!.players[0].check, 'unregistered');
+  });
+
+  test('a failed roster read degrades its players to unchecked; the day still answers', async () => {
+    const P = (key: string) => `smartclub:${T}:player:${key}`;
+    body = {
+      version: 1,
+      tenant: T,
+      date: DAY,
+      generatedAt: '2026-10-04T08:42:00.000Z',
+      matches: [
+        liveMatch(REF('s1', 'f1'), {
+          players: [
+            {
+              side: 'home',
+              name: 'Ann Active',
+              ref: P('nk-a1'),
+              addedDuringMatch: false,
+              addedAt: null,
+            },
+            {
+              side: 'away',
+              name: 'Bea Bee',
+              ref: P('nk-b1'),
+              addedDuringMatch: false,
+              addedAt: null,
+            },
+          ],
+        }),
+      ],
+    };
+    const r = await live.buildMatchMonitor(
+      T,
+      DAY,
+      { series: [series('s1')], clubs: CLUBS.concat({ id: 'd', name: 'Pirates CC' }) },
+      {
+        url: stubUrl,
+        secret: SECRET,
+        listPlayers: async (t, clubId) => {
+          if (clubId === 'a') throw new Error('dynamo unavailable');
+          return repo.listPlayers(t, clubId);
+        },
+      },
+    );
+    assert.equal(r.reachable, true);
+    assert.equal(r.matches.length, 3);
+    assert.deepEqual(
+      r.matches[0].live!.players.map((p) => [p.name, p.check]),
+      [
+        ['Ann Active', 'unchecked'],
+        ['Bea Bee', 'registered'],
+      ],
+    );
+  });
+
+  test('an unreachable or dry-run answer is never cached; the next poll asks again', async () => {
+    httpFail = 500;
+    let r = (await (await get(`?date=${DAY}`)).json()) as MatchMonitorResponse;
+    assert.equal(r.reachable, false);
+    httpFail = null;
+    r = (await (await get(`?date=${DAY}`)).json()) as MatchMonitorResponse;
+    assert.equal(seen.length, 2, 'the failure was not reused within the cache window');
+    assert.equal(r.reachable, true);
+
+    live.resetLiveCaches();
+    seen.length = 0;
+    process.env.MEDICOACH_SYNC_SECRET = '';
+    r = (await (await get(`?date=${DAY}`)).json()) as MatchMonitorResponse;
+    assert.equal(r.dryRun, true);
+    process.env.MEDICOACH_SYNC_SECRET = SECRET;
+    r = (await (await get(`?date=${DAY}`)).json()) as MatchMonitorResponse;
+    assert.equal(r.dryRun, false);
+    assert.equal(r.reachable, true);
+    assert.equal(seen.length, 1);
+  });
+
+  test('an answer for a different day is refused like an unreachable one, and not cached', async () => {
+    body = { ...(body as object), date: '2026-10-05' };
+    let r = (await (await get(`?date=${DAY}`)).json()) as MatchMonitorResponse;
+    assert.equal(r.reachable, false);
+    assert.match(r.technical!, /different date/);
+    assert.ok(r.matches.every((m) => m.live === null));
+    body = { ...(body as object), date: DAY };
+    r = (await (await get(`?date=${DAY}`)).json()) as MatchMonitorResponse;
+    assert.equal(r.reachable, true);
+    assert.equal(seen.length, 2);
   });
 
   test('with the sync unconfigured it is a dry run with no request made', async () => {

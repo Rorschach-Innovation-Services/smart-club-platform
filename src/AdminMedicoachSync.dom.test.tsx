@@ -325,4 +325,35 @@ describe('match monitor tab', () => {
     expect(await screen.findByTestId('mcs-health')).toBeInTheDocument();
     expect(localStorage.getItem('smartclub.medicoachSync.tab')).toBe('sync');
   });
+
+  it('badges Sync health with everything needing attention, not only schedule conflicts', async () => {
+    vi.mocked(api.getMatchMonitor).mockResolvedValue(monitor());
+    renderPage(
+      baseStatus({
+        conflicts: [],
+        attention: { conflicts: 0, playerReviews: 3, playersParked: 0, total: 3 },
+      }),
+    );
+    expect(await screen.findByRole('tab', { name: 'Sync health 3' })).toBeInTheDocument();
+  });
+
+  it('a sync-disabled union sees loading, then the notice, and the monitor is never asked', async () => {
+    let resolve!: (s: api.MedicoachSyncStatus) => void;
+    vi.mocked(api.getMedicoachSyncStatus).mockReturnValue(
+      new Promise<api.MedicoachSyncStatus>((r) => (resolve = r)),
+    );
+    renderWithProviders(
+      <AdminMedicoachSyncView
+        allSeries={SERIES}
+        onEditFixture={vi.fn()}
+        onOpenSeries={vi.fn()}
+        onToast={vi.fn()}
+      />,
+    );
+    expect(await screen.findByText(/Loading the sync status/)).toBeInTheDocument();
+    resolve(baseStatus({ enabled: false } as Partial<api.MedicoachSyncStatus>));
+    expect(await screen.findByText(/isn.t switched on for this union/)).toBeInTheDocument();
+    expect(vi.mocked(api.getMatchMonitor)).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
 });

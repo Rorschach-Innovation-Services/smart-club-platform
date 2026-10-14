@@ -54,6 +54,7 @@ const live = (over: Partial<LiveMatch> = {}): LiveMatch => ({
   medianGapSec: 38,
   longGaps: [],
   undoCount: 0,
+  undoCountExact: true,
   players: [],
   medicoachMatchUrl: null,
   ...over,
@@ -298,6 +299,13 @@ describe('match monitor', () => {
     expect(approx.flags.map((f) => f.label)).toEqual(['Undo used ~6 times']);
     expect(undoText(approx)).toBe('~6');
     expect(undoText(at5)).toBe('5');
+    // Exactness unreported (null) never overstates confidence: it reads as an estimate.
+    const unknown = monitorRow(
+      fixture({ live: live({ undoCount: 5, undoCountExact: null }) }),
+      at('11:02'),
+    );
+    expect(unknown.flags.map((f) => f.label)).toEqual(['Undo used ~5 times']);
+    expect(undoText(unknown)).toBe('~5');
   });
 
   it('puts every flag of the day on one board, alerts first, then by type and how long open', () => {

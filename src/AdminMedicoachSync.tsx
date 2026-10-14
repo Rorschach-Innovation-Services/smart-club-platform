@@ -805,22 +805,17 @@ export function AdminMedicoachSyncView({
                 {counts.games}
               </span>
             )}
-            {k === 'sync' && (status.data?.conflicts?.length ?? 0) > 0 && (
-              <span className="mm-chip-n">{status.data!.conflicts!.length}</span>
+            {k === 'sync' && (data?.attention?.total ?? 0) > 0 && (
+              <span className="mm-chip-n">{data!.attention!.total}</span>
             )}
           </button>
         ))}
       </div>
 
-      {tab !== 'sync' ? (
-        status.data && !status.data.enabled ? (
-          <div className="mcs-empty">
-            The medicoach sync isn&apos;t switched on for this union. Your platform operator turns
-            it on.
-          </div>
-        ) : (
-          <MatchMonitor view={tab} onCounts={setCounts} onShowGames={() => pickTab('games')} />
-        )
+      {/* The monitor mounts only once the status says the sync is on: a disabled tenant's
+          live route 409s, so mounting early would flash an error before the notice. */}
+      {tab !== 'sync' && data?.enabled === true ? (
+        <MatchMonitor view={tab} onCounts={setCounts} onShowGames={() => pickTab('games')} />
       ) : status.isLoading ? (
         <div className="mcs-empty" role="status">
           Loading the sync status…

@@ -5386,8 +5386,7 @@ app.get('/integrations/medicoach/live', async (c) => {
   const config = await repo.getTenantConfig(tenant);
   if (!hasFeature(config, 'medicoachSync'))
     throw new HttpError(409, 'the medicoach sync is not enabled for this tenant');
-  const date =
-    c.req.query('date') ?? new Date(Date.now() + 2 * 3_600_000).toISOString().slice(0, 10);
+  const date = c.req.query('date') ?? tenantDate();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(`${date}T00:00:00Z`)))
     throw new HttpError(400, 'date must be YYYY-MM-DD');
   const [series, clubs] = await Promise.all([repo.listSeries(tenant), repo.listClubs(tenant)]);
