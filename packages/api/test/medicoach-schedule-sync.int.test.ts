@@ -871,6 +871,57 @@ describe('Slice 4 — the outbox', () => {
     assert.equal(pushes[0].body.changes.length, 1);
   });
 
+  test('a PATCH that leaves the schedule as it was queues nothing (F-005)', async () => {
+    const f1 = await fixtureOf(S1, 'f1');
+    const res = await patchFixture(S1, 'f1', { date: f1.date, time: f1.time, round: 2 });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await repo.listPendingSync(T), []);
+  });
+
+  test('a fixture with no venue of its own pushes its home club ground, never null (F-003)', async () => {
+    const S3 = 's-planb-premier-men-t20-g3';
+    for (const [id, ground] of [
+      ['a', { venue: 'Harbour Oval' }],
+      ['b', {}],
+    ] as const)
+      await repo.createClub(T, {
+        id,
+        name: `Club ${id}`,
+        district: 'D',
+        sub: `sub-${id}`,
+        chair: 'Chair',
+        affiliation: 'not_started',
+        cqi: 0,
+        docs: {},
+        players: 0,
+        teams: 0,
+        women: 0,
+        juniors: 0,
+        color: '#123456',
+        ground,
+        leagues: [],
+        version: 1,
+      } as unknown as Club);
+    const bare = (id: string, home: string) =>
+      fx(id, { home, away: home === 'a' ? 'b' : 'a', venueId: undefined, venueName: undefined });
+    await repo.putSeries(
+      T,
+      series(S3, [bare('f1', 'a'), bare('f2', 'b')], {
+        participants: ['a', 'b'].map((t) => ({ teamId: t, clubId: t, name: `Team ${t}` })),
+      } as Partial<Series>),
+    );
+    await patchFixture(S3, 'f1', { time: '10:00' });
+    await patchFixture(S3, 'f2', { time: '11:00' });
+    // Stored as smart club holds it (no venue); the ground is added at send time.
+    assert.ok((await repo.listPendingSync(T)).every((r) => r.schedule.venue === null));
+    await flush();
+    const sent = new Map(pushes[0].body.changes.map((c) => [c.ref, c.schedule.venue]));
+    assert.equal(sent.get(REF(S3, 'f1')), 'Harbour Oval');
+    // A home club without a ground has nothing to send: null, as before.
+    assert.equal(sent.get(REF(S3, 'f2')), null);
+    assert.ok(contract.SchedulePushRequestSchema.safeParse(pushes[0].body).success);
+  });
+
   test('an `error` answer keeps the row with its attempt count and is retried next run', async () => {
     await patchFixture(S1, 'f1', { time: '10:00' });
     pushStatus = () => 'error';
