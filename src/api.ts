@@ -698,7 +698,8 @@ export const checkSeriesClashes = (id: string, candidates: unknown[]) =>
 // A chair asks to move a released fixture; the other club counters / accepts / declines; an
 // accepted date applies to the fixture immediately. 409 codes the UI branches on (ApiError.code):
 // postponement_exists, fixture_cancelled, fixture_past, version_conflict, not_your_turn,
-// postponement_closed, fixture_changed, venue_clash (details: clashes + teamBusy).
+// postponement_closed, fixture_changed, venue_clash (details: clashes + teamBusy),
+// fixture_live_in_medicoach (accept / override: retry with confirmLive once the user agrees).
 export interface ClubPostponements {
   /** This club is the OPPOSING side (asked to agree). */
   inbound: PostponementRequest[];
@@ -726,10 +727,17 @@ export const counterPostponement = (
     method: 'POST',
     body,
   });
-export const acceptPostponement = (clubId: string, reqId: string, version?: number) =>
+// `confirmLive`: go ahead although medicoach is scoring the game right now (the first try
+// answers 409 `fixture_live_in_medicoach` instead).
+export const acceptPostponement = (
+  clubId: string,
+  reqId: string,
+  version?: number,
+  confirmLive?: boolean,
+) =>
   request<PostponementRequest>(`/clubs/${clubId}/postponements/${reqId}/accept`, {
     method: 'POST',
-    body: { version },
+    body: { version, ...(confirmLive ? { confirmLive } : {}) },
   });
 export const withdrawPostponement = (clubId: string, reqId: string, version?: number) =>
   request<PostponementRequest>(`/clubs/${clubId}/postponements/${reqId}/withdraw`, {
@@ -778,6 +786,8 @@ export const overridePostponement = (
     venueName?: string;
     note?: string;
     version?: number;
+    /** Go ahead although medicoach is scoring the game right now. */
+    confirmLive?: boolean;
   },
 ) =>
   request<PostponementRequest>(`/admin/postponements/${reqId}/override`, {
@@ -1264,6 +1274,10 @@ export interface MonitorMatch {
   date: string;
   time?: string;
   fixtureStatus: 'scheduled' | 'postponed' | 'cancelled' | 'completed';
+  /** medicoach has no match for this fixture yet (it awaits an operator carry). */
+  notInMedicoach?: boolean;
+  /** The result smart club holds; `manual` when an administrator set or overrode it. */
+  result?: { summary: string; manual: boolean };
   /** null: medicoach has no live match for this fixture (or wasn't reached). */
   live: LiveMatch | null;
 }

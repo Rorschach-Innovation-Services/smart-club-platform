@@ -25,7 +25,13 @@ import {
   type LivePlayer,
 } from '../medicoach-sync-contract.js';
 import { fixtureSyncRef } from '../fixture-identity.js';
-import type { Club, PlayerRegistration, Series, SyncHealth } from '../types.js';
+import type {
+  Club,
+  PlayerRegistration,
+  Series,
+  StoredFixtureResult,
+  SyncHealth,
+} from '../types.js';
 import { explainSyncError } from './explain.js';
 import { MedicoachSyncError } from './puller.js';
 
@@ -86,6 +92,13 @@ export interface MonitorMatch {
   date: string;
   time?: string;
   fixtureStatus: 'scheduled' | 'postponed' | 'cancelled' | 'completed';
+  /**
+   * True when the connection console lists this fixture as awaiting a medicoach carry
+   * (MCAWAIT#): medicoach has no match for it yet, so "no live scoring" is not the scorer's.
+   */
+  notInMedicoach?: boolean;
+  /** The result smart club holds for it (pulled, or an administrator's override). */
+  result?: { summary: string; manual: boolean };
   live: MonitorLive | null;
 }
 
@@ -397,10 +410,20 @@ export async function fetchLiveMatches(
 export async function buildMatchMonitor(
   tenant: string,
   date: string,
-  input: { series: Series[]; clubs: Pick<Club, 'id' | 'name'>[] },
+  input: {
+    series: Series[];
+    clubs: Pick<Club, 'id' | 'name'>[];
+    /** Fixture refs the connection console lists as awaiting a medicoach carry (MCAWAIT#). */
+    awaitingRefs?: ReadonlySet<string>;
+  },
   deps: LiveDeps & {
     now?: () => Date;
     listPlayers: RosterDeps['listPlayers'];
+    /** The stored result of one fixture (only asked for games that are over). */
+    getResult?: (
+      seriesId: string,
+      fixtureId: string,
+    ) => Promise<Pick<StoredFixtureResult, 'summary' | 'cleared' | 'resultSource'> | null>;
     /** Merge the live facet into SYNCHEALTH# (real fetches only; a failure here is logged, never thrown). */
     recordHealth?: (patch: SyncHealth) => Promise<void>;
   },
@@ -409,7 +432,9 @@ export async function buildMatchMonitor(
   const cacheKey = `${tenant}|${date}`;
   const cached = responseCache.get(cacheKey);
   if (cached && now().getTime() - cached.at < RESPONSE_TTL_MS) return cached.payload;
-  const day = fixturesOnDate(tenant, input.series, input.clubs, date);
+  const day = fixturesOnDate(tenant, input.series, input.clubs, date).map((m) =>
+    input.awaitingRefs?.has(m.ref) ? { ...m, notInMedicoach: true } : m,
+  );
   const base = { date, generatedAt: now().toISOString() };
   if (!deps.url || !deps.secret)
     return {
@@ -430,6 +455,18 @@ export async function buildMatchMonitor(
         tenant,
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+  };
+  // A stored result is decoration: a failed read leaves it off rather than failing the poll.
+  const resultOf = async (m: { seriesId: string; fixtureId: string }) => {
+    if (!deps.getResult) return undefined;
+    try {
+      const r = await deps.getResult(m.seriesId, m.fixtureId);
+      return r && !r.cleared && r.summary
+        ? { summary: r.summary, manual: r.resultSource === 'manual' }
+        : undefined;
+    } catch {
+      return undefined;
     }
   };
   let live: LiveMatch[];
@@ -457,19 +494,57 @@ export async function buildMatchMonitor(
   await record(liveHealthPatch(base.generatedAt, { ok: true, matches: live }));
   const byRef = new Map(live.map((l) => [l.ref, l]));
   const refs = new Set(day.map((m) => m.ref));
+  const joined = await Promise.all(
+    day.map(async (m) => {
+      const l = byRef.get(m.ref) ?? null;
+      // A medicoach match counts as linked once it is in the live answer, whatever MCAWAIT# says.
+      const { notInMedicoach, ...rest } = m;
+      const over =
+        m.fixtureStatus === 'completed' || l?.status === 'completed' || l?.status === 'abandoned';
+      const result = over ? await resultOf(m) : undefined;
+      return {
+        ...rest,
+        ...(notInMedicoach && !l ? { notInMedicoach } : {}),
+        ...(result ? { result } : {}),
+        live: l,
+      };
+    }),
+  );
   const payload: MatchMonitorResponse = {
     ...base,
     dryRun: false,
     reachable: true,
-    matches: await checkPlayers(
-      tenant,
-      day.map((m) => ({ ...m, live: byRef.get(m.ref) ?? null })),
-      { listPlayers: deps.listPlayers, clubs: input.clubs, now },
-    ),
+    matches: await checkPlayers(tenant, joined, {
+      listPlayers: deps.listPlayers,
+      clubs: input.clubs,
+      now,
+    }),
     unmatched: live.filter((l) => !refs.has(l.ref)).length,
     parseFailures,
   };
   // Only a good answer is reused; a failure is retried on the next poll.
   responseCache.set(cacheKey, { at: now().getTime(), payload });
   return payload;
+}
+
+/**
+ * True when medicoach reports the fixture as being scored right now (in progress or at the
+ * innings break) on `date`. Asked before a postponement moves a fixture, so the club can be
+ * warned. Fail-open: an unconfigured, unreachable or off-contract medicoach answers false —
+ * the warning is advice, never a gate the postponement depends on.
+ */
+export async function fixtureLiveInMedicoach(
+  tenant: string,
+  ref: string,
+  date: string,
+  deps: LiveDeps,
+): Promise<boolean> {
+  if (!deps.url || !deps.secret) return false;
+  try {
+    const { matches } = await fetchLiveMatches(tenant, date, deps);
+    return matches.some((m) => m.ref === ref && LIVE_STATUSES.has(m.status));
+  } catch (err) {
+    if (err instanceof MedicoachSyncError) return false;
+    throw err;
+  }
 }

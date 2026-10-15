@@ -21,6 +21,7 @@ import { dynaliteEnv, startDynalite, stopDynalite } from './dynalite-harness.js'
 const DDB_PORT = 4691; // next free odd port after medicoach-sync-ux (4689)
 const TABLE = 'SmartClubMedicoachLive';
 dynaliteEnv(DDB_PORT, TABLE);
+process.env.NOTIFY_DRY_RUN = '1';
 
 const T = 'dolphins';
 const SECRET = 'stub-live-secret';
@@ -28,6 +29,7 @@ const devAuth = (email: string, memberships: unknown) =>
   Buffer.from(JSON.stringify({ sub: 'u', email, memberships })).toString('base64');
 const ADMIN = devAuth('admin@test', [{ tenantId: T, role: 'admin', clubIds: [] }]);
 const REP = devAuth('rep@test', [{ tenantId: T, role: 'rep', clubIds: ['a'] }]);
+const REP_B = devAuth('rep-b@test', [{ tenantId: T, role: 'rep', clubIds: ['b'] }]);
 const headers = (auth = ADMIN) => ({ 'x-tenant': T, 'x-dev-auth': auth });
 
 let ddb: Server;
@@ -585,6 +587,139 @@ describe('match monitor', () => {
     assert.equal(r.dryRun, true);
     assert.equal(seen.length, 0);
     assert.equal(r.matches.length, 3);
+  });
+
+  test('a fixture awaiting a medicoach carry is marked; a linked one never is (F-049)', async () => {
+    await repo.upsertMcAwait(
+      T,
+      { seriesId: 's1', refs: [REF('s1', 'f1'), REF('s1', 'f2')] },
+      { now: '2026-10-04T06:00:00.000Z' },
+    );
+    try {
+      const r = (await (await get(`?date=${DAY}`)).json()) as MatchMonitorResponse;
+      const by = new Map(r.matches.map((m) => [m.fixtureId, m]));
+      // f1 is in medicoach's live answer, so it is linked whatever MCAWAIT# still says.
+      assert.equal(by.get('f1')!.notInMedicoach, undefined);
+      assert.equal(by.get('f2')!.notInMedicoach, true);
+      assert.equal(by.get('f4')!.notInMedicoach, undefined);
+    } finally {
+      await repo.deleteMcAwait(T, 's1');
+    }
+  });
+
+  test('a finished game carries the stored result; an override is marked manual (F-025/F-050)', async () => {
+    body = {
+      version: 1,
+      tenant: T,
+      date: DAY,
+      generatedAt: '2026-10-04T08:42:00.000Z',
+      matches: [
+        liveMatch(REF('s1', 'f1'), { status: 'completed', endedAt: '2026-10-04T10:00:00.000Z' }),
+        liveMatch(REF('s1', 'f2'), { status: 'abandoned', endedAt: '2026-10-04T12:00:00.000Z' }),
+      ],
+    };
+    const stored = (fixtureId: string, over: Record<string, unknown>) =>
+      repo.putFixtureResultIfNewer(T, {
+        seriesId: 's1',
+        fixtureId,
+        ref: REF('s1', fixtureId),
+        orderAt: '2026-10-04T10:05:00.000Z',
+        storedAt: '2026-10-04T10:05:00.000Z',
+        ...over,
+      } as never);
+    await stored('f1', { summary: 'Umzinto won by 4 runs', resultSource: 'manual' });
+    await stored('f2', { cleared: true });
+    const r = (await (await get(`?date=${DAY}`)).json()) as MatchMonitorResponse;
+    const by = new Map(r.matches.map((m) => [m.fixtureId, m]));
+    assert.deepEqual(by.get('f1')!.result, { summary: 'Umzinto won by 4 runs', manual: true });
+    assert.equal(by.get('f2')!.result, undefined, 'a cleared result is not shown');
+    assert.equal(by.get('f4')!.result, undefined);
+  });
+
+  test('accepting a postponement of a game medicoach is scoring needs a confirmation (F-047)', async () => {
+    const today = new Date(Date.now() + 2 * 3600_000).toISOString().slice(0, 10);
+    const later = new Date(Date.parse(`${today}T00:00:00Z`) + 7 * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    await repo.putSeries(
+      T,
+      series('s-today', {
+        startDate: today,
+        fixtures: [{ id: 'g1', date: today, time: '09:00', home: 'a', away: 'b' }],
+      }),
+    );
+    const call = (path: string, auth: string, payload: unknown) =>
+      app.request(path, {
+        method: 'POST',
+        headers: { ...headers(auth), 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    body = {
+      version: 1,
+      tenant: T,
+      date: today,
+      generatedAt: new Date().toISOString(),
+      matches: [liveMatch(REF('s-today', 'g1'))],
+    };
+    try {
+      const opened = await call('/clubs/a/postponements', REP, {
+        seriesId: 's-today',
+        fixtureId: 'g1',
+        proposedDate: later,
+      });
+      assert.equal(opened.status, 201);
+      const req = (await opened.json()) as { id: string; version: number };
+      const accept = (confirmLive?: boolean) =>
+        call(`/clubs/b/postponements/${req.id}/accept`, REP_B, {
+          version: req.version,
+          ...(confirmLive ? { confirmLive } : {}),
+        });
+      const warned = await accept();
+      assert.equal(warned.status, 409);
+      assert.equal(((await warned.json()) as { code: string }).code, 'fixture_live_in_medicoach');
+      // Nothing moved.
+      const g1 = () =>
+        repo
+          .getSeries(T, 's-today')
+          .then((s) => (s!.fixtures as Array<{ id: string; date: string }>)[0]);
+      assert.equal((await g1()).date, today);
+      const ok = await accept(true);
+      assert.equal(ok.status, 200);
+      assert.equal((await g1()).date, later);
+    } finally {
+      await repo.deleteSeries(T, 's-today');
+    }
+  });
+
+  test('the postponement check is advice only: medicoach down never blocks it', async () => {
+    const today = new Date(Date.now() + 2 * 3600_000).toISOString().slice(0, 10);
+    const later = new Date(Date.parse(`${today}T00:00:00Z`) + 7 * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    await repo.putSeries(
+      T,
+      series('s-today2', {
+        startDate: today,
+        fixtures: [{ id: 'g1', date: today, time: '09:00', home: 'a', away: 'b' }],
+      }),
+    );
+    httpFail = 503;
+    try {
+      const opened = await app.request('/clubs/a/postponements', {
+        method: 'POST',
+        headers: { ...headers(REP), 'content-type': 'application/json' },
+        body: JSON.stringify({ seriesId: 's-today2', fixtureId: 'g1', proposedDate: later }),
+      });
+      const req = (await opened.json()) as { id: string; version: number };
+      const res = await app.request(`/clubs/b/postponements/${req.id}/accept`, {
+        method: 'POST',
+        headers: { ...headers(REP_B), 'content-type': 'application/json' },
+        body: JSON.stringify({ version: req.version }),
+      });
+      assert.equal(res.status, 200);
+    } finally {
+      await repo.deleteSeries(T, 's-today2');
+    }
   });
 
   test('admin only, feature-gated, and the date is validated', async () => {
