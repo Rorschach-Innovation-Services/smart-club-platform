@@ -15,6 +15,7 @@ vi.mock('./api', async (importActual) => {
     getMedicoachPlayerReviews: vi.fn(),
     resolveMedicoachPlayerReview: vi.fn(),
     retryMedicoachPlayers: vi.fn(),
+    getMatchMonitor: vi.fn(),
   };
 });
 
@@ -69,30 +70,36 @@ const DUPLICATE_REVIEW: api.MedicoachPlayerReview = {
   candidates: [{ name: 'Thabo Nkosi', dob: '2004-04-04', institutionName: 'Kloof CC' }],
 };
 
-function renderPage(s: api.MedicoachSyncStatus, reviews: api.MedicoachPlayerReview[] = []) {
+async function renderPage(s: api.MedicoachSyncStatus, reviews: api.MedicoachPlayerReview[] = []) {
   vi.mocked(api.getMedicoachSyncStatus).mockResolvedValue(s);
   vi.mocked(api.getMedicoachPlayerReviews).mockResolvedValue(reviews);
   vi.mocked(api.resolveMedicoachPlayerReview).mockResolvedValue({ status: 'queued' });
   vi.mocked(api.retryMedicoachPlayers).mockResolvedValue({ requeued: 2 });
+  vi.mocked(api.getMatchMonitor).mockReturnValue(new Promise(() => {}));
   const onToast = vi.fn();
   renderWithProviders(
     <AdminMedicoachSyncView allSeries={[]} onEditFixture={vi.fn()} onToast={onToast} />,
   );
+  // The page opens on the Action board; the Players panel lives on the Sync health tab.
+  await userEvent.click(await screen.findByRole('tab', { name: /^Sync health/ }));
   return { onToast };
 }
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  localStorage.removeItem('smartclub.medicoachSync.tab');
+});
 
 describe('Players panel', () => {
   it('is absent while the player sync is off', async () => {
-    renderPage(status({ enabled: false }));
+    await renderPage(status({ enabled: false }));
     await screen.findByTestId('mcs-health');
     expect(screen.queryByTestId('mcs-players')).not.toBeInTheDocument();
     expect(api.getMedicoachPlayerReviews).not.toHaveBeenCalled();
   });
 
   it('shows waiting, parked and review counts', async () => {
-    renderPage(status(on({ pending: 3, parked: 1, reviews: 2 })));
+    await renderPage(status(on({ pending: 3, parked: 1, reviews: 2 })));
     const panel = await screen.findByTestId('mcs-players');
     expect(within(panel).getByText('Waiting to send').nextSibling).toHaveTextContent('3');
     expect(within(panel).getByText('Waiting for a team').nextSibling).toHaveTextContent('1');
@@ -100,7 +107,7 @@ describe('Players panel', () => {
   });
 
   it('parked players: explains the top-up and retries them', async () => {
-    const { onToast } = renderPage(
+    const { onToast } = await renderPage(
       status(on({ parked: 2, missingTeamRefs: ['smartclub:d:team:premier:x'] })),
     );
     const panel = await screen.findByTestId('mcs-players');
@@ -111,7 +118,7 @@ describe('Players panel', () => {
   });
 
   it('medicoach review: link to a candidate, or create new acknowledging every candidate', async () => {
-    renderPage(status(on({ reviews: 1 })), [MEDICOACH_REVIEW]);
+    await renderPage(status(on({ reviews: 1 })), [MEDICOACH_REVIEW]);
     const list = await screen.findByTestId('mcs-player-reviews');
     expect(within(list).getByText('medicoach found a possible match')).toBeInTheDocument();
     expect(within(list).getByText('Umzinto CC · 2008-03-14')).toBeInTheDocument();
@@ -132,7 +139,7 @@ describe('Players panel', () => {
   });
 
   it('possible duplicate: confirm different people, or dismiss', async () => {
-    renderPage(status(on({ reviews: 1 })), [DUPLICATE_REVIEW]);
+    await renderPage(status(on({ reviews: 1 })), [DUPLICATE_REVIEW]);
     const list = await screen.findByTestId('mcs-player-reviews');
     expect(
       within(list).getByText('Same name and date of birth under another ID here'),
@@ -147,7 +154,7 @@ describe('Players panel', () => {
   });
 
   it('a review with no candidates shows medicoach’s message and only Dismiss', async () => {
-    renderPage(status(on({ reviews: 1 })), [
+    await renderPage(status(on({ reviews: 1 })), [
       { ...MEDICOACH_REVIEW, message: 'out-of-tenant-identity-conflict', candidates: [] },
     ]);
     const list = await screen.findByTestId('mcs-player-reviews');
@@ -159,7 +166,7 @@ describe('Players panel', () => {
   });
 
   it('a decision says whether it was sent, queued or needs review', async () => {
-    const { onToast } = renderPage(status(on({ reviews: 1 })), [MEDICOACH_REVIEW]);
+    const { onToast } = await renderPage(status(on({ reviews: 1 })), [MEDICOACH_REVIEW]);
     const list = await screen.findByTestId('mcs-player-reviews');
     await userEvent.click(within(list).getAllByRole('button', { name: 'Link to this player' })[0]);
     expect(onToast).toHaveBeenCalledWith('Linked — queued, will send on the next sync');
@@ -171,7 +178,7 @@ describe('Players panel', () => {
   });
 
   it('players an admin re-queued stay visible as queued', async () => {
-    renderPage(status(on({ pending: 2, queued: 2 })));
+    await renderPage(status(on({ pending: 2, queued: 2 })));
     const queued = await screen.findByTestId('mcs-players-queued');
     expect(queued).toHaveTextContent('Queued');
     expect(queued).toHaveTextContent('2 player(s) you retried or decided on are queued');
@@ -179,7 +186,7 @@ describe('Players panel', () => {
   });
 
   it('says how many players are not sent at their request — a count, nothing to act on', async () => {
-    renderPage(status(on({ optedOut: 1 })));
+    await renderPage(status(on({ optedOut: 1 })));
     const note = await screen.findByTestId('mcs-players-opted-out');
     expect(note).toHaveTextContent('1 player(s) are not sent to the Match Centre at their request');
     expect(note).toHaveTextContent('Their registration here is unchanged');
@@ -187,23 +194,25 @@ describe('Players panel', () => {
   });
 
   it('shows no opted-out note when nobody opted out', async () => {
-    renderPage(status(on({})));
+    await renderPage(status(on({})));
     await screen.findByTestId('mcs-players');
     expect(screen.queryByTestId('mcs-players-opted-out')).toBeNull();
   });
 
   it('the page header counts player reviews with the schedule changes', async () => {
-    renderPage({
+    await renderPage({
       ...status(on({ reviews: 2, parked: 1 })),
       attention: { conflicts: 0, playerReviews: 2, playersParked: 1, total: 3 },
     });
     const stats = await screen.findByTestId('mcs-stats');
     expect(within(stats).getByText('For your review').nextSibling).toHaveTextContent('2');
     expect(stats).toHaveTextContent('2 player(s) · 1 waiting for a team');
+    // The tab badge counts the same total, though there are no schedule conflicts.
+    expect(screen.getByRole('tab', { name: 'Sync health 3' })).toBeInTheDocument();
   });
 
   it('a push that never reached medicoach says so — not "not accepted"', async () => {
-    renderPage({
+    await renderPage({
       ...status(on()),
       logs: [
         {
@@ -241,7 +250,7 @@ describe('Players panel', () => {
   });
 
   it('warns that linking a candidate at another club moves them off that club’s team', async () => {
-    renderPage(status(on({ reviews: 1 })), [
+    await renderPage(status(on({ reviews: 1 })), [
       {
         ...MEDICOACH_REVIEW,
         clubName: 'Crusaders CC',
@@ -273,7 +282,7 @@ describe('Players panel', () => {
   });
 
   it('summarises a player push in recent activity', async () => {
-    renderPage({
+    await renderPage({
       ...status(on()),
       logs: [
         {

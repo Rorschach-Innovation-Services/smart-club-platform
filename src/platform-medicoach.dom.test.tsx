@@ -188,6 +188,51 @@ describe('MedicoachConsolePage', () => {
     expect(health.closest('.card')).not.toBe(card);
   });
 
+  it('shows the live endpoint as never used before the monitor has fetched', async () => {
+    vi.mocked(api.platformMedicoachConnection).mockResolvedValue(AWAITING);
+    renderConsole();
+    expect((await screen.findByText('Live endpoint')).nextSibling).toHaveTextContent('Never used');
+    expect(screen.queryByTestId('live-links-unconfigured')).not.toBeInTheDocument();
+  });
+
+  it('shows a failing live endpoint and the links-unconfigured warning', async () => {
+    vi.mocked(api.platformMedicoachConnection).mockResolvedValue({
+      ...AWAITING,
+      live: {
+        status: 'failing',
+        lastOkAt: '2026-10-08T06:00:00Z',
+        lastErrorAt: '2026-10-08T07:00:00Z',
+        failingSince: '2026-10-08T06:30:00Z',
+        lastError: 'medicoach answered HTTP 502',
+        linksUnconfigured: true,
+      },
+    });
+    renderConsole();
+    expect((await screen.findByText('Live endpoint')).nextSibling).toHaveTextContent(
+      /^Failing since /,
+    );
+    expect(screen.getByTestId('live-links-unconfigured')).toHaveTextContent(
+      "medicoach match links aren't configured — the monitor's 'medicoach ↗' buttons won't show",
+    );
+  });
+
+  it('shows the live endpoint as reachable', async () => {
+    vi.mocked(api.platformMedicoachConnection).mockResolvedValue({
+      ...AWAITING,
+      live: {
+        status: 'reachable',
+        lastOkAt: '2026-10-08T06:00:00Z',
+        lastErrorAt: null,
+        failingSince: null,
+        lastError: null,
+        linksUnconfigured: false,
+      },
+    });
+    renderConsole();
+    expect((await screen.findByText('Live endpoint')).nextSibling).toHaveTextContent('Reachable');
+    expect(screen.queryByTestId('live-links-unconfigured')).not.toBeInTheDocument();
+  });
+
   it('shows the all-clear when nothing is awaiting', async () => {
     vi.mocked(api.platformMedicoachConnection).mockResolvedValue(CLEAR);
     renderConsole();

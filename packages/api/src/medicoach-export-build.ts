@@ -66,6 +66,7 @@ import type {
   TenantConfig,
   VeteransAffiliation,
 } from './types.js';
+import { computeIsMinor } from './player-identity.js';
 import { resolveVertical } from './vertical.js';
 import {
   civilDateAt,
@@ -74,6 +75,12 @@ import {
   isExcludedLeagueKey,
   unclassifiedLeagueKeys,
 } from './medicoach-sync/player-placement.js';
+
+/** Minor-ness from dob when it parses (the stored flag goes stale); the stored flag otherwise. */
+export function effectiveIsMinor(dob: string | undefined, stored: unknown): boolean {
+  if (dob && !Number.isNaN(new Date(dob).getTime())) return computeIsMinor(dob);
+  return stored === true;
+}
 
 /* ─────────────────────────── Inputs / outputs ─────────────────────────── */
 
@@ -1661,7 +1668,7 @@ function buildPlayers(
       ...(optStr(p.gender) ? { gender: optStr(p.gender) } : {}),
       ...(normaliseEmail(p.email) ? { email: normaliseEmail(p.email) } : {}),
       ...(optStr(p.cell) ? { cell: optStr(p.cell) } : {}),
-      isMinor: p.isMinor === true,
+      isMinor: effectiveIsMinor(optStr(p.dob), p.isMinor),
       ...(optStr(p.guardianName) ? { guardianName: optStr(p.guardianName) } : {}),
       sourceStatus: p.status ?? 'active',
       ...(optStr(p.battingHand) ? { battingHand: optStr(p.battingHand) } : {}),

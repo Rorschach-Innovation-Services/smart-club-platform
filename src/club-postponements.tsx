@@ -56,6 +56,28 @@ type SeriesLike = {
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 /** Which side of a request `clubId` is on (the canonical lives under the opposing club). */
+
+/** The user chose not to postpone a game medicoach is scoring (no error to show). */
+const LIVE_CANCELLED = Symbol('live-cancelled');
+
+/**
+ * Run a postponement that moves a fixture. When medicoach is scoring that game right now the
+ * server answers 409 `fixture_live_in_medicoach`; ask, and go ahead only if the user agrees.
+ */
+async function withLiveConfirm<T>(
+  call: (confirmLive?: boolean) => Promise<T>,
+): Promise<T | typeof LIVE_CANCELLED> {
+  try {
+    return await call();
+  } catch (err) {
+    if (!(err instanceof ApiError) || err.code !== 'fixture_live_in_medicoach') throw err;
+    const ok = window.confirm(
+      'This game is currently being scored in medicoach. Postponing it moves a game that is in play. Postpone it anyway?',
+    );
+    return ok ? call(true) : LIVE_CANCELLED;
+  }
+}
+
 export function sideOf(req: PostponementRequest, clubId: string): Side {
   return req.opposingClubId === clubId ? 'opposing' : 'requesting';
 }
@@ -426,7 +448,7 @@ function PostponementCard({
     setBusy(kind);
     setError(null);
     try {
-      await call();
+      if ((await call()) === LIVE_CANCELLED) return;
       client.invalidateQueries({ queryKey: qk.postponements(club.id) });
       if (kind === 'accept') client.invalidateQueries({ queryKey: qk.series() });
       setMode('idle');
@@ -620,7 +642,10 @@ function PostponementCard({
                 onClick={() =>
                   run(
                     'accept',
-                    () => acceptPostponement(club.id, req.id, req.version),
+                    () =>
+                      withLiveConfirm((confirmLive) =>
+                        acceptPostponement(club.id, req.id, req.version, confirmLive),
+                      ),
                     `Agreed — the fixture now plays on ${whenLabel(cur?.date, cur?.time)}.`,
                   )
                 }
@@ -833,14 +858,18 @@ function OverrideModal({
     setError('');
     setClashes([]);
     try {
-      await overridePostponement(req.id, {
-        date,
-        ...(time ? { time } : {}),
-        ...(venueChoice && venueChoice !== '__other__' ? { venueId: venueChoice } : {}),
-        ...(venueChoice === '__other__' ? { venueName: venueName.trim() } : {}),
-        ...(note.trim() ? { note: note.trim() } : {}),
-        version: req.version,
-      });
+      const out = await withLiveConfirm((confirmLive) =>
+        overridePostponement(req.id, {
+          date,
+          ...(time ? { time } : {}),
+          ...(venueChoice && venueChoice !== '__other__' ? { venueId: venueChoice } : {}),
+          ...(venueChoice === '__other__' ? { venueName: venueName.trim() } : {}),
+          ...(note.trim() ? { note: note.trim() } : {}),
+          version: req.version,
+          ...(confirmLive ? { confirmLive } : {}),
+        }),
+      );
+      if (out === LIVE_CANCELLED) return;
       client.invalidateQueries({ queryKey: qk.allPostponements() });
       client.invalidateQueries({ queryKey: qk.series() });
       toast?.('Final date set — both clubs have been notified.');

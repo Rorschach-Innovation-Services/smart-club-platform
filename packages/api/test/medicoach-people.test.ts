@@ -313,3 +313,46 @@ describe('masking and args', () => {
       );
   });
 });
+
+describe('isMinor in the bundle is derived from dob', () => {
+  const yearsAgo = (n: number) => {
+    const d = new Date();
+    d.setUTCFullYear(d.getUTCFullYear() - n);
+    d.setUTCMonth(0, 1);
+    return d.toISOString().slice(0, 10);
+  };
+  const { bundle } = buildBundle({
+    tenant: T,
+    config,
+    clubs,
+    playersByClub: new Map([
+      [
+        'glenwood',
+        [
+          player({ naturalKey: 'nk-aged-out', clubId: 'glenwood', isMinor: true, dob: yearsAgo(19) }),
+          player({ naturalKey: 'nk-junior', clubId: 'glenwood', isMinor: true, dob: yearsAgo(15) }),
+          player({ naturalKey: 'nk-no-dob', clubId: 'glenwood', isMinor: true, dob: undefined }),
+        ],
+      ],
+    ]),
+    veteransAffiliationsByClub: new Map(),
+    series: [],
+    seasonRuns: [],
+    recipes: { tenant: T, utcOffset: '+02:00', leagues: {} },
+    options: { generatedAt: 'x' },
+  });
+  const minor = (nk: string) =>
+    bundle.people.players.find((p) => p.externalRef.endsWith(nk))?.isMinor;
+
+  test('a stored minor whose dob is 18+ years ago exports as an adult', () => {
+    assert.equal(minor('nk-aged-out'), false);
+  });
+
+  test('a stored minor still under 18 stays a minor', () => {
+    assert.equal(minor('nk-junior'), true);
+  });
+
+  test('without a dob the stored flag is the fallback', () => {
+    assert.equal(minor('nk-no-dob'), true);
+  });
+});

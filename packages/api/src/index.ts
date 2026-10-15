@@ -64,6 +64,11 @@ import {
 } from './medicoach-sync/series-results.js';
 import { MedicoachSyncError } from './medicoach-sync/puller.js';
 import { runTenantSync } from './medicoach-sync/run.js';
+import {
+  buildMatchMonitor,
+  fixtureLiveInMedicoach,
+  recordLiveHealth,
+} from './medicoach-sync/live.js';
 import { isReconcileBusy, reconcileAwaitingCarry } from './medicoach-sync/reconcile.js';
 import { buildConnectionView, buildOverviewRow } from './medicoach-sync/connection.js';
 import {
@@ -5372,6 +5377,43 @@ app.get('/integrations/medicoach/status', async (c) => {
   });
 });
 
+/**
+ * Admin "Match monitor" (Medicoach sync): one SAST day's fixtures (released series) joined to
+ * their live-scoring state in medicoach: first ball, score and overs, last scoring input,
+ * innings times, end, long gaps between balls, undo count, and each player checked against the
+ * club rosters (status + name only; refs never leave the server). Read-through (the page
+ * polls); nothing is stored. `date` defaults to today in SAST. A medicoach failure still
+ * answers 200 with the fixtures, `reachable: false` and the reason in plain language.
+ */
+app.get('/integrations/medicoach/live', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const config = await repo.getTenantConfig(tenant);
+  if (!hasFeature(config, 'medicoachSync'))
+    throw new HttpError(409, 'the medicoach sync is not enabled for this tenant');
+  const date = c.req.query('date') ?? tenantDate();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(`${date}T00:00:00Z`)))
+    throw new HttpError(400, 'date must be YYYY-MM-DD');
+  const [series, clubs, awaiting] = await Promise.all([
+    repo.listSeries(tenant),
+    repo.listClubs(tenant),
+    repo.listMcAwait(tenant),
+  ]);
+  return c.json(
+    await buildMatchMonitor(
+      tenant,
+      date,
+      { series, clubs, awaitingRefs: new Set(awaiting.flatMap((a) => a.refs)) },
+      {
+        url: medicoachSyncUrl(),
+        secret: medicoachSyncSecret(),
+        listPlayers: repo.listPlayers,
+        getResult: (seriesId, fixtureId) => repo.getFixtureResult(tenant, seriesId, fixtureId),
+        recordHealth: (patch) => recordLiveHealth(repo, tenant, patch),
+      },
+    ),
+  );
+});
+
 /** A conflict as the inbox shows it: the stored row plus readable proposed text, and the
  * proposal in the same parts as `current` so the two read side by side. */
 function conflictView(x: SyncConflict) {
@@ -5897,6 +5939,39 @@ function postponementHttpError(
   extra: Record<string, unknown> = {},
 ): HttpError {
   return new HttpError(status, message, { code, ...extra });
+}
+
+/**
+ * A postponement that would move a game medicoach is scoring right now (today's or, for an
+ * evening game past midnight, yesterday's) answers 409 `fixture_live_in_medicoach` until the
+ * caller confirms (`confirmLive: true`). Advice only: with the sync off, unconfigured or
+ * unreachable it says nothing.
+ */
+async function assertNotLiveInMedicoach(
+  tenant: string,
+  series: Series,
+  fixture: PostponableFixture,
+  confirmed: unknown,
+): Promise<void> {
+  if (confirmed === true || !fixture.date) return;
+  const today = tenantToday();
+  const yesterday = new Date(Date.parse(`${today}T00:00:00Z`) - 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+  if (fixture.date !== today && fixture.date !== yesterday) return;
+  if (!hasFeature(await repo.getTenantConfig(tenant), 'medicoachSync')) return;
+  const live = await fixtureLiveInMedicoach(
+    tenant,
+    fixtureSyncRef(tenant, String(series.id), fixture),
+    fixture.date,
+    { url: medicoachSyncUrl(), secret: medicoachSyncSecret() },
+  );
+  if (live)
+    throw postponementHttpError(
+      409,
+      'fixture_live_in_medicoach',
+      'this game is being scored in medicoach right now — postponing it moves a game in play',
+    );
 }
 
 /** Map the postponement repo errors to HTTP codes (throws; never returns). */
@@ -6573,7 +6648,9 @@ app.post('/clubs/:id/postponements/:reqId/accept', async (c) => {
   const id = c.req.param('id');
   const reqId = c.req.param('reqId');
   assertClubAccess(ra, id);
-  const body = await c.req.json<{ version?: number }>().catch(() => ({}) as { version?: number });
+  const body = await c.req
+    .json<{ version?: number; confirmLive?: unknown }>()
+    .catch(() => ({}) as { version?: number; confirmLive?: unknown });
   const { request, side } = await loadPostponementForClub(ra.tenant, id, reqId);
   if (request.status !== 'open')
     throw postponementHttpError(
@@ -6588,6 +6665,10 @@ app.post('/clubs/:id/postponements/:reqId/accept', async (c) => {
   if (body.version !== undefined && body.version !== request.version)
     throw postponementHttpError(409, 'version_conflict', 'postponement request changed; refetch');
   const proposal = request.proposals[request.proposals.length - 1];
+  const current = await repo.getSeries(ra.tenant, request.seriesId);
+  const target = current && fixturesOf(current).find((f) => f.id === request.fixtureId);
+  if (current && target)
+    await assertNotLiveInMedicoach(ra.tenant, current, target, body.confirmLive);
   await applyAgreedPostponement(ra.tenant, request, proposal, ra.email, { forClub: true });
   try {
     const updated = await repo.resolvePostponement(ra.tenant, request.opposingClubId, reqId, {
@@ -6746,6 +6827,7 @@ app.post('/admin/postponements/:reqId/override', requireAdmin, async (c) => {
     venueName?: unknown;
     note?: unknown;
     version?: number;
+    confirmLive?: unknown;
   }>();
   if (!isValidIsoDate(body.date)) throw new HttpError(400, 'date must be a valid YYYY-MM-DD date');
   const date = body.date;
@@ -6783,6 +6865,7 @@ app.post('/admin/postponements/:reqId/override', requireAdmin, async (c) => {
   if (!series) throw postponementHttpError(409, 'fixture_changed', 'the series no longer exists');
   const fixture = fixturesOf(series).find((f) => f.id === request.fixtureId);
   if (!fixture) throw postponementHttpError(409, 'fixture_changed', 'the fixture no longer exists');
+  await assertNotLiveInMedicoach(ra.tenant, series, fixture, body.confirmLive);
   const moved = postponedFixture(fixture, request.id, {
     date,
     ...(time ? { time } : {}),
