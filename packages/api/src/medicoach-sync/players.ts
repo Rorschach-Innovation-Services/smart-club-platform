@@ -22,7 +22,7 @@
  * or a natural key — counts only.
  */
 import { randomUUID } from 'node:crypto';
-import { normaliseEmail } from '../medicoach-export-build.js';
+import { effectiveIsMinor, normaliseEmail } from '../medicoach-export-build.js';
 import { refs } from '../medicoach-bundle.js';
 import { recipesForTenant } from '../medicoach-recipes/index.js';
 import {
@@ -259,7 +259,7 @@ export function buildPlayerEntry(
     ...(optStr(p.gender) ? { gender: optStr(p.gender) } : {}),
     ...(normaliseEmail(p.email) ? { email: normaliseEmail(p.email) } : {}),
     ...(optStr(p.cell) ? { cell: optStr(p.cell) } : {}),
-    isMinor: p.isMinor === true,
+    isMinor: effectiveIsMinor(dob, p.isMinor),
     ...(optStr(p.guardianName) ? { guardianName: optStr(p.guardianName) } : {}),
     teamRefs: intent.teamRefs,
     // Fan-out tenants only (absent otherwise, so the entry is byte-identical): ADD-ONLY sides.

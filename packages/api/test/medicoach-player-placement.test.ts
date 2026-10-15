@@ -546,3 +546,33 @@ describe('fan-out — enqueue-players dry run surfaces the prediction', () => {
     assert.equal(off.fanOut, undefined, 'no fan-out lines for a tenant without it');
   });
 });
+
+describe('isMinor on the wire is derived from dob', () => {
+  const yearsAgo = (n: number) => {
+    const d = new Date();
+    d.setUTCFullYear(d.getUTCFullYear() - n);
+    d.setUTCMonth(0, 1);
+    return d.toISOString().slice(0, 10);
+  };
+  const entryFor = (p: Partial<PlayerRegistration>) =>
+    buildPlayerEntry(
+      T,
+      { naturalKey: 'nk-x', changedAt: '2026-10-03T00:00:00.000Z' },
+      syncIntent([row(p)], [], ctx),
+    );
+
+  test('a stored minor whose dob is 18+ years ago is pushed as an adult', () => {
+    const e = entryFor({ isMinor: true, dob: yearsAgo(19) });
+    assert.equal(e.op === 'upsert' && e.isMinor, false);
+  });
+
+  test('a stored minor still under 18 stays a minor', () => {
+    const e = entryFor({ isMinor: true, dob: yearsAgo(15) });
+    assert.equal(e.op === 'upsert' && e.isMinor, true);
+  });
+
+  test('without a dob the stored flag is the fallback', () => {
+    const e = entryFor({ isMinor: true, dob: undefined });
+    assert.equal(e.op === 'upsert' && e.isMinor, true);
+  });
+});
