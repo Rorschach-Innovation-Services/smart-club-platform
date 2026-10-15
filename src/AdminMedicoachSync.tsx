@@ -28,6 +28,7 @@ import { ApiError } from './api';
 import { Btn, Modal, Pill } from './atoms';
 import { MatchMonitor, type MonitorCounts } from './MatchMonitor';
 import { qk } from './query';
+import { formatChangedAt, isNeverEditedChangedAt } from './medicoachChangedAt';
 import type { Series } from './types';
 
 type MonitorTab = 'board' | 'games' | 'sync';
@@ -204,7 +205,10 @@ function ConflictCard({
             {title}
           </div>
           <div className="ump-sub">
-            {c.seriesName ?? c.seriesId} · medicoach changed it {fmtWhen(c.proposed.changedAt)}
+            {c.seriesName ?? c.seriesId} ·{' '}
+            {isNeverEditedChangedAt(c.proposed.changedAt)
+              ? 'never edited in medicoach'
+              : `medicoach changed it ${formatChangedAt(c.proposed.changedAt)}`}
           </div>
         </div>
         <Pill tone={c.reason === 'clash' ? 'coral' : 'gold'}>

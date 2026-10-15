@@ -155,6 +155,22 @@ describe('conflict inbox', () => {
     expect(within(card).getByText(/sends smart club's version back to medicoach/)).toBeVisible();
   });
 
+  it('shows the never-edited sentinel as "never edited", not a 1970 date', async () => {
+    renderPage(
+      baseStatus({
+        conflicts: [
+          {
+            ...conflict,
+            proposed: { ...conflict.proposed, changedAt: '1970-01-01T00:00:00.001Z' },
+          },
+        ],
+      }),
+    );
+    const card = await screen.findByRole('article', { name: /UKZN CC v Crusaders CC/ });
+    expect(within(card).getByText(/never edited in medicoach/)).toBeInTheDocument();
+    expect(card).not.toHaveTextContent(/1970|1 Jan/);
+  });
+
   it('names an unrecognised venue', async () => {
     renderPage(
       baseStatus({

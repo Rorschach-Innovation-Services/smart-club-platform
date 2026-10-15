@@ -407,7 +407,9 @@ export async function recordScheduleDiff(
  * The `changedAt` a fixture smart club never edited since import carries on the wire: one
  * millisecond after medicoach's never-edited epoch (`1970-01-01T00:00:00.000Z`), so smart
  * club's real values (a newly revealed venue, say) still win over a never-edited medicoach
- * row, while any real medicoach edit wins over them.
+ * row, while any real medicoach edit wins over them. Medicoach echoes it back unchanged —
+ * that is expected, not a bug (campaign F-004); src/medicoachChangedAt.ts mirrors it so the UI
+ * renders it as "never edited" rather than a 1970 date.
  */
 export const NEVER_EDITED_CHANGED_AT = '1970-01-01T00:00:00.001Z';
 
