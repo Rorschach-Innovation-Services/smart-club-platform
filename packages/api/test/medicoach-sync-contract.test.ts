@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ChangesResponseSchema,
+  LiveResponseSchema,
   MEDICOACH_SYNC_VERSION,
   PLAYER_PUSH_MAX,
   PlayerPushRequestSchema,
@@ -48,17 +49,20 @@ const schemaFor = (file: string) =>
             ? PlayerPushResponseSchema
             : file.startsWith('scorecard-')
               ? ScorecardResponseSchema
-              : null;
+              : file.startsWith('live-')
+                ? LiveResponseSchema
+                : null;
 
 describe('contract examples', () => {
   const files = readdirSync(EXAMPLES).filter((f) => f.endsWith('.json'));
 
-  test('all nine shared examples are present', () => {
+  test('all ten shared examples are present', () => {
     assert.deepEqual(files.sort(), [
       'changes-knockout-reschedule.json',
       'changes-live-result.json',
       'changes-manual-and-cleared.json',
       'changes-result-with-play.json',
+      'live-day.json',
       'player-push-request.json',
       'player-push-response.json',
       'schedule-push-request.json',
@@ -180,7 +184,7 @@ describe('shared contract checksum', () => {
   const DOCS = path.resolve(EXAMPLES, '..');
   const PINNED: Record<string, string> = {
     'medicoach-sync-contract.md':
-      '8cdf736a7cb5d03852fbf89ae08f16558a91828b4a6718f2a4469e28a2090bbc',
+      '144a5d4cdcf4239da0f2eb893211785dfb43a63813ae2e6b146c20f4d1499703',
     'medicoach-sync-examples/changes-knockout-reschedule.json':
       '7040b5a70f49a4adcefe173659126e383c1d0813c5ab0581748fb6e4e8634aa4',
     'medicoach-sync-examples/changes-live-result.json':
@@ -189,6 +193,8 @@ describe('shared contract checksum', () => {
       'ffcf0b6c4542402fc6a996328740828244b5fcf1ac6977d5aaedd30935e96ac4',
     'medicoach-sync-examples/changes-result-with-play.json':
       'ba73c381b800d6f62013551120b7e990726fbeee2078351fafdf6562e8103ed1',
+    'medicoach-sync-examples/live-day.json':
+      '18fd9f86a9908c72540ddf0db722b13629b5b61f8f969426cf4a6f9bad69236f',
     'medicoach-sync-examples/player-push-request.json':
       '27effdde2b8883acd4f1e8017bf038da84c55b866b206fe78c401722c02eb01c',
     'medicoach-sync-examples/player-push-response.json':

@@ -188,6 +188,8 @@ test('a clashing medicoach reschedule is held, refused on Apply, discarded and p
 
   await signInAsAdmin(browser);
   await browser.locator('aside.nav .nav-item', { hasText: 'Medicoach sync' }).click();
+  // The sync controls live on the "Sync health" tab (the page opens on the Action board).
+  await browser.getByRole('tab', { name: /Sync health/ }).click();
   await expect(browser.getByRole('heading', { name: /Medicoach sync/ })).toBeVisible();
   const row = browser
     .getByTestId('mcs-conflicts')

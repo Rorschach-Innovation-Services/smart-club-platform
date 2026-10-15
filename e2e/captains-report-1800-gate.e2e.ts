@@ -214,6 +214,8 @@ test('report notices wait for 18:00, then go out once per side — never twice',
 
   await signInAsAdmin(browser);
   await browser.locator('aside.nav .nav-item', { hasText: 'Medicoach sync' }).click();
+  // The sync controls live on the "Sync health" tab (the page opens on the Action board).
+  await browser.getByRole('tab', { name: /Sync health/ }).click();
   await expect(browser.getByRole('heading', { name: /Medicoach sync/ })).toBeVisible();
 
   // 1. Before 18:00: the result is stored, the reports are queued, nothing is sent.
@@ -247,6 +249,8 @@ test('report notices wait for 18:00, then go out once per side — never twice',
 
   // 3. Another sync in the window: nothing new is opened or sent.
   await browser.locator('aside.nav .nav-item', { hasText: 'Medicoach sync' }).click();
+  // The sync controls live on the "Sync health" tab (the page opens on the Action board).
+  await browser.getByRole('tab', { name: /Sync health/ }).click();
   const again = await syncNowInUi(browser);
   expect(again.reportNotices).toMatchObject({ deferred: 0, opened: 0, notified: 0, failed: 0 });
   const final = await seriesReports(request);
