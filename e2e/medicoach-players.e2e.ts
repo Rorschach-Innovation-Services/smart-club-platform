@@ -251,6 +251,8 @@ test('registrations queue, sync, and land in the Players panel as counts and rev
 
   await signInAsAdmin(page);
   await page.locator('aside.nav .nav-item', { hasText: 'Medicoach sync' }).click();
+  // The sync controls live on the "Sync health" tab (the page opens on the Action board).
+  await page.getByRole('tab', { name: /Sync health/ }).click();
   await expect(page.getByTestId('mcs-players')).toBeVisible();
   await expect(stat(page, 'Waiting to send')).toHaveText(String(before.pending));
 
@@ -299,6 +301,8 @@ test('link needs a candidate, create must acknowledge every candidate; each is s
 
   await signInAsAdmin(page);
   await page.locator('aside.nav .nav-item', { hasText: 'Medicoach sync' }).click();
+  // The sync controls live on the "Sync health" tab (the page opens on the Action board).
+  await page.getByRole('tab', { name: /Sync health/ }).click();
   pushes.length = 0;
   const link = card(page, NAME.link);
   await expect(link.getByRole('button', { name: 'Link to this player' })).toHaveCount(2);
@@ -330,6 +334,8 @@ test('different people, dismiss, and a no-candidate identity conflict offers Dis
 }) => {
   await signInAsAdmin(page);
   await page.locator('aside.nav .nav-item', { hasText: 'Medicoach sync' }).click();
+  // The sync controls live on the "Sync health" tab (the page opens on the Action board).
+  await page.getByRole('tab', { name: /Sync health/ }).click();
   pushes.length = 0;
 
   // Smart club's possible duplicate: confirming them distinct settles BOTH reviews.
@@ -371,6 +377,8 @@ test('retry re-queues the parked player: queued, then sent and gone on the next 
 
   await signInAsAdmin(page);
   await page.locator('aside.nav .nav-item', { hasText: 'Medicoach sync' }).click();
+  // The sync controls live on the "Sync health" tab (the page opens on the Action board).
+  await page.getByRole('tab', { name: /Sync health/ }).click();
   await expect(stat(page, 'Waiting for a team')).toHaveText(String(parked));
   await page.getByRole('button', { name: 'Retry waiting players' }).click();
   await expect(page.getByText(`${parked} player(s) will be sent on the next sync`)).toBeVisible();

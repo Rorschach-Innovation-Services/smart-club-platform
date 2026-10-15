@@ -268,7 +268,43 @@ describe('PostponementsPanel', () => {
     const r = renderPanel({ inbound: [req()] });
     fireEvent.click(r.getByRole('button', { name: /^Accept / }));
     await waitFor(() => expect(r.toast).toHaveBeenCalledWith(expect.stringMatching(/^Agreed/)));
-    expect(acceptPostponement).toHaveBeenCalledWith('home-club', 'p1', 3);
+    expect(acceptPostponement).toHaveBeenCalledWith('home-club', 'p1', 3, undefined);
+  });
+
+  it('asks before accepting a game medicoach is scoring right now, and goes ahead on yes (F-047)', async () => {
+    vi.mocked(acceptPostponement)
+      .mockRejectedValueOnce(
+        new ApiError(409, 'this game is being scored', 'fixture_live_in_medicoach'),
+      )
+      .mockResolvedValueOnce(req({ status: 'applied' }) as never);
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      const r = renderPanel({ inbound: [req()] });
+      fireEvent.click(r.getByRole('button', { name: /^Accept / }));
+      await waitFor(() => expect(r.toast).toHaveBeenCalledWith(expect.stringMatching(/^Agreed/)));
+      expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/currently being scored/));
+      expect(acceptPostponement).toHaveBeenLastCalledWith('home-club', 'p1', 3, true);
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
+  it('a "no" to the live warning leaves the request as it was, with no error', async () => {
+    vi.mocked(acceptPostponement).mockRejectedValue(
+      new ApiError(409, 'this game is being scored', 'fixture_live_in_medicoach'),
+    );
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    try {
+      const r = renderPanel({ inbound: [req()] });
+      fireEvent.click(r.getByRole('button', { name: /^Accept / }));
+      await waitFor(() => expect(confirm).toHaveBeenCalled());
+      expect(acceptPostponement).toHaveBeenCalledTimes(1);
+      expect(r.queryByRole('alert')).toBeNull();
+      expect(r.toast).not.toHaveBeenCalled();
+      expect(r.getByRole('button', { name: /^Accept / })).toBeInTheDocument();
+    } finally {
+      confirm.mockRestore();
+    }
   });
 
   it('keeps the request open and lists the clash when accept is refused', async () => {

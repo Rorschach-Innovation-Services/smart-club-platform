@@ -15,6 +15,7 @@ vi.mock('./api', async (importActual) => {
     dropMedicoachOutbox: vi.fn(),
     applyMedicoachConflict: vi.fn(),
     discardMedicoachConflict: vi.fn(),
+    getMatchMonitor: vi.fn(),
   };
 });
 
@@ -64,7 +65,11 @@ function renderPage(status: api.MedicoachSyncStatus) {
   return { onOpenSeries, onToast };
 }
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  // These suites are about the "Sync health" tab; the page remembers the last tab chosen.
+  localStorage.setItem('smartclub.medicoachSync.tab', 'sync');
+});
 
 describe('health', () => {
   it('shows the last successful sync prominently', async () => {
@@ -150,6 +155,22 @@ describe('conflict inbox', () => {
     expect(within(card).getByText(/sends smart club's version back to medicoach/)).toBeVisible();
   });
 
+  it('shows the never-edited sentinel as "never edited", not a 1970 date', async () => {
+    renderPage(
+      baseStatus({
+        conflicts: [
+          {
+            ...conflict,
+            proposed: { ...conflict.proposed, changedAt: '1970-01-01T00:00:00.001Z' },
+          },
+        ],
+      }),
+    );
+    const card = await screen.findByRole('article', { name: /UKZN CC v Crusaders CC/ });
+    expect(within(card).getByText(/never edited in medicoach/)).toBeInTheDocument();
+    expect(card).not.toHaveTextContent(/1970|1 Jan/);
+  });
+
   it('names an unrecognised venue', async () => {
     renderPage(
       baseStatus({
@@ -230,5 +251,270 @@ describe('outbox', () => {
     ).toBeInTheDocument();
     await userEvent.click(screen.getByRole('link', { name: /Promotion T20 draft/ }));
     expect(onOpenSeries).toHaveBeenCalledWith('s-draft');
+  });
+});
+
+describe('match monitor tab', () => {
+  const today = new Date(Date.now() + 2 * 3_600_000).toISOString().slice(0, 10);
+  const monitor = (over: Partial<api.MatchMonitorResponse> = {}): api.MatchMonitorResponse => ({
+    date: today,
+    generatedAt: new Date().toISOString(),
+    dryRun: false,
+    reachable: true,
+    unmatched: 0,
+    matches: [
+      {
+        ref: 'smartclub:dolphins:fixture:s1:f1',
+        seriesId: 's1',
+        seriesName: 'Premier T20',
+        fixtureId: 'f1',
+        home: 'UKZN CC',
+        away: 'Crusaders CC',
+        venue: 'Howard College Oval',
+        date: today,
+        time: '00:00',
+        fixtureStatus: 'scheduled',
+        live: null,
+      },
+    ],
+    ...over,
+  });
+
+  beforeEach(() => localStorage.removeItem('smartclub.medicoachSync.tab'));
+
+  it('opens on the action board; Every game lists the day on the same data', async () => {
+    vi.mocked(api.getMatchMonitor).mockResolvedValue(monitor());
+    renderPage(baseStatus());
+    expect(
+      await screen.findByRole('tab', { name: /^Action board/, selected: true }),
+    ).toBeInTheDocument();
+    expect(await screen.findByTestId('mm-board')).toBeInTheDocument();
+    expect(screen.queryByRole('table', { name: 'Games' })).toBeNull();
+
+    await userEvent.click(screen.getByRole('tab', { name: /^Every game/ }));
+    const table = await screen.findByRole('table', { name: 'Games' });
+    expect(screen.queryByTestId('mm-board')).toBeNull();
+    expect(within(table).getByText('UKZN CC v Crusaders CC')).toBeInTheDocument();
+    // One monitor for both tabs: switching keeps the day and doesn't fetch it again. (Before
+    // midday it also watches yesterday, for evening games still on — a different day.)
+    expect(vi.mocked(api.getMatchMonitor).mock.calls.filter(([d]) => d === today)).toHaveLength(1);
+    expect(screen.getByRole('tab', { name: /^Every game 1$/ })).toBeInTheDocument();
+    expect(localStorage.getItem('smartclub.medicoachSync.tab')).toBe('games');
+    // The demo fixture "started" at 00:00 SAST today: past the 15-minute grace unless it is
+    // just after midnight, when it is still awaiting its start.
+    const flag = within(table).queryByText(/No live scoring/);
+    if (Date.now() + 2 * 3_600_000 - Date.parse(`${today}T00:15:00Z`) >= 0)
+      expect(flag).toBeInTheDocument();
+  });
+
+  it('goes from the board to every game, and an old saved "monitor" tab opens the board', async () => {
+    localStorage.setItem('smartclub.medicoachSync.tab', 'monitor');
+    vi.mocked(api.getMatchMonitor).mockResolvedValue(monitor());
+    renderPage(baseStatus());
+    expect(
+      await screen.findByRole('tab', { name: /^Action board/, selected: true }),
+    ).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole('button', { name: /see every game \(1\)/i }));
+    expect(screen.getByRole('tab', { name: /^Every game/, selected: true })).toBeInTheDocument();
+    expect(await screen.findByRole('table', { name: 'Games' })).toBeInTheDocument();
+  });
+
+  it('says plainly when medicoach is unreachable, and keeps the fixtures', async () => {
+    vi.mocked(api.getMatchMonitor).mockResolvedValue(
+      monitor({
+        reachable: false,
+        error: 'Couldn’t reach medicoach — timed out.',
+        technical: 'medicoach unreachable: TimeoutError',
+      }),
+    );
+    localStorage.setItem('smartclub.medicoachSync.tab', 'games');
+    renderPage(baseStatus());
+    expect(await screen.findByText(/Live scoring unavailable/)).toBeInTheDocument();
+    expect(screen.getByText(/timed out/)).toBeInTheDocument();
+    expect(screen.getByRole('table', { name: 'Games' })).toBeInTheDocument();
+  });
+
+  it('switches to Sync health and remembers it', async () => {
+    vi.mocked(api.getMatchMonitor).mockResolvedValue(monitor());
+    renderPage(baseStatus());
+    await userEvent.click(await screen.findByRole('tab', { name: 'Sync health' }));
+    expect(await screen.findByTestId('mcs-health')).toBeInTheDocument();
+    expect(localStorage.getItem('smartclub.medicoachSync.tab')).toBe('sync');
+  });
+
+  it('badges Sync health with everything needing attention, not only schedule conflicts', async () => {
+    vi.mocked(api.getMatchMonitor).mockResolvedValue(monitor());
+    renderPage(
+      baseStatus({
+        conflicts: [],
+        attention: { conflicts: 0, playerReviews: 3, playersParked: 0, total: 3 },
+      }),
+    );
+    expect(await screen.findByRole('tab', { name: 'Sync health 3' })).toBeInTheDocument();
+  });
+
+  it('a sync-disabled union sees loading, then the notice, and the monitor is never asked', async () => {
+    let resolve!: (s: api.MedicoachSyncStatus) => void;
+    vi.mocked(api.getMedicoachSyncStatus).mockReturnValue(
+      new Promise<api.MedicoachSyncStatus>((r) => (resolve = r)),
+    );
+    renderWithProviders(
+      <AdminMedicoachSyncView
+        allSeries={SERIES}
+        onEditFixture={vi.fn()}
+        onOpenSeries={vi.fn()}
+        onToast={vi.fn()}
+      />,
+    );
+    expect(await screen.findByText(/Loading the sync status/)).toBeInTheDocument();
+    resolve(baseStatus({ enabled: false } as Partial<api.MedicoachSyncStatus>));
+    expect(await screen.findByText(/isn.t switched on for this union/)).toBeInTheDocument();
+    expect(vi.mocked(api.getMatchMonitor)).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  const liveGame = (over: Partial<api.LiveMatch> = {}): api.LiveMatch => ({
+    ref: 'smartclub:dolphins:fixture:s1:f1',
+    status: 'in_progress',
+    startedAt: new Date(Date.now() - 20 * 60_000).toISOString(),
+    endedAt: null,
+    lastInputAt: new Date(Date.now() - 60_000).toISOString(),
+    oversPerSide: 20,
+    innings: [
+      {
+        number: 1,
+        battingSide: 'home',
+        runs: 9,
+        wickets: 0,
+        overs: '1.2',
+        startedAt: new Date(Date.now() - 20 * 60_000).toISOString(),
+        endedAt: null,
+      },
+    ],
+    deliveries: 8,
+    medianGapSec: 30,
+    longGaps: [],
+    undoCount: 1,
+    undoCountExact: true,
+    players: [],
+    medicoachMatchUrl: null,
+    ...over,
+  });
+  /** Answers by day: `today` from the queue (last answer repeats), any other day empty. */
+  const byDay = (...answers: api.MatchMonitorResponse[]) =>
+    vi
+      .mocked(api.getMatchMonitor)
+      .mockImplementation(async (d: string) =>
+        d === today
+          ? answers.length > 1
+            ? answers.shift()!
+            : answers[0]
+          : monitor({ date: d, matches: [] }),
+      );
+
+  it('an outage keeps the last known state and raises no flags from missing data (F-042)', async () => {
+    const good = monitor();
+    good.matches[0] = { ...good.matches[0], live: liveGame() };
+    byDay(
+      good,
+      monitor({
+        reachable: false,
+        error: 'Couldn’t reach medicoach — the connection failed.',
+        technical: 'medicoach unreachable: TypeError',
+      }),
+    );
+    localStorage.setItem('smartclub.medicoachSync.tab', 'games');
+    renderPage(baseStatus());
+    const table = await screen.findByRole('table', { name: 'Games' });
+    expect(within(table).getByText('Live')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(await screen.findByText(/Live scoring unavailable/)).toBeInTheDocument();
+    expect(screen.getByText(/Games show their last update from/)).toBeInTheDocument();
+    const after = screen.getByRole('table', { name: 'Games' });
+    expect(within(after).getByText('Live')).toBeInTheDocument();
+    expect(within(after).queryByText(/No live scoring/)).toBeNull();
+    expect(within(after).queryByText(/Awaiting start/i)).toBeNull();
+    await userEvent.click(screen.getByRole('tab', { name: /^Action board/ }));
+    await screen.findByTestId('mm-board');
+    expect(screen.queryByText(/Act now/)).toBeNull();
+    expect(screen.queryByText(/No live scoring|Scorer silent|No input for/)).toBeNull();
+  });
+
+  it('an outage on a fresh page shows the games as unknown, never "no live scoring"', async () => {
+    byDay(monitor({ reachable: false, error: 'Couldn’t reach medicoach.' }));
+    localStorage.setItem('smartclub.medicoachSync.tab', 'games');
+    renderPage(baseStatus());
+    const table = await screen.findByRole('table', { name: 'Games' });
+    expect(within(table).queryByText(/No live scoring/)).toBeNull();
+    if (Date.now() + 2 * 3_600_000 - Date.parse(`${today}T00:00:00Z`) >= 0)
+      expect(within(table).getByText('Unknown')).toBeInTheDocument();
+  });
+
+  it('a sync switched off while the page is open shows the notice, not an error (F-046)', async () => {
+    vi.mocked(api.getMatchMonitor).mockRejectedValue(
+      new api.ApiError(409, 'the medicoach sync is not enabled for this tenant'),
+    );
+    renderPage(baseStatus());
+    expect(await screen.findByText(/isn.t switched on for this union/)).toBeInTheDocument();
+    expect(screen.queryByText(/Couldn.t load the match monitor/)).toBeNull();
+  });
+
+  it('finished games list their flags under "After the game"; the KPIs count every fixture (F-024/F-047)', async () => {
+    const day = monitor();
+    const walkOn: api.MonitorPlayer = {
+      side: 'home',
+      name: 'Walk On',
+      addedDuringMatch: false,
+      addedAt: null,
+      check: 'unregistered',
+    };
+    day.matches = [
+      {
+        ...day.matches[0],
+        result: { summary: 'Crusaders CC won by 4 runs', manual: true },
+        live: liveGame({
+          status: 'completed',
+          endedAt: new Date(Date.now() - 60_000).toISOString(),
+          players: [walkOn],
+        }),
+      },
+      { ...day.matches[0], ref: 'r2', fixtureId: 'f2', fixtureStatus: 'postponed' },
+    ];
+    byDay(day);
+    renderPage(baseStatus());
+    const after = await screen.findByTestId('mm-after-game');
+    expect(within(after).getByText(/^After the game \(\d+\)$/)).toBeInTheDocument();
+    expect(within(after).getByText(/Walk On is not registered to play/)).toBeInTheDocument();
+    expect(screen.getByText('Nothing needs you right now.')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('tab', { name: /^Every game/ }));
+    const kpis = await screen.findByTestId('mm-kpis');
+    expect(kpis).toHaveTextContent('2 games');
+    expect(kpis).toHaveTextContent('1 of them postponed');
+    expect(kpis).toHaveTextContent('1 unregistered player');
+    expect(kpis).toHaveTextContent('1 undo');
+    const table = screen.getByRole('table', { name: 'Games' });
+    expect(within(table).getByText('Crusaders CC won by 4 runs')).toBeInTheDocument();
+    expect(within(table).getByText('Result set by the union office')).toBeInTheDocument();
+  });
+
+  it('a fresh load after midnight says yesterday still has a game on (F-019)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      // 00:20 SAST on 15 Oct: yesterday's 23:25 game is still being scored.
+      vi.setSystemTime(new Date('2026-10-14T22:20:00Z'));
+      const yesterday = monitor({ date: '2026-10-14' });
+      yesterday.matches[0] = { ...yesterday.matches[0], date: '2026-10-14', live: liveGame() };
+      vi.mocked(api.getMatchMonitor).mockImplementation(async (d: string) =>
+        d === '2026-10-14' ? yesterday : monitor({ date: d, matches: [] }),
+      );
+      renderPage(baseStatus());
+      expect(
+        await screen.findByText(/1 game from yesterday is still being scored/),
+      ).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: /View yesterday/ }));
+      expect(await screen.findByText(/Yesterday · Wed,? 14 Oct/)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

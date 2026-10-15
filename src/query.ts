@@ -38,6 +38,7 @@ export const qk = {
   captainsReports: () => ['captains-reports', t()],
   captainsReportContactGaps: () => ['captains-report-contact-gaps', t()],
   medicoachSync: () => ['medicoach-sync', t()],
+  matchMonitor: (date: string) => ['match-monitor', t(), date],
   medicoachPlayerReviews: () => ['medicoach-sync', t(), 'player-reviews'],
   clubCaptainsReports: (clubId: string) => ['club-captains-reports', t(), clubId],
   clubCaptainsReport: (id: string) => ['club-captains-report', t(), id],

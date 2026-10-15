@@ -2989,7 +2989,9 @@ function Shell({
             }}
           />
         );
-      if (view === 'medicoach_sync' && medicoachSyncOn)
+      // Not gated on the flag: with the sync off the page itself says so (and who turns it on),
+      // rather than a direct link or a reload landing on an empty pane.
+      if (view === 'medicoach_sync')
         return (
           <AdminMedicoachSyncView
             allSeries={allSeries}

@@ -126,6 +126,24 @@ export function effectiveVenue(series: Series, f: ScheduleFixture): string | nul
   return f.venueOverride || f.venueName || homeVenue || null;
 }
 
+/**
+ * The home club's ground for a fixture with no venue of its own — the bundle export's last
+ * fallback (`venueOverride ?? venueName ?? home team ground`), so a push sends what the carry
+ * sent. null for a slot side, an unknown club or a club without a ground.
+ */
+export function homeClubGround(
+  series: Pick<Series, 'fixtures' | 'participants'> | null,
+  fixtureId: string,
+  grounds: ReadonlyMap<string, string | null>,
+): string | null {
+  const f = ((series?.fixtures as ScheduleFixture[] | undefined) ?? []).find(
+    (x) => x?.id === fixtureId,
+  );
+  if (!f?.home || isSlotRef(f.home)) return null;
+  const clubId = series?.participants?.find((p) => p.teamId === f.home)?.clubId ?? f.home;
+  return grounds.get(clubId) ?? null;
+}
+
 const statusFlag = (status: string | undefined) =>
   status === 'cancelled' || status === 'postponed' ? status : '';
 
@@ -389,7 +407,9 @@ export async function recordScheduleDiff(
  * The `changedAt` a fixture smart club never edited since import carries on the wire: one
  * millisecond after medicoach's never-edited epoch (`1970-01-01T00:00:00.000Z`), so smart
  * club's real values (a newly revealed venue, say) still win over a never-edited medicoach
- * row, while any real medicoach edit wins over them.
+ * row, while any real medicoach edit wins over them. Medicoach echoes it back unchanged —
+ * that is expected, not a bug (campaign F-004); src/medicoachChangedAt.ts mirrors it so the UI
+ * renders it as "never edited" rather than a 1970 date.
  */
 export const NEVER_EDITED_CHANGED_AT = '1970-01-01T00:00:00.001Z';
 
@@ -545,6 +565,22 @@ export async function flushScheduleOutbox(
   for (const row of rows) {
     if (SyncScheduleSchema.safeParse(row.schedule).success) sendable.push(row);
     else await failRow(row, 'the stored schedule does not fit the v1 contract');
+  }
+
+  // A fixture with no venue of its own and no participant venue went to medicoach with its
+  // home club's ground (the bundle export's fallback). Send the same ground, never a null
+  // that would wipe the venue medicoach got from the carry. One club list read, only when
+  // some row needs it.
+  if (sendable.some((r) => r.schedule.venue == null)) {
+    const grounds = new Map(
+      (await repo.listClubs(tenant)).map((cl) => [cl.id, cl.ground?.venue?.trim() || null]),
+    );
+    for (let i = 0; i < sendable.length; i++) {
+      const row = sendable[i];
+      if (row.schedule.venue != null) continue;
+      const ground = homeClubGround(live.get(row.seriesId) ?? null, row.fixtureId, grounds);
+      if (ground) sendable[i] = { ...row, schedule: { ...row.schedule, venue: ground } };
+    }
   }
 
   /** The first whole-request failure of this flush (unreachable, HTTP, contract), if any. */
