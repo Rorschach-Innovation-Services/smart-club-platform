@@ -38,11 +38,13 @@ export type MonitorPhase =
   | 'break' // between innings
   | 'done'
   | 'abandoned'
-  | 'off'; // postponed / cancelled in smart club
+  | 'off' // postponed / cancelled in smart club
+  | 'unknown'; // its start has passed, and medicoach couldn't be reached to say more
 
 export type FlagKey =
   | 'unregistered'
   | 'no-scoring'
+  | 'not-linked'
   | 'not-started'
   | 'quiet'
   | 'late'
@@ -55,6 +57,7 @@ export type FlagKey =
 export const FLAG_TYPES: Array<{ key: FlagKey; name: string }> = [
   { key: 'unregistered', name: 'Not registered' },
   { key: 'no-scoring', name: 'No live scoring' },
+  { key: 'not-linked', name: 'Not in medicoach' },
   { key: 'not-started', name: 'Not started' },
   { key: 'quiet', name: 'Scorer silent' },
   { key: 'late', name: 'Late start' },
@@ -97,6 +100,8 @@ export interface MonitorRow {
   sinceInputMin: number | null;
   /** Unexplained gaps between balls at or over the threshold, longest first. */
   delays: LiveGap[];
+  /** Unexplained gaps medicoach reports (2 min or more) that are under the threshold. */
+  minorGaps: LiveGap[];
   /** Long gaps the scorer recorded as drinks or an interruption (shown, never flagged). */
   breaks: LiveGap[];
   inningsBreak: InningsBreak | null;
@@ -110,6 +115,11 @@ export interface MonitorRow {
   playersAdded: number;
   /** Players the rosters can't vouch for (unregistered, other club, inactive). */
   ineligible: number;
+  /**
+   * True when medicoach couldn't be reached on the last poll: the live state is the last one
+   * the page saw (or none), so nothing is flagged from what is missing.
+   */
+  stale: boolean;
   flags: MonitorFlag[];
 }
 
@@ -118,12 +128,24 @@ export interface BoardFlag {
   id: string;
   row: MonitorRow;
   flag: MonitorFlag;
+  /** The game is over (finished, abandoned) or off: the flag is history, not an action. */
+  closed: boolean;
 }
+
+/** Phases whose flags no longer need action (shown under "After the game"). */
+const CLOSED: ReadonlySet<MonitorPhase> = new Set(['done', 'abandoned', 'off']);
 
 /** Every flag of the day, most urgent first: alerts, then by type, then longest open. */
 export function boardFlags(rows: MonitorRow[]): BoardFlag[] {
   return rows
-    .flatMap((row) => row.flags.map((flag) => ({ id: `${row.match.ref}|${flag.key}`, row, flag })))
+    .flatMap((row) =>
+      row.flags.map((flag) => ({
+        id: `${row.match.ref}|${flag.key}`,
+        row,
+        flag,
+        closed: CLOSED.has(row.phase),
+      })),
+    )
     .sort(
       (a, b) =>
         (a.flag.tone === 'alert' ? 0 : 1) - (b.flag.tone === 'alert' ? 0 : 1) ||
@@ -139,7 +161,33 @@ const ms = (iso: string | null | undefined) => {
   const v = iso ? Date.parse(iso) : NaN;
   return Number.isFinite(v) ? v : null;
 };
+/** Rounded minutes, for durations shown (a game's length). */
 const minutesBetween = (a: number, b: number) => Math.round((b - a) / MIN);
+/**
+ * Whole minutes elapsed, for everything compared with a threshold: a 15-min threshold is met
+ * at 15:00, never at 14:30.
+ */
+const elapsedMin = (a: number, b: number) => Math.floor((b - a) / MIN);
+
+/** "1 game", "2 games". */
+export function plural(n: number, one: string, many = `${one}s`): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/** "once", "2 times" (with "~" when approximate). */
+export function timesText(n: number, approx = false): string {
+  return n === 1 && !approx ? 'once' : `${approx ? '~' : ''}${n} time${n === 1 ? '' : 's'}`;
+}
+
+/**
+ * The ball a gap ends on, cricket-style. medicoach sends the innings' overs AFTER that ball
+ * ("4.0" once the sixth ball of the fourth over is bowled), so "4.0" reads as ball 3.6.
+ */
+export function ballLabel(over: string): string {
+  const m = /^(\d+)\.0$/.exec(over) ?? /^(\d+)$/.exec(over);
+  if (m && Number(m[1]) > 0) return `${Number(m[1]) - 1}.6`;
+  return over;
+}
 
 /** The fixture's start as an instant: its date and time read as SAST; null when time TBC. */
 export function scheduledStartMs(m: Pick<MonitorMatch, 'date' | 'time'>): number | null {
@@ -155,6 +203,24 @@ export function sastClock(iso: string | number | null | undefined): string {
   if (v === null) return '—';
   const d = new Date(v + SAST_OFFSET_MS);
   return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
+}
+
+/**
+ * A time as the monitor shows it on `day`: "14:05" when it is on that SAST day, else with its
+ * date ("Thu 15 Oct 00:07"), so a game re-dated to another day doesn't read as played there.
+ */
+export function sastWhen(iso: string | number | null | undefined, day: string): string {
+  const v = typeof iso === 'number' ? iso : ms(iso);
+  if (v === null) return '—';
+  const on = new Date(v + SAST_OFFSET_MS).toISOString().slice(0, 10);
+  if (on === day) return sastClock(v);
+  const d = new Date(`${on}T00:00:00Z`).toLocaleDateString('en-GB', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    timeZone: 'UTC',
+  });
+  return `${d.replace(',', '')} ${sastClock(v)}`;
 }
 
 /** Today's date in SAST, YYYY-MM-DD. */
@@ -175,7 +241,16 @@ export function monitorRow(
   match: MonitorMatch,
   nowMs: number,
   t: MonitorThresholds = DEFAULT_THRESHOLDS,
+  opts: {
+    /**
+     * medicoach couldn't be reached: `match.live` is the last state the page saw (or null). A
+     * game with no known state past its start is `unknown`, and no flag is raised from what is
+     * missing (no live scoring, not started, a silent scorer, a break still counting).
+     */
+    stale?: boolean;
+  } = {},
 ): MonitorRow {
+  const stale = opts.stale === true;
   const live = match.live;
   const start = scheduledStartMs(match);
   const first = ms(live?.startedAt);
@@ -189,10 +264,10 @@ export function monitorRow(
   else if (live?.status === 'completed') phase = 'done';
   else if (live?.status === 'innings_break') phase = 'break';
   else if (live?.status === 'in_progress') phase = 'live';
-  else if (start !== null && nowMs >= start) phase = 'awaiting';
+  else if (start !== null && nowMs >= start) phase = stale && !live ? 'unknown' : 'awaiting';
   else phase = 'upcoming';
 
-  const lateMin = first !== null && start !== null ? minutesBetween(start, first) : null;
+  const lateMin = first !== null && start !== null ? elapsedMin(start, first) : null;
   if (lateMin !== null && lateMin >= t.lateStartMin)
     flags.push({
       key: 'late',
@@ -202,30 +277,42 @@ export function monitorRow(
       signature: 'late',
     });
 
-  if (phase === 'awaiting' && start !== null) {
-    const over = minutesBetween(start, nowMs);
+  if (phase === 'awaiting' && start !== null && !stale) {
+    const over = elapsedMin(start, nowMs);
     if (over >= t.lateStartMin)
       flags.push(
-        live
+        !live && match.notInMedicoach
           ? {
-              key: 'not-started',
-              label: `Not started · ${fmtDuration(over)} past start`,
-              tone: 'alert',
+              // Not the scorer's doing: medicoach has no match for this fixture yet.
+              key: 'not-linked',
+              label: `Not in medicoach yet · ${fmtDuration(over)} past start`,
+              tone: 'warn',
+              detail: [
+                'medicoach has no match for this fixture, so it cannot be scored there. Your platform operator carries it across.',
+              ],
               since: new Date(start).toISOString(),
-              signature: 'not-started',
+              signature: 'not-linked',
             }
-          : {
-              key: 'no-scoring',
-              label: `No live scoring · ${fmtDuration(over)} past start`,
-              tone: 'alert',
-              since: new Date(start).toISOString(),
-              signature: 'no-scoring',
-            },
+          : live
+            ? {
+                key: 'not-started',
+                label: `Not started · ${fmtDuration(over)} past start`,
+                tone: 'alert',
+                since: new Date(start).toISOString(),
+                signature: 'not-started',
+              }
+            : {
+                key: 'no-scoring',
+                label: `No live scoring · ${fmtDuration(over)} past start`,
+                tone: 'alert',
+                since: new Date(start).toISOString(),
+                signature: 'no-scoring',
+              },
       );
   }
 
-  const sinceInputMin = lastInput !== null ? minutesBetween(lastInput, nowMs) : null;
-  if (phase === 'live' && sinceInputMin !== null && sinceInputMin >= t.quietMin)
+  const sinceInputMin = lastInput !== null ? elapsedMin(lastInput, nowMs) : null;
+  if (phase === 'live' && !stale && sinceInputMin !== null && sinceInputMin >= t.quietMin)
     flags.push({
       key: 'quiet',
       label: `No input for ${fmtDuration(sinceInputMin)}`,
@@ -235,11 +322,11 @@ export function monitorRow(
       signature: `quiet:${live!.lastInputAt}`,
     });
 
-  const long = (live?.longGaps ?? [])
-    .filter((g) => g.gapSec >= t.ballGapMin * 60)
-    .sort((a, b) => b.gapSec - a.gapSec);
+  const gaps = [...(live?.longGaps ?? [])].sort((a, b) => b.gapSec - a.gapSec);
+  const long = gaps.filter((g) => g.gapSec >= t.ballGapMin * 60);
   const delays = long.filter((g) => !g.reason);
   const breaks = long.filter((g) => g.reason);
+  const minorGaps = gaps.filter((g) => g.gapSec < t.ballGapMin * 60 && !g.reason);
   if (delays.length)
     flags.push({
       key: 'delay',
@@ -247,7 +334,7 @@ export function monitorRow(
       tone: 'warn',
       detail: delays.map(
         (g) =>
-          `Innings ${g.innings}, before ball ${g.over}: ${fmtDuration(g.gapSec / 60)} (${sastClock(Date.parse(g.at) - g.gapSec * 1000)}–${sastClock(g.at)})`,
+          `Innings ${g.innings}, before ball ${ballLabel(g.over)}: ${fmtDuration(g.gapSec / 60)} (${sastClock(Date.parse(g.at) - g.gapSec * 1000)}–${sastClock(g.at)})`,
       ),
       since: [...delays].sort((a, b) => b.at.localeCompare(a.at))[0].at,
       signature: `delay:${delays.length}`,
@@ -263,12 +350,12 @@ export function monitorRow(
       inningsBreak = {
         from: i1!.endedAt!,
         to: i2!.startedAt,
-        minutes: minutesBetween(i1End, i2Start),
+        minutes: elapsedMin(i1End, i2Start),
       };
     else if (phase === 'break')
-      inningsBreak = { from: i1!.endedAt!, to: null, minutes: minutesBetween(i1End, nowMs) };
+      inningsBreak = { from: i1!.endedAt!, to: null, minutes: elapsedMin(i1End, nowMs) };
   }
-  if (inningsBreak && inningsBreak.minutes >= t.breakMin)
+  if (inningsBreak && inningsBreak.minutes >= t.breakMin && !(stale && !inningsBreak.to))
     flags.push({
       key: 'long-break',
       label: `Innings break ${fmtDuration(inningsBreak.minutes)}${inningsBreak.to ? '' : ' and counting'}`,
@@ -298,13 +385,13 @@ export function monitorRow(
         (p) =>
           `${p.name} — ${why[p.check]!(p)}${p.addedDuringMatch ? ` · added during the match${p.addedAt ? ` at ${sastClock(p.addedAt)}` : ''}` : ''}`,
       ),
+      // Each player from when they began playing: an added player from when they were added,
+      // everyone else from the first ball. A guest added later never hides the others' time.
       since:
         ineligible
-          .map((p) => p.addedAt)
+          .map((p) => (p.addedDuringMatch && p.addedAt ? p.addedAt : (live?.startedAt ?? null)))
           .filter((x): x is string => !!x)
-          .sort()[0] ??
-        live?.startedAt ??
-        null,
+          .sort()[0] ?? null,
       signature: `unregistered:${ineligible
         .map((p) => p.name)
         .sort()
@@ -339,7 +426,7 @@ export function monitorRow(
   if (undoCount !== null && undoCount >= t.undoMax)
     flags.push({
       key: 'undo',
-      label: `Undo used ${undoApprox ? '~' : ''}${undoCount} times`,
+      label: `Undo used ${timesText(undoCount, undoApprox)}`,
       tone: 'warn',
       since: null,
       // Comes back each time the count climbs another threshold's worth.
@@ -365,6 +452,7 @@ export function monitorRow(
     lateMin,
     sinceInputMin,
     delays,
+    minorGaps,
     breaks,
     inningsBreak,
     durationMin,
@@ -372,6 +460,7 @@ export function monitorRow(
     undoApprox,
     playersAdded: added.length,
     ineligible: ineligible.length,
+    stale,
     flags,
   };
 }
@@ -395,6 +484,7 @@ const PHASE_ORDER: Record<MonitorPhase, number> = {
   done: 4,
   abandoned: 5,
   off: 6,
+  unknown: 7,
 };
 
 /** Flagged first (alerts before warnings), then live → upcoming → finished, then start time. */
@@ -410,8 +500,18 @@ export function sortRows(rows: MonitorRow[]): MonitorRow[] {
   );
 }
 
+const INELIGIBLE: ReadonlySet<MonitorPlayer['check']> = new Set([
+  'unregistered',
+  'other-club',
+  'not-active',
+]);
+
 export interface MonitorTotals {
+  /** Every fixture of the day, postponed and cancelled included. */
+  games: number;
+  /** Games still on (not postponed or cancelled). */
   matches: number;
+  postponed: number;
   live: number;
   done: number;
   late: number;
@@ -421,8 +521,18 @@ export interface MonitorTotals {
 }
 
 export function totals(rows: MonitorRow[]): MonitorTotals {
+  // A player who played in several games (the same walk-on all day) counts once.
+  const unregistered = new Set<string>();
+  for (const r of rows)
+    for (const p of r.match.live?.players ?? [])
+      if (INELIGIBLE.has(p.check))
+        unregistered.add(
+          `${p.side === 'home' ? r.match.home : r.match.away}|${p.name.trim().toLowerCase()}`,
+        );
   return {
+    games: rows.length,
     matches: rows.filter((r) => r.phase !== 'off').length,
+    postponed: rows.filter((r) => r.phase === 'off').length,
     live: rows.filter((r) => r.phase === 'live' || r.phase === 'break').length,
     done: rows.filter((r) => r.phase === 'done' || r.phase === 'abandoned').length,
     late: rows.filter((r) =>
@@ -430,7 +540,7 @@ export function totals(rows: MonitorRow[]): MonitorTotals {
     ).length,
     delayed: rows.filter((r) => r.delays.length > 0).length,
     attention: rows.filter((r) => r.flags.some((f) => f.tone === 'alert')).length,
-    unregistered: rows.reduce((n, r) => n + r.ineligible, 0),
+    unregistered: unregistered.size,
   };
 }
 

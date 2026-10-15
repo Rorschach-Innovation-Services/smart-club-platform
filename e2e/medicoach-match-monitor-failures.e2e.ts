@@ -467,6 +467,8 @@ test('Every game: statuses, approximate undo, added players and the day summary'
     hasText: gameLabel(fx('quiet')),
   });
   await expect(quietAdded).toContainText('Watch · Players added');
+  // The byline names the start, so two games between the same clubs can be told apart (F-021).
+  await expect(quietAdded).toContainText(`· ${fx('quiet').time} · ${SERIES_NAME}`);
   await expect(quietAdded).toContainText(`${registered.name} (${fx('quiet').homeName})`);
   await expect(quietAdded).toContainText('— registered');
   const unreg = page.locator('.mm-flagcard[data-flag="unregistered"]', {
@@ -481,11 +483,20 @@ test('Every game: statuses, approximate undo, added players and the day summary'
     page.locator('.mm-flagcard[data-flag="undo"]', { hasText: gameLabel(fx('quiet')) }),
   ).toContainText('Undo used ~6 times');
   await expect(
-    page.locator('.mm-flagcard[data-flag="undo"]', { hasText: gameLabel(fx('finished')) }),
-  ).toContainText('Undo used 7 times');
-  await expect(
     page.locator('.mm-flagcard[data-flag="undo"]', { hasText: gameLabel(fx('break')) }),
   ).toHaveCount(0);
+
+  // A finished game's flags are history: listed under "After the game", not as actions (F-024).
+  const afterGame = page.getByTestId('mm-after-game');
+  await expect(
+    page.locator('ul[aria-label="Flags"] .mm-flagcard', { hasText: gameLabel(fx('finished')) }),
+  ).toHaveCount(0);
+  await afterGame.locator('summary').click();
+  const finishedUndo = afterGame.locator('.mm-flagcard[data-flag="undo"]', {
+    hasText: gameLabel(fx('finished')),
+  });
+  await expect(finishedUndo).toContainText('After the game · Undo used');
+  await expect(finishedUndo).toContainText('Undo used 7 times');
 });
 
 test('a flag threshold hides and restores a flag, and persists across a reload', async ({
@@ -525,40 +536,41 @@ test('a flag threshold hides and restores a flag, and persists across a reload',
 test('mark seen: the flag moves to Seen, survives a reload, and is per day', async ({ page }) => {
   needsLive();
   await openMonitor(page, 'Action board');
-  const undo = page.locator('.mm-flagcards .mm-flagcard[data-flag="undo"]', {
-    hasText: gameLabel(fx('finished')),
+  const undo = page.locator('ul[aria-label="Flags"] .mm-flagcard[data-flag="undo"]', {
+    hasText: gameLabel(fx('quiet')),
   });
   await expect(undo).toHaveCount(1);
-  await undo.getByRole('button', { name: 'Mark seen: Undo used 7 times' }).click();
+  await undo.getByRole('button', { name: 'Mark seen: Undo used ~6 times' }).click();
   await expect(undo).toHaveCount(0);
-  const seen = page.locator('details.mm-seen');
+  const seen = page.locator('details.mm-seen').filter({ hasText: /^Seen/ });
   await expect(seen.locator('summary')).toHaveText(/Seen \(1\)/);
   await seen.locator('summary').click();
-  await expect(seen).toContainText('Undo used 7 times');
-  await expect(seen).toContainText(gameLabel(fx('finished')));
+  await expect(seen).toContainText('Undo used ~6 times');
+  await expect(seen).toContainText(gameLabel(fx('quiet')));
 
   await page.reload();
   await expect(page.locator('.mm-flagcard').first()).toBeVisible();
   await expect(undo).toHaveCount(0);
-  await expect(page.locator('details.mm-seen summary')).toHaveText(/Seen \(1\)/);
+  await expect(seen.locator('summary')).toHaveText(/Seen \(1\)/);
 
-  // Another day has its own marks: yesterday's finished game keeps its undo flag.
+  // Another day has its own marks: yesterday's finished game keeps its undo flag (listed after
+  // the game, as it is over) and nothing is seen there.
   await page.getByRole('button', { name: 'Previous day' }).click();
   await expect(page.getByText(/^Yesterday ·/)).toBeVisible();
   await expect(
-    page.locator('.mm-flagcards .mm-flagcard[data-flag="undo"]', {
+    page.getByTestId('mm-after-game').locator('.mm-flagcard[data-flag="undo"]', {
       hasText: gameLabel(fx('yesterday')),
     }),
   ).toHaveCount(1);
-  await expect(page.locator('details.mm-seen')).toHaveCount(0);
+  await expect(seen).toHaveCount(0);
 
   // Back to today: still seen; Put back restores it.
   await page.getByRole('button', { name: 'Today', exact: true }).click();
-  await expect(page.locator('details.mm-seen summary')).toHaveText(/Seen \(1\)/);
-  await page.locator('details.mm-seen summary').click();
+  await expect(seen.locator('summary')).toHaveText(/Seen \(1\)/);
+  await seen.locator('summary').click();
   await page.getByRole('button', { name: 'Put back' }).click();
   await expect(undo).toHaveCount(1);
-  await expect(page.locator('details.mm-seen')).toHaveCount(0);
+  await expect(seen).toHaveCount(0);
 });
 
 test('a malformed match is left out with a note; the rest of the day still shows', async ({
@@ -570,7 +582,7 @@ test('a malformed match is left out with a note; the rest of the day still shows
     'Finished',
   );
   mode.badMatch = true;
-  const note = page.getByText("1 game(s) from medicoach couldn't be read and are left out");
+  const note = page.getByText("1 game from medicoach couldn't be read and is left out");
   await refreshUntil(page, () => expect(note).toBeVisible());
   // Only that game lost its live data; it is still listed, as a fixture with no scoring.
   const bad = gameRow(page, fx('finished'));
@@ -603,17 +615,58 @@ test('medicoach down: plain-language error, fixtures still listed, recovers', as
   await expect(banner).toContainText("Couldn't reach medicoach — the connection failed.");
   await expect(banner).toContainText('The monitor keeps trying while this page is open.');
   await expect(page.getByText("Couldn't load the match monitor")).toHaveCount(0);
+  // An outage is ours, not the scorers': every game keeps its last known state, marked as
+  // such, and nothing is flagged from the missing data (F-042).
+  await expect(banner).toContainText('Games show their last update from');
   for (const k of ['finished', 'quiet', 'break', 'abandoned', 'upcoming'] as const)
     await expect(gameRow(page, fx(k))).toHaveCount(1);
-  await expect(gameRow(page, fx('quiet')).locator('td[data-label="Start"]')).toContainText(
-    'No ball yet',
-  );
+  const pill = (k: Kind) => gameRow(page, fx(k)).locator('td[data-label="Score now"]');
+  await expect(pill('quiet')).toContainText('Live');
+  await expect(pill('finished')).toContainText('Finished');
+  await expect(pill('abandoned')).toContainText('Abandoned');
+  await expect(gameRow(page, fx('quiet'))).toHaveClass(/stale/);
+  const table = page.getByRole('table', { name: 'Games' });
+  await expect(table).not.toContainText('No live scoring');
+  await expect(table).not.toContainText('Not started ·');
+  await expect(table).not.toContainText('No input for');
+  // The action board raises no Act-now flag for the outage.
+  await page.getByRole('tab', { name: /^Action board/ }).click();
+  for (const key of ['no-scoring', 'not-started', 'quiet'])
+    await expect(page.locator(`.mm-flagcard[data-flag="${key}"]`)).toHaveCount(0);
+  // What the last good answer did show still stands: the unregistered walk-on.
+  await expect(
+    page.locator('ul[aria-label="Flags"] .mm-flagcard[data-flag="unregistered"]', {
+      hasText: gameLabel(fx('break')),
+    }),
+  ).toHaveCount(1);
+  await page.getByRole('tab', { name: /^Every game/ }).click();
 
   await startStub();
   await refreshUntil(page, () => expect(banner).toHaveCount(0));
   await expect(gameRow(page, fx('quiet')).locator('td[data-label="Score now"]')).toContainText(
     'Live',
   );
+  await expect(gameRow(page, fx('quiet'))).not.toHaveClass(/stale/);
+});
+
+test('a page opened during an outage shows games as unknown and flags nothing', async ({
+  page,
+}) => {
+  needsLive();
+  await stopStub();
+  try {
+    await openMonitor(page, 'Every game');
+    const banner = page.getByRole('alert').filter({ hasText: 'Live scoring unavailable.' });
+    await expect(banner).toContainText('Nothing is flagged until medicoach answers again.');
+    await expect(
+      gameRow(page, fx('late-not-started')).locator('td[data-label="Score now"]'),
+    ).toContainText('Unknown');
+    await expect(page.getByRole('table', { name: 'Games' })).not.toContainText('No live scoring');
+    await page.getByRole('tab', { name: /^Action board/ }).click();
+    await expect(page.locator('.mm-flagcard[data-flag="no-scoring"]')).toHaveCount(0);
+  } finally {
+    await startStub();
+  }
 });
 
 test('a signature mismatch (medicoach 401) shows as unavailable, and recovers', async ({
@@ -628,6 +681,8 @@ test('a signature mismatch (medicoach 401) shows as unavailable, and recovers', 
   await expect(banner).toContainText('medicoach rejected our credentials');
   await banner.getByText('Details').click();
   await expect(banner).toContainText('medicoach answered HTTP 401');
+  for (const key of ['no-scoring', 'not-started', 'quiet'])
+    await expect(page.locator(`.mm-flagcard[data-flag="${key}"]`)).toHaveCount(0);
 
   mode.wrongSecret = false;
   await refreshUntil(page, () => expect(banner).toHaveCount(0));
@@ -685,6 +740,32 @@ test('day navigation: yesterday polls, tomorrow does not, an empty day says so',
   await expect(page.getByText('No fixtures in a released series on this day.')).toBeVisible();
   await page.getByRole('tab', { name: /^Action board/ }).click();
   await expect(page.getByText('No fixtures in a released series on this day.')).toBeVisible();
+});
+
+test('with the sync switched off, the page says so — by direct link and on an open page', async ({
+  page,
+  request,
+}) => {
+  const setSync = async (on: boolean) => {
+    const res = await request.put(`${API_BASE}/platform/tenants/${TENANT}`, {
+      headers: operator(),
+      data: { features: { ...priorFeatures, medicoachSync: on } },
+    });
+    expect(res.ok(), `set sync ${on} → ${res.status()}`).toBeTruthy();
+  };
+  const notice = page.getByText(/The medicoach sync isn.t switched on for this union/);
+  // An open page whose sync is switched off under it (F-046b).
+  await openMonitor(page, 'Every game');
+  await setSync(false);
+  try {
+    await refreshUntil(page, () => expect(notice).toBeVisible());
+    await expect(page.getByText("Couldn't load the match monitor")).toHaveCount(0);
+    // A direct link (or a reload) renders the notice, never an empty pane (F-046a).
+    await page.goto('/admin/medicoach_sync');
+    await expect(notice).toBeVisible();
+  } finally {
+    await setSync(true);
+  }
 });
 
 test('dry run: no sync connection shows the dry-run note and never calls medicoach', async ({

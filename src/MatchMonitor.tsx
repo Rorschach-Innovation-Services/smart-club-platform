@@ -19,14 +19,18 @@ import { qk } from './query';
 import {
   DEFAULT_THRESHOLDS,
   FLAG_TYPES,
+  ballLabel,
   boardFlags,
   fmtDuration,
   monitorRow,
+  plural,
   sastClock,
   sastToday,
+  sastWhen,
   scheduledStartMs,
   scoreLines,
   sortRows,
+  timesText,
   totals,
   undoText,
   type BoardFlag,
@@ -50,7 +54,13 @@ const PHASE: Record<MonitorPhase, { label: string; tone: string }> = {
   done: { label: 'Finished', tone: 'navy' },
   abandoned: { label: 'Abandoned', tone: 'muted' },
   off: { label: 'Postponed', tone: 'muted' },
+  unknown: { label: 'Unknown', tone: 'muted' },
 };
+
+/** medicoach statuses that mean a game is being scored right now. */
+const SCORING = new Set(['in_progress', 'innings_break']);
+/** Until midday SAST the page also watches yesterday, for evening games still running. */
+const YESTERDAY_WATCH_UNTIL_HOUR = 12;
 
 const CHECK_LABEL: Record<api.PlayerCheck, { text: string; tone: 'ok' | 'bad' | 'muted' }> = {
   registered: { text: 'Registered', tone: 'ok' },
@@ -143,7 +153,9 @@ export function MatchMonitor({
   const [open, setOpen] = useState<string | null>(null);
   const isToday = date === today;
   // Yesterday too: an evening game still running after midnight belongs to yesterday's date.
-  const isLiveDay = isToday || date === shiftDay(today, -1);
+  const yesterday = shiftDay(today, -1);
+  const isLiveDay = isToday || date === yesterday;
+  const sastHour = new Date(nowMs + 2 * 3_600_000).getUTCHours();
 
   // A clock for "x min ago" and the flags, independent of the data refresh.
   useEffect(() => {
@@ -158,6 +170,33 @@ export function MatchMonitor({
     refetchInterval: isLiveDay ? POLL_MS : false,
     refetchOnWindowFocus: isLiveDay,
   });
+  // A fresh load after midnight opens on the new day; yesterday's evening game may still be
+  // on. Watched (same poll) only on Today and only in the morning, to say so on the page.
+  const watchYesterday = isToday && sastHour < YESTERDAY_WATCH_UNTIL_HOUR;
+  const qy = useQuery({
+    queryKey: qk.matchMonitor(yesterday),
+    queryFn: () => api.getMatchMonitor(yesterday),
+    enabled: watchYesterday,
+    refetchInterval: watchYesterday ? POLL_MS : false,
+  });
+  const stillLiveYesterday = watchYesterday
+    ? (qy.data?.matches ?? []).filter((m) => m.live && SCORING.has(m.live.status)).length
+    : 0;
+
+  // The last answer in which medicoach was reached, per day. While it can't be reached the
+  // games keep that state (marked stale) instead of reading as "no live scoring".
+  const lastGood = useRef<{ date: string; at: number; byRef: Map<string, api.LiveMatch> } | null>(
+    null,
+  );
+  if (q.data && !q.data.dryRun && q.data.reachable && q.data.date === date)
+    lastGood.current = {
+      date,
+      at: q.dataUpdatedAt || Date.now(),
+      byRef: new Map(q.data.matches.flatMap((m) => (m.live ? [[m.ref, m.live]] : []))),
+    };
+  const unreachable = !!q.data && !q.data.dryRun && !q.data.reachable;
+  const held = unreachable && lastGood.current?.date === date ? lastGood.current : null;
+  const disabled = q.error instanceof api.ApiError && q.error.status === 409;
 
   const setThreshold = (k: keyof MonitorThresholds, v: number) => {
     const next = { ...t, [k]: v };
@@ -166,8 +205,15 @@ export function MatchMonitor({
   };
 
   const rows = useMemo(
-    () => sortRows((q.data?.matches ?? []).map((m) => monitorRow(m, nowMs, t))),
-    [q.data, nowMs, t],
+    () =>
+      sortRows(
+        (q.data?.matches ?? []).map((m) =>
+          unreachable
+            ? monitorRow({ ...m, live: held?.byRef.get(m.ref) ?? null }, nowMs, t, { stale: true })
+            : monitorRow(m, nowMs, t),
+        ),
+      ),
+    [q.data, nowMs, t, unreachable, held],
   );
   const flags = useMemo(() => boardFlags(rows), [rows]);
 
@@ -190,7 +236,10 @@ export function MatchMonitor({
   };
 
   const seenSet = new Set(seen);
-  const active = flags.filter((b) => !seenSet.has(seenKeyOf(b)));
+  const unseen = flags.filter((b) => !seenSet.has(seenKeyOf(b)));
+  // A finished, abandoned or postponed game's flags are history: listed apart, not counted.
+  const active = unseen.filter((b) => !b.closed);
+  const afterGame = unseen.filter((b) => b.closed);
   const done = flags.filter((b) => seenSet.has(seenKeyOf(b)));
   const shownFlags = active.filter((b) => flagType === 'all' || b.flag.key === flagType);
   const markSeen = (b: BoardFlag, on: boolean) => {
@@ -274,7 +323,10 @@ export function MatchMonitor({
       {q.data && !q.data.dryRun && !q.data.reachable && (
         <div className="insights-callout alert mcs-alert" role="alert">
           <div>
-            <strong>Live scoring unavailable.</strong> {q.data.error}
+            <strong>Live scoring unavailable.</strong> {q.data.error}{' '}
+            {held
+              ? `Games show their last update from ${sastClock(held.at)}; nothing new is flagged until medicoach answers again.`
+              : 'Nothing is flagged until medicoach answers again.'}
           </div>
           {q.data.technical && (
             <details className="mcs-details">
@@ -287,9 +339,26 @@ export function MatchMonitor({
         </div>
       )}
 
+      {stillLiveYesterday > 0 && (
+        <div className="insights-callout warn" role="note" style={{ marginBottom: 12 }}>
+          <strong>
+            {plural(stillLiveYesterday, 'game')} from yesterday{' '}
+            {stillLiveYesterday === 1 ? 'is' : 'are'} still being scored.
+          </strong>{' '}
+          <button className="mm-link" onClick={() => setDate(yesterday)}>
+            View yesterday →
+          </button>
+        </div>
+      )}
+
       {q.isLoading ? (
         <div className="mcs-empty" role="status">
           Loading the day&apos;s games…
+        </div>
+      ) : disabled ? (
+        <div className="mcs-empty">
+          The medicoach sync isn&apos;t switched on for this union. Your platform operator turns it
+          on.
         </div>
       ) : q.isError ? (
         <div className="mcs-empty" role="alert">
@@ -396,9 +465,11 @@ export function MatchMonitor({
               {active.length === 0 ? (
                 <div className="mm-allclear">
                   <span aria-hidden="true">✓</span>
-                  {rows.length
-                    ? 'Every game is on track — no flags.'
-                    : 'No fixtures in a released series on this day.'}
+                  {!rows.length
+                    ? 'No fixtures in a released series on this day.'
+                    : unreachable
+                      ? 'Nothing to flag from what medicoach last told us.'
+                      : 'Every game is on track — no flags.'}
                 </div>
               ) : (
                 <ul className="mm-flagcards" aria-label="Flags">
@@ -406,6 +477,7 @@ export function MatchMonitor({
                     <FlagCard
                       key={b.id}
                       b={b}
+                      day={date}
                       nowMs={nowMs}
                       isNew={isNew(b)}
                       onOpen={() => setOpen(b.row.match.ref)}
@@ -415,6 +487,28 @@ export function MatchMonitor({
                 </ul>
               )}
 
+              {afterGame.length > 0 && (
+                <details className="mm-seen" data-testid="mm-after-game">
+                  <summary>After the game ({afterGame.length})</summary>
+                  <p className="mcs-note">
+                    Flags of games that are finished, abandoned or postponed — for the record, not
+                    for action now.
+                  </p>
+                  <ul className="mm-flagcards" aria-label="After the game">
+                    {afterGame.map((b) => (
+                      <FlagCard
+                        key={b.id}
+                        b={b}
+                        day={date}
+                        nowMs={nowMs}
+                        isNew={false}
+                        onOpen={() => setOpen(b.row.match.ref)}
+                        onSeen={() => markSeen(b, true)}
+                      />
+                    ))}
+                  </ul>
+                </details>
+              )}
               {done.length > 0 && (
                 <details className="mm-seen">
                   <summary>Seen ({done.length})</summary>
@@ -450,7 +544,7 @@ export function MatchMonitor({
               {/* ── The day in one line ── */}
               <div className="mm-daystats" data-testid="mm-kpis">
                 <span>
-                  <strong>{sum.matches}</strong> games
+                  <strong>{sum.games}</strong> game{sum.games === 1 ? '' : 's'}
                 </span>
                 <span>
                   <strong>{sum.live}</strong> live
@@ -470,11 +564,11 @@ export function MatchMonitor({
                     {rows.some((r) => r.undoApprox) ? '~' : ''}
                     {rows.reduce((n, r) => n + (r.undoCount ?? 0), 0)}
                   </strong>{' '}
-                  undos
+                  {rows.reduce((n, r) => n + (r.undoCount ?? 0), 0) === 1 ? 'undo' : 'undos'}
                 </span>
-                {rows.length - sum.matches > 0 && (
+                {sum.postponed > 0 && (
                   <span>
-                    <strong>{rows.length - sum.matches}</strong> postponed
+                    <strong>{sum.postponed}</strong> of them postponed
                   </span>
                 )}
               </div>
@@ -519,7 +613,12 @@ export function MatchMonitor({
                         </thead>
                         <tbody>
                           {shown.map((r) => (
-                            <GameRow key={r.match.ref} r={r} onOpen={() => setOpen(r.match.ref)} />
+                            <GameRow
+                              key={r.match.ref}
+                              r={r}
+                              day={date}
+                              onOpen={() => setOpen(r.match.ref)}
+                            />
                           ))}
                         </tbody>
                       </table>
@@ -534,32 +633,38 @@ export function MatchMonitor({
           )}
           {!!q.data?.unmatched && (
             <p className="mcs-note">
-              medicoach is also scoring {q.data.unmatched} game(s) on this day that aren&apos;t a
-              fixture here on this date — likely moved in one system and not the other.
+              medicoach is also scoring {plural(q.data.unmatched, 'game')} on this day that
+              {q.data.unmatched === 1 ? " isn't a fixture" : " aren't fixtures"} here on this date —
+              likely moved in one system and not the other.
             </p>
           )}
           {!!q.data?.parseFailures && (
             <p className="mcs-note">
-              {q.data.parseFailures} game(s) from medicoach couldn&apos;t be read and are left out;
-              the rest are shown.
+              {plural(q.data.parseFailures, 'game')} from medicoach couldn&apos;t be read and{' '}
+              {q.data.parseFailures === 1 ? 'is' : 'are'} left out; the rest are shown.
             </p>
           )}
         </>
       )}
 
-      {openRow && <GameDetail r={openRow} nowMs={nowMs} t={t} onClose={() => setOpen(null)} />}
+      {openRow && (
+        <GameDetail r={openRow} day={date} nowMs={nowMs} t={t} onClose={() => setOpen(null)} />
+      )}
     </div>
   );
 }
 
 function FlagCard({
   b,
+  day,
   nowMs,
   isNew,
   onOpen,
   onSeen,
 }: {
   b: BoardFlag;
+  /** The day the page shows (times on another day carry their date). */
+  day: string;
   nowMs: number;
   isNew: boolean;
   onOpen: () => void;
@@ -576,7 +681,7 @@ function FlagCard({
       <div className="mm-fc-main">
         <div className="mm-fc-type">
           <span className={`mm-fc-dot ${b.flag.tone}`} aria-hidden="true" />
-          {b.flag.tone === 'alert' ? 'Act now' : 'Watch'} · {type}
+          {b.closed ? 'After the game' : b.flag.tone === 'alert' ? 'Act now' : 'Watch'} · {type}
           {isNew && <span className="mm-new">New</span>}
         </div>
         <div className="mm-fc-title">{b.flag.label}</div>
@@ -586,10 +691,10 @@ function FlagCard({
           </strong>
           <span className="ump-sub">
             {' '}
-            · {m.seriesName}
+            · {m.time ?? 'Time TBC'} · {m.seriesName}
             {m.venue ? ` · ${m.venue}` : ''}
             {since !== null &&
-              ` · since ${sastClock(since)} (${fmtDuration((nowMs - since) / 60_000)})`}
+              ` · since ${sastWhen(since, day)} (${fmtDuration((nowMs - since) / 60_000)})`}
           </span>
         </div>
         {visible.length > 0 && (
@@ -660,7 +765,7 @@ function Threshold({
   );
 }
 
-function GameRow({ r, onOpen }: { r: MonitorRow; onOpen: () => void }) {
+function GameRow({ r, day, onOpen }: { r: MonitorRow; day: string; onOpen: () => void }) {
   const m = r.match;
   const live = m.live;
   const score = scoreLines(m);
@@ -668,7 +773,7 @@ function GameRow({ r, onOpen }: { r: MonitorRow; onOpen: () => void }) {
   const label = `${m.home} v ${m.away}`;
   return (
     <tr
-      className={`mm-row${r.flags.some((f) => f.tone === 'alert') ? ' alert' : ''}`}
+      className={`mm-row${r.flags.some((f) => f.tone === 'alert') ? ' alert' : ''}${r.stale ? ' stale' : ''}`}
       onClick={onOpen}
     >
       <td data-label="Game">
@@ -692,7 +797,7 @@ function GameRow({ r, onOpen }: { r: MonitorRow; onOpen: () => void }) {
         <div className="ump-sub">
           {live?.startedAt ? (
             <>
-              First ball {sastClock(live.startedAt)}
+              First ball {sastWhen(live.startedAt, day)}
               {r.lateMin !== null && r.lateMin > 0 && (
                 <span className={r.flags.some((f) => f.key === 'late') ? 'mm-late' : ''}>
                   {' '}
@@ -700,6 +805,8 @@ function GameRow({ r, onOpen }: { r: MonitorRow; onOpen: () => void }) {
                 </span>
               )}
             </>
+          ) : m.notInMedicoach ? (
+            'Not in medicoach yet'
           ) : (
             'No ball yet'
           )}
@@ -709,12 +816,20 @@ function GameRow({ r, onOpen }: { r: MonitorRow; onOpen: () => void }) {
         <Pill tone={phase.tone} dot={r.phase === 'live'}>
           {phase.label}
         </Pill>
-        {score.current && <div className="mm-score">{score.current}</div>}
-        {score.earlier.map((e) => (
-          <div key={e} className="ump-sub">
-            {e}
-          </div>
-        ))}
+        {m.result && <div className="mm-strong">{m.result.summary}</div>}
+        {m.result?.manual && <div className="ump-sub">Result set by the union office</div>}
+        <div className={m.result ? 'ump-sub' : ''}>
+          {score.current && (
+            <div className={m.result ? '' : 'mm-score'}>
+              {m.result ? `Live book: ${score.current}` : score.current}
+            </div>
+          )}
+          {score.earlier.map((e) => (
+            <div key={e} className="ump-sub">
+              {e}
+            </div>
+          ))}
+        </div>
       </td>
       <td data-label="Last input">
         {live?.lastInputAt ? (
@@ -724,7 +839,7 @@ function GameRow({ r, onOpen }: { r: MonitorRow; onOpen: () => void }) {
             >
               {sinceText(r.sinceInputMin)}
             </div>
-            <div className="ump-sub">at {sastClock(live.lastInputAt)}</div>
+            <div className="ump-sub">at {sastWhen(live.lastInputAt, day)}</div>
           </>
         ) : (
           <span className="ump-sub">—</span>
@@ -746,7 +861,7 @@ function GameRow({ r, onOpen }: { r: MonitorRow; onOpen: () => void }) {
       <td data-label="Finished">
         {live?.endedAt ? (
           <>
-            <div className="mm-strong">{sastClock(live.endedAt)}</div>
+            <div className="mm-strong">{sastWhen(live.endedAt, day)}</div>
             <div className="ump-sub">{fmtDuration(r.durationMin)} game</div>
           </>
         ) : r.durationMin !== null ? (
@@ -783,7 +898,9 @@ function GameRow({ r, onOpen }: { r: MonitorRow; onOpen: () => void }) {
           </div>
         ) : (
           <span className="ump-sub">
-            {r.phase === 'upcoming' || r.phase === 'off' ? '—' : 'On track'}
+            {r.phase === 'upcoming' || r.phase === 'off' || r.phase === 'unknown'
+              ? '—'
+              : 'On track'}
           </span>
         )}
       </td>
@@ -794,11 +911,13 @@ function GameRow({ r, onOpen }: { r: MonitorRow; onOpen: () => void }) {
 /** One game's day: flags, the timeline, delays, the scorer's corrections and the team sheets. */
 function GameDetail({
   r,
+  day,
   nowMs,
   t,
   onClose,
 }: {
   r: MonitorRow;
+  day: string;
   nowMs: number;
   t: MonitorThresholds;
   onClose: () => void;
@@ -819,26 +938,21 @@ function GameDetail({
   const width = (a: number, b: number) => `${Math.max(0.4, ((b - a) / span) * 100)}%`;
   const canDraw = Number.isFinite(from) && Number.isFinite(to) && span > 0 && first !== null;
 
+  const when = (iso: string | null | undefined) => (iso ? sastWhen(iso, day) : null);
+  // The run-up to the first ball is a "late start" only once it is over the threshold.
+  const late = r.flags.some((f) => f.key === 'late');
   const events: Array<[string, string | null]> = [
     ['Scheduled start', sched !== null ? sastClock(sched) : 'Time TBC'],
-    ['First ball', live?.startedAt ? sastClock(live.startedAt) : null],
+    ['First ball', when(live?.startedAt)],
     ...(live?.innings ?? []).flatMap(
       (i): Array<[string, string | null]> => [
         ...(i.number > 1
-          ? [
-              [`Innings ${i.number} starts`, i.startedAt ? sastClock(i.startedAt) : null] as [
-                string,
-                string | null,
-              ],
-            ]
+          ? [[`Innings ${i.number} starts`, when(i.startedAt)] as [string, string | null]]
           : []),
-        [`Innings ${i.number} ends`, i.endedAt ? sastClock(i.endedAt) : null],
+        [`Innings ${i.number} ends`, when(i.endedAt)],
       ],
     ),
-    [
-      live?.status === 'abandoned' ? 'Abandoned' : 'Game ends',
-      live?.endedAt ? sastClock(live.endedAt) : null,
-    ],
+    [live?.status === 'abandoned' ? 'Abandoned' : 'Game ends', when(live?.endedAt)],
   ];
   const players = live?.players ?? [];
 
@@ -854,13 +968,28 @@ function GameDetail({
           <Pill tone={PHASE[r.phase].tone} dot={r.phase === 'live'}>
             {PHASE[r.phase].label}
           </Pill>
-          {score.current && <span className="mm-score">{score.current}</span>}
+          {m.result && <strong>{m.result.summary}</strong>}
+          {score.current && (
+            <span className={m.result ? 'ump-sub' : 'mm-score'}>
+              {m.result ? `Live book: ${score.current}` : score.current}
+            </span>
+          )}
           {score.earlier.map((e) => (
             <span key={e} className="ump-sub">
               {e}
             </span>
           ))}
         </div>
+        {m.result?.manual && (
+          <p className="mcs-note">
+            The union office set this result; it stands over the live scoring shown with it.
+          </p>
+        )}
+        {r.stale && (
+          <p className="mcs-note">
+            medicoach can&apos;t be reached right now — this is the last state the page saw.
+          </p>
+        )}
         {r.flags.length > 0 && (
           <ul className="mm-detail-flags">
             {r.flags.map((f) => (
@@ -882,9 +1011,9 @@ function GameDetail({
           <div className="mm-line" aria-hidden="true">
             {sched !== null && first !== null && first > sched && (
               <span
-                className="mm-seg late"
+                className={`mm-seg ${late ? 'late' : 'pre'}`}
                 style={{ left: pct(sched), width: width(sched, first) }}
-                title="Late start"
+                title={late ? 'Late start' : 'Before the first ball'}
               />
             )}
             {(live?.innings ?? []).map((i) => {
@@ -936,7 +1065,8 @@ function GameDetail({
         {canDraw && (
           <div className="mm-legend">
             <span>
-              <i className="late" /> Late start
+              <i className={late ? 'late' : 'pre'} />{' '}
+              {late ? `Late start (${t.lateStartMin}+ min)` : 'Before the first ball'}
             </span>
             <span>
               <i className="inn" /> Innings 1
@@ -972,14 +1102,14 @@ function GameDetail({
                 <span>Last scorer input</span>
                 <strong>
                   {live?.lastInputAt
-                    ? `${sastClock(live.lastInputAt)} · ${sinceText(r.sinceInputMin)}`
+                    ? `${sastWhen(live.lastInputAt, day)} · ${sinceText(r.sinceInputMin)}`
                     : '—'}
                 </strong>
               </li>
               <li>
                 <span>Undo pressed</span>
                 <strong className={r.flags.some((f) => f.key === 'undo') ? 'mm-late' : ''}>
-                  {r.undoCount === null ? 'not reported' : `${undoText(r)} times`}
+                  {r.undoCount === null ? 'not reported' : timesText(r.undoCount, r.undoApprox)}
                 </strong>
               </li>
               <li>
@@ -995,7 +1125,7 @@ function GameDetail({
             {live ? (
               <>
                 <p className="mcs-note">
-                  {live.deliveries} balls scored
+                  {plural(live.deliveries, 'ball')} scored
                   {live.medianGapSec !== null
                     ? ` · typical gap ${fmtDuration(live.medianGapSec / 60, live.medianGapSec)}`
                     : ''}
@@ -1006,7 +1136,7 @@ function GameDetail({
                     {r.delays.map((g) => (
                       <li key={`${g.innings}-${g.over}`}>
                         <span>
-                          Innings {g.innings}, before ball {g.over}
+                          Innings {g.innings}, before ball {ballLabel(g.over)}
                           <span className="ump-sub">
                             {' '}
                             · {sastClock(Date.parse(g.at) - g.gapSec * 1000)}–{sastClock(g.at)}
@@ -1019,6 +1149,29 @@ function GameDetail({
                 ) : (
                   <div className="mcs-empty">None.</div>
                 )}
+                {r.minorGaps.length > 0 && (
+                  <>
+                    <p className="mcs-note" data-testid="mm-minor-gaps">
+                      {plural(r.minorGaps.length, 'shorter gap')} of 2–{t.ballGapMin} min (not
+                      flagged):
+                    </p>
+                    <ul className="mcs-list mm-events mm-muted">
+                      {r.minorGaps.map((g) => (
+                        <li key={`${g.innings}-${g.over}`}>
+                          <span>
+                            Innings {g.innings}, before ball {ballLabel(g.over)}
+                            <span className="ump-sub">
+                              {' '}
+                              · {sastWhen(Date.parse(g.at) - g.gapSec * 1000, day)}–
+                              {sastWhen(g.at, day)}
+                            </span>
+                          </span>
+                          <span className="ump-sub">{fmtDuration(g.gapSec / 60)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
                 {r.breaks.length > 0 && (
                   <>
                     <p className="mcs-note">Recorded by the scorer (not flagged):</p>
@@ -1027,7 +1180,7 @@ function GameDetail({
                         <li key={`${g.innings}-${g.over}`}>
                           <span>
                             {g.reason === 'drinks' ? 'Drinks' : 'Interruption'} · innings{' '}
-                            {g.innings}, before ball {g.over}
+                            {g.innings}, before ball {ballLabel(g.over)}
                             <span className="ump-sub">
                               {' '}
                               · {sastClock(Date.parse(g.at) - g.gapSec * 1000)}–{sastClock(g.at)}

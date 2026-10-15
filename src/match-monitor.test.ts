@@ -1,9 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_THRESHOLDS,
+  ballLabel,
   boardFlags,
   monitorRow,
+  plural,
   sastClock,
+  sastWhen,
+  timesText,
   sastToday,
   scheduledStartMs,
   scoreLines,
@@ -210,7 +214,9 @@ describe('match monitor', () => {
     ];
     expect(sortRows(rows).map((r) => r.match.fixtureId)).toEqual(['b', 'c', 'd', 'a', 'e']);
     expect(totals(rows)).toEqual({
+      games: 5,
       matches: 4,
+      postponed: 1,
       live: 1,
       done: 1,
       late: 2,
@@ -270,7 +276,8 @@ describe('match monitor', () => {
       'Ben Elsewhere — registered with Clares CC, not Umzinto',
       'Dee Pending — registration at Umzinto is inactive or awaiting a clearance',
     ]);
-    expect(unreg.since).toBe(iso('10:40'));
+    // Ben and Dee have played since the first ball; Ann's later arrival doesn't hide that.
+    expect(unreg.since).toBe(iso('10:05'));
     expect(added.label).toBe('2 players added during the match');
     expect(added.detail).toEqual([
       'Ann Added (Crusaders) at 10:40 — NOT registered',
@@ -326,5 +333,132 @@ describe('match monitor', () => {
       'a|late',
       'a|undo',
     ]);
+  });
+
+  it('fires a minute threshold at the threshold exactly, never 30 s early (F-022)', () => {
+    const m = fixture({ time: '10:00' });
+    const sec = (hhmmss: string) => Date.parse(`2026-10-04T${hhmmss}+02:00`);
+    expect(monitorRow(m, sec('10:14:59')).flags).toEqual([]);
+    expect(monitorRow(m, sec('10:15:00')).flags.map((f) => f.key)).toEqual(['no-scoring']);
+    // Innings break: 29 min 42 s is under a 30-min threshold.
+    const brk = live({
+      status: 'innings_break',
+      innings: [{ ...live().innings[0], endedAt: iso('11:00') }],
+    });
+    expect(monitorRow(fixture({ live: brk }), sec('11:29:42')).flags).toEqual([]);
+    expect(monitorRow(fixture({ live: brk }), sec('11:30:00')).flags[0].key).toBe('long-break');
+    // A quiet scorer at 9 min 50 s is not yet "10 min".
+    expect(
+      monitorRow(fixture({ live: live({ lastInputAt: iso('11:00') }) }), sec('11:09:50')).flags,
+    ).toEqual([]);
+  });
+
+  it('while medicoach is unreachable nothing is flagged from missing data (F-042)', () => {
+    // No known state: past its start the game is "unknown", not "no live scoring".
+    const none = monitorRow(fixture(), at('11:00'), DEFAULT_THRESHOLDS, { stale: true });
+    expect([none.phase, none.flags, none.stale]).toEqual(['unknown', [], true]);
+    // Before its start it is simply upcoming.
+    expect(monitorRow(fixture(), at('09:00'), DEFAULT_THRESHOLDS, { stale: true }).phase).toBe(
+      'upcoming',
+    );
+    // The last known state: still live, but a silence that is only our outage is not flagged.
+    const held = monitorRow(fixture({ live: live() }), at('11:30'), DEFAULT_THRESHOLDS, {
+      stale: true,
+    });
+    expect(held.phase).toBe('live');
+    expect(held.flags).toEqual([]);
+    // What the last state did show still stands (a player not registered).
+    const unreg = monitorRow(
+      fixture({
+        live: live({
+          players: [
+            {
+              side: 'home',
+              name: 'X',
+              addedDuringMatch: false,
+              addedAt: null,
+              check: 'unregistered',
+            },
+          ],
+        }),
+      }),
+      at('11:30'),
+      DEFAULT_THRESHOLDS,
+      { stale: true },
+    );
+    expect(unreg.flags.map((f) => f.key)).toEqual(['unregistered']);
+  });
+
+  it('a fixture medicoach does not have yet is not the scorer’s fault (F-049)', () => {
+    const r = monitorRow(fixture({ notInMedicoach: true }), at('10:30'));
+    expect(r.phase).toBe('awaiting');
+    expect(r.flags.map((f) => [f.key, f.tone])).toEqual([['not-linked', 'warn']]);
+    expect(r.flags[0].label).toBe('Not in medicoach yet · 30 min past start');
+  });
+
+  it('a finished or abandoned game’s flags are history; unregistered players count once (F-024)', () => {
+    const walkOn = {
+      side: 'home' as const,
+      name: 'Walk On',
+      addedDuringMatch: false,
+      addedAt: null,
+      check: 'unregistered' as const,
+    };
+    const rows = [
+      monitorRow(
+        fixture({
+          fixtureId: 'a',
+          live: live({ status: 'completed', endedAt: iso('13:00'), players: [walkOn] }),
+        }),
+        at('14:00'),
+      ),
+      monitorRow(
+        fixture({ fixtureId: 'b', live: live({ lastInputAt: iso('13:59'), players: [walkOn] }) }),
+        at('14:00'),
+      ),
+    ];
+    expect(boardFlags(rows).map((b) => [b.row.match.fixtureId, b.flag.key, b.closed])).toEqual([
+      ['a', 'unregistered', true],
+      ['b', 'unregistered', false],
+    ]);
+    expect(totals(rows).unregistered).toBe(1);
+  });
+
+  it('labels balls cricket-style, pluralises, and dates times off the viewed day (F-020/F-012/F-047)', () => {
+    expect(ballLabel('4.0')).toBe('3.6');
+    expect(ballLabel('2.1')).toBe('2.1');
+    expect(ballLabel('0.3')).toBe('0.3');
+    expect([plural(1, 'game'), plural(2, 'game'), plural(0, 'undo')]).toEqual([
+      '1 game',
+      '2 games',
+      '0 undos',
+    ]);
+    expect([timesText(1), timesText(2), timesText(1, true)]).toEqual([
+      'once',
+      '2 times',
+      '~1 time',
+    ]);
+    expect(sastWhen(iso('10:07'), '2026-10-04')).toBe('10:07');
+    expect(sastWhen(iso('10:07'), '2026-10-05')).toBe('Sun 4 Oct 10:07');
+    const gaps = monitorRow(
+      fixture({
+        live: live({
+          longGaps: [
+            { innings: 1, over: '4.0', at: iso('10:40'), gapSec: 300, reason: null },
+            { innings: 1, over: '1.4', at: iso('10:20'), gapSec: 219, reason: null },
+          ],
+        }),
+      }),
+      at('11:02'),
+    );
+    expect(gaps.flags[0].detail).toEqual(['Innings 1, before ball 3.6: 5 min (10:35–10:40)']);
+    // The 3.6-min pause is under the threshold: not flagged, but kept for the detail (F-014).
+    expect(gaps.minorGaps.map((g) => g.gapSec)).toEqual([219]);
+    expect(
+      monitorRow(fixture({ live: live({ undoCount: 1 }) }), at('11:02'), {
+        ...DEFAULT_THRESHOLDS,
+        undoMax: 1,
+      }).flags[0].label,
+    ).toBe('Undo used once');
   });
 });
