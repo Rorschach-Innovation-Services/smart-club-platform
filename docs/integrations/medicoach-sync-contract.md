@@ -479,8 +479,8 @@ Response 200 (example: `live-day.json`):
       reason: "drinks" | "interruption" | null  // a break the scorer recorded inside the gap
     }>,
     undoCount: number | null,   // times the scorer undid a ball; null = not known for this match
-    undoCountExact: boolean | null, // true = client-stamped exact count, false = server
-                                // approximation; null exactly when undoCount is null
+    undoCountExact: boolean | null, // true = client-stamped exact count, false = may be
+                                // understated (see below); null exactly when undoCount is null
     players: Array<{            // at most 60: both team sheets, then anyone added during play
       side: "home" | "away",
       name: string,             // as the scorer has it (max 120 chars)
@@ -508,14 +508,18 @@ Field limits (medicoach clamps before sending, so one long value never fails a w
   through Edit Overs is never an undo.
 - **Exact** (`undoCountExact: true`): the scoring clients (web and mobile) stamp one running
   counter per match on every live-scoring save; medicoach stores the highest value seen. Clients
-  seed their counter from the stored value when they load the match, so reloads, device switches
-  and a second scorer never reset it. Once any save for a match carries a stamped counter, the
-  match is latched to the exact source and the fallback below never writes to it again.
-- **Approximate fallback** (`undoCountExact: false`): until a match is latched, saves from
+  seed their counter from the stored value when they load the match, so reloads and device
+  switches never reset it. A second scorer never lowers it either, but once more than one scorer
+  has stamped the match it is served as approximate (below). Once any save for a match carries a
+  stamped counter, the match is latched to the exact source and the fallback below never writes
+  to it again.
+- **Approximate** (`undoCountExact: false`): the count may be understated — it comes from the
+  server-side estimate for unstamped saves, or more than one scorer has stamped this match.
+  Smart club shows it as `~N`. The estimate: until a match is latched, saves from
   clients that don't stamp (older builds) are diffed on the server: delivery ids at the end of an
   innings present in the previous save and missing from the new one count as undos. Autosave
   batching can hide an undo followed by a re-score, and trailing Edit-Overs deletes look the same,
-  so this is a lower-confidence count: smart club shows it as `~N`.
+  so this is a lower-confidence count.
 - `undoCount: null` (and `undoCountExact: null`) when neither source is available for the match.
   Smart club then leaves the undo flag dormant.
 

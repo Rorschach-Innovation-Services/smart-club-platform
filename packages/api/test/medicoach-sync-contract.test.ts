@@ -184,7 +184,7 @@ describe('shared contract checksum', () => {
   const DOCS = path.resolve(EXAMPLES, '..');
   const PINNED: Record<string, string> = {
     'medicoach-sync-contract.md':
-      '83319bb307c345de36d43f44fded0b6e022a48f837ecfa6b4ea3301b176b1997',
+      'c49fda649df561be8474c3dcda42dea59682b03d0c27cafc365e5f7acdc89ab9',
     'medicoach-sync-examples/changes-knockout-reschedule.json':
       '7040b5a70f49a4adcefe173659126e383c1d0813c5ab0581748fb6e4e8634aa4',
     'medicoach-sync-examples/changes-live-result.json':
