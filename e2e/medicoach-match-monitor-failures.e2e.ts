@@ -651,10 +651,19 @@ test('medicoach down: plain-language error, fixtures still listed, recovers', as
 
 test('a page opened during an outage shows games as unknown and flags nothing', async ({
   page,
+  request,
 }) => {
   needsLive();
   await stopStub();
   try {
+    // The API reuses a good answer for 15 s: open the page only once it says unreachable, so
+    // the page has never seen a live state (a cold open mid-outage).
+    await expect(async () => {
+      const r = await request.get(`${API_BASE}/integrations/medicoach/live?date=${TODAY}`, {
+        headers: admin(),
+      });
+      expect(((await r.json()) as { reachable: boolean }).reachable).toBe(false);
+    }).toPass({ timeout: 45_000, intervals: [2_000, 3_000, 5_000] });
     await openMonitor(page, 'Every game');
     const banner = page.getByRole('alert').filter({ hasText: 'Live scoring unavailable.' });
     await expect(banner).toContainText('Nothing is flagged until medicoach answers again.');
