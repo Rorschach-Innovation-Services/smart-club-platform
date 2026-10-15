@@ -722,9 +722,13 @@ test('day navigation: yesterday polls, tomorrow does not, an empty day says so',
     if (r.url().includes(`/integrations/medicoach/live?date=${YESTERDAY}`)) pagePolls++;
   };
   page.on('request', onReq);
-  await page.waitForTimeout(33_000);
+  await expect
+    .poll(() => pagePolls, {
+      message: 'yesterday is re-fetched on the 30 s poll',
+      timeout: 35_000,
+    })
+    .toBeGreaterThanOrEqual(1);
   page.off('request', onReq);
-  expect(pagePolls, 'yesterday is re-fetched on the 30 s poll').toBeGreaterThanOrEqual(1);
   expect(liveCalls.filter((d) => d === YESTERDAY).length).toBeGreaterThanOrEqual(before);
 
   // Tomorrow: shows the upcoming game, no polling.

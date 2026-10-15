@@ -216,6 +216,7 @@ export async function checkPlayers(
     const nowMs = (deps.now ?? (() => new Date()))().getTime();
     if (hit && nowMs - hit.at < ROSTER_TTL_MS) return hit.rows;
     const rows = deps.listPlayers(tenant, clubId);
+    for (const [k, v] of rosterCache) if (nowMs - v.at >= ROSTER_TTL_MS) rosterCache.delete(k);
     rosterCache.set(key, { at: nowMs, rows });
     // A failed read is never cached; the next poll tries again.
     rows.catch(() => {
@@ -486,7 +487,13 @@ export async function buildMatchMonitor(
         ' The monitor keeps trying while this page is open.',
       ),
       technical: err.message,
-      matches: day.map((m) => ({ ...m, live: null })),
+      // A completed fixture keeps its stored result through the outage.
+      matches: await Promise.all(
+        day.map(async (m) => {
+          const result = m.fixtureStatus === 'completed' ? await resultOf(m) : undefined;
+          return { ...m, ...(result ? { result } : {}), live: null };
+        }),
+      ),
       unmatched: 0,
       parseFailures: 0,
     };
@@ -523,6 +530,9 @@ export async function buildMatchMonitor(
     parseFailures,
   };
   // Only a good answer is reused; a failure is retried on the next poll.
+  // Sweep expired entries so the cache stays bounded by live days, not every day ever asked for.
+  for (const [k, v] of responseCache)
+    if (now().getTime() - v.at >= RESPONSE_TTL_MS) responseCache.delete(k);
   responseCache.set(cacheKey, { at: now().getTime(), payload });
   return payload;
 }

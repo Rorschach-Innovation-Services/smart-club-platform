@@ -636,6 +636,44 @@ describe('match monitor', () => {
     assert.equal(by.get('f4')!.result, undefined);
   });
 
+  test('medicoach down: a completed fixture keeps its stored result and override marker', async () => {
+    const DAY2 = '2026-10-06';
+    await repo.putSeries(
+      T,
+      series('s-done', {
+        startDate: DAY2,
+        fixtures: [
+          { id: 'h1', date: DAY2, time: '09:00', home: 'a', away: 'b', status: 'completed' },
+          { id: 'h2', date: DAY2, time: '13:30', home: 'c', away: 'd' },
+        ],
+      }),
+    );
+    await repo.putFixtureResultIfNewer(T, {
+      seriesId: 's-done',
+      fixtureId: 'h1',
+      ref: REF('s-done', 'h1'),
+      orderAt: '2026-10-06T10:05:00.000Z',
+      storedAt: '2026-10-06T10:05:00.000Z',
+      summary: 'Crusaders won by 9 wickets',
+      resultSource: 'manual',
+    } as never);
+    httpFail = 502;
+    try {
+      const r = (await (await get(`?date=${DAY2}`)).json()) as MatchMonitorResponse;
+      assert.equal(r.reachable, false);
+      const by = new Map(r.matches.map((m) => [m.fixtureId, m]));
+      assert.deepEqual(by.get('h1')!.result, {
+        summary: 'Crusaders won by 9 wickets',
+        manual: true,
+      });
+      assert.equal(by.get('h1')!.live, null);
+      assert.equal(by.get('h2')!.result, undefined, 'a fixture that is not over is not decorated');
+    } finally {
+      httpFail = null;
+      await repo.deleteSeries(T, 's-done');
+    }
+  });
+
   test('accepting a postponement of a game medicoach is scoring needs a confirmation (F-047)', async () => {
     const today = new Date(Date.now() + 2 * 3600_000).toISOString().slice(0, 10);
     const later = new Date(Date.parse(`${today}T00:00:00Z`) + 7 * 86_400_000)

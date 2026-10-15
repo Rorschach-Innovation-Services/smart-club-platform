@@ -8,6 +8,7 @@ import {
   sastClock,
   sastWhen,
   timesText,
+  sastHour,
   sastToday,
   scheduledStartMs,
   scoreLines,
@@ -70,6 +71,8 @@ describe('match monitor', () => {
     expect(scheduledStartMs({ date: '2026-10-04', time: undefined })).toBeNull();
     expect(sastClock(iso('13:07'))).toBe('13:07');
     expect(sastToday(Date.parse('2026-10-04T23:30:00Z'))).toBe('2026-10-05');
+    expect(sastHour(Date.parse('2026-10-04T23:30:00Z'))).toBe(1);
+    expect(sastHour(Date.parse('2026-10-04T08:59:00Z'))).toBe(10);
   });
 
   it('a game on time and scoring is live with no flags', () => {

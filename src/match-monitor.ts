@@ -8,6 +8,7 @@
  * console reads the same everywhere.
  */
 import type { LiveGap, MonitorMatch, MonitorPlayer } from './api';
+// Deliberate exception to the mirror convention: tenant-time is a pure module with no contract deps.
 import { TENANT_UTC_OFFSET_MINUTES, tenantDate } from '../packages/api/src/tenant-time';
 
 export interface MonitorThresholds {
@@ -226,6 +227,11 @@ export function sastWhen(iso: string | number | null | undefined, day: string): 
 /** Today's date in SAST, YYYY-MM-DD. */
 export function sastToday(nowMs: number = Date.now()): string {
   return tenantDate(new Date(nowMs));
+}
+
+/** The hour of the day (0-23) in SAST. */
+export function sastHour(nowMs: number = Date.now()): number {
+  return new Date(nowMs + SAST_OFFSET_MS).getUTCHours();
 }
 
 /** "1 h 05 min", "12 min", "45 s". */

@@ -33,16 +33,16 @@ export function syncHealthStatus(health: SyncHealth | null, dryRun: boolean): Sy
 export type LiveEndpointStatus = 'reachable' | 'failing' | 'never';
 
 /**
- * The live endpoint (match monitor) in one word, from SYNCHEALTH#'s live facet: failing when
- * the last failure is newer than the last good answer (or there was none), reachable after a
- * good answer, never before the monitor has made a real fetch.
- */
-/**
  * How long a links-unconfigured observation stays current. The flag is only re-observed on a
  * day with a live match, so an older one is shown as nothing rather than as today's truth.
  */
 export const LIVE_LINKS_FLAG_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * The live endpoint (match monitor) in one word, from SYNCHEALTH#'s live facet: failing when
+ * the last failure is newer than the last good answer (or there was none), reachable after a
+ * good answer, never before the monitor has made a real fetch.
+ */
 export function liveEndpointView(
   health: SyncHealth | null,
   now: number = Date.now(),

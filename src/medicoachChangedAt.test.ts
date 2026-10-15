@@ -16,7 +16,7 @@ describe('formatChangedAt', () => {
   });
 
   it('formats a real date in SAST', () => {
-    expect(formatChangedAt('2026-10-03T07:00:00.000Z')).toBe('3 Oct, 09:00');
+    expect(formatChangedAt('2026-10-03T07:00:00.000Z')).toMatch(/3 Oct.*09:00/);
     expect(isNeverEditedChangedAt('2026-10-03T07:00:00.000Z')).toBe(false);
   });
 

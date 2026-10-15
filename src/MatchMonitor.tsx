@@ -25,6 +25,7 @@ import {
   monitorRow,
   plural,
   sastClock,
+  sastHour,
   sastToday,
   sastWhen,
   scheduledStartMs,
@@ -155,7 +156,7 @@ export function MatchMonitor({
   // Yesterday too: an evening game still running after midnight belongs to yesterday's date.
   const yesterday = shiftDay(today, -1);
   const isLiveDay = isToday || date === yesterday;
-  const sastHour = new Date(nowMs + 2 * 3_600_000).getUTCHours();
+  const hourNow = sastHour(nowMs);
 
   // A clock for "x min ago" and the flags, independent of the data refresh.
   useEffect(() => {
@@ -172,7 +173,7 @@ export function MatchMonitor({
   });
   // A fresh load after midnight opens on the new day; yesterday's evening game may still be
   // on. Watched (same poll) only on Today and only in the morning, to say so on the page.
-  const watchYesterday = isToday && sastHour < YESTERDAY_WATCH_UNTIL_HOUR;
+  const watchYesterday = isToday && hourNow < YESTERDAY_WATCH_UNTIL_HOUR;
   const qy = useQuery({
     queryKey: qk.matchMonitor(yesterday),
     queryFn: () => api.getMatchMonitor(yesterday),
@@ -188,12 +189,21 @@ export function MatchMonitor({
   const lastGood = useRef<{ date: string; at: number; byRef: Map<string, api.LiveMatch> } | null>(
     null,
   );
-  if (q.data && !q.data.dryRun && q.data.reachable && q.data.date === date)
-    lastGood.current = {
-      date,
-      at: q.dataUpdatedAt || Date.now(),
-      byRef: new Map(q.data.matches.flatMap((m) => (m.live ? [[m.ref, m.live]] : []))),
-    };
+  const good = useMemo(
+    () =>
+      q.data && !q.data.dryRun && q.data.reachable && q.data.date === date
+        ? {
+            date,
+            at: q.dataUpdatedAt || Date.now(),
+            byRef: new Map(q.data.matches.flatMap((m) => (m.live ? [[m.ref, m.live]] : []))),
+          }
+        : null,
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- dataUpdatedAt marks a new answer
+    [q.dataUpdatedAt, date],
+  );
+  useEffect(() => {
+    if (good) lastGood.current = good;
+  }, [good]);
   const unreachable = !!q.data && !q.data.dryRun && !q.data.reachable;
   const held = unreachable && lastGood.current?.date === date ? lastGood.current : null;
   const disabled = q.error instanceof api.ApiError && q.error.status === 409;
