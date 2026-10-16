@@ -373,6 +373,12 @@ describe('match monitor', () => {
     );
     assert.equal(parsed.abandonReason, null);
     assert.equal(parsed.oversChangeReason, 'agreed');
+    // The clamp counts code points: an emoji straddling 200 is kept whole, never split.
+    const emoji = contract.LiveMatchSchema.parse(
+      liveMatch(f2, { abandonReason: `${'y'.repeat(199)}🌧️rain` }),
+    ).abandonReason!;
+    assert.equal(emoji, `${'y'.repeat(199)}🌧`);
+    assert.ok(!/[\uD800-\uDBFF]$/.test(emoji));
     assert.equal(
       contract.LiveMatchSchema.parse(liveMatch(f2, { oversChangeReason: 'correction' }))
         .oversChangeReason,

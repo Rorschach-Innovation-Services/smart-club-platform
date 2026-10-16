@@ -105,6 +105,13 @@ describe('match monitor', () => {
     expect(row('rain')).toBe('Shortened — rain / bad light');
     expect(row('correction')).toBeNull();
     expect(monitorRow(fixture({ live: live() }), at('11:02')).shortenedNote).toBeNull();
+    // A fixture smart club marked postponed never carries a stale note.
+    const off = monitorRow(
+      fixture({ fixtureStatus: 'postponed', live: live({ oversChangeReason: 'rain' }) }),
+      at('11:02'),
+    );
+    expect(off.phase).toBe('off');
+    expect(off.shortenedNote).toBeNull();
   });
 
   it('a game on time and scoring is live with no flags', () => {

@@ -332,7 +332,7 @@ export type OversChangeReason = (typeof OVERS_CHANGE_REASONS)[number];
 
 function abandonReasonOrNull(v: unknown): string | null {
   if (typeof v !== 'string') return null;
-  const t = v.trim().slice(0, ABANDON_REASON_MAX).trim();
+  const t = [...v.trim()].slice(0, ABANDON_REASON_MAX).join('').trim();
   return t || null;
 }
 

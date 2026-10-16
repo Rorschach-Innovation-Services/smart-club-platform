@@ -475,7 +475,7 @@ export function monitorRow(
       phase === 'abandoned' && typeof live?.abandonReason === 'string' && live.abandonReason.trim()
         ? live.abandonReason.trim()
         : null,
-    shortenedNote: shortenedNote(live?.oversChangeReason),
+    shortenedNote: phase === 'off' ? null : shortenedNote(live?.oversChangeReason),
     flags,
   };
 }

@@ -453,6 +453,30 @@ describe('match monitor tab', () => {
     ).toBeInTheDocument();
   });
 
+  it("an abandoned game's After-the-game card names the reason", async () => {
+    const base = monitor().matches[0];
+    vi.mocked(api.getMatchMonitor).mockResolvedValue(
+      monitor({
+        matches: [
+          {
+            ...base,
+            // A flag (undo over the threshold) so the closed game has a card.
+            live: liveGame({
+              status: 'abandoned',
+              endedAt: new Date(Date.now() - 60_000).toISOString(),
+              undoCount: 50,
+              abandonReason: 'Bad light',
+            }),
+          },
+        ],
+      }),
+    );
+    renderPage(baseStatus());
+    const cards = await screen.findByRole('list', { name: 'After the game' });
+    // One line per card (the game may carry more than one closed flag).
+    expect(within(cards).getAllByText('Abandoned — Bad light').length).toBeGreaterThan(0);
+  });
+
   it('an outage keeps the last known state and raises no flags from missing data (F-042)', async () => {
     const good = monitor();
     good.matches[0] = { ...good.matches[0], live: liveGame() };

@@ -466,7 +466,7 @@ Response 200 (example: `live-day.json`):
     abandonReason: string | null, // the scorer's recorded reason, only when status is "abandoned"
     lastInputAt: string | null, // latest scoring save of any kind
     oversPerSide: number | null,
-    oversChangeReason: "rain" | "agreed" | "correction" | null, // why the game is shorter (see below)
+    oversChangeReason: "rain" | "agreed" | "correction" | null, // the latest overs change's reason (see below)
     innings: Array<{            // at most 4, in order
       number: number,           // 1..4
       battingSide: "home" | "away" | null,
@@ -535,7 +535,7 @@ kept), `players` ≤ 60.
 - `abandonReason`: the reason the scorer recorded with the abandonment (the terminal marker's
   reason text), clamped to 200 chars. `null` for every other status, and for an abandonment with
   no recorded reason.
-- `oversChangeReason`: set when the scorer shortened the game's overs and recorded why — `rain`
+- `oversChangeReason`: the latest overs change's recorded reason, when the scorer gave one — `rain`
   (rain or bad light cut the overs), `agreed` (the captains agreed a shorter game) or
   `correction` (the scorer fixed a setup mistake; consumers should show nothing for a
   correction). `null` when the overs were never changed or no reason was recorded. Consumers
