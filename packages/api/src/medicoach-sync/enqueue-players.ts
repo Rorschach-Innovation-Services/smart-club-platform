@@ -30,12 +30,12 @@ import { pathToFileURL } from 'node:url';
 import { medicoachSyncSecret, medicoachSyncUrl } from '../env.js';
 import { playerSyncEnabled, unclassifiedLeagueKeys } from './player-placement.js';
 import {
-  PLAYER_PUSH_MAX,
   PlayerPushEntrySchema,
   type PlayerPushEntry,
 } from '../medicoach-sync-contract.js';
 import {
   buildPlayerEntry,
+  playerPushBatchSize,
   intentOf,
   loadPlayerSyncSnapshot,
   possibleDuplicates,
@@ -193,12 +193,15 @@ async function main(): Promise<void> {
     const missingTeams = new Map<string, number>();
     let heldRemovals = 0;
     let failedBatches = 0;
-    for (let i = 0; i < entries.length; i += PLAYER_PUSH_MAX) {
+    // Same batch size as the real flush: MEDICOACH_SYNC_BATCH_SIZE, else the contract cap.
+    // A 50-player prediction batch times out behind API Gateway's 29 s just like a real one.
+    const batchSize = playerPushBatchSize();
+    for (let i = 0; i < entries.length; i += batchSize) {
       try {
         // eslint-disable-next-line no-await-in-loop -- one batch at a time, like the flush
         const res = await postPlayerBatch(
           tenant,
-          entries.slice(i, i + PLAYER_PUSH_MAX),
+          entries.slice(i, i + batchSize),
           {
             url,
             secret,
