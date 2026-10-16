@@ -335,6 +335,57 @@ describe('match monitor', () => {
     assert.equal(r.matches.find((m) => m.fixtureId === 'f2')!.live, null);
   });
 
+  test('abandonReason and oversChangeReason are salvaged: value, clamp, unknown → null, absent → null', async () => {
+    const f2 = REF('s1', 'f2');
+    const f3 = REF('s1', 'f4');
+    body = {
+      version: 1,
+      tenant: T,
+      date: DAY,
+      generatedAt: '2026-10-04T08:42:00.000Z',
+      matches: [
+        liveMatch(REF('s1', 'f1'), {
+          status: 'abandoned',
+          abandonReason: 'Waterlogged outfield',
+          oversChangeReason: 'rain',
+        }),
+        liveMatch(f2, {
+          status: 'abandoned',
+          abandonReason: 'x'.repeat(260),
+          oversChangeReason: 'hail',
+        }),
+        // Absent fields (an older medicoach) read as null.
+        liveMatch(f3),
+      ],
+    };
+    const r = (await (await get(`?date=${DAY}`)).json()) as MatchMonitorResponse;
+    assert.equal(r.parseFailures, 0);
+    const by = (id: string) => r.matches.find((m) => m.fixtureId === id)!.live!;
+    assert.equal(by('f1').abandonReason, 'Waterlogged outfield');
+    assert.equal(by('f1').oversChangeReason, 'rain');
+    assert.equal(by('f2').abandonReason, 'x'.repeat(200));
+    assert.equal(by('f2').oversChangeReason, null);
+    assert.equal(by('f4').abandonReason, null);
+    assert.equal(by('f4').oversChangeReason, null);
+    // A non-string reason is coerced to null rather than dropping the match.
+    const parsed = contract.LiveMatchSchema.parse(
+      liveMatch(f2, { abandonReason: 42, oversChangeReason: 'agreed' }),
+    );
+    assert.equal(parsed.abandonReason, null);
+    assert.equal(parsed.oversChangeReason, 'agreed');
+    // The clamp counts code points: an emoji straddling 200 is kept whole, never split.
+    const emoji = contract.LiveMatchSchema.parse(
+      liveMatch(f2, { abandonReason: `${'y'.repeat(199)}🌧️rain` }),
+    ).abandonReason!;
+    assert.equal(emoji, `${'y'.repeat(199)}🌧`);
+    assert.ok(!/[\uD800-\uDBFF]$/.test(emoji));
+    assert.equal(
+      contract.LiveMatchSchema.parse(liveMatch(f2, { oversChangeReason: 'correction' }))
+        .oversChangeReason,
+      'correction',
+    );
+  });
+
   test('a repeat poll within the cache window reuses the answer', async () => {
     await get(`?date=${DAY}`);
     const r = (await (await get(`?date=${DAY}`)).json()) as MatchMonitorResponse;

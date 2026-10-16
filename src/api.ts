@@ -1239,6 +1239,10 @@ export interface LiveMatch {
    * (shown as "~N"); null/absent when undoCount is null.
    */
   undoCountExact?: boolean | null;
+  /** The scorer's recorded reason for an abandonment (≤ 200 chars); null/absent otherwise. */
+  abandonReason?: string | null;
+  /** Why the overs were shortened; null/absent when never changed or no reason was recorded. */
+  oversChangeReason?: 'rain' | 'agreed' | 'correction' | null;
   /** Each side's players, checked against the club rosters. */
   players: MonitorPlayer[];
   medicoachMatchUrl: string | null;
