@@ -121,6 +121,10 @@ export interface MonitorRow {
    * the page saw (or none), so nothing is flagged from what is missing.
    */
   stale: boolean;
+  /** The scorer's reason, for an abandoned game only; null otherwise. */
+  abandonReason: string | null;
+  /** A muted note when the overs were cut for rain or by agreement; null otherwise. */
+  shortenedNote: string | null;
   flags: MonitorFlag[];
 }
 
@@ -467,8 +471,20 @@ export function monitorRow(
     playersAdded: added.length,
     ineligible: ineligible.length,
     stale,
+    abandonReason:
+      phase === 'abandoned' && typeof live?.abandonReason === 'string' && live.abandonReason.trim()
+        ? live.abandonReason.trim()
+        : null,
+    shortenedNote: shortenedNote(live?.oversChangeReason),
     flags,
   };
+}
+
+/** Why a game was shortened, in the page's words. A scorer's correction shows nothing. */
+export function shortenedNote(reason: unknown): string | null {
+  if (reason === 'rain') return 'Shortened — rain / bad light';
+  if (reason === 'agreed') return 'Shortened by agreement';
+  return null;
 }
 
 /** "84/3 (12.4)" for the innings now batting (or the last one), plus the earlier innings. */

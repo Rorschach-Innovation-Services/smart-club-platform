@@ -707,6 +707,9 @@ function FlagCard({
               ` · since ${sastWhen(since, day)} (${fmtDuration((nowMs - since) / 60_000)})`}
           </span>
         </div>
+        {b.closed && b.row.abandonReason && (
+          <div className="ump-sub">Abandoned — {b.row.abandonReason}</div>
+        )}
         {visible.length > 0 && (
           <ul className="mm-fc-detail">
             {visible.map((d) => (
@@ -826,6 +829,8 @@ function GameRow({ r, day, onOpen }: { r: MonitorRow; day: string; onOpen: () =>
         <Pill tone={phase.tone} dot={r.phase === 'live'}>
           {phase.label}
         </Pill>
+        {r.abandonReason && <div className="ump-sub">— {r.abandonReason}</div>}
+        {r.shortenedNote && <div className="ump-sub">{r.shortenedNote}</div>}
         {m.result && <div className="mm-strong">{m.result.summary}</div>}
         {m.result?.manual && <div className="ump-sub">Result set by the union office</div>}
         <div className={m.result ? 'ump-sub' : ''}>
@@ -962,7 +967,12 @@ function GameDetail({
         [`Innings ${i.number} ends`, when(i.endedAt)],
       ],
     ),
-    [live?.status === 'abandoned' ? 'Abandoned' : 'Game ends', when(live?.endedAt)],
+    [
+      live?.status === 'abandoned'
+        ? `Abandoned${r.abandonReason ? ` — ${r.abandonReason}` : ''}`
+        : 'Game ends',
+      when(live?.endedAt),
+    ],
   ];
   const players = live?.players ?? [];
 
@@ -995,6 +1005,8 @@ function GameDetail({
             The union office set this result; it stands over the live scoring shown with it.
           </p>
         )}
+        {r.abandonReason && <p className="mcs-note">Abandoned — {r.abandonReason}</p>}
+        {r.shortenedNote && <p className="mcs-note">{r.shortenedNote}</p>}
         {r.stale && (
           <p className="mcs-note">
             medicoach can&apos;t be reached right now — this is the last state the page saw.

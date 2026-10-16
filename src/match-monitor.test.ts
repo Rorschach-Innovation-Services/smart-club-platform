@@ -12,6 +12,7 @@ import {
   sastToday,
   scheduledStartMs,
   scoreLines,
+  shortenedNote,
   sortRows,
   totals,
   undoText,
@@ -73,6 +74,37 @@ describe('match monitor', () => {
     expect(sastToday(Date.parse('2026-10-04T23:30:00Z'))).toBe('2026-10-05');
     expect(sastHour(Date.parse('2026-10-04T23:30:00Z'))).toBe(1);
     expect(sastHour(Date.parse('2026-10-04T08:59:00Z'))).toBe(10);
+  });
+
+  it('an abandoned game carries the scorer reason; any other phase never does', () => {
+    const ab = monitorRow(
+      fixture({
+        live: live({ status: 'abandoned', endedAt: iso('11:00'), abandonReason: '  Rain  ' }),
+      }),
+      at('11:30'),
+    );
+    expect(ab.phase).toBe('abandoned');
+    expect(ab.abandonReason).toBe('Rain');
+    expect(
+      monitorRow(fixture({ live: live({ abandonReason: 'Rain' }) }), at('11:02')).abandonReason,
+    ).toBeNull();
+    expect(
+      monitorRow(fixture({ live: live({ status: 'abandoned', abandonReason: null }) }), at('11:30'))
+        .abandonReason,
+    ).toBeNull();
+  });
+
+  it('a shortened game notes rain or agreement; a correction, null or unknown shows nothing', () => {
+    expect(shortenedNote('rain')).toBe('Shortened — rain / bad light');
+    expect(shortenedNote('agreed')).toBe('Shortened by agreement');
+    expect(shortenedNote('correction')).toBeNull();
+    expect(shortenedNote(null)).toBeNull();
+    expect(shortenedNote('hail')).toBeNull();
+    const row = (oversChangeReason: LiveMatch['oversChangeReason']) =>
+      monitorRow(fixture({ live: live({ oversChangeReason }) }), at('11:02')).shortenedNote;
+    expect(row('rain')).toBe('Shortened — rain / bad light');
+    expect(row('correction')).toBeNull();
+    expect(monitorRow(fixture({ live: live() }), at('11:02')).shortenedNote).toBeNull();
   });
 
   it('a game on time and scoring is live with no flags', () => {
