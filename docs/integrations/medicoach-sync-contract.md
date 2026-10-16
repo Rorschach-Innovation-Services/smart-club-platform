@@ -463,8 +463,10 @@ Response 200 (example: `live-day.json`):
     status: "not_started" | "in_progress" | "innings_break" | "completed" | "abandoned",
     startedAt: string | null,   // first ball of the match (ISO UTC)
     endedAt: string | null,     // completed / abandoned at
+    abandonReason: string | null, // the scorer's recorded reason, only when status is "abandoned"
     lastInputAt: string | null, // latest scoring save of any kind
     oversPerSide: number | null,
+    oversChangeReason: "rain" | "agreed" | "correction" | null, // why the game is shorter (see below)
     innings: Array<{            // at most 4, in order
       number: number,           // 1..4
       battingSide: "home" | "away" | null,
@@ -503,7 +505,8 @@ club / inactive or clearance pending / registered at another club / not register
 with no ref is matched by name) and sends its admin page the status and the name — never the ref.
 
 Field limits (medicoach clamps before sending, so one long value never fails a whole match):
-`name` ≤ 120 chars, `innings` ≤ 4, `longGaps` ≤ 50 (the longest kept), `players` ≤ 60.
+`name` ≤ 120 chars, `abandonReason` ≤ 200 chars, `innings` ≤ 4, `longGaps` ≤ 50 (the longest
+kept), `players` ≤ 60.
 - **Player cap**: the 60-player cap never truncates `addedDuringMatch` entries. When a match has
   more than 60 players, team-sheet players are dropped first (from the end of the list); every
   player added during the match is always sent.
@@ -528,6 +531,16 @@ Field limits (medicoach clamps before sending, so one long value never fails a w
 - `undoCount: null` (and `undoCountExact: null`) when neither source is available for the match.
   Smart club then leaves the undo flag dormant.
 
+`abandonReason` / `oversChangeReason` (added 2026-10-16, both optional and additive):
+- `abandonReason`: the reason the scorer recorded with the abandonment (the terminal marker's
+  reason text), clamped to 200 chars. `null` for every other status, and for an abandonment with
+  no recorded reason.
+- `oversChangeReason`: set when the scorer shortened the game's overs and recorded why — `rain`
+  (rain or bad light cut the overs), `agreed` (the captains agreed a shorter game) or
+  `correction` (the scorer fixed a setup mistake; consumers should show nothing for a
+  correction). `null` when the overs were never changed or no reason was recorded. Consumers
+  must treat an unknown future string like `null`.
+
 `addedDuringMatch` / `addedAt`: on each live-scoring save, a player id that appears in
 `batsmenNames`/`bowlersNames` for the first time after the first ball, compared with the previous
 save's records (not in `selectedPlayerIds` or the creation-time `guestPlayers`), is "added";
@@ -551,6 +564,8 @@ Deriving the fields in medicoach (cricket limited-overs, from the linked `PostMa
 - A gap's `reason` comes from a `drinksBreakStart`/`End` or `matchInterruptionStart`/`End` marker
   between the two balls. A gap across innings is never listed (the break is innings times).
 - Runs, wickets and overs as the scorecard shows them (§3).
+- `abandonReason` = the abandonment (terminal) marker's recorded reason; `oversChangeReason` =
+  the latest overs-change event's recorded reason.
 - **Time Cricket** matches carry the counters only (status, times, innings, `deliveries`,
   `undoCount`, `players`): `medianGapSec` is null and `longGaps` is empty.
 

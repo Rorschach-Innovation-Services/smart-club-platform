@@ -326,6 +326,20 @@ export const LIVE_GAP_FLOOR_SEC = 120;
 /** At most this many `longGaps` per match (the longest are kept). */
 export const LIVE_GAPS_MAX = 50;
 
+export const ABANDON_REASON_MAX = 200;
+export const OVERS_CHANGE_REASONS = ['rain', 'agreed', 'correction'] as const;
+export type OversChangeReason = (typeof OVERS_CHANGE_REASONS)[number];
+
+function abandonReasonOrNull(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const t = v.trim().slice(0, ABANDON_REASON_MAX).trim();
+  return t || null;
+}
+
+function oversChangeReasonOrNull(v: unknown): OversChangeReason | null {
+  return (OVERS_CHANGE_REASONS as readonly unknown[]).includes(v) ? (v as OversChangeReason) : null;
+}
+
 export const LiveMatchSchema = z.object({
   /** The fixture ref the live match is linked to. */
   ref,
@@ -350,6 +364,16 @@ export const LiveMatchSchema = z.object({
    * (smart club shows "~N"); null exactly when undoCount is null. Absent is read as null.
    */
   undoCountExact: z.boolean().nullable().default(null),
+  /**
+   * The scorer's recorded reason for an abandonment (status "abandoned" only), ≤ 200 chars.
+   * Optional and salvaged: absent or not a string reads as null; a longer one is clamped.
+   */
+  abandonReason: z.unknown().transform(abandonReasonOrNull),
+  /**
+   * Why the overs were shortened. Optional and salvaged: anything but one of the three known
+   * reasons (absent, null, an unknown future string) reads as null.
+   */
+  oversChangeReason: z.unknown().transform(oversChangeReasonOrNull),
   /** Each side's players, team sheet first, then any added during the match. */
   players: z.array(LivePlayerSchema).max(LIVE_PLAYERS_MAX),
   medicoachMatchUrl: z.string().url().nullable().transform(httpUrlOrNull),
