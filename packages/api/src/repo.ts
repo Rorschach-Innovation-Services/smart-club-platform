@@ -1055,6 +1055,7 @@ async function storedFixtureHighWater(
 export async function putSeries(tenant: string, series: Series): Promise<Series> {
   const on = await playerSyncOnSafe(tenant);
   const before = on ? await getSeries(tenant, series.id) : null;
+  // Mutates the caller's object: it gets the stored high-water mark too.
   series.maxFixtureIdEver = fixtureHighWater(
     series,
     await storedFixtureHighWater(tenant, series, on ? before : undefined),
@@ -1089,6 +1090,7 @@ export async function putSeriesIfVersion(
   const on = await playerSyncOnSafe(tenant);
   // `null` ⇒ a create: there is no prior state to read.
   const before = on && expectedVersion !== null ? await getSeries(tenant, series.id) : null;
+  // Mutates the caller's object: it gets the stored high-water mark too.
   series.maxFixtureIdEver = fixtureHighWater(
     series,
     expectedVersion === null

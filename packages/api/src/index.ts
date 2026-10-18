@@ -7008,7 +7008,12 @@ app.post('/clubs/:id/clash-hints', async (c) => {
 async function deleteSeriesWithSync(
   tenant: string,
   id: string,
-  opts: { justCreated?: boolean; config?: TenantConfig | null } = {},
+  opts: {
+    justCreated?: boolean;
+    config?: TenantConfig | null;
+    /** The tenant's outbox, read at most once per request (`pendingOnce`) across series. */
+    pending?: () => Promise<PendingScheduleSync[]>;
+  } = {},
 ): Promise<PendingScheduleSync[]> {
   if (opts.justCreated) {
     await repo.deleteSeries(tenant, id);
@@ -7026,7 +7031,7 @@ async function deleteSeriesWithSync(
       new Date().toISOString(),
     );
     const queued = new Set(deletes.map((r) => r.ref));
-    for (const row of await repo.listPendingSync(tenant))
+    for (const row of await (opts.pending ?? (() => repo.listPendingSync(tenant)))())
       if (row.seriesId === id && row.op === 'delete' && !queued.has(row.ref)) deletes.push(row);
   }
   await repo.deleteSeries(tenant, id);
@@ -7036,6 +7041,15 @@ async function deleteSeriesWithSync(
   await repo.deleteFixtureOfficialsForSeries(tenant, id);
   await repo.deleteSeriesSyncState(tenant, id);
   return deletes;
+}
+
+/**
+ * One outbox Query per request for a multi-series delete. Only this series' queued deletes are
+ * read from it, so another series' wipe in the same loop does not stale it.
+ */
+function pendingOnce(tenant: string): () => Promise<PendingScheduleSync[]> {
+  let p: Promise<PendingScheduleSync[]> | undefined;
+  return () => (p ??= repo.listPendingSync(tenant));
 }
 
 /** Write delete rows from `deleteSeriesWithSync` — always AFTER that series' wipe. */
@@ -7242,8 +7256,11 @@ app.post('/competitions/:id/regenerate', async (c) => {
   // but only once the new draw landed: a rollback restores the old series, so its delete rows
   // are then never written.
   const oldDeletes: PendingScheduleSync[] = [];
+  const pending = pendingOnce(tenant);
   for (const sid of oldIds)
-    oldDeletes.push(...(await deleteSeriesWithSync(tenant, sid, { config: inputs.config })));
+    oldDeletes.push(
+      ...(await deleteSeriesWithSync(tenant, sid, { config: inputs.config, pending })),
+    );
   // Best-effort rollback, as POST /competitions does: a failed create must not lose the old
   // draw. Remove whatever new series landed (ids can coincide with the old ones), then put the
   // old series back from the in-memory `current` list with their original ids and versions.
@@ -7252,6 +7269,8 @@ app.post('/competitions/:id/regenerate', async (c) => {
   const written: string[] = [];
   try {
     for (const s of plan.series) {
+      // Same-id recreation resets maxFixtureIdEver: reused ids rely on medicoach's
+      // side-gated reclaim and the upsert-onto-delete await-carry gate.
       await createSeries(tenant, s as unknown as Series);
       written.push(s.id);
     }
@@ -7303,8 +7322,12 @@ app.delete('/competitions/:id', async (c) => {
       code: 'competition_released',
     });
   const config = await repo.getTenantConfig(tenant);
+  const pending = pendingOnce(tenant);
   for (const s of series)
-    await queueSeriesDeletes(tenant, await deleteSeriesWithSync(tenant, String(s.id), { config }));
+    await queueSeriesDeletes(
+      tenant,
+      await deleteSeriesWithSync(tenant, String(s.id), { config, pending }),
+    );
   return c.json({ ok: true, deleted: series.map((s) => s.id) });
 });
 

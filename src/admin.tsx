@@ -1503,7 +1503,8 @@ export function FixtureTable({
             </p>
             <p>
               <strong>Duplicate</strong> — copy the series (e.g. to trial a change).{' '}
-              <strong>Delete series</strong> — remove it and all its fixtures.
+              <strong>Delete series</strong> — remove it and all its fixtures. Fixtures Match Centre
+              holds are deleted there too, including any recorded results.
             </p>
           </InfoDot>
           <Btn tone="outline" size="sm" icon={Icon.Plus} onClick={addFixture}>
@@ -1548,7 +1549,7 @@ export function FixtureTable({
             onClick={() =>
               setConfirm({
                 title: 'Delete this series?',
-                body: `Permanently remove "${series.name}" along with all ${series.fixtures.length} fixtures. The ${copy.office} cannot undo this.`,
+                body: `Permanently remove "${series.name}" along with all ${series.fixtures.length} fixtures. Any of them Match Centre holds are deleted there too, including recorded results. The ${copy.office} cannot undo this.`,
                 onYes: () => {
                   setConfirm(null);
                   Promise.resolve(onDeleteSeries(series.id))

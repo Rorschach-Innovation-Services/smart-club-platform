@@ -582,10 +582,11 @@ export async function recordScheduleDiff(
       let queued = 0;
       for (const r of rows) {
         const res = await writePendingSync(repo, tenant, r);
-        if (res !== 'await-carry') queued++;
+        if (res === 'written') queued++;
         // A re-add of a different match over a pending delete: the delete still goes; the
         // new fixture awaits a carry (medicoach would refuse to reclaim the ref anyway).
         else if (res === 'await-carry') newRefs.push(r.ref);
+        // 'kept': the stored row already says it (or is newer) — nothing queued.
       }
       if (newRefs.length) {
         log(newFixturesNotice(tenant, String(after.id), newRefs));

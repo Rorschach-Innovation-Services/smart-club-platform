@@ -163,6 +163,8 @@ export async function seriesCreateContext(
   const mine = groupLabel ?? '';
   if (siblings.some((s) => compareGroupLabels(labelOf(s), mine) === 0))
     return { refusal: `another series of stream ${stream} has the same group label` };
+  // Indices can drift if sibling series are added or renamed after the carry (medicoach
+  // keeps the old group).
   const index = [...siblings, series]
     .sort((a, b) => compareGroupLabels(labelOf(a), labelOf(b)))
     .findIndex((s) => s.id === series.id);
