@@ -1515,6 +1515,32 @@ export interface SchedulePushCounts {
   errors: number;
   /** Changes whose request never reached medicoach (still queued). Absent on older rows. */
   unreached?: number;
+  /** Create ops medicoach answered `created` (2026-10-18). Absent on older rows. */
+  created?: number;
+  /** Delete ops medicoach answered `deleted` (2026-10-18). Absent on older rows. */
+  deleted?: number;
+}
+
+/** A knockout side waiting on another fixture, in the wire shape (contract §2 `Slot`). */
+export interface SyncSlotSnapshot {
+  kind: 'winner' | 'loser';
+  ofFixtureRef: string;
+}
+
+/** The wire `create` object of an `op: "create"` push (contract §2, 2026-10-18). */
+export interface FixtureCreateSnapshot {
+  competitionRef: string;
+  sport: string;
+  homeTeamRef?: string;
+  awayTeamRef?: string;
+  homeSlot?: SyncSlotSnapshot;
+  awaySlot?: SyncSlotSnapshot;
+  stage: string;
+  stageLabel?: string;
+  groupName?: string;
+  round?: number;
+  venueLat?: number;
+  venueLon?: number;
 }
 
 /** A smart-club fixture schedule in the wire shape (`SyncSchedule`, contract v1). */
@@ -1549,6 +1575,16 @@ export interface PendingScheduleSync {
    * revealed (the reveal re-queues the series with its real schedule).
    */
   heldUntilReveal?: boolean;
+  /**
+   * Absent = a schedule upsert. `create`: medicoach has no such fixture yet — `create` carries
+   * what it needs (snapshotted at enqueue). `delete`: the fixture (or its series) was removed
+   * in smart club; the row is self-contained (its series may be gone by the flush). A stored
+   * `delete` row is only ever replaced by a `create` (putPendingSync's condition).
+   */
+  op?: 'create' | 'delete';
+  create?: FixtureCreateSnapshot;
+  /** On a `delete` row: the removed fixture's sides, so a re-add is a create only for the same match. */
+  sides?: { home: string; away: string };
 }
 
 /** The admin's answer to a medicoach `needs-review`, sent with the next push (contract §4). */

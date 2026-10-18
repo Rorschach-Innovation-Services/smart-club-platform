@@ -95,6 +95,31 @@ function idNumber(id: string | undefined): number {
   return m ? Number(m[1]) : 0;
 }
 
+/** The highest `f<N>` number among `fixtures` (0 when none has that shape). */
+export function maxFixtureIdNumber(fixtures: unknown): number {
+  if (!Array.isArray(fixtures)) return 0;
+  let max = 0;
+  for (const f of fixtures as Array<{ id?: unknown } | null>) {
+    const n = typeof f?.id === 'string' ? idNumber(f.id) : 0;
+    if (n > max) max = n;
+  }
+  return max;
+}
+
+/**
+ * A series' fixture-id high-water mark after a write: the highest of the mark it carries, the
+ * stored mark (`prior`) and the ids it now holds. Never lower than any of them, so a removed
+ * fixture's id stays "used" (hardening #1 — importers mint above it). Admin-minted ids
+ * (`f<epoch ms>`) are absorbed the same way.
+ */
+export function fixtureHighWater(
+  series: { fixtures?: unknown; maxFixtureIdEver?: unknown },
+  prior?: unknown,
+): number {
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  return Math.max(num(series.maxFixtureIdEver), num(prior), maxFixtureIdNumber(series.fixtures));
+}
+
 export interface IdReconciliation<T> {
   /** The incoming fixtures (same objects, same order) with stable ids assigned. */
   fixtures: T[];
@@ -114,6 +139,10 @@ export interface IdReconciliation<T> {
 export function reconcileFixtureIds<T extends IdentityFixture>(
   existing: IdentityFixture[],
   incoming: T[],
+  opts: {
+    /** The series' persisted `maxFixtureIdEver`: new ids are minted above it too. */
+    highWater?: number;
+  } = {},
 ): IdReconciliation<T> {
   const pool = new Map<string, IdentityFixture[]>();
   for (const f of existing) {
@@ -164,7 +193,13 @@ export function reconcileFixtureIds<T extends IdentityFixture>(
     if (best >= 0) assigned.set(f, leftover.splice(best, 1)[0]);
   }
 
-  let next = Math.max(0, ...existing.map((f) => idNumber(f.id)));
+  // Above every id the series holds AND the persisted high-water mark: an id removed since
+  // (no longer in `existing`) must never come back for another match.
+  let next = Math.max(
+    0,
+    Number.isFinite(opts.highWater) ? (opts.highWater as number) : 0,
+    ...existing.map((f) => idNumber(f.id)),
+  );
   const added: string[] = [];
   for (const f of incoming) {
     const prior = assigned.get(f);

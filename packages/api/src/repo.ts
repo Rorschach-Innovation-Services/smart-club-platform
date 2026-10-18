@@ -183,6 +183,7 @@ import type {
 import { tableName } from './env.js';
 import { teamIdsForClub } from './teams.js';
 import { isoInstant } from './medicoach-sync-contract.js';
+import { fixtureHighWater } from './fixture-identity.js';
 import { playerSyncEnabled } from './medicoach-sync/player-placement.js';
 
 const TABLE = tableName();
@@ -1029,9 +1030,35 @@ export async function getSeries(tenant: string, seriesId: string): Promise<Serie
   return stripKeys<Series>(res.Item);
 }
 
+/**
+ * The stored `maxFixtureIdEver` for a series about to be replaced by a caller that did not
+ * carry it (a freshly built series object): one projected point read, so a whole-item put
+ * never lowers the mark (hardening #1). Undefined when the caller already carries it.
+ */
+async function storedFixtureHighWater(
+  tenant: string,
+  series: Series,
+  before: Series | null | undefined,
+): Promise<number | undefined> {
+  if (before !== undefined && before !== null) return Number(before.maxFixtureIdEver) || 0;
+  if (typeof series.maxFixtureIdEver === 'number') return undefined;
+  const res = await ddb.send(
+    new GetCommand({
+      TableName: TABLE,
+      Key: seriesKey(tenant, series.id),
+      ProjectionExpression: 'maxFixtureIdEver',
+    }),
+  );
+  return Number(res.Item?.maxFixtureIdEver) || 0;
+}
+
 export async function putSeries(tenant: string, series: Series): Promise<Series> {
   const on = await playerSyncOnSafe(tenant);
   const before = on ? await getSeries(tenant, series.id) : null;
+  series.maxFixtureIdEver = fixtureHighWater(
+    series,
+    await storedFixtureHighWater(tenant, series, on ? before : undefined),
+  );
   await ddb.send(
     new PutCommand({
       TableName: TABLE,
@@ -1062,6 +1089,12 @@ export async function putSeriesIfVersion(
   const on = await playerSyncOnSafe(tenant);
   // `null` ⇒ a create: there is no prior state to read.
   const before = on && expectedVersion !== null ? await getSeries(tenant, series.id) : null;
+  series.maxFixtureIdEver = fixtureHighWater(
+    series,
+    expectedVersion === null
+      ? 0
+      : await storedFixtureHighWater(tenant, series, on ? before : undefined),
+  );
   try {
     await ddb.send(
       new PutCommand({
@@ -1106,6 +1139,7 @@ export async function updateSeries(
     id: seriesId,
     version: expectedVersion + 1,
   };
+  next.maxFixtureIdEver = fixtureHighWater(next, current.maxFixtureIdEver);
   try {
     await ddb.send(
       new PutCommand({
@@ -1504,6 +1538,36 @@ export async function upsertMcAwait(
   return row;
 }
 
+/**
+ * Take refs OUT of a series' MCAWAIT# row — medicoach now has them (a `created` push answer).
+ * The row is deleted when no ref is left. Read-modify-write like `upsertMcAwait` (the daily
+ * reconciliation re-derives the set, so a lost race heals). Returns the refs left.
+ */
+export async function removeMcAwaitRefs(
+  tenant: string,
+  seriesId: string,
+  refs: string[],
+  opts: { now: string },
+): Promise<string[]> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: mcAwaitKey(tenant, seriesId) }),
+  );
+  const existing = stripKeys<McAwaitRow>(res.Item);
+  if (!existing) return [];
+  const drop = new Set(refs);
+  const left = (existing.refs ?? []).filter((r) => !drop.has(r));
+  if (left.length === (existing.refs ?? []).length) return left;
+  if (!left.length) {
+    await deleteMcAwait(tenant, seriesId);
+    return [];
+  }
+  const row: McAwaitRow = { ...existing, refs: left, count: left.length, lastSeen: opts.now };
+  await ddb.send(
+    new PutCommand({ TableName: TABLE, Item: { ...row, ...mcAwaitKey(tenant, seriesId) } }),
+  );
+  return left;
+}
+
 export async function deleteMcAwait(tenant: string, seriesId: string): Promise<void> {
   await ddb.send(new DeleteCommand({ TableName: TABLE, Key: mcAwaitKey(tenant, seriesId) }));
 }
@@ -1679,28 +1743,84 @@ export async function deleteSyncConflict(tenant: string, ref: string): Promise<v
  * Enqueue (or collapse onto) a fixture's outbox row: the latest snapshot wins. Conditional on
  * the stored row's `schedule.changedAt` being OLDER, so a slower writer holding an older
  * snapshot (two concurrent edits, a CLI racing an admin) can never replace a newer one. An
- * older or equal snapshot is a silent no-op — the newer one already in the row goes out.
+ * older snapshot is a silent no-op — the newer one already in the row goes out.
+ *
+ * Op-aware (2026-10-18, hardening #2) — a DynamoDB condition, not caller logic, because
+ * writers race:
+ *   - a stored `delete` row is replaced ONLY by a newer `create` (a re-add), never by an
+ *     upsert, whatever its `changedAt` (an upsert landing on it would be dropped by the next
+ *     flush for a gone series → a permanent medicoach phantom);
+ *   - a `delete` replaces any stored upsert, and a create/delete no newer than itself;
+ *   - a same-millisecond tie goes to the superseding op (upsert < create < delete), so it is
+ *     never dropped; an equal snapshot of the same op stays a no-op.
+ * Returns false when the condition kept the stored row.
  */
-export async function putPendingSync(tenant: string, pending: PendingScheduleSync): Promise<void> {
+export async function putPendingSync(
+  tenant: string,
+  pending: PendingScheduleSync,
+): Promise<boolean> {
   // One canonical spelling: the condition compares strings (ADR 0016).
   const row = {
     ...pending,
     schedule: { ...pending.schedule, changedAt: isoInstant(pending.schedule.changedAt) },
   };
+  const op = row.op;
+  const condition =
+    op === 'delete'
+      ? // Any upsert; an older create/delete; a create at the same instant.
+        'attribute_not_exists(pk) OR attribute_not_exists(#op) OR #sch.changedAt < :c OR ' +
+        '(#op = :cre AND #sch.changedAt = :c)'
+      : op === 'create'
+        ? // Newer anything (a delete included: the re-add); an upsert at the same instant.
+          'attribute_not_exists(pk) OR #sch.changedAt < :c OR ' +
+          '(attribute_not_exists(#op) AND #sch.changedAt = :c)'
+        : // A plain upsert never replaces a delete row.
+          'attribute_not_exists(pk) OR ((attribute_not_exists(#op) OR #op <> :del) AND ' +
+          '#sch.changedAt < :c)';
   try {
     await ddb.send(
       new PutCommand({
         TableName: TABLE,
         Item: { ...row, ...pendingSyncKey(tenant, row.ref) },
-        ConditionExpression: 'attribute_not_exists(pk) OR #sch.changedAt < :c',
-        ExpressionAttributeNames: { '#sch': 'schedule' },
-        ExpressionAttributeValues: { ':c': row.schedule.changedAt },
+        ConditionExpression: condition,
+        ExpressionAttributeNames: { '#sch': 'schedule', '#op': 'op' },
+        ExpressionAttributeValues: {
+          ':c': row.schedule.changedAt,
+          ...(op === 'delete' ? { ':cre': 'create' } : {}),
+          ...(op === undefined ? { ':del': 'delete' } : {}),
+        },
       }),
     );
+    return true;
   } catch (err) {
     if (!isCcf(err)) throw err;
+    return false;
   }
 }
+
+/** One outbox row by ref (the collapse helper reads it before it writes). */
+export async function getPendingSync(
+  tenant: string,
+  ref: string,
+): Promise<PendingScheduleSync | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: pendingSyncKey(tenant, ref) }),
+  );
+  return stripKeys<PendingScheduleSync>(res.Item);
+}
+
+/** The op a sent row had, for the snapshot-scoped writes below (`upsert` = no stored op). */
+export type PendingSyncOp = 'upsert' | 'create' | 'delete';
+export const pendingSyncOp = (row: Pick<PendingScheduleSync, 'op'>): PendingSyncOp =>
+  row.op ?? 'upsert';
+
+/** `#op` condition for one op, or null (any op) when none is given. */
+const sameOp = (op: PendingSyncOp | undefined) =>
+  !op
+    ? null
+    : op === 'upsert'
+      ? { expr: ' AND attribute_not_exists(#op)', values: {} }
+      : { expr: ' AND #op = :op', values: { ':op': op } };
 
 export async function listPendingSync(tenant: string): Promise<PendingScheduleSync[]> {
   const { pk, skPrefix } = pendingSyncListKey(tenant);
@@ -1721,15 +1841,18 @@ export async function deletePendingSyncIfUnchanged(
   tenant: string,
   ref: string,
   changedAt: string,
+  /** The sent row's op: a same-instant row of another op (a superseding delete) is kept. */
+  op?: PendingSyncOp,
 ): Promise<boolean> {
+  const scoped = sameOp(op);
   try {
     await ddb.send(
       new DeleteCommand({
         TableName: TABLE,
         Key: pendingSyncKey(tenant, ref),
-        ConditionExpression: '#sch.changedAt = :c',
-        ExpressionAttributeNames: { '#sch': 'schedule' },
-        ExpressionAttributeValues: { ':c': changedAt },
+        ConditionExpression: `#sch.changedAt = :c${scoped?.expr ?? ''}`,
+        ExpressionAttributeNames: { '#sch': 'schedule', ...(scoped ? { '#op': 'op' } : {}) },
+        ExpressionAttributeValues: { ':c': changedAt, ...(scoped?.values ?? {}) },
       }),
     );
     return true;
@@ -1772,7 +1895,10 @@ export async function markPendingSyncFailed(
   changedAt: string,
   error: string,
   at: string,
+  /** The sent row's op: a same-instant row of another op is left alone. */
+  op?: PendingSyncOp,
 ): Promise<void> {
+  const scoped = sameOp(op);
   try {
     await ddb.send(
       new UpdateCommand({
@@ -1780,14 +1906,15 @@ export async function markPendingSyncFailed(
         Key: pendingSyncKey(tenant, ref),
         UpdateExpression:
           'SET attempts = if_not_exists(attempts, :zero) + :one, lastError = :e, lastAttemptAt = :at',
-        ConditionExpression: 'attribute_exists(pk) AND #sch.changedAt = :c',
-        ExpressionAttributeNames: { '#sch': 'schedule' },
+        ConditionExpression: `attribute_exists(pk) AND #sch.changedAt = :c${scoped?.expr ?? ''}`,
+        ExpressionAttributeNames: { '#sch': 'schedule', ...(scoped ? { '#op': 'op' } : {}) },
         ExpressionAttributeValues: {
           ':zero': 0,
           ':one': 1,
           ':e': error.slice(0, 300),
           ':at': at,
           ':c': changedAt,
+          ...(scoped?.values ?? {}),
         },
       }),
     );

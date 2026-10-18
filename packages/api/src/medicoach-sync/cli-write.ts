@@ -11,7 +11,7 @@
  *   - the medicoach schedule diff is original-read → written, the change this CLI made.
  */
 import type { ScheduleChangeOrigin, Series } from '../types.js';
-import { recordScheduleDiff } from './schedule.js';
+import { recordScheduleDiff, type ScheduleDiffRepo } from './schedule.js';
 
 type RepoModule = typeof import('../repo.js');
 
@@ -23,15 +23,7 @@ export type CliWriteOutcome = 'written' | 'drifted';
  * written, an error printed) when the stored series moved on since the read.
  */
 export async function writeSeriesFromSnapshot(
-  repo: Pick<
-    RepoModule,
-    | 'getTenantConfig'
-    | 'putPendingSync'
-    | 'getSeasonRun'
-    | 'putSyncLog'
-    | 'upsertMcAwait'
-    | 'putSeriesIfVersion'
-  >,
+  repo: ScheduleDiffRepo & Pick<RepoModule, 'putSeriesIfVersion'>,
   tenant: string,
   original: Series | null | undefined,
   next: Series,

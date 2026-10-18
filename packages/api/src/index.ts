@@ -81,6 +81,7 @@ import { explainSyncError } from './medicoach-sync/explain.js';
 import { carrySyncOwnedFields, fixtureSyncRef } from './fixture-identity.js';
 import {
   buildInboundFixture,
+  deleteRowsFor,
   describeSchedule,
   fixtureSchedule,
   flushScheduleOutbox,
@@ -90,6 +91,7 @@ import {
   recordScheduleDiff,
   requeueRevealedSeries,
   sameMatch,
+  writePendingSync,
   seriesMappedForSync,
   seriesHoldsSchedule,
   type ScheduleFixture,
@@ -5009,12 +5011,12 @@ async function applySeriesPatch(
   }
 
   // ── Removing fixtures medicoach already holds ──
-  // Medicoach never deletes a synced fixture (contract v1: organisers mark it Cancelled) and
-  // the v1 contract has no delete, so dropping one here would leave it live in medicoach's
-  // match centre with no way to reach it again. On a released, sync-mapped series the write is
-  // refused (409 `synced_fixture_removed`) unless the admin explicitly confirmed it; the
-  // console offers "Mark cancelled" instead. Removed fixtures' appointments are cleaned up
-  // after the write either way (they would otherwise outlive the fixture, invisibly).
+  // Smart club owns fixture existence (contract §2 create/delete ops, 2026-10-18): a removed
+  // fixture is queued as a delete and medicoach deletes its copy — even one with a recorded
+  // result. That is destructive, so on a released, sync-mapped series the write is refused
+  // (409 `synced_fixture_removed`) unless the admin explicitly confirmed it; the console offers
+  // "Mark cancelled" (keeps the record) as the alternative. Removed fixtures' appointments are
+  // cleaned up after the write either way (they would otherwise outlive the fixture, invisibly).
   const confirmRemoveSynced = patch.confirmRemoveSynced === true;
   delete patch.confirmRemoveSynced;
   let removedFixtureIds: string[] = [];
@@ -5035,7 +5037,7 @@ async function applySeriesPatch(
       if (await seriesMappedForSync(repo, tenant, current, config))
         throw new HttpError(
           409,
-          `${removedFixtureIds.length === 1 ? 'This fixture is' : `${removedFixtureIds.length} fixtures are`} already in medicoach, which can't delete a synced fixture. Mark it cancelled instead — or confirm you want it removed here only.`,
+          `${removedFixtureIds.length === 1 ? 'This fixture is' : `${removedFixtureIds.length} fixtures are`} already in medicoach. Removing ${removedFixtureIds.length === 1 ? 'it' : 'them'} also deletes the medicoach copy, including any recorded result. Mark it cancelled instead to keep the record — or confirm the removal.`,
           { code: 'synced_fixture_removed', fixtureIds: removedFixtureIds },
         );
     }
@@ -6992,12 +6994,35 @@ app.post('/clubs/:id/clash-hints', async (c) => {
 
 app.delete('/series/:id', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
-  await repo.deleteSeries(tenant, c.req.param('id'));
+  const id = c.req.param('id');
+  // Medicoach must delete its copies (contract §2 delete ops): read the series BEFORE it goes
+  // and build a self-contained delete row for every fixture it may hold, plus any delete
+  // already queued for a fixture removed earlier (the wipe below would lose it).
+  const before = await repo.getSeries(tenant, id);
+  let deletes: Awaited<ReturnType<typeof deleteRowsFor>> = [];
+  if (
+    before &&
+    (await seriesMappedForSync(repo, tenant, before, await repo.getTenantConfig(tenant)))
+  ) {
+    deletes = deleteRowsFor(
+      tenant,
+      before,
+      (before.fixtures ?? []) as ScheduleFixture[],
+      'admin',
+      new Date().toISOString(),
+    );
+    const queued = new Set(deletes.map((r) => r.ref));
+    for (const row of await repo.listPendingSync(tenant))
+      if (row.seriesId === id && row.op === 'delete' && !queued.has(row.ref)) deletes.push(row);
+  }
+  await repo.deleteSeries(tenant, id);
   // Its fixtures' umpire appointments go with it, and so does its medicoach-sync state
   // (results, outbox rows, held conflicts, report markers); pending captain's reports are
   // voided (ADR 0016).
-  await repo.deleteFixtureOfficialsForSeries(tenant, c.req.param('id'));
-  await repo.deleteSeriesSyncState(tenant, c.req.param('id'));
+  await repo.deleteFixtureOfficialsForSeries(tenant, id);
+  await repo.deleteSeriesSyncState(tenant, id);
+  // AFTER the wipe (it deletes the series' outbox rows): the delete rows outlive the series.
+  for (const row of deletes) await writePendingSync(repo, tenant, row);
   return c.json({ ok: true });
 });
 

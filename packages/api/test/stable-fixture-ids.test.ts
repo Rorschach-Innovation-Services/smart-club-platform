@@ -146,6 +146,19 @@ describe('reconcileFixtureIds', () => {
     assert.deepEqual(r.added, []);
   });
 
+  test('new ids are minted above the persisted high-water mark (a removed id is never reused)', () => {
+    // The series once held f1..f5; f4 and f5 were removed since, so they are not in `existing`.
+    const stored = built(sheet.slice(0, 3));
+    const incoming = built([...sheet.slice(0, 3), row('2026-10-25', 'a', 'd')]);
+    const r = reconcileFixtureIds(stored, incoming, { highWater: 5 });
+    assert.deepEqual(r.added, ['f6']);
+    assert.deepEqual(
+      reconcileFixtureIds(built(sheet.slice(0, 3)), built([...sheet.slice(0, 3), sheet[3]])).added,
+      ['f4'],
+      'without the mark the old max+1 rule stands',
+    );
+  });
+
   test('a first import (nothing stored) writes f1..fN', () => {
     const r = reconcileFixtureIds([], built(sheet));
     assert.deepEqual(

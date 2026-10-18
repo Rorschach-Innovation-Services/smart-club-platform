@@ -366,17 +366,17 @@ describe('This week', () => {
     const dlg = screen.getByRole('dialog', { name: /remove this fixture/i });
     await user.click(within(dlg).getByRole('button', { name: /^remove fixture$/i }));
     expect(within(dlg).getByRole('alert').textContent).toMatch(
-      /Match Centre already holds this fixture and can’t delete it\. Marking it cancelled keeps the record/,
+      /Match Centre already holds this fixture\. Removing it here deletes it from Match Centre too, including any recorded result\. Marking it cancelled keeps the record/,
     );
     expect(within(dlg).getByRole('alert').textContent).not.toMatch(/!/);
-    expect(within(dlg).getByRole('button', { name: /remove here only/i })).toBeTruthy();
+    expect(within(dlg).getByRole('button', { name: /remove from both/i })).toBeTruthy();
     expect((applied(update, 0).fixtures as unknown[]).length).toBe(3);
     await user.click(within(dlg).getByRole('button', { name: /mark cancelled/i }));
     expect(fx(applied(update, 1), 'f2')?.status).toBe('cancelled');
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
-  it('"Remove here only" sends the explicit confirmation', async () => {
+  it('"Remove from both" sends the explicit confirmation', async () => {
     const user = userEvent.setup();
     const update = vi
       .fn()
@@ -388,7 +388,7 @@ describe('This week', () => {
     await user.click(screen.getByRole('menuitem', { name: /remove ilembe cc v spartan/i }));
     const dlg = screen.getByRole('dialog', { name: /remove this fixture/i });
     await user.click(within(dlg).getByRole('button', { name: /^remove fixture$/i }));
-    await user.click(within(dlg).getByRole('button', { name: /remove here only/i }));
+    await user.click(within(dlg).getByRole('button', { name: /remove from both/i }));
     const sent = applied(update, 1);
     expect(sent.confirmRemoveSynced).toBe(true);
     expect(fx(sent, 'f2')).toBeUndefined();

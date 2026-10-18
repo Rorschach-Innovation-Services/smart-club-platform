@@ -10,7 +10,8 @@
  *   - a ground double-booking (409 venue_clash) lists the clashes;
  *   - a stale page (409 "series changed") asks to reload;
  *   - removing a fixture medicoach already holds (409 synced_fixture_removed) offers
- *     "Mark cancelled" (the supported path) or "Remove here only" (explicit).
+ *     "Mark cancelled" (keeps the record) or "Remove from both" (explicit: Match Centre
+ *     deletes its copy too, result included).
  */
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { ApiError, type OfficialsNotifyStatusRow } from './api';
@@ -520,9 +521,9 @@ export function RemoveFixtureDialog({
       </p>
       {err?.synced ? (
         <div className="insights-callout alert fm-error" role="alert">
-          Match Centre already holds this fixture and can’t delete it. Marking it cancelled keeps
-          the record and shows it as cancelled there. Removing it here only leaves it listed in
-          Match Centre, with no way to update it from this console.
+          Match Centre already holds this fixture. Removing it here deletes it from Match Centre
+          too, including any recorded result. Marking it cancelled keeps the record and shows it as
+          cancelled there.
         </div>
       ) : (
         <ErrorBox err={err} />
@@ -536,7 +537,7 @@ export function RemoveFixtureDialog({
         </Btn>
         {err?.synced ? (
           <Btn tone="ink" onClick={() => run('force')} disabled={!!busy}>
-            {busy === 'force' ? 'Removing…' : 'Remove here only'}
+            {busy === 'force' ? 'Removing…' : 'Remove from both'}
           </Btn>
         ) : (
           <Btn tone="ink" onClick={() => run('remove')} disabled={!!busy}>

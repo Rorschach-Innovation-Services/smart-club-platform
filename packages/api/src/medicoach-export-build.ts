@@ -563,6 +563,30 @@ export function scheduledInstant(date: string, time: string | undefined, offset:
  * side skips the fixture (`unresolved-side`); a concrete
  * side is a teamRef (smart club materialises a knockout side by replacing the slot).
  */
+/**
+ * One fixture side as medicoach knows it: a `win:`/`lose:` side is a slot on its feeder's ref, a
+ * concrete side a team ref (+ ground). null for a `pos:`/`tbd:` placeholder (it names neither a
+ * team nor a fixture to wait on — ADR 0018) or a side `resolveTeam` does not know. Shared by
+ * the bundle (`mapFixture`) and the sync's create ops (medicoach-sync/create-payload.ts).
+ */
+export function resolveFixtureSide(
+  id: string | undefined,
+  ctx: Pick<FixtureContext, 'tenant' | 'seriesId' | 'resolveTeam'>,
+): { ref?: string; slot?: BundleSlot; ground?: string } | null {
+  if (!id) return null;
+  const src = slotSource(id);
+  if (src)
+    return {
+      slot: {
+        kind: src.kind,
+        ofFixtureRef: refs.fixture(ctx.tenant, ctx.seriesId, src.fixtureId),
+      },
+    };
+  if (isSlotRef(id)) return null;
+  const team = ctx.resolveTeam(id);
+  return team ? { ref: team.ref, ground: team.ground } : null;
+}
+
 export function mapFixture(f: SourceFixture, ctx: FixtureContext): FixtureOutcome {
   const status = f.status ?? null;
   // A fixture without an id can't get a stable ref; guessing one would duplicate on re-import.
@@ -570,26 +594,9 @@ export function mapFixture(f: SourceFixture, ctx: FixtureContext): FixtureOutcom
   if (status === 'cancelled') return { kind: 'skip', reason: 'cancelled' };
   if (!f.date || !/^\d{4}-\d{2}-\d{2}$/.test(f.date)) return { kind: 'skip', reason: 'undated' };
 
-  const side = (
-    id: string | undefined,
-  ): { ref?: string; slot?: BundleSlot; ground?: string } | null => {
-    if (!id) return null;
-    const src = slotSource(id);
-    if (src)
-      return {
-        slot: {
-          kind: src.kind,
-          ofFixtureRef: refs.fixture(ctx.tenant, ctx.seriesId, src.fixtureId),
-        },
-      };
-    // A `pos:`/`tbd:` placeholder names neither a team nor a fixture to wait on: the fixture is
-    // skipped as unresolved until the admin sets the team (ADR 0018).
-    if (isSlotRef(id)) return null;
-    const team = ctx.resolveTeam(id);
-    return team ? { ref: team.ref, ground: team.ground } : null;
-  };
-  const home = side(f.home);
-  const away = side(f.away);
+  // A `pos:`/`tbd:` placeholder is skipped as unresolved until the admin sets the team.
+  const home = resolveFixtureSide(f.home, ctx);
+  const away = resolveFixtureSide(f.away, ctx);
   if (!home || !away) return { kind: 'skip', reason: 'unresolved-side' };
 
   const notes: string[] = [];
@@ -639,6 +646,16 @@ export function inferRounds(fixtures: Array<Pick<SourceFixture, 'home' | 'away'>
 }
 
 /* ─────────────────────────── Build ─────────────────────────── */
+
+/** Season runs newest first (createdAt, then id): the order that gives each run its stream. */
+export function compareRunsNewestFirst(a: SeasonRun, b: SeasonRun): number {
+  return str(b.createdAt).localeCompare(str(a.createdAt)) || b.id.localeCompare(a.id);
+}
+
+/** A season run's competition stream: the newest run is `main`, older ones `main-<runId>`. */
+export function seasonRunStream(run: SeasonRun, newestFirstIndex: number): string {
+  return newestFirstIndex === 0 ? 'main' : `main-${slugify(run.id) || newestFirstIndex}`;
+}
 
 interface StreamSeries {
   series: Series;
@@ -944,10 +961,8 @@ export function buildBundle(input: BuildInputs): BuildResult {
       : undefined;
     // Newest run first: it keeps stream `main`; older runs export as `main-<runId>` so the
     // competition refs stay unique (a league normally has one run per season).
-    const runsNewestFirst = [...w.runs.values()].sort(
-      (a, b) =>
-        str(b.run.createdAt).localeCompare(str(a.run.createdAt)) ||
-        b.run.id.localeCompare(a.run.id),
+    const runsNewestFirst = [...w.runs.values()].sort((a, b) =>
+      compareRunsNewestFirst(a.run, b.run),
     );
     if (runsNewestFirst.length > 1) {
       summary.leagues.multiRun.push(w.key);
@@ -966,7 +981,7 @@ export function buildBundle(input: BuildInputs): BuildResult {
       const mapping = mapStructureToFormat(structure);
       for (const m of mapping.warnings) warnings.push(`league ${w.key}: ${m}`);
       const seriesById = new Map(series.map((s) => [s.id, s]));
-      const stream = ri === 0 ? 'main' : `main-${slugify(run.id) || ri}`;
+      const stream = seasonRunStream(run, ri);
       const compRef = refs.competition(tenant, w.key, stream);
       const groups: BundleGroup[] = [];
       const fixtures: BundleFixture[] = [];

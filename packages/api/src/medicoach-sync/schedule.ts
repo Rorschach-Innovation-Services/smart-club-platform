@@ -39,6 +39,13 @@ import { randomUUID } from 'node:crypto';
 import { isSlotRef, slotSource, tbdLabel } from '../../../engine/src/formats.js';
 import { fixtureSyncRef } from '../fixture-identity.js';
 import {
+  fixtureCreateFrom,
+  isRefusal,
+  seriesCreateContext,
+  type Refusal,
+  type SeriesCreateContext,
+} from './create-payload.js';
+import {
   capVenue,
   isoInstant,
   MEDICOACH_SYNC_VERSION,
@@ -245,12 +252,14 @@ export async function seriesMappedForSync(
 }
 
 export interface ScheduleDiffHandle {
-  /** Refs whose schedule this write changes (already stamped on `after.fixtures`). */
+  /** Refs whose outbox row this write queues (schedule edits, creates and deletes). */
   refs: string[];
   /**
-   * Refs of fixtures this write ADDS to a mapped series. Medicoach has no such match and the
-   * v1 contract cannot create one, so they are never pushed — `enqueue()` reports them (log +
-   * SYNCLOG + MCAWAIT#) as needing a bundle top-up instead of ignoring them silently.
+   * Refs of fixtures this write ADDS to a mapped series that cannot go to medicoach as a
+   * create (`buildFixtureCreate` refused: undated, an unresolved side, no unambiguous group…,
+   * or a re-add over a pending delete of a different match). `enqueue()` reports them (log +
+   * SYNCLOG + MCAWAIT#) as needing a bundle top-up instead of ignoring them silently. Filled
+   * further by `enqueue()` when a collapse refuses a create.
    */
   newRefs: string[];
   /** Write the PENDINGSYNC# rows — call only AFTER the series write succeeded. */
@@ -259,7 +268,7 @@ export interface ScheduleDiffHandle {
 
 const NO_DIFF: ScheduleDiffHandle = { refs: [], newRefs: [], enqueue: async () => 0 };
 
-/** The CLI/log line for fixtures medicoach does not have (no create in contract v1). */
+/** The CLI/log line for fixtures medicoach does not have and smart club cannot create. */
 export function newFixturesNotice(tenant: string, seriesId: string, refs: string[]): string {
   return (
     `[medicoach-sync] ${tenant}: ${refs.length} new fixture(s) in ${seriesId} not in medicoach ` +
@@ -301,6 +310,144 @@ export async function recordAwaitingCarry(
   }
 }
 
+/* ── Outbox collapse (2026-10-18 create/delete ops) ── */
+
+const sidesOf = (f: Pick<ScheduleFixture, 'home' | 'away'>) => ({
+  home: String(f.home ?? ''),
+  away: String(f.away ?? ''),
+});
+
+/** What to do with an incoming outbox row given the row already stored for its ref. */
+export type CollapseOutcome =
+  | { kind: 'write'; row: PendingScheduleSync }
+  /** Nothing to write: the stored row already says it (an upsert onto a pending delete). */
+  | { kind: 'keep' }
+  /** A re-add of a different match over a pending delete: keep the delete, await a carry. */
+  | { kind: 'await-carry' };
+
+/**
+ * The ONE per-ref transition rule every outbox writer applies (pure):
+ *   - pending create + schedule edit → the create, with the newer schedule;
+ *   - pending create/upsert + removal → the delete (never just dropped: the create may have
+ *     flushed already, and a delete of a ref medicoach never had is an idempotent success);
+ *   - pending delete + the same id re-added → a create ONLY when its sides are the deleted
+ *     fixture's (hardening #1), else the delete stays and the ref awaits a carry;
+ *   - pending delete + an upsert → the delete stays;
+ *   - anything else → the incoming row.
+ * putPendingSync's condition still decides races between writers.
+ */
+export function collapsePending(
+  stored: PendingScheduleSync | null | undefined,
+  incoming: PendingScheduleSync,
+): CollapseOutcome {
+  if (!stored || incoming.op === 'delete') return { kind: 'write', row: incoming };
+  if (stored.op === 'delete') {
+    if (incoming.op !== 'create') return { kind: 'keep' };
+    const a = stored.sides;
+    const b = incoming.sides;
+    return a && b && a.home === b.home && a.away === b.away
+      ? { kind: 'write', row: incoming }
+      : { kind: 'await-carry' };
+  }
+  if (stored.op === 'create' && !incoming.op && stored.create)
+    return {
+      kind: 'write',
+      row: {
+        ...incoming,
+        op: 'create',
+        create: stored.create,
+        ...(stored.sides ? { sides: stored.sides } : {}),
+      },
+    };
+  return { kind: 'write', row: incoming };
+}
+
+/**
+ * Collapse `row` onto the stored outbox row (`collapsePending`) and write it. A write the
+ * condition refused because another writer changed the row in between is re-read and
+ * re-collapsed (at most 3 tries); refused against the same stored row it is a plain no-op (an
+ * older snapshot).
+ */
+export async function writePendingSync(
+  repo: Pick<RepoModule, 'getPendingSync' | 'putPendingSync'>,
+  tenant: string,
+  row: PendingScheduleSync,
+): Promise<'written' | 'kept' | 'await-carry'> {
+  let stored = await repo.getPendingSync(tenant, row.ref);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const outcome = collapsePending(stored, row);
+    if (outcome.kind === 'keep') return 'kept';
+    if (outcome.kind === 'await-carry') return 'await-carry';
+    if (await repo.putPendingSync(tenant, outcome.row)) return 'written';
+    const again = await repo.getPendingSync(tenant, row.ref);
+    const same =
+      !!again &&
+      !!stored &&
+      again.op === stored.op &&
+      again.schedule.changedAt === stored.schedule.changedAt;
+    if (same || !again) return 'kept';
+    stored = again;
+  }
+  return 'kept';
+}
+
+/**
+ * A delete reads only `changedAt` (contract §2): a stored delete row whose schedule snapshot no
+ * longer fits the contract still goes out, with this neutral schedule around its `changedAt`.
+ */
+const DELETE_FALLBACK_SCHEDULE = {
+  scheduledTime: null,
+  timeTbc: true,
+  dateTbc: true,
+  venue: null,
+  postponed: false,
+  cancelled: false,
+};
+
+/**
+ * Self-contained `op: "delete"` rows for fixtures of `series` that medicoach may hold (every
+ * fixture with an id but a `pos:`/`tbd:` side — those were never exported). Undated fixtures
+ * are included: one may have been created while dated, and a delete of a ref medicoach never
+ * had is an idempotent `deleted`.
+ */
+export function deleteRowsFor(
+  tenant: string,
+  series: Series,
+  fixtures: ScheduleFixture[],
+  origin: ScheduleChangeOrigin,
+  nowIso: string,
+): PendingScheduleSync[] {
+  const rows: PendingScheduleSync[] = [];
+  for (const old of fixtures) {
+    if (!old?.id || neverExported(old)) continue;
+    rows.push({
+      ref: fixtureSyncRef(tenant, String(series.id), old),
+      seriesId: String(series.id),
+      fixtureId: String(old.id),
+      op: 'delete',
+      schedule: fixtureSchedule(series, old, nowIso),
+      sides: sidesOf(old),
+      origin,
+      enqueuedAt: nowIso,
+      attempts: 0,
+    });
+  }
+  return rows;
+}
+
+/** The repo reads/writes `recordScheduleDiff` needs. */
+export type ScheduleDiffRepo = Pick<
+  RepoModule,
+  | 'getTenantConfig'
+  | 'putPendingSync'
+  | 'getPendingSync'
+  | 'getSeasonRun'
+  | 'listSeasonRuns'
+  | 'listSeries'
+  | 'putSyncLog'
+  | 'upsertMcAwait'
+>;
+
 /**
  * The one helper every smart-club series write calls (Slice 4). Compares `before` and
  * `after` fixture by fixture (same id, same match); for each whose schedule changed it
@@ -311,16 +458,16 @@ export async function recordAwaitingCarry(
  *
  * A no-op for origin `medicoach` (the inbound apply — nothing echoes), for a tenant without
  * `features.medicoachSync` and for a series medicoach does not own (`seriesIsSyncMapped`).
- * Fixtures that are new (no stored counterpart, or a brand-new series) are never pushed —
- * medicoach cannot create a match — but are reported by `enqueue()` as "new fixture not in
- * medicoach (needs bundle top-up)"; a fixture whose id now names a different match is skipped
- * (its ref no longer means what medicoach has).
+ * Create/delete ops (2026-10-18): a fixture medicoach does not have yet — new (no stored
+ * counterpart, or a brand-new series), one whose `pos:`/`tbd:` side was just set, or an
+ * undated one that just got a date — is queued as `op: "create"` (stamped like an edit) when
+ * `buildFixtureCreate` derives its payload; otherwise it is reported by `enqueue()` as "new
+ * fixture not in medicoach (needs bundle top-up)". A fixture in `before` that `after` no
+ * longer has is queued as a self-contained `op: "delete"`. A fixture whose id now names a
+ * different match is skipped (its ref no longer means what medicoach has).
  */
 export async function recordScheduleDiff(
-  repo: Pick<
-    RepoModule,
-    'getTenantConfig' | 'putPendingSync' | 'getSeasonRun' | 'putSyncLog' | 'upsertMcAwait'
-  >,
+  repo: ScheduleDiffRepo,
   tenant: string,
   before: Series | null | undefined,
   after: Series,
@@ -336,26 +483,68 @@ export async function recordScheduleDiff(
   for (const f of (before?.fixtures as ScheduleFixture[] | undefined) ?? [])
     if (f?.id) prior.set(f.id, f);
 
+  // The series' place in medicoach, derived once and only when some fixture needs a create.
+  let context: Promise<SeriesCreateContext | Refusal> | undefined;
+  const createOf = async (f: ScheduleFixture) => {
+    context ??= seriesCreateContext(tenant, after, config, repo);
+    const ctx = await context;
+    return isRefusal(ctx) ? ctx : fixtureCreateFrom(ctx, f);
+  };
+
   const rows: PendingScheduleSync[] = [];
   const newRefs: string[] = [];
-  after.fixtures = (after.fixtures as ScheduleFixture[]).map((f) => {
+  const out: ScheduleFixture[] = [];
+  for (const f of after.fixtures as ScheduleFixture[]) {
     const old = f?.id ? prior.get(f.id) : undefined;
-    if (!old) {
-      if (f?.id) newRefs.push(fixtureSyncRef(tenant, String(after.id), f));
-      return f;
+    // Medicoach does not have it yet: new; a `pos:`/`tbd:` side just set (ADR 0018: such a
+    // fixture was never exported); or an undated one (never exported, never created) that
+    // now has a date. Still unresolved / still undated: nothing to create yet.
+    const createNow =
+      !old ||
+      (neverExported(old) && !neverExported(f)) ||
+      (!neverExported(old) && !old.date && !!f.date);
+    if (createNow) {
+      if (!f?.id) {
+        out.push(f);
+        continue;
+      }
+      const ref = fixtureSyncRef(tenant, String(after.id), f);
+      const create = await createOf(f);
+      if (isRefusal(create)) {
+        newRefs.push(ref);
+        out.push(f);
+        continue;
+      }
+      const next: ScheduleFixture = {
+        ...f,
+        schedule: { ...(f.schedule ?? {}), changedAt: nowIso },
+      };
+      rows.push({
+        ref,
+        seriesId: String(after.id),
+        fixtureId: String(f.id),
+        op: 'create',
+        create,
+        sides: sidesOf(f),
+        schedule: fixtureSchedule(after, next, nowIso),
+        origin,
+        enqueuedAt: nowIso,
+        attempts: 0,
+        ...(held ? { heldUntilReveal: true } : {}),
+      });
+      out.push(next);
+      continue;
     }
-    // A fixture with a `pos:`/`tbd:` side was never exported (ADR 0018: no team, no fixture to
-    // wait on), so medicoach has no match to update. Once Set team leaves it with no such side
-    // it needs a bundle top-up — reported like a new fixture, never pushed (a push would come
-    // back `unmapped` and vanish). Still unresolved: nothing to push either.
-    if (neverExported(old)) {
-      if (!neverExported(f) && f.id) newRefs.push(fixtureSyncRef(tenant, String(after.id), f));
-      return f;
+    // Still a `pos:`/`tbd:` placeholder (old and new): medicoach has nothing to update.
+    // Reverted to one: the contract can't carry it, so nothing is pushed.
+    if (neverExported(old) || neverExported(f) || !before || !sameMatch(old, f)) {
+      out.push(f);
+      continue;
     }
-    // Reverted to a `pos:`/`tbd:` placeholder: the contract can't carry it, so nothing is pushed.
-    if (neverExported(f)) return f;
-    if (!before || !sameMatch(old, f)) return f;
-    if (scheduleKey(before, old) === scheduleKey(after, f)) return f;
+    if (scheduleKey(before, old) === scheduleKey(after, f)) {
+      out.push(f);
+      continue;
+    }
     const next: ScheduleFixture = { ...f, schedule: { ...(f.schedule ?? {}), changedAt: nowIso } };
     rows.push({
       ref: fixtureSyncRef(tenant, String(after.id), next),
@@ -367,15 +556,31 @@ export async function recordScheduleDiff(
       attempts: 0,
       ...(held ? { heldUntilReveal: true } : {}),
     });
-    return next;
-  });
+    out.push(next);
+  }
+  after.fixtures = out;
+
+  // Removals: medicoach must delete its copy (smart club owns existence).
+  if (before) {
+    const kept = new Set(out.map((f) => f?.id).filter(Boolean));
+    const removed = [...prior.values()].filter((old) => !kept.has(old.id));
+    rows.push(...deleteRowsFor(tenant, before, removed, origin, nowIso));
+  }
+
   if (!rows.length && !newRefs.length) return NO_DIFF;
   const log = opts.log ?? ((line: string) => console.log(line));
   return {
     refs: rows.map((r) => r.ref),
     newRefs,
     enqueue: async () => {
-      for (const r of rows) await repo.putPendingSync(tenant, r);
+      let queued = 0;
+      for (const r of rows) {
+        const res = await writePendingSync(repo, tenant, r);
+        if (res !== 'await-carry') queued++;
+        // A re-add of a different match over a pending delete: the delete still goes; the
+        // new fixture awaits a carry (medicoach would refuse to reclaim the ref anyway).
+        else if (res === 'await-carry') newRefs.push(r.ref);
+      }
       if (newRefs.length) {
         log(newFixturesNotice(tenant, String(after.id), newRefs));
         await repo.putSyncLog(tenant, {
@@ -398,7 +603,7 @@ export async function recordScheduleDiff(
         });
         await recordAwaitingCarry(repo, tenant, after, newRefs, nowIso);
       }
-      return rows.length;
+      return queued;
     },
   };
 }
@@ -433,7 +638,7 @@ export const EPOCH_CHANGED_AT = '1970-01-01T00:00:00.000Z';
  * withholding a field), an unmapped series or a tenant without the sync.
  */
 export async function requeueRevealedSeries(
-  repo: Pick<RepoModule, 'getTenantConfig' | 'putPendingSync' | 'getSeasonRun'>,
+  repo: Pick<RepoModule, 'getTenantConfig' | 'putPendingSync' | 'getPendingSync' | 'getSeasonRun'>,
   tenant: string,
   revealed: Series,
   opts: { config?: TenantConfig | null; now?: () => Date } = {},
@@ -460,7 +665,9 @@ export async function requeueRevealedSeries(
   if (!rows.length) return none;
   return {
     enqueue: async () => {
-      for (const r of rows) await repo.putPendingSync(tenant, r);
+      // Through the shared collapse: a fixture held as a create goes out as the create (an
+      // upsert would bounce `unmapped`), and a pending delete is never replaced.
+      for (const r of rows) await writePendingSync(repo, tenant, r);
       return rows.length;
     },
   };
@@ -492,10 +699,38 @@ const zeroPush = (): SchedulePushCounts => ({
   errors: 0,
 });
 
+/** A create whose side waits on another fixture (sent after the non-slot creates). */
+const isSlotCreate = (r: PendingScheduleSync) => !!(r.create?.homeSlot || r.create?.awaySlot);
+
+/**
+ * The batches of one flush: plain upserts in their own batches, op rows (create/delete) in
+ * SEPARATE ones — a medicoach that predates create/delete ops rejects an op batch with a 400
+ * on its strict schema, which must never fail the upserts with it. Op rows go deletes first,
+ * then creates feeders-first (non-slot creates before slot creates; the outbox lists in ref
+ * order, not insertion order), so a slot's feeder is usually created earlier in the run.
+ */
+export function pushBatches(rows: PendingScheduleSync[]): PendingScheduleSync[][] {
+  const chunk = (list: PendingScheduleSync[]) => {
+    const out: PendingScheduleSync[][] = [];
+    for (let i = 0; i < list.length; i += SCHEDULE_PUSH_MAX)
+      out.push(list.slice(i, i + SCHEDULE_PUSH_MAX));
+    return out;
+  };
+  const rank = (r: PendingScheduleSync) =>
+    r.op === 'delete' ? 0 : r.op === 'create' ? (isSlotCreate(r) ? 2 : 1) : 3;
+  const ops = rows.filter((r) => r.op).map((r, i) => ({ r, i }));
+  ops.sort((a, b) => rank(a.r) - rank(b.r) || a.i - b.i);
+  return [...chunk(rows.filter((r) => !r.op)), ...chunk(ops.map((x) => x.r))];
+}
+
 /**
  * Push the tenant's outbox to medicoach (Slice 4). Never throws for a medicoach failure: a
  * failed batch keeps its rows (attempts + 1, lastError) for the next run, and the pull still
  * runs. Dry run (URL or secret empty): logs what it would send, sends nothing.
+ *
+ * `op: "delete"` rows are self-contained: no live-series read, never dropped for a deleted
+ * series, never held, never venue-filled, only their `changedAt` checked. `op: "create"` rows
+ * are held/dropped like upserts, and an undated one waits (never sent as a create).
  */
 export async function flushScheduleOutbox(
   tenant: string,
@@ -511,26 +746,35 @@ export async function flushScheduleOutbox(
     a.enqueuedAt.localeCompare(b.enqueuedAt),
   );
   if (!all.length) return { status: 'empty', pending: 0, held: 0, counts };
+  const opOf = (row: PendingScheduleSync) => row.op ?? 'upsert';
 
   // A draft (never released, or recalled) or withheld venue/time never leaves smart club
   // (ADR 0011): decided against the series as it stands NOW, not the flag the row was
   // enqueued with, so a recall or a release-with-withheld after the enqueue still holds it and
   // a release/reveal by any path releases it. A row whose series no longer exists is dropped:
-  // there is nothing left to say about it, and pushing it would leak a deleted draft.
+  // there is nothing left to say about it, and pushing it would leak a deleted draft. A delete
+  // row is the exception — it exists to reach medicoach after its fixture or series is gone.
   const live = new Map<string, Series | null>();
   const rows: PendingScheduleSync[] = [];
   let held = 0;
   let dropped = 0;
   for (const row of all) {
+    if (row.op === 'delete') {
+      rows.push(row);
+      continue;
+    }
     if (!live.has(row.seriesId)) live.set(row.seriesId, await repo.getSeries(tenant, row.seriesId));
     const series = live.get(row.seriesId)!;
     if (!series) {
-      await repo.deletePendingSyncIfUnchanged(tenant, row.ref, row.schedule.changedAt);
+      await repo.deletePendingSyncIfUnchanged(tenant, row.ref, row.schedule.changedAt, opOf(row));
       dropped++;
       continue;
     }
     const hold = seriesHoldsSchedule(series);
-    if (hold) held++;
+    // Contract: an undated fixture is never sent as a create; it waits for a date (a later
+    // edit replaces the row) or a removal.
+    const undatedCreate = row.op === 'create' && !row.schedule.scheduledTime;
+    if (hold || undatedCreate) held++;
     else rows.push(row);
     if (hold !== (row.heldUntilReveal === true))
       await repo.setPendingSyncHeld(tenant, row.ref, row.schedule.changedAt, hold);
@@ -557,27 +801,40 @@ export async function flushScheduleOutbox(
       row.schedule.changedAt,
       error,
       now().toISOString(),
+      opOf(row),
     );
   };
 
-  // A row whose snapshot no longer fits the contract can never be sent; keep it visible.
+  // A row whose snapshot no longer fits the contract can never be sent; keep it visible. A
+  // delete reads only `changedAt`: a valid one goes out with a neutral schedule if need be.
   const sendable: PendingScheduleSync[] = [];
   for (const row of rows) {
     if (SyncScheduleSchema.safeParse(row.schedule).success) sendable.push(row);
+    else if (
+      row.op === 'delete' &&
+      SyncScheduleSchema.safeParse({
+        ...DELETE_FALLBACK_SCHEDULE,
+        changedAt: row.schedule.changedAt,
+      }).success
+    )
+      sendable.push({
+        ...row,
+        schedule: { ...DELETE_FALLBACK_SCHEDULE, changedAt: row.schedule.changedAt },
+      });
     else await failRow(row, 'the stored schedule does not fit the v1 contract');
   }
 
   // A fixture with no venue of its own and no participant venue went to medicoach with its
   // home club's ground (the bundle export's fallback). Send the same ground, never a null
   // that would wipe the venue medicoach got from the carry. One club list read, only when
-  // some row needs it.
-  if (sendable.some((r) => r.schedule.venue == null)) {
+  // some row needs it. Never for a delete (it reads only `changedAt`).
+  if (sendable.some((r) => r.schedule.venue == null && r.op !== 'delete')) {
     const grounds = new Map(
       (await repo.listClubs(tenant)).map((cl) => [cl.id, cl.ground?.venue?.trim() || null]),
     );
     for (let i = 0; i < sendable.length; i++) {
       const row = sendable[i];
-      if (row.schedule.venue != null) continue;
+      if (row.schedule.venue != null || row.op === 'delete') continue;
       const ground = homeClubGround(live.get(row.seriesId) ?? null, row.fixtureId, grounds);
       if (ground) sendable[i] = { ...row, schedule: { ...row.schedule, venue: ground } };
     }
@@ -587,15 +844,20 @@ export async function flushScheduleOutbox(
   let requestError: string | undefined;
   /** Refs medicoach answered `unmapped`, by series (recorded as MCAWAIT# after the batches). */
   const unmappedBySeries = new Map<string, string[]>();
-  for (let i = 0; i < sendable.length; i += SCHEDULE_PUSH_MAX) {
-    const batch = sendable.slice(i, i + SCHEDULE_PUSH_MAX);
+  /** Refs medicoach answered `created`, by series (taken off MCAWAIT# after the batches). */
+  const createdBySeries = new Map<string, string[]>();
+  const push = (into: Map<string, string[]>, seriesId: string, ref: string) =>
+    into.set(seriesId, [...(into.get(seriesId) ?? []), ref]);
+  for (const batch of pushBatches(sendable)) {
     const body = JSON.stringify({
       version: MEDICOACH_SYNC_VERSION,
       tenant,
       // Rows queued before the venue cap still go out within it.
       changes: batch.map((r) => ({
         ref: r.ref,
+        ...(r.op ? { op: r.op } : {}),
         schedule: { ...r.schedule, venue: capVenue(r.schedule.venue) },
+        ...(r.op === 'create' && r.create ? { create: r.create } : {}),
       })),
     });
     counts.sent += batch.length;
@@ -645,13 +907,14 @@ export async function flushScheduleOutbox(
       if (!r) await failRow(row, 'medicoach returned no result for this fixture');
       else if (r.status === 'error') await failRow(row, r.message || 'medicoach reported an error');
       else {
-        counts[r.status as 'applied' | 'stale' | 'unchanged' | 'unmapped']++;
-        await repo.deletePendingSyncIfUnchanged(tenant, row.ref, row.schedule.changedAt);
-        if (r.status === 'unmapped') {
-          const refs = unmappedBySeries.get(row.seriesId) ?? [];
-          refs.push(row.ref);
-          unmappedBySeries.set(row.seriesId, refs);
-        }
+        if (r.status === 'created') counts.created = (counts.created ?? 0) + 1;
+        else if (r.status === 'deleted') counts.deleted = (counts.deleted ?? 0) + 1;
+        else counts[r.status as 'applied' | 'stale' | 'unchanged' | 'unmapped']++;
+        await repo.deletePendingSyncIfUnchanged(tenant, row.ref, row.schedule.changedAt, opOf(row));
+        // A delete answer never awaits a carry: the fixture is gone either way.
+        if (row.op === 'delete') continue;
+        if (r.status === 'unmapped') push(unmappedBySeries, row.seriesId, row.ref);
+        else if (r.status === 'created') push(createdBySeries, row.seriesId, row.ref);
       }
     }
   }
@@ -659,6 +922,17 @@ export async function flushScheduleOutbox(
   for (const [seriesId, refs] of unmappedBySeries) {
     const series = live.get(seriesId);
     if (series) await recordAwaitingCarry(repo, tenant, series, refs, now().toISOString());
+  }
+  // A `created` answer: medicoach has it now — no longer awaiting a carry. Best-effort (the
+  // daily reconciliation re-derives the set).
+  for (const [seriesId, refs] of createdBySeries) {
+    try {
+      await repo.removeMcAwaitRefs(tenant, seriesId, refs, { now: now().toISOString() });
+    } catch (err) {
+      console.error(
+        `[medicoach-sync] ${tenant}: awaiting-carry clear failed for ${seriesId} — ${err instanceof Error ? err.message : 'error'}`,
+      );
+    }
   }
 
   if (counts.sent || counts.errors)

@@ -1088,7 +1088,11 @@ describe('Slice 4 — moved dates keep their ref; new fixtures are reported', ()
     );
   });
 
-  test('a fixture added to a mapped series is not pushed but reported for a bundle top-up', async () => {
+  // These series are named without a "League · Stream · Group" shape, so S1 and S2 share the
+  // same (empty) group label: the create's group is ambiguous and it is refused
+  // (create-payload.ts) — the fixture falls back to the awaiting-carry report. Derivable creates
+  // are covered in medicoach-fixture-create-delete.int.test.ts.
+  test('a fixture added whose create cannot be derived is not pushed but reported for a bundle top-up', async () => {
     const s = (await repo.getSeries(T, S1))!;
     const fixtures = [
       ...(s.fixtures as unknown[]),
@@ -1102,7 +1106,7 @@ describe('Slice 4 — moved dates keep their ref; new fixtures are reported', ()
     assert.deepEqual(handle.newRefs, [REF(S1, 'f3')]);
     await repo.putSeries(T, after);
     await handle.enqueue();
-    assert.deepEqual(await repo.listPendingSync(T), [], 'medicoach cannot create a match');
+    assert.deepEqual(await repo.listPendingSync(T), [], 'no create without an unambiguous group');
     assert.match(lines.join('\n'), /new fixture\(s\).*not in medicoach \(needs bundle top-up\)/);
     assert.ok(lines.join('\n').includes(REF(S1, 'f3')));
     const logs = await repo.listSyncLogs(T);
