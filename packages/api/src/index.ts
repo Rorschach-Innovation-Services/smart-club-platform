@@ -4800,8 +4800,28 @@ type SeriesPatch = Partial<Series> & {
 app.patch('/series/:id', requireAdmin, async (c) => {
   const ra = c.get('requestAuth')!;
   const patch = (await c.req.json()) as SeriesPatch;
-  return c.json(await applySeriesPatch(ra.tenant, c.req.param('id'), patch, ra.email ?? 'unknown'));
+  const out: SeriesPatchOutcome = {};
+  const written = await applySeriesPatch(
+    ra.tenant,
+    c.req.param('id'),
+    patch,
+    ra.email ?? 'unknown',
+    undefined,
+    'admin',
+    out,
+  );
+  // Response-only: fixtures this save added that medicoach can't be sent as creates (they
+  // await a carry — the connection console). Absent when there are none / no sync.
+  return c.json(
+    out.awaitingCarry?.length ? { ...written, medicoachAwaitingCarry: out.awaitingCarry } : written,
+  );
 });
+
+/** What a series write learned beyond the written series (response-only extras). */
+interface SeriesPatchOutcome {
+  /** Fixture ids queued as awaiting a medicoach carry (MCAWAIT#) by this write. */
+  awaitingCarry?: string[];
+}
 
 /**
  * The whole of `PATCH /series/:id` — version pre-check, approval gate (a fixtures edit on a
@@ -4821,7 +4841,10 @@ async function applySeriesPatch(
   runCalendar?: RunCalendarOverride,
   /** Who is changing the schedule — stamped + queued for medicoach unless `medicoach`. */
   origin: ScheduleChangeOrigin = 'admin',
+  out?: SeriesPatchOutcome,
 ): Promise<Series> {
+  // Response-only (PATCH /series answer); an editor echoing it back never persists it.
+  delete (patch as Record<string, unknown>).medicoachAwaitingCarry;
   const current = await repo.getSeries(tenant, id);
   if (!current) throw new HttpError(404, 'series not found');
   // A whole-series PATCH echoes GET /series' response-only fixture keys (the joined
@@ -5200,6 +5223,12 @@ async function applySeriesPatch(
     throw err;
   }
   await scheduleSync?.enqueue();
+  if (out && scheduleSync?.newRefs.length) {
+    const prefix = `smartclub:${tenant}:fixture:${id}:`;
+    out.awaitingCarry = scheduleSync.newRefs.map((r) =>
+      r.startsWith(prefix) ? r.slice(prefix.length) : r,
+    );
+  }
   if (removedFixtureIds.length) {
     // Best effort, after the write landed: a failure here leaves invisible rows, never a
     // wrong schedule, so it must not fail the edit the admin already made.
@@ -7040,6 +7069,8 @@ async function deleteSeriesWithSync(
   // voided (ADR 0016).
   await repo.deleteFixtureOfficialsForSeries(tenant, id);
   await repo.deleteSeriesSyncState(tenant, id);
+  // Nothing of it awaits a carry any more (the daily reconcile is the net for other paths).
+  await repo.deleteMcAwait(tenant, id);
   return deletes;
 }
 

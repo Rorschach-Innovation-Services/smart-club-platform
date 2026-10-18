@@ -144,6 +144,10 @@ const teamOptions = (s: ManageSeries, clubs: ManageClub[]) =>
     : (s.teams ?? []).map((id) => ({ id, name: clubs.find((c) => c.id === id)?.name ?? id }))
   ).sort((a, b) => a.name.localeCompare(b.name));
 
+/** A new fixture's default round: one past the series' highest round (1 when it has none). */
+export const nextRoundOf = (s: Pick<ManageSeries, 'fixtures'> | undefined) =>
+  Math.max(0, ...((s?.fixtures as Fixture[]) ?? []).map((f) => Number(f.round) || 0)) + 1;
+
 const homeGroundOf = (s: ManageSeries, clubs: ManageClub[], teamId?: string) => {
   if (!teamId) return '';
   const p = s.participants?.find((x) => x.teamId === teamId);
@@ -180,12 +184,8 @@ export function FixtureEditDialog({
   const s = series.find((x) => x.id === seriesId);
   const existing = (s?.fixtures as Fixture[] | undefined)?.find((f) => f.id === fixtureId);
   const teams = s ? teamOptions(s, clubs) : [];
-  const lastRound = Math.max(
-    0,
-    ...((s?.fixtures as Fixture[]) ?? []).map((f) => Number(f.round) || 0),
-  );
   const [draft, setDraft] = useState(() => ({
-    round: (existing?.round as number) ?? lastRound + 1,
+    round: (existing?.round as number) ?? nextRoundOf(s),
     date: (existing?.date as string) ?? '',
     time: (existing?.time as string) ?? '',
     home: (existing?.home as string) ?? '',
@@ -296,7 +296,15 @@ export function FixtureEditDialog({
         {mode === 'add' && (
           <label className="fm-field fm-wide">
             Series
-            <select value={seriesId} onChange={(e) => setSeriesId(e.target.value)}>
+            <select
+              value={seriesId}
+              onChange={(e) => {
+                setSeriesId(e.target.value);
+                // The round default belongs to the series picked, not the one first shown.
+                const picked = series.find((x) => x.id === e.target.value);
+                setDraft((d) => ({ ...d, round: nextRoundOf(picked) }));
+              }}
+            >
               {series.map((x) => (
                 <option key={x.id} value={x.id}>
                   {x.name}

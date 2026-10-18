@@ -227,6 +227,27 @@ describe('This week', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
+  it('the Round default follows the series picked (not the first series shown)', async () => {
+    const user = userEvent.setup();
+    const long = series({
+      id: 's0',
+      name: 'A Long Series',
+      fixtures: Array.from({ length: 7 }, (_, i) => ({
+        id: `f${i + 1}`,
+        round: i + 1,
+        date: `2026-11-${String(i + 1).padStart(2, '0')}`,
+        home: 'spartan',
+        away: 'tongaat',
+      })),
+    });
+    renderHub([long, series()]);
+    await user.click(screen.getByRole('button', { name: /add fixture/i }));
+    const dlg = screen.getByRole('dialog', { name: /add a fixture/i });
+    expect(within(dlg).getByLabelText('Round')).toHaveValue(8);
+    await user.selectOptions(within(dlg).getByLabelText('Series'), 's1');
+    expect(within(dlg).getByLabelText('Round')).toHaveValue(3);
+  });
+
   it('refuses a team playing itself before anything is sent', async () => {
     const user = userEvent.setup();
     const h = renderHub();

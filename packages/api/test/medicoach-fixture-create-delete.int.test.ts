@@ -699,3 +699,27 @@ describe('an upsert medicoach answers `unmapped` becomes a create (next run)', (
     assert.equal((await pending(REF(S1, 'f1')))?.op, 'delete');
   });
 });
+
+describe('admin feedback and cleanup', () => {
+  test('PATCH answers medicoachAwaitingCarry for an added fixture that cannot be created', async () => {
+    const ok = await addFixture(S1, nf('f3'));
+    assert.equal(((await ok.json()) as Record<string, unknown>).medicoachAwaitingCarry, undefined);
+    const undated = await addFixture(S1, nf('f4', { date: undefined, time: undefined }));
+    assert.equal(undated.status, 200);
+    const body = (await undated.json()) as Record<string, unknown>;
+    assert.deepEqual(body.medicoachAwaitingCarry, ['f4']);
+    // Echoed back on the next whole-series save, it is never stored.
+    await patch(S1, { ...body, fixtures: await fixturesOf(S1) });
+    assert.equal((await repo.getSeries(T, S1))!.medicoachAwaitingCarry, undefined);
+  });
+
+  test('DELETE /series clears its awaiting-carry row', async () => {
+    await addFixture(S1, nf('f4', { date: undefined, time: undefined }));
+    assert.deepEqual(await awaiting(S1), [REF(S1, 'f4')]);
+    assert.equal(
+      (await app.request(`/series/${S1}`, { method: 'DELETE', headers: headers() })).status,
+      200,
+    );
+    assert.deepEqual(await repo.listMcAwait(T), []);
+  });
+});
