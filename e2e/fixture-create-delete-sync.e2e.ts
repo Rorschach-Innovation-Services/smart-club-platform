@@ -147,8 +147,7 @@ test('a synced series: add saves, remove asks "Remove from both", series delete 
   await expect(confirm).toContainText(
     'Any of them Match Centre holds are deleted there too, including recorded results.',
   );
-  // The danger confirm's yes button (it carries no series-specific label today).
-  await page.locator('.fix-confirm-actions button').last().click();
+  await page.locator('.fix-confirm-actions').getByRole('button', { name: 'Delete series' }).click();
   await expect(page.getByRole('heading', { name, exact: true })).toHaveCount(0);
   const all = (await (
     await request.get(`${API_BASE}/series`, { headers: admin() })

@@ -542,6 +542,16 @@ describe('flush batching', () => {
         ...over,
       });
     const base = { competitionRef: COMP, sport: 'cricket', stage: 'Knockout' };
+    // The creates' fixtures are live (a flush re-derives a create from its live fixture).
+    await repo.putSeries(
+      T,
+      series(S1, 1, [
+        fx('f1'),
+        fx('f2', { home: 'c', away: 'd' }),
+        fx('f6', { date: '2026-11-01', home: 'a', away: 'b' }),
+        fx('f8', { date: '2026-11-08', home: 'win:f6', away: 'win:f7' }),
+      ]),
+    );
     // Enqueued slot-create first, so ordering is not an accident of insertion.
     await put('f8', 1, {
       op: 'create',
@@ -721,5 +731,66 @@ describe('admin feedback and cleanup', () => {
       200,
     );
     assert.deepEqual(await repo.listMcAwait(T), []);
+  });
+});
+
+describe('a queued create is re-derived from the LIVE fixture at flush', () => {
+  const setTeams = async (id: string, home: string, away: string) => {
+    const fixtures = (await fixturesOf(S1)).map((f) => (f.id === id ? { ...f, home, away } : f));
+    assert.equal((await patch(S1, { fixtures })).status, 200);
+  };
+  const sentCreate = () =>
+    pushes.flatMap((p) => p.changes).find((c) => c.ref === REF(S1, 'f3') && c.op === 'create');
+
+  test('released: a team edit before the flush → the create carries the final teams', async () => {
+    await addFixture(S1, nf('f3', { home: 'a', away: 'c' }));
+    await setTeams('f3', 'a', 'd');
+    await flush();
+    assert.equal(sentCreate()?.create?.awayTeamRef, TEAM('d'));
+    assert.equal(await pending(REF(S1, 'f3')), null);
+  });
+
+  test('draft reshuffle → release → the pushed create carries the final teams', async () => {
+    await repo.putSeries(T, series(S1, 1, [fx('f1')], { released: false, releasedAt: null }));
+    await addFixture(S1, nf('f3', { home: 'a', away: 'c' }));
+    await setTeams('f3', 'b', 'd');
+    assert.equal((await patch(S1, { approved: true })).status, 200);
+    assert.equal((await patch(S1, { released: true })).status, 200);
+    await flush();
+    const c = sentCreate()!;
+    assert.equal(c.create?.homeTeamRef, TEAM('b'));
+    assert.equal(c.create?.awayTeamRef, TEAM('d'));
+  });
+
+  test('no longer derivable (a side reverted to a placeholder) → dropped, awaiting carry', async () => {
+    await addFixture(S1, nf('f3', { home: 'a', away: 'c' }));
+    await setTeams('f3', 'pos:Group 2#1', 'c');
+    await flush();
+    assert.equal(sentCreate(), undefined);
+    assert.equal(await pending(REF(S1, 'f3')), null);
+    assert.deepEqual(await awaiting(S1), [REF(S1, 'f3')]);
+  });
+});
+
+describe('writePendingSync', () => {
+  test('a row deleted between the failed put and the re-read is retried against no row', async () => {
+    const stored = { op: undefined, schedule: { changedAt: '2026-10-18T10:00:00.000Z' } };
+    const reads = [stored, null];
+    let puts = 0;
+    const fake = {
+      getPendingSync: async () => reads.shift() ?? null,
+      putPendingSync: async () => ++puts === 2,
+    } as never;
+    const row = {
+      ref: 'r',
+      seriesId: 's',
+      fixtureId: 'f',
+      schedule: { ...stored.schedule, changedAt: '2026-10-18T09:00:00.000Z' },
+      origin: 'admin',
+      enqueuedAt: 'x',
+      attempts: 0,
+    } as unknown as PendingScheduleSync;
+    assert.equal(await schedule.writePendingSync(fake, T, row), 'written');
+    assert.equal(puts, 2);
   });
 });

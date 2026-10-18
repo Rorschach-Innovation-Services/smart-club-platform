@@ -1801,7 +1801,10 @@ export async function runAppendSides(args: Args) {
   console.log(`Done. ${plan.patches.length - raced} club(s) written. Backup: ${backup}`);
 }
 
-/** DELETE /series parity: the series, its umpire appointments and its medicoach-sync state. */
+/**
+ * DELETE /series parity minus medicoach delete propagation: the series, its umpire
+ * appointments and its medicoach-sync state, but no delete rows (runbook "Known gaps").
+ */
 async function deleteSeriesFully(repo: RepoModule, id: string) {
   await repo.deleteSeries(TITANS_TENANT, id);
   await repo.deleteFixtureOfficialsForSeries(TITANS_TENANT, id);

@@ -391,7 +391,8 @@ export async function writePendingSync(
       !!stored &&
       again.op === stored.op &&
       again.schedule.changedAt === stored.schedule.changedAt;
-    if (same || !again) return 'kept';
+    if (same) return 'kept';
+    // Gone between the put and the re-read (a flush deleted it): try again against no row.
     stored = again;
   }
   return 'kept';
@@ -771,6 +772,18 @@ export async function flushScheduleOutbox(
   const rows: PendingScheduleSync[] = [];
   let held = 0;
   let dropped = 0;
+  // A create derived from the LIVE fixture (one series context per series per flush).
+  let config: TenantConfig | null | undefined;
+  const contexts = new Map<string, Promise<SeriesCreateContext | Refusal>>();
+  const liveCreate = async (series: Series, f: ScheduleFixture) => {
+    if (config === undefined) config = await repo.getTenantConfig(tenant);
+    if (!contexts.has(series.id))
+      contexts.set(series.id, seriesCreateContext(tenant, series, config, repo));
+    const ctx = await contexts.get(series.id)!;
+    return isRefusal(ctx) ? ctx : fixtureCreateFrom(ctx, f);
+  };
+  /** Create rows whose live fixture no longer derives a create: awaiting carry. */
+  const refusedCreates = new Map<string, string[]>();
   for (const row of all) {
     if (row.op === 'delete') {
       rows.push(row);
@@ -784,16 +797,43 @@ export async function flushScheduleOutbox(
       continue;
     }
     const hold = seriesHoldsSchedule(series);
+    // A create's payload was snapshotted at enqueue, but the fixture may have changed since
+    // (a team edit is not a schedule diff, so no newer row replaced it): re-derive it — and
+    // its schedule, keeping the row's changedAt — from the LIVE fixture, so medicoach never
+    // materialises a stale match. No longer derivable → dropped, awaiting a carry.
+    let send = row;
+    if (!hold && row.op === 'create') {
+      const f = (series.fixtures as ScheduleFixture[] | undefined)?.find(
+        (x) => x?.id === row.fixtureId,
+      );
+      const create = f && !neverExported(f) ? await liveCreate(series, f) : null;
+      if (!f || !create || isRefusal(create)) {
+        await repo.deletePendingSyncIfUnchanged(tenant, row.ref, row.schedule.changedAt, 'create');
+        if (f)
+          refusedCreates.set(row.seriesId, [...(refusedCreates.get(row.seriesId) ?? []), row.ref]);
+        continue;
+      }
+      send = {
+        ...row,
+        create,
+        sides: sidesOf(f),
+        schedule: fixtureSchedule(series, f, row.schedule.changedAt),
+      };
+    }
     // Contract: an undated fixture is never sent as a create; it waits for a date (a later
     // edit replaces the row) or a removal.
-    const undatedCreate = row.op === 'create' && !row.schedule.scheduledTime;
+    const undatedCreate = send.op === 'create' && !send.schedule.scheduledTime;
     if (hold || undatedCreate) held++;
-    else rows.push(row);
+    else rows.push(send);
     if (hold !== (row.heldUntilReveal === true))
       await repo.setPendingSyncHeld(tenant, row.ref, row.schedule.changedAt, hold);
   }
   if (dropped)
     log(`[medicoach-sync] ${tenant}: dropped ${dropped} outbox row(s) of deleted series`);
+  for (const [seriesId, refs] of refusedCreates) {
+    const series = live.get(seriesId);
+    if (series) await recordAwaitingCarry(repo, tenant, series, refs, now().toISOString());
+  }
   if (!rows.length) return { status: 'empty', pending: all.length - dropped, held, counts };
   if (!deps.url || !deps.secret) {
     log(
@@ -940,8 +980,6 @@ export async function flushScheduleOutbox(
   // revealed venue/time rides along — through the collapse helper (op precedence holds: a
   // pending delete is never replaced). It goes out on the next run. Otherwise: awaiting carry.
   if (unmappedUpserts.length) {
-    const config = await repo.getTenantConfig(tenant);
-    const contexts = new Map<string, Promise<SeriesCreateContext | Refusal>>();
     const nowIso = now().toISOString();
     for (const row of unmappedUpserts) {
       const series = live.get(row.seriesId);
@@ -950,10 +988,7 @@ export async function flushScheduleOutbox(
       );
       let queued = false;
       if (series && f && !neverExported(f)) {
-        if (!contexts.has(series.id))
-          contexts.set(series.id, seriesCreateContext(tenant, series, config, repo));
-        const ctx = await contexts.get(series.id)!;
-        const create = isRefusal(ctx) ? ctx : fixtureCreateFrom(ctx, f);
+        const create = await liveCreate(series, f);
         if (!isRefusal(create)) {
           const changedAt = f.schedule?.changedAt || NEVER_EDITED_CHANGED_AT;
           const res = await writePendingSync(repo, tenant, {

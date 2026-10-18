@@ -8,8 +8,8 @@ schedule push (`op: "create" | "delete"` on §2). Branches:
 
 ## Deploy order — medicoach FIRST, smart club second
 
-Medicoach's inbound schemas are strict: an op row sent to an old medicoach is a
-400. The medicoach build accepts the new fields but old smart club never sends
+Medicoach's inbound schemas are strict: an old medicoach answers an op row with
+HTTP 400. The medicoach build accepts the new fields but old smart club never sends
 them, so medicoach can ship alone safely. The smart club deploy is the
 activation — the moment it's live, every `features.medicoachSync` tenant starts
 propagating creates and deletes. There is no feature flag.
@@ -57,5 +57,9 @@ propagating creates and deletes. There is no feature flag.
   reconcile / connection console remains the net.
 - EMCU's importer `deleteSeriesFully` on stale series bypasses delete
   propagation (it refuses released series, so low risk).
+- The Titans importer's `deleteSeriesFully` (import-titans-fixtures.ts, the
+  prune path) also bypasses delete propagation, and its prune supports
+  `--include-released`, so the "refuses released" rationale does not apply.
+  Titans is not a `features.medicoachSync` tenant today; revisit before it is.
 - Group names for Plan-B creates are positional among sibling series; siblings
   added or removed after a carry can shift the label on later creates.
