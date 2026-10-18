@@ -1550,6 +1550,7 @@ export function FixtureTable({
               setConfirm({
                 title: 'Delete this series?',
                 body: `Permanently remove "${series.name}" along with all ${series.fixtures.length} fixtures. Any of them Match Centre holds are deleted there too, including recorded results. The ${copy.office} cannot undo this.`,
+                yesLabel: 'Delete series',
                 onYes: () => {
                   setConfirm(null);
                   Promise.resolve(onDeleteSeries(series.id))
