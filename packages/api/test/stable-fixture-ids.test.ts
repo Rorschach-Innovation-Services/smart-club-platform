@@ -10,6 +10,7 @@ import {
   carrySyncOwnedFields,
   reconcileFixtureIds,
   fixtureSyncRef,
+  stabiliseAgainstStored,
   type IdentityFixture,
 } from '../src/fixture-identity.js';
 
@@ -271,5 +272,36 @@ describe('carrySyncOwnedFields — knockout slot bookkeeping (ADR 0022 §7)', ()
     });
     assert.deepEqual(to.slots, { home: 'win:f9' });
     assert.equal(to.slotsManual, undefined);
+  });
+});
+
+describe('stabiliseAgainstStored (positional importers: EMCU, Lions)', () => {
+  test('re-keys row-order ids against the stored series and its high-water mark', () => {
+    const stored = {
+      fixtures: [{ id: 'f1', date: '2026-10-04', home: 'a', away: 'b' }],
+      maxFixtureIdEver: 7,
+    };
+    const incoming = [
+      { id: 'f1', date: '2026-10-11', home: 'c', away: 'd' },
+      { id: 'f2', date: '2026-10-04', home: 'b', away: 'a' },
+    ];
+    const renames = stabiliseAgainstStored(incoming, stored);
+    assert.deepEqual(
+      incoming.map((f) => f.id),
+      ['f8', 'f1'],
+    );
+    assert.deepEqual(
+      [...renames],
+      [
+        ['f1', 'f8'],
+        ['f2', 'f1'],
+      ],
+    );
+  });
+
+  test('no stored series: a first import keeps f1..fN', () => {
+    const incoming = [{ id: 'f1', date: '2026-10-04', home: 'a', away: 'b' }];
+    assert.equal(stabiliseAgainstStored(incoming, undefined).size, 0);
+    assert.equal(incoming[0].id, 'f1');
   });
 });

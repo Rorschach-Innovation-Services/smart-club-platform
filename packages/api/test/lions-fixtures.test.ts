@@ -689,3 +689,48 @@ describe('prereqs bootstrap — pure diffs', () => {
     );
   });
 });
+
+describe('re-import over a stored series (fixture id high-water mark)', () => {
+  test('a matched row keeps its id; a new row never gets a removed id', () => {
+    const row = (r: number, date: string, home: string, away: string) => ({
+      row: r,
+      round: 1,
+      date,
+      time: '09:00',
+      home,
+      away,
+      venue: null,
+      source: 'test',
+    });
+    const input = [
+      {
+        spec: SPEC,
+        fixtures: [
+          row(4, '2026-10-11', 'Delfos', 'Pirates'),
+          row(5, '2026-10-18', 'Jeppe', 'Delfos'),
+        ],
+      },
+    ];
+    const ctx = { clubs: CLUBS, venues: [], leagueLabel: (k: string) => k };
+    const first = buildAllSeries(input as never, ctx).built[0];
+    assert.deepEqual(
+      first.fixtures.map((f) => f.id),
+      ['f1', 'f2'],
+    );
+    // Stored: the series once held f1..f3 (f2 and f3 since removed; mark = 3).
+    const stored = {
+      ...first.series,
+      fixtures: [first.fixtures[0]],
+      maxFixtureIdEver: 3,
+    } as unknown as Series;
+    const again = buildAllSeries(input as never, { ...ctx, stored: [stored] });
+    assert.deepEqual(
+      again.built[0].fixtures.map((f) => f.id),
+      ['f1', 'f4'],
+    );
+    assert.ok(
+      again.tbc.every((t) => t.fixtureId !== 'f2'),
+      'reports follow the final ids',
+    );
+  });
+});

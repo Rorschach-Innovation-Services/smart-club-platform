@@ -68,6 +68,7 @@ import {
   type SuffixUsage,
 } from './club-name-resolve.js';
 import { writeSeriesFromSnapshot } from './medicoach-sync/cli-write.js';
+import { stabiliseAgainstStored } from './fixture-identity.js';
 import { loadOffline } from './patch-fixtures.js';
 import {
   DEFAULT_WORKBOOK,
@@ -131,6 +132,8 @@ export interface BuildContext {
   clubs: Club[];
   venues: Venue[];
   aliases: Record<string, string>;
+  /** The tenant's stored series: a re-import keys fixture ids against them (never recycles). */
+  stored?: Series[];
 }
 
 export interface BuiltEmcuSeries {
@@ -258,6 +261,11 @@ export function buildEmcuSeries(
       }
       return wf;
     });
+    // Over a stored series: matched rows keep their ids, new rows go above its high-water mark.
+    stabiliseAgainstStored(
+      fixtures,
+      ctx.stored?.find((s) => String(s.id) === seriesIdFor(spec.slug)),
+    );
     const dates = fixtures.map((f) => f.date).sort();
     const series = {
       id: seriesIdFor(spec.slug),
@@ -1218,7 +1226,7 @@ async function runImport(args: Args) {
   // ── Build ──
   // Without tenant data the map alone names the clubs (no resolver cross-check, no venues).
   const ctx: BuildContext = haveTenantData
-    ? { clubs, venues, aliases }
+    ? { clubs, venues, aliases, stored: series }
     : { clubs: [], venues: [], aliases };
   const outcome = buildEmcuSeries(parsed, ctx, args.only);
   if (args.only.length)

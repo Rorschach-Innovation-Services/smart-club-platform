@@ -260,6 +260,7 @@ import type {
   SeriesSchedule,
   Venue,
   TenantConfig,
+  PendingScheduleSync,
   TutorialVideo,
   UserProfile,
   PlayerRegistration,
@@ -6992,18 +6993,31 @@ app.post('/clubs/:id/clash-hints', async (c) => {
   return c.json({ results });
 });
 
-app.delete('/series/:id', requireAdmin, async (c) => {
-  const { tenant } = c.get('requestAuth')!;
-  const id = c.req.param('id');
-  // Medicoach must delete its copies (contract §2 delete ops): read the series BEFORE it goes
-  // and build a self-contained delete row for every fixture it may hold, plus any delete
-  // already queued for a fixture removed earlier (the wipe below would lose it).
+/**
+ * Delete a series and its smart-club state, keeping medicoach in step (contract §2 delete
+ * ops). The series is read BEFORE it goes; when it is sync-mapped, a self-contained delete
+ * row is built for every fixture medicoach may hold, plus any delete already queued for a
+ * fixture removed earlier (the wipe below would lose it). Then: deleteSeries → officials →
+ * deleteSeriesSyncState (which drops the series' outbox rows). The delete rows are RETURNED,
+ * not written: the caller writes them with `queueSeriesDeletes` once it knows the deletion
+ * stands (after the wipe — always — and, for a regenerate, only once the new draw landed).
+ *
+ * `justCreated`: the series was written earlier in the same request and never left smart
+ * club (a create's rollback) — just the item delete, no reads, exactly as before.
+ */
+async function deleteSeriesWithSync(
+  tenant: string,
+  id: string,
+  opts: { justCreated?: boolean; config?: TenantConfig | null } = {},
+): Promise<PendingScheduleSync[]> {
+  if (opts.justCreated) {
+    await repo.deleteSeries(tenant, id);
+    return [];
+  }
   const before = await repo.getSeries(tenant, id);
-  let deletes: Awaited<ReturnType<typeof deleteRowsFor>> = [];
-  if (
-    before &&
-    (await seriesMappedForSync(repo, tenant, before, await repo.getTenantConfig(tenant)))
-  ) {
+  let deletes: PendingScheduleSync[] = [];
+  const config = opts.config !== undefined ? opts.config : await repo.getTenantConfig(tenant);
+  if (before && (await seriesMappedForSync(repo, tenant, before, config))) {
     deletes = deleteRowsFor(
       tenant,
       before,
@@ -7021,8 +7035,17 @@ app.delete('/series/:id', requireAdmin, async (c) => {
   // voided (ADR 0016).
   await repo.deleteFixtureOfficialsForSeries(tenant, id);
   await repo.deleteSeriesSyncState(tenant, id);
-  // AFTER the wipe (it deletes the series' outbox rows): the delete rows outlive the series.
-  for (const row of deletes) await writePendingSync(repo, tenant, row);
+  return deletes;
+}
+
+/** Write delete rows from `deleteSeriesWithSync` — always AFTER that series' wipe. */
+async function queueSeriesDeletes(tenant: string, rows: PendingScheduleSync[]): Promise<void> {
+  for (const row of rows) await writePendingSync(repo, tenant, row);
+}
+
+app.delete('/series/:id', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  await queueSeriesDeletes(tenant, await deleteSeriesWithSync(tenant, c.req.param('id')));
   return c.json({ ok: true });
 });
 
@@ -7110,7 +7133,9 @@ app.post('/competitions', async (c) => {
       written.push(s.id);
     }
   } catch (err) {
-    await Promise.all(written.map((id) => repo.deleteSeries(tenant, id).catch(() => {})));
+    await Promise.all(
+      written.map((id) => deleteSeriesWithSync(tenant, id, { justCreated: true }).catch(() => {})),
+    );
     throw err;
   }
   return c.json(
@@ -7213,11 +7238,12 @@ app.post('/competitions/:id/regenerate', async (c) => {
   const spec = parseCompetitionBody({ ...(raw ?? {}), id }, inputs.clubs);
   const plan = planOrRefuse(spec);
   const oldIds = current.map((s) => String(s.id));
-  for (const sid of oldIds) {
-    await repo.deleteSeries(tenant, sid);
-    await repo.deleteFixtureOfficialsForSeries(tenant, sid);
-    await repo.deleteSeriesSyncState(tenant, sid);
-  }
+  // Medicoach deletes the old draw's copies (a recalled competition may have been carried) —
+  // but only once the new draw landed: a rollback restores the old series, so its delete rows
+  // are then never written.
+  const oldDeletes: PendingScheduleSync[] = [];
+  for (const sid of oldIds)
+    oldDeletes.push(...(await deleteSeriesWithSync(tenant, sid, { config: inputs.config })));
   // Best-effort rollback, as POST /competitions does: a failed create must not lose the old
   // draw. Remove whatever new series landed (ids can coincide with the old ones), then put the
   // old series back from the in-memory `current` list with their original ids and versions.
@@ -7230,7 +7256,11 @@ app.post('/competitions/:id/regenerate', async (c) => {
       written.push(s.id);
     }
   } catch (err) {
-    await Promise.all(written.map((sid) => repo.deleteSeries(tenant, sid).catch(() => {})));
+    await Promise.all(
+      written.map((sid) =>
+        deleteSeriesWithSync(tenant, sid, { justCreated: true }).catch(() => {}),
+      ),
+    );
     const restored = await Promise.all(
       current.map((s) =>
         repo.putSeries(tenant, s).then(
@@ -7255,6 +7285,7 @@ app.post('/competitions/:id/regenerate', async (c) => {
       { code: 'regenerate_failed', restored: allBack },
     );
   }
+  await queueSeriesDeletes(tenant, oldDeletes);
   return c.json({
     id,
     series: await Promise.all(plan.series.map((s) => repo.getSeries(tenant, s.id))),
@@ -7271,11 +7302,9 @@ app.delete('/competitions/:id', async (c) => {
     throw new HttpError(409, 'this competition is released — recall it before deleting it', {
       code: 'competition_released',
     });
-  for (const s of series) {
-    await repo.deleteSeries(tenant, String(s.id));
-    await repo.deleteFixtureOfficialsForSeries(tenant, String(s.id));
-    await repo.deleteSeriesSyncState(tenant, String(s.id));
-  }
+  const config = await repo.getTenantConfig(tenant);
+  for (const s of series)
+    await queueSeriesDeletes(tenant, await deleteSeriesWithSync(tenant, String(s.id), { config }));
   return c.json({ ok: true, deleted: series.map((s) => s.id) });
 });
 

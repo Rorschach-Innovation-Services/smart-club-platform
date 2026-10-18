@@ -424,6 +424,41 @@ describe('regenerate a draft', () => {
     assert.deepEqual(back.competition, before.competition);
     // The stray series was never the regenerate's to touch.
     assert.equal(((await repo.getSeries(T, strayId)) as Series).name, 'Stray');
+    // The old draw is back, so medicoach is NOT told to delete it.
+    assert.deepEqual(
+      (await repo.listPendingSync(T)).filter((r) => r.seriesId === c.id && r.op === 'delete'),
+      [],
+    );
+  });
+});
+
+describe('medicoach delete propagation (contract §2 delete ops)', () => {
+  const deletesOf = async (seriesId: string) =>
+    (await repo.listPendingSync(T))
+      .filter((r) => r.seriesId === seriesId && r.op === 'delete')
+      .map((r) => r.fixtureId)
+      .sort();
+  const fixtureIds = (s: S) => s.fixtures.map((f) => f.id).sort();
+
+  test('DELETE /competitions/:id queues a delete for every fixture (a recalled draw may be carried)', async () => {
+    const c = await json<{ id: string; series: S[] }>(
+      await call('POST', '/competitions', { ...spec({ name: 'Gone League' }), seed: 3 }),
+    );
+    assert.equal((await call('DELETE', `/competitions/${c.id}`)).status, 200);
+    assert.equal(await repo.getSeries(T, c.id), null);
+    assert.deepEqual(await deletesOf(c.id), fixtureIds(c.series[0]));
+  });
+
+  test('regenerate queues deletes for the old draw once the new one landed', async () => {
+    const c = await json<{ id: string; series: S[] }>(
+      await call('POST', '/competitions', { ...spec({ name: 'Swap League' }), seed: 4 }),
+    );
+    const res = await call('POST', `/competitions/${c.id}/regenerate`, {
+      ...spec({ name: 'Swap League' }),
+      seed: 5,
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await deletesOf(c.id), fixtureIds(c.series[0]));
   });
 });
 

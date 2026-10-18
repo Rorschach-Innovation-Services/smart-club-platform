@@ -120,6 +120,29 @@ export function fixtureHighWater(
   return Math.max(num(series.maxFixtureIdEver), num(prior), maxFixtureIdNumber(series.fixtures));
 }
 
+/**
+ * An importer that builds a series' fixtures positionally (`f1..fN` by sheet row) re-keys them
+ * against the series as stored: a row matching a stored fixture's identity keeps its id (and
+ * its sync-owned fields), every other row gets an id above the series' persisted high-water
+ * mark — so a re-import never hands a removed fixture's id (its medicoach ref) to another
+ * match. No stored series ⇒ untouched (a first import keeps f1..fN). Mutates `fixtures`;
+ * returns the renames (built id → final id) for the importer's own reports.
+ */
+export function stabiliseAgainstStored<T extends IdentityFixture>(
+  fixtures: T[],
+  stored: { fixtures?: unknown; maxFixtureIdEver?: unknown } | null | undefined,
+): Map<string, string> {
+  const renames = new Map<string, string>();
+  if (!stored) return renames;
+  const before = fixtures.map((f) => f.id);
+  const existing = ((stored.fixtures as IdentityFixture[] | undefined) ?? []).filter(Boolean);
+  reconcileFixtureIds(existing, fixtures, { highWater: fixtureHighWater(stored) });
+  fixtures.forEach((f, i) => {
+    if (before[i] !== undefined && before[i] !== f.id) renames.set(String(before[i]), String(f.id));
+  });
+  return renames;
+}
+
 export interface IdReconciliation<T> {
   /** The incoming fixtures (same objects, same order) with stable ids assigned. */
   fixtures: T[];
