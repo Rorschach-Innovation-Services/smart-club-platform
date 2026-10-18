@@ -9,8 +9,10 @@
       "status": "in_progress",
       "startedAt": "2026-10-04T07:21:40.000Z",
       "endedAt": null,
+      "abandonReason": null,
       "lastInputAt": "2026-10-04T10:41:12.000Z",
       "oversPerSide": 20,
+      "oversChangeReason": null,
       "innings": [
         {
           "number": 1,
@@ -81,8 +83,10 @@
       "status": "not_started",
       "startedAt": null,
       "endedAt": null,
+      "abandonReason": null,
       "lastInputAt": null,
       "oversPerSide": 20,
+      "oversChangeReason": null,
       "innings": [],
       "deliveries": 0,
       "medianGapSec": null,

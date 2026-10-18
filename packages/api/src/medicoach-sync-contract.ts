@@ -334,9 +334,16 @@ export const LiveMatchSchema = z.object({
   startedAt: isoUtc.nullable(),
   /** When the match was completed or abandoned. */
   endedAt: isoUtc.nullable(),
+  /** The scorer's recorded abandonment reason; only when status is "abandoned" (additive, 2026-10-16). */
+  abandonReason: z.string().max(200).nullable().optional(),
   /** The latest scoring write of any kind (ball, undo, correction). */
   lastInputAt: isoUtc.nullable(),
   oversPerSide: z.number().int().positive().nullable(),
+  /**
+   * The latest overs change's recorded reason (additive, 2026-10-16): "rain" | "agreed" |
+   * "correction". Any string is accepted; consumers treat an unknown future value like null.
+   */
+  oversChangeReason: z.string().nullable().optional(),
   innings: z.array(LiveInningsSchema).max(4),
   /** Balls scored so far (legal and extras). */
   deliveries: z.number().int().min(0),
