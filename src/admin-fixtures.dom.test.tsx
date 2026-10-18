@@ -1631,7 +1631,8 @@ describe('approve, duplicate and delete toast success only after the write lands
     const toast = renderPage(series(), { onDuplicateSeries, onDeleteSeries });
     await user.click(screen.getByRole('button', { name: /^duplicate$/i }));
     await user.click(screen.getByRole('button', { name: /delete series/i }));
-    await user.click(screen.getByRole('button', { name: /yes, continue/i }));
+    // The confirm's yes button carries the same label (yesLabel); it renders last.
+    await user.click(screen.getAllByRole('button', { name: /^delete series$/i }).at(-1)!);
     expect(onDeleteSeries).toHaveBeenCalledWith('s1');
     await settle();
     expect(toast).not.toHaveBeenCalledWith('Series duplicated');
