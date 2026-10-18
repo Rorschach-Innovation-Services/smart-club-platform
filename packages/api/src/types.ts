@@ -1519,6 +1519,8 @@ export interface SchedulePushCounts {
   created?: number;
   /** Delete ops medicoach answered `deleted` (2026-10-18). Absent on older rows. */
   deleted?: number;
+  /** Upserts answered `unmapped` that were re-queued as creates (sent next run). */
+  convertedToCreate?: number;
 }
 
 /** A knockout side waiting on another fixture, in the wire shape (contract §2 `Slot`). */

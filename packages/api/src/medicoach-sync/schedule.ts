@@ -320,9 +320,12 @@ const sidesOf = (f: Pick<ScheduleFixture, 'home' | 'away'>) => ({
 /** What to do with an incoming outbox row given the row already stored for its ref. */
 export type CollapseOutcome =
   | { kind: 'write'; row: PendingScheduleSync }
-  /** Nothing to write: the stored row already says it (an upsert onto a pending delete). */
+  /** Nothing to write: the stored row already says it. */
   | { kind: 'keep' }
-  /** A re-add of a different match over a pending delete: keep the delete, await a carry. */
+  /**
+   * Keep the pending delete and record the ref as awaiting a carry: a re-add of a different
+   * match, or an upsert, over a pending delete.
+   */
   | { kind: 'await-carry' };
 
 /**
@@ -332,7 +335,7 @@ export type CollapseOutcome =
  *     flushed already, and a delete of a ref medicoach never had is an idempotent success);
  *   - pending delete + the same id re-added → a create ONLY when its sides are the deleted
  *     fixture's (hardening #1), else the delete stays and the ref awaits a carry;
- *   - pending delete + an upsert → the delete stays;
+ *   - pending delete + an upsert → the delete stays, the ref awaits a carry;
  *   - anything else → the incoming row.
  * putPendingSync's condition still decides races between writers.
  */
@@ -342,7 +345,10 @@ export function collapsePending(
 ): CollapseOutcome {
   if (!stored || incoming.op === 'delete') return { kind: 'write', row: incoming };
   if (stored.op === 'delete') {
-    if (incoming.op !== 'create') return { kind: 'keep' };
+    // The fixture is in smart club again under a ref whose medicoach copy is being deleted
+    // (a regenerated draw reusing ids, then released): the delete still goes, and the new
+    // match awaits a carry — never silently dropped.
+    if (incoming.op !== 'create') return { kind: 'await-carry' };
     const a = stored.sides;
     const b = incoming.sides;
     return a && b && a.home === b.home && a.away === b.away
@@ -638,7 +644,10 @@ export const EPOCH_CHANGED_AT = '1970-01-01T00:00:00.000Z';
  * withholding a field), an unmapped series or a tenant without the sync.
  */
 export async function requeueRevealedSeries(
-  repo: Pick<RepoModule, 'getTenantConfig' | 'putPendingSync' | 'getPendingSync' | 'getSeasonRun'>,
+  repo: Pick<
+    RepoModule,
+    'getTenantConfig' | 'putPendingSync' | 'getPendingSync' | 'getSeasonRun' | 'upsertMcAwait'
+  >,
   tenant: string,
   revealed: Series,
   opts: { config?: TenantConfig | null; now?: () => Date } = {},
@@ -667,7 +676,10 @@ export async function requeueRevealedSeries(
     enqueue: async () => {
       // Through the shared collapse: a fixture held as a create goes out as the create (an
       // upsert would bounce `unmapped`), and a pending delete is never replaced.
-      for (const r of rows) await writePendingSync(repo, tenant, r);
+      const awaiting: string[] = [];
+      for (const r of rows)
+        if ((await writePendingSync(repo, tenant, r)) === 'await-carry') awaiting.push(r.ref);
+      await recordAwaitingCarry(repo, tenant, revealed, awaiting, nowIso);
       return rows.length;
     },
   };
@@ -844,6 +856,8 @@ export async function flushScheduleOutbox(
   let requestError: string | undefined;
   /** Refs medicoach answered `unmapped`, by series (recorded as MCAWAIT# after the batches). */
   const unmappedBySeries = new Map<string, string[]>();
+  /** Upserts medicoach answered `unmapped`: tried as creates after the batches. */
+  const unmappedUpserts: PendingScheduleSync[] = [];
   /** Refs medicoach answered `created`, by series (taken off MCAWAIT# after the batches). */
   const createdBySeries = new Map<string, string[]>();
   const push = (into: Map<string, string[]>, seriesId: string, ref: string) =>
@@ -913,9 +927,51 @@ export async function flushScheduleOutbox(
         await repo.deletePendingSyncIfUnchanged(tenant, row.ref, row.schedule.changedAt, opOf(row));
         // A delete answer never awaits a carry: the fixture is gone either way.
         if (row.op === 'delete') continue;
-        if (r.status === 'unmapped') push(unmappedBySeries, row.seriesId, row.ref);
+        if (r.status === 'unmapped' && !row.op) unmappedUpserts.push(row);
+        else if (r.status === 'unmapped') push(unmappedBySeries, row.seriesId, row.ref);
         else if (r.status === 'created') push(createdBySeries, row.seriesId, row.ref);
       }
+    }
+  }
+  // An upsert answered `unmapped`: medicoach has no such fixture (e.g. a series created in
+  // smart club and released later, whose requeue sends upserts). When the create derives from
+  // the LIVE fixture it is queued as a create row — with the fixture's current schedule, so a
+  // revealed venue/time rides along — through the collapse helper (op precedence holds: a
+  // pending delete is never replaced). It goes out on the next run. Otherwise: awaiting carry.
+  if (unmappedUpserts.length) {
+    const config = await repo.getTenantConfig(tenant);
+    const contexts = new Map<string, Promise<SeriesCreateContext | Refusal>>();
+    const nowIso = now().toISOString();
+    for (const row of unmappedUpserts) {
+      const series = live.get(row.seriesId);
+      const f = (series?.fixtures as ScheduleFixture[] | undefined)?.find(
+        (x) => x?.id === row.fixtureId,
+      );
+      let queued = false;
+      if (series && f && !neverExported(f)) {
+        if (!contexts.has(series.id))
+          contexts.set(series.id, seriesCreateContext(tenant, series, config, repo));
+        const ctx = await contexts.get(series.id)!;
+        const create = isRefusal(ctx) ? ctx : fixtureCreateFrom(ctx, f);
+        if (!isRefusal(create)) {
+          const changedAt = f.schedule?.changedAt || NEVER_EDITED_CHANGED_AT;
+          const res = await writePendingSync(repo, tenant, {
+            ref: row.ref,
+            seriesId: row.seriesId,
+            fixtureId: row.fixtureId,
+            op: 'create',
+            create,
+            sides: sidesOf(f),
+            schedule: fixtureSchedule(series, f, changedAt),
+            origin: row.origin,
+            enqueuedAt: nowIso,
+            attempts: 0,
+          });
+          queued = res !== 'await-carry';
+        }
+      }
+      if (!queued) push(unmappedBySeries, row.seriesId, row.ref);
+      else counts.convertedToCreate = (counts.convertedToCreate ?? 0) + 1;
     }
   }
   // An `unmapped` answer: medicoach has no such fixture — it awaits a carry (ADR 0020).

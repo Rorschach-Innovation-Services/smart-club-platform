@@ -410,7 +410,7 @@ describe('collapse', () => {
     });
     const create = { competitionRef: 'c', sport: 'cricket', stage: 'Group stage' };
     const del = base({ op: 'delete', sides: { home: 'a', away: 'b' } });
-    assert.deepEqual(schedule.collapsePending(del, base({})), { kind: 'keep' });
+    assert.deepEqual(schedule.collapsePending(del, base({})), { kind: 'await-carry' });
     assert.equal(
       schedule.collapsePending(del, base({ op: 'create', create, sides: { home: 'a', away: 'b' } }))
         .kind,
@@ -624,5 +624,78 @@ describe('fixture id high-water mark', () => {
       (built[0].fixtures as Array<{ id: string }>).map((f) => f.id),
       ['f1', 'f3'],
     );
+  });
+});
+
+describe('an upsert medicoach answers `unmapped` becomes a create (next run)', () => {
+  const editF1 = async () => {
+    const fixtures = (await fixturesOf(S1)).map((f) =>
+      f.id === 'f1' ? { ...f, time: '11:00', venueId: 'v-lahee', venueName: 'Lahee Park' } : f,
+    );
+    assert.equal((await patch(S1, { fixtures })).status, 200);
+  };
+
+  test('converted to a queued create with the current schedule; MCAWAIT is not written', async () => {
+    await editF1();
+    answer = (c) => (c.op ? 'created' : 'unmapped');
+    const out = await flush();
+    assert.equal(out.counts.unmapped, 1);
+    assert.equal(out.counts.convertedToCreate, 1);
+    const row = (await pending(REF(S1, 'f1')))!;
+    assert.equal(row.op, 'create');
+    assert.equal(row.create?.competitionRef, COMP);
+    assert.equal(row.schedule.scheduledTime, '2026-10-04T11:00:00+02:00');
+    assert.equal(row.schedule.venue, 'Lahee Park');
+    assert.deepEqual(await repo.listMcAwait(T), []);
+    pushes.length = 0;
+    await flush();
+    assert.equal(pushes[0].changes[0].op, 'create');
+    assert.equal(await pending(REF(S1, 'f1')), null);
+  });
+
+  test('a create that cannot be derived still records MCAWAIT', async () => {
+    await repo.putSeries(T, series(S2, 1, [fx('f1', { date: '2026-10-11' })])); // same group label
+    await editF1();
+    answer = () => 'unmapped';
+    await flush();
+    assert.equal(await pending(REF(S1, 'f1')), null);
+    assert.deepEqual(await awaiting(S1), [REF(S1, 'f1')]);
+  });
+
+  test('the converted create never replaces a delete queued meanwhile (op precedence)', async () => {
+    await editF1();
+    answer = () => 'unmapped';
+    const real = fetch;
+    const out = await schedule.flushScheduleOutbox(T, 'cron', {
+      repo,
+      url: stubUrl,
+      secret: SECRET,
+      log: () => {},
+      // While the push is in flight the fixture is removed: a newer delete lands.
+      fetch: (async (url: string, init: RequestInit) => {
+        await repo.putPendingSync(T, {
+          ref: REF(S1, 'f1'),
+          seriesId: S1,
+          fixtureId: 'f1',
+          op: 'delete',
+          sides: { home: 'a', away: 'b' },
+          schedule: {
+            scheduledTime: null,
+            timeTbc: true,
+            dateTbc: true,
+            venue: null,
+            postponed: false,
+            cancelled: false,
+            changedAt: new Date(Date.now() + 1000).toISOString(),
+          },
+          origin: 'admin',
+          enqueuedAt: new Date().toISOString(),
+          attempts: 0,
+        });
+        return real(url, init);
+      }) as typeof fetch,
+    });
+    assert.equal(out.counts.unmapped, 1);
+    assert.equal((await pending(REF(S1, 'f1')))?.op, 'delete');
   });
 });

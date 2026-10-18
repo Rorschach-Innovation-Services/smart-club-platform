@@ -18,7 +18,7 @@
  * No DynamoDB of its own: reads go through `deps` (a point read of the run, and at most one
  * tenant series list + one season-run list per context, both GSI queries).
  */
-import { isRecipeKnockoutSeries, refs } from '../medicoach-bundle.js';
+import { isRecipeKnockoutSeries, refs, type BundleSlot } from '../medicoach-bundle.js';
 import {
   compareGroupLabels,
   compareRunsNewestFirst,
@@ -31,7 +31,13 @@ import {
 import { isExcludedLeagueKey } from './player-placement.js';
 import { recipesForTenant } from '../medicoach-recipes/index.js';
 import { resolveVertical } from '../vertical.js';
-import type { FixtureCreateSnapshot, SeasonRun, Series, TenantConfig } from '../types.js';
+import type {
+  FixtureCreateSnapshot,
+  SeasonRun,
+  Series,
+  SyncSlotSnapshot,
+  TenantConfig,
+} from '../types.js';
 
 export interface CreatePayloadDeps {
   getSeasonRun(tenant: string, runId: string): Promise<SeasonRun | null>;
@@ -169,6 +175,17 @@ export async function seriesCreateContext(
   };
 }
 
+/**
+ * A bundle slot as a create can carry it: winner/loser only (contract §2 `Slot`). The bundle's
+ * `group-position` slot (recipe knockouts) has no create form — null, so the create is refused
+ * (→ awaiting carry), never cast through.
+ */
+export function createSlotOf(slot: BundleSlot): SyncSlotSnapshot | null {
+  return slot.kind === 'winner' || slot.kind === 'loser'
+    ? { kind: slot.kind, ofFixtureRef: slot.ofFixtureRef }
+    : null;
+}
+
 /** One fixture's `create`, from its series' context. */
 export function fixtureCreateFrom(
   ctx: SeriesCreateContext,
@@ -186,10 +203,8 @@ export function fixtureCreateFrom(
   const sideOf = (id: string | undefined) => {
     const side = resolveFixtureSide(id, sideCtx);
     if (side?.ref) return { ref: side.ref };
-    const slot = side?.slot;
-    return slot && (slot.kind === 'winner' || slot.kind === 'loser')
-      ? { slot: { kind: slot.kind, ofFixtureRef: slot.ofFixtureRef } }
-      : null;
+    const slot = side?.slot ? createSlotOf(side.slot) : null;
+    return slot ? { slot } : null;
   };
   const home = sideOf(f.home);
   const away = sideOf(f.away);

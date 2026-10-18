@@ -6,6 +6,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  createSlotOf,
   buildFixtureCreate,
   type CreatePayloadDeps,
 } from '../src/medicoach-sync/create-payload.js';
@@ -150,5 +151,18 @@ describe('season-run series', () => {
     assert.ok('refusal' in (await buildFixtureCreate(T, orphan, fixture, config, deps([], runs))));
     const lost = series({ id: 'x', seasonRunId: 'gone' });
     assert.ok('refusal' in (await buildFixtureCreate(T, lost, fixture, config, deps([], runs))));
+  });
+});
+
+describe('createSlotOf', () => {
+  test('winner/loser map through; a group-position slot has no create form (refusal)', () => {
+    assert.deepEqual(createSlotOf({ kind: 'winner', ofFixtureRef: 'r' }), {
+      kind: 'winner',
+      ofFixtureRef: 'r',
+    });
+    assert.equal(
+      createSlotOf({ kind: 'group-position', groupName: 'Group 1', position: 1 } as never),
+      null,
+    );
   });
 });
