@@ -160,6 +160,7 @@ Smart club owns fixture existence. `created` and `deleted` are success outcomes 
   - `error`: transient only, e.g. a slot's `ofFixtureRef` is not created yet. Retried.
   - Smart club never exports `pos:`/`tbd:` sides, so there is no group-position slot. Undated
     fixtures (`scheduledTime: null`) are never sent as creates; the create goes once a date exists.
+  - Medicoach may ignore `round`, `venueLat` and `venueLon` on the create payload.
 - `op: "delete"`: only `schedule.changedAt` is read, and it is NOT used for ordering — a delete always
   wins. Medicoach soft-deletes the fixture even when it has a recorded result or dependants, and
   marks the external-ref row deleted, so §1 stops reporting the fixture (no `cancelled` echo).

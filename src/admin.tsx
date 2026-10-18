@@ -1907,7 +1907,7 @@ export function FixtureTable({
                   Cancel
                 </Btn>
                 <Btn tone="ink" onClick={confirm.onYes}>
-                  Yes, continue
+                  {confirm.yesLabel ?? 'Yes, continue'}
                 </Btn>
               </div>
             </div>
