@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "tenant": "dolphins",
+  "changes": [
+    {
+      "ref": "smartclub:dolphins:fixture:s-planb-premier-men-t20-g1:f5",
+      "schedule": {
+        "scheduledTime": "2026-10-25T13:30:00+02:00",
+        "timeTbc": false,
+        "dateTbc": false,
+        "venue": "Toti Oval 1",
+        "postponed": false,
+        "cancelled": false,
+        "changedAt": "2026-10-18T09:00:00.000Z"
+      }
+    },
+    {
+      "ref": "smartclub:dolphins:fixture:s-planb-premier-men-t20-g1:f13",
+      "op": "create",
+      "schedule": {
+        "scheduledTime": "2026-11-01T09:30:00+02:00",
+        "timeTbc": false,
+        "dateTbc": false,
+        "venue": "Crusaders Oval",
+        "postponed": false,
+        "cancelled": false,
+        "changedAt": "2026-10-18T09:01:00.000Z"
+      },
+      "create": {
+        "competitionRef": "smartclub:dolphins:competition:premier-men-t20:main",
+        "sport": "cricket",
+        "homeTeamRef": "smartclub:dolphins:team:premier-men-t20:crusaders",
+        "awayTeamRef": "smartclub:dolphins:team:premier-men-t20:savages",
+        "stage": "Group stage",
+        "groupName": "Group A",
+        "round": 4
+      }
+    },
+    {
+      "ref": "smartclub:dolphins:fixture:s-planb-premier-men-t20-ko:f2",
+      "op": "create",
+      "schedule": {
+        "scheduledTime": "2026-12-06T10:00:00+02:00",
+        "timeTbc": true,
+        "dateTbc": false,
+        "venue": null,
+        "postponed": false,
+        "cancelled": false,
+        "changedAt": "2026-10-18T09:02:00.000Z"
+      },
+      "create": {
+        "competitionRef": "smartclub:dolphins:competition:premier-men-t20:main",
+        "sport": "cricket",
+        "homeSlot": { "kind": "winner", "ofFixtureRef": "smartclub:dolphins:fixture:s-planb-premier-men-t20-ko:f1" },
+        "awaySlot": { "kind": "winner", "ofFixtureRef": "smartclub:dolphins:fixture:s-planb-premier-men-t20-ko:f0" },
+        "stage": "Knockout",
+        "stageLabel": "Final"
+      }
+    },
+    {
+      "ref": "smartclub:dolphins:fixture:s-planb-promotion-men-t20-g1:f9",
+      "op": "delete",
+      "schedule": {
+        "scheduledTime": "2026-10-11T09:00:00+02:00",
+        "timeTbc": false,
+        "dateTbc": false,
+        "venue": "Lahee Park",
+        "postponed": false,
+        "cancelled": false,
+        "changedAt": "2026-10-18T09:03:00.000Z"
+      }
+    }
+  ]
+}

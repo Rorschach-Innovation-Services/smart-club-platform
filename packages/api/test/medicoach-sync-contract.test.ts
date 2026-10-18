@@ -39,9 +39,10 @@ const EXAMPLES = path.resolve(
 const schemaFor = (file: string) =>
   file.startsWith('changes-')
     ? ChangesResponseSchema
-    : file === 'schedule-push-request.json'
+    : file === 'schedule-push-request.json' || file === 'schedule-push-create-delete-request.json'
       ? SchedulePushRequestSchema
-      : file === 'schedule-push-response.json'
+      : file === 'schedule-push-response.json' ||
+          file === 'schedule-push-create-delete-response.json'
         ? SchedulePushResponseSchema
         : file === 'player-push-request.json'
           ? PlayerPushRequestSchema
@@ -56,7 +57,7 @@ const schemaFor = (file: string) =>
 describe('contract examples', () => {
   const files = readdirSync(EXAMPLES).filter((f) => f.endsWith('.json'));
 
-  test('all ten shared examples are present', () => {
+  test('all twelve shared examples are present', () => {
     assert.deepEqual(files.sort(), [
       'changes-knockout-reschedule.json',
       'changes-live-result.json',
@@ -65,6 +66,8 @@ describe('contract examples', () => {
       'live-day.json',
       'player-push-request.json',
       'player-push-response.json',
+      'schedule-push-create-delete-request.json',
+      'schedule-push-create-delete-response.json',
       'schedule-push-request.json',
       'schedule-push-response.json',
       'scorecard-live-match.json',
@@ -176,7 +179,7 @@ describe('player push (contract §4)', () => {
 });
 
 /**
- * The contract doc and ALL eight examples are copied byte-for-byte into the medicoach repo
+ * The contract doc and ALL examples are copied byte-for-byte into the medicoach repo
  * (contract v1 + §3 scorecard + §4 player push). Pinning every file here means editing any
  * copy without the other fails CI; change both copies and both pins together.
  */
@@ -184,7 +187,7 @@ describe('shared contract checksum', () => {
   const DOCS = path.resolve(EXAMPLES, '..');
   const PINNED: Record<string, string> = {
     'medicoach-sync-contract.md':
-      '9f527f8f12b2d2938876fc414ee684add2ee5526f111161bad4a86197dcfcc6f',
+      '5827a746ab3e042d46f97133e1e8f1fe40f5e32366c825d5f17c6a49ece02440',
     'medicoach-sync-examples/changes-knockout-reschedule.json':
       '7040b5a70f49a4adcefe173659126e383c1d0813c5ab0581748fb6e4e8634aa4',
     'medicoach-sync-examples/changes-live-result.json':
@@ -199,6 +202,10 @@ describe('shared contract checksum', () => {
       '27effdde2b8883acd4f1e8017bf038da84c55b866b206fe78c401722c02eb01c',
     'medicoach-sync-examples/player-push-response.json':
       'b2bfb563d61e6b1f1d777e0f968968678aad5fc55cd42c5e0b154d87bf9112ad',
+    'medicoach-sync-examples/schedule-push-create-delete-request.json':
+      '13f3f1d505746e8d23c49d558e34b2b6d89fd1149f03a08725310de8b04c700b',
+    'medicoach-sync-examples/schedule-push-create-delete-response.json':
+      '68311fe9f20734614238839f3d7cf1f0a7350caa5cfa501d4e18ba33687324ab',
     'medicoach-sync-examples/schedule-push-request.json':
       '449cb674ff66463c265628bedd98e7c8553a061d090950ab97db8e389e54d91f',
     'medicoach-sync-examples/schedule-push-response.json':
