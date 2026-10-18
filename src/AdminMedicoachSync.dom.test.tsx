@@ -412,6 +412,71 @@ describe('match monitor tab', () => {
           : monitor({ date: d, matches: [] }),
       );
 
+  it("shows an abandoned game's reason and a rain/agreed shortening; a correction shows nothing", async () => {
+    const base = monitor().matches[0];
+    const m = (fixtureId: string, home: string, l: Partial<api.LiveMatch>) => ({
+      ...base,
+      ref: `smartclub:dolphins:fixture:s1:${fixtureId}`,
+      fixtureId,
+      home,
+      live: liveGame({ ref: `smartclub:dolphins:fixture:s1:${fixtureId}`, ...l }),
+    });
+    vi.mocked(api.getMatchMonitor).mockResolvedValue(
+      monitor({
+        matches: [
+          m('f1', 'Abandoned XI', {
+            status: 'abandoned',
+            endedAt: new Date(Date.now() - 60_000).toISOString(),
+            abandonReason: 'Waterlogged outfield',
+          }),
+          m('f2', 'Rain XI', { oversChangeReason: 'rain' }),
+          m('f3', 'Agreed XI', { oversChangeReason: 'agreed' }),
+          m('f4', 'Fixed XI', { oversChangeReason: 'correction' }),
+        ],
+      }),
+    );
+    localStorage.setItem('smartclub.medicoachSync.tab', 'games');
+    renderPage(baseStatus());
+    const table = await screen.findByRole('table', { name: 'Games' });
+    const row = (home: string) => within(table).getByText(`${home} v Crusaders CC`).closest('tr')!;
+    expect(within(row('Abandoned XI')).getByText('— Waterlogged outfield')).toBeInTheDocument();
+    expect(within(row('Rain XI')).getByText('Shortened — rain / bad light')).toBeInTheDocument();
+    expect(within(row('Agreed XI')).getByText('Shortened by agreement')).toBeInTheDocument();
+    expect(within(row('Fixed XI')).queryByText(/Shortened/)).toBeNull();
+    expect(within(row('Fixed XI')).queryByText(/correction/i)).toBeNull();
+    // The timeline names the reason on its abandoned line.
+    await userEvent.click(
+      within(row('Abandoned XI')).getByRole('button', { name: /open the match timeline/ }),
+    );
+    expect(
+      await screen.findByText('Abandoned — Waterlogged outfield', { selector: 'p' }),
+    ).toBeInTheDocument();
+  });
+
+  it("an abandoned game's After-the-game card names the reason", async () => {
+    const base = monitor().matches[0];
+    vi.mocked(api.getMatchMonitor).mockResolvedValue(
+      monitor({
+        matches: [
+          {
+            ...base,
+            // A flag (undo over the threshold) so the closed game has a card.
+            live: liveGame({
+              status: 'abandoned',
+              endedAt: new Date(Date.now() - 60_000).toISOString(),
+              undoCount: 50,
+              abandonReason: 'Bad light',
+            }),
+          },
+        ],
+      }),
+    );
+    renderPage(baseStatus());
+    const cards = await screen.findByRole('list', { name: 'After the game' });
+    // One line per card (the game may carry more than one closed flag).
+    expect(within(cards).getAllByText('Abandoned — Bad light').length).toBeGreaterThan(0);
+  });
+
   it('an outage keeps the last known state and raises no flags from missing data (F-042)', async () => {
     const good = monitor();
     good.matches[0] = { ...good.matches[0], live: liveGame() };
