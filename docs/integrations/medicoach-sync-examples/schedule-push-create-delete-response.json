@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "results": [
+    { "ref": "smartclub:dolphins:fixture:s-planb-premier-men-t20-g1:f5", "status": "applied" },
+    { "ref": "smartclub:dolphins:fixture:s-planb-premier-men-t20-g1:f13", "status": "created" },
+    { "ref": "smartclub:dolphins:fixture:s-planb-premier-men-t20-ko:f2", "status": "error", "message": "slot feeder smartclub:dolphins:fixture:s-planb-premier-men-t20-ko:f0 not created yet" },
+    { "ref": "smartclub:dolphins:fixture:s-planb-promotion-men-t20-g1:f9", "status": "deleted" }
+  ]
+}

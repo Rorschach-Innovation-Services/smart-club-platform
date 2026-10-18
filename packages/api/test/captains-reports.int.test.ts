@@ -970,10 +970,14 @@ describe('DELETE /series', () => {
     const res = await app.request(`/series/${SID}`, { method: 'DELETE', headers: headers(ADMIN) });
     assert.equal(res.status, 200);
     assert.equal(await repo.getFixtureResult('dolphins', SID, 'f3'), null);
+    // The series' own upsert rows are wiped; what is left of it are the delete ops medicoach
+    // needs (contract §2, 2026-10-18), queued after the wipe.
+    const pending = await repo.listPendingSync('dolphins');
     assert.deepEqual(
-      (await repo.listPendingSync('dolphins')).map((p) => p.seriesId),
+      pending.filter((p) => p.op !== 'delete').map((p) => p.seriesId),
       [OTHER],
     );
+    assert.ok(pending.filter((p) => p.seriesId === SID).every((p) => p.op === 'delete'));
     assert.deepEqual(
       (await repo.listSyncConflicts('dolphins')).map((x) => x.seriesId),
       [OTHER],

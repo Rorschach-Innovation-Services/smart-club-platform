@@ -68,6 +68,7 @@ import {
   type SuffixUsage,
 } from './club-name-resolve.js';
 import { writeSeriesFromSnapshot } from './medicoach-sync/cli-write.js';
+import { stabiliseAgainstStored } from './fixture-identity.js';
 import { loadOffline } from './patch-fixtures.js';
 import {
   DEFAULT_WORKBOOK,
@@ -131,6 +132,8 @@ export interface BuildContext {
   clubs: Club[];
   venues: Venue[];
   aliases: Record<string, string>;
+  /** The tenant's stored series: a re-import keys fixture ids against them (never recycles). */
+  stored?: Series[];
 }
 
 export interface BuiltEmcuSeries {
@@ -157,6 +160,8 @@ export interface BuildOutcome {
   locked: number;
   /** Registry misses: sheet venue → fixture count (written as venueOverride). */
   registryMisses: Map<string, number>;
+  /** Row-order ids re-keyed against the stored series ("<seriesId> f3 → f9"). */
+  idRenames: string[];
 }
 
 function deriveStatus(venue: Venue | undefined, homeClubId: string, awayClubId: string) {
@@ -187,6 +192,7 @@ export function buildEmcuSeries(
     resolverMismatches: [],
     locked: 0,
     registryMisses: new Map(),
+    idRenames: [],
   };
   const seenRes = new Set<string>();
   for (const spec of EMCU_SERIES) {
@@ -258,6 +264,12 @@ export function buildEmcuSeries(
       }
       return wf;
     });
+    // Over a stored series: matched rows keep their ids, new rows go above its high-water mark.
+    for (const [from, to] of stabiliseAgainstStored(
+      fixtures,
+      ctx.stored?.find((s) => String(s.id) === seriesIdFor(spec.slug)),
+    ))
+      outcome.idRenames.push(`${seriesIdFor(spec.slug)} ${from} → ${to}`);
     const dates = fixtures.map((f) => f.date).sort();
     const series = {
       id: seriesIdFor(spec.slug),
@@ -830,7 +842,10 @@ async function writeBackup(dir: string, b: EmcuBackup, log: (l: string) => void)
   return path;
 }
 
-/** DELETE /series parity: the series, its umpire appointments and its medicoach-sync state. */
+/**
+ * DELETE /series parity minus medicoach delete propagation: the series, its umpire
+ * appointments and its medicoach-sync state, but no delete rows (runbook "Known gaps").
+ */
 async function deleteSeriesFully(repo: RepoModule, tenant: string, id: string) {
   await repo.deleteSeries(tenant, id);
   await repo.deleteFixtureOfficialsForSeries(tenant, id);
@@ -1218,9 +1233,15 @@ async function runImport(args: Args) {
   // ── Build ──
   // Without tenant data the map alone names the clubs (no resolver cross-check, no venues).
   const ctx: BuildContext = haveTenantData
-    ? { clubs, venues, aliases }
+    ? { clubs, venues, aliases, stored: series }
     : { clubs: [], venues: [], aliases };
   const outcome = buildEmcuSeries(parsed, ctx, args.only);
+  if (outcome.idRenames.length) {
+    console.log(
+      `\n── Fixture ids re-keyed against the stored series (${outcome.idRenames.length}; a removed id is never reused)`,
+    );
+    for (const r of outcome.idRenames) console.log(`  ${r}`);
+  }
   if (args.only.length)
     console.log(
       `\n── --only: restricted to ${outcome.built.length} series: ${args.only.join(', ')}`,

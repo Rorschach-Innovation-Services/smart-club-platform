@@ -114,21 +114,30 @@ Body:
   tenant: string,
   changes: Array<{
     ref: string,
+    op?: "upsert" | "create" | "delete",  // additive (2026-10-18): absent = "upsert" (see "Create/delete ops")
     schedule: {
       scheduledTime: string | null, timeTbc: boolean, dateTbc: boolean,
       venue: string | null,         // at most 200 characters (see Field limits)
       postponed: boolean, cancelled: boolean,
       changedAt: string            // ISO-8601 UTC: when the change was written in smart club
+    },                             // required for every op; a "delete" reads only changedAt
+    create?: {                     // additive (2026-10-18): present exactly when op === "create"
+      competitionRef: string, sport: string,
+      homeTeamRef?: string, awayTeamRef?: string,  // smart club team refs
+      homeSlot?: Slot, awaySlot?: Slot,            // a side is a team ref OR a slot, never both
+      stage: string, stageLabel?: string, groupName?: string, round?: number,
+      venueLat?: number, venueLon?: number
     }
   }>                              // max 100
 }
+type Slot = { kind: "winner" | "loser", ofFixtureRef: string }  // the feeder fixture's ref
 ```
 Response 200:
 ```ts
-{ version: 1, results: Array<{ ref: string, status: "applied" | "stale" | "unchanged" | "unmapped" | "error", message?: string }> }
+{ version: 1, results: Array<{ ref: string, status: "applied" | "stale" | "unchanged" | "unmapped" | "created" | "deleted" | "error", message?: string }> }
 ```
 Medicoach rules: apply only if `changedAt` > the fixture's `scheduleChangedAt`; applying sets `scheduleChangedAt = changedAt`
-(so the next pull does NOT bounce it back as newer) and stamps `syncStamp`. Never soft-delete — `cancelled` is a flag.
+(so the next pull does NOT bounce it back as newer) and stamps `syncStamp`. An upsert never soft-deletes — `cancelled` is a flag.
 A `changedAt` more than 5 minutes ahead of medicoach's clock is refused with `error` (fix the sender's clock).
 Gap fill (the one exception to most-recent-wins): when a change is stale BUT medicoach's stored venue is
 null/empty AND the incoming venue is non-empty, medicoach writes ONLY the venue (same compare-and-set as an
@@ -139,6 +148,27 @@ then smart club revealed the venue — the reveal is stale, but the venue still 
 medicoach's whole schedule (its time plus the filled venue) with a `changedAt` newer than smart club's.
 Every applied change is audited in medicoach under the `smartclub-sync` principal.
 `stale`/`unchanged`/`unmapped` are success outcomes for the caller (drop from outbox); `error` = retry later.
+The rules above apply to `op: "upsert"` (or no `op`).
+
+### Create/delete ops (2026-10-18, additive)
+Smart club owns fixture existence. `created` and `deleted` are success outcomes (drop from outbox).
+- `op: "create"`: medicoach resolves `competitionRef` and each team ref via the external-ref table and
+  creates the fixture with `externalRef = ref` and the given schedule. `phase` is derived by medicoach.
+  - `created`: the fixture was created, or `ref` is already mapped to a live fixture (idempotent).
+  - `unmapped` (with `message`): the competition or a team is not carried yet, or a team/competition
+    is unresolvable or ambiguous. These are permanent; the sender routes the ref to awaiting-carry.
+  - `error`: transient only, e.g. a slot's `ofFixtureRef` is not created yet. Retried.
+  - Smart club never exports `pos:`/`tbd:` sides, so there is no group-position slot. Undated
+    fixtures (`scheduledTime: null`) are never sent as creates; the create goes once a date exists.
+  - Medicoach may ignore `round`, `venueLat` and `venueLon` on the create payload.
+- `op: "delete"`: only `schedule.changedAt` is read, and it is NOT used for ordering — a delete always
+  wins. Medicoach soft-deletes the fixture even when it has a recorded result or dependants, and
+  marks the external-ref row deleted, so §1 stops reporting the fixture (no `cancelled` echo).
+  - `deleted`: soft-deleted, or already gone / never mapped (idempotent). A delete never answers
+    `unmapped`.
+- Reclaim: a later create for a deleted ref reclaims it only when its home/away pair matches the
+  deleted fixture's. Dependants whose sources pointed at the deleted fixture are re-pointed to the new one.
+  A mismatched pair answers `unmapped` with a message.
 
 ## 3. GET /integrations/smartclub/matches/:matchId/scorecard?tournamentId=<id>&tenant=<t>
 - Same HMAC signing as §1 and §2; `pathAndQuery` is exactly

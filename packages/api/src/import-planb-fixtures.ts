@@ -55,7 +55,7 @@ import { writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import type { Series, Venue, VenueStatus, Club, TenantConfig } from './types.js';
 import { hasFeature } from './features.js';
-import { fixtureSyncRef, reconcileFixtureIds } from './fixture-identity.js';
+import { fixtureHighWater, fixtureSyncRef, reconcileFixtureIds } from './fixture-identity.js';
 import { writeSeriesFromSnapshot } from './medicoach-sync/cli-write.js';
 
 type SeriesParticipant = NonNullable<Series['participants']>[number];
@@ -2374,7 +2374,10 @@ export function stabiliseFixtureIds(
   for (const b of built) {
     const existing = existingSeries.find((s) => s.id === b.series.id);
     const stored = ((existing?.fixtures as StoredFixture[]) ?? []).filter(Boolean);
-    const r = reconcileFixtureIds(stored, b.fixtures);
+    // Above the persisted high-water mark too: a removed fixture's id is never re-minted.
+    const r = reconcileFixtureIds(stored, b.fixtures, {
+      highWater: existing ? fixtureHighWater(existing) : 0,
+    });
     out.added += r.added.length;
     out.matched += r.matched;
     for (const f of r.removed) {

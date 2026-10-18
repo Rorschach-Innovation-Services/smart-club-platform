@@ -30,7 +30,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { WrittenFixture } from './import-planb-fixtures.js';
-import { carrySyncOwnedFields, reconcileFixtureIds } from './fixture-identity.js';
+import { carrySyncOwnedFields, fixtureHighWater, reconcileFixtureIds } from './fixture-identity.js';
 import {
   findClashes,
   groundKey,
@@ -296,6 +296,8 @@ export function buildTitansSeries(
         0,
         ...kept.map((f) => idNum(f.id)),
         ...((storedSeries?.fixtures as WrittenFixture[] | undefined) ?? []).map((f) => idNum(f.id)),
+        // Never re-mint an id the series held before (a removed fixture's sync ref).
+        storedSeries ? fixtureHighWater(storedSeries) : 0,
       );
       for (const h of heldHere) {
         h.wf.id = `f${++next}`;
@@ -592,7 +594,9 @@ export function stabiliseIds(
   // An incoming knockout side the union already resolved (KO_RESOLVED) is matched by its
   // placeholder too, so the same row keeps its id whichever side got its team first.
   const keyed = (incoming as Slotted[]).map(byPlaceholder);
-  const r = reconcileFixtureIds(existing, keyed);
+  const r = reconcileFixtureIds(existing, keyed, {
+    highWater: stored ? fixtureHighWater(stored) : 0,
+  });
   keyed.forEach((k, i) => {
     incoming[i].id = k.id;
     // reconcileFixtureIds carried the stored sync-owned fields onto the keyed copy.
@@ -642,7 +646,9 @@ export function stabiliseKoIds(
   );
   const map = new Map<string, string>();
   const used = new Set<string>();
-  let next = Math.max(0, ...[...storedIds, ...incoming.map((f) => f.id)].map(idNum));
+  // The persisted high-water mark: an id the series held before (now removed) is never reused.
+  const highWater = stored ? fixtureHighWater(stored) : 0;
+  let next = Math.max(highWater, ...[...storedIds, ...incoming.map((f) => f.id)].map(idNum));
   const rewrite = (ref: string | undefined): string | undefined => {
     const src = ref ? slotSource(ref) : null;
     const to = src ? map.get(src.fixtureId) : undefined;
@@ -674,7 +680,12 @@ export function stabiliseKoIds(
         id = k.id;
         carrySyncOwnedFields(k, f);
         pool = pool.filter((x) => x.id !== k.id);
-      } else if (!storedIds.has(sheetId) && !used.has(sheetId)) id = sheetId;
+      } else if (
+        !storedIds.has(sheetId) &&
+        !used.has(sheetId) &&
+        idNum(sheetId) > (Number(stored?.maxFixtureIdEver) || 0)
+      )
+        id = sheetId;
       else {
         do id = `f${++next}`;
         while (used.has(id) || storedIds.has(id));
@@ -1790,7 +1801,10 @@ export async function runAppendSides(args: Args) {
   console.log(`Done. ${plan.patches.length - raced} club(s) written. Backup: ${backup}`);
 }
 
-/** DELETE /series parity: the series, its umpire appointments and its medicoach-sync state. */
+/**
+ * DELETE /series parity minus medicoach delete propagation: the series, its umpire
+ * appointments and its medicoach-sync state, but no delete rows (runbook "Known gaps").
+ */
 async function deleteSeriesFully(repo: RepoModule, id: string) {
   await repo.deleteSeries(TITANS_TENANT, id);
   await repo.deleteFixtureOfficialsForSeries(TITANS_TENANT, id);

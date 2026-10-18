@@ -424,6 +424,127 @@ describe('regenerate a draft', () => {
     assert.deepEqual(back.competition, before.competition);
     // The stray series was never the regenerate's to touch.
     assert.equal(((await repo.getSeries(T, strayId)) as Series).name, 'Stray');
+    // The old draw is back, so medicoach is NOT told to delete it.
+    assert.deepEqual(
+      (await repo.listPendingSync(T)).filter((r) => r.seriesId === c.id && r.op === 'delete'),
+      [],
+    );
+  });
+});
+
+describe('medicoach delete propagation (contract §2 delete ops)', () => {
+  const deletesOf = async (seriesId: string) =>
+    (await repo.listPendingSync(T))
+      .filter((r) => r.seriesId === seriesId && r.op === 'delete')
+      .map((r) => r.fixtureId)
+      .sort();
+  const fixtureIds = (s: S) => s.fixtures.map((f) => f.id).sort();
+
+  test('DELETE /competitions/:id queues a delete for every fixture (a recalled draw may be carried)', async () => {
+    const c = await json<{ id: string; series: S[] }>(
+      await call('POST', '/competitions', { ...spec({ name: 'Gone League' }), seed: 3 }),
+    );
+    assert.equal((await call('DELETE', `/competitions/${c.id}`)).status, 200);
+    assert.equal(await repo.getSeries(T, c.id), null);
+    assert.deepEqual(await deletesOf(c.id), fixtureIds(c.series[0]));
+  });
+
+  // Named "League · Stream" so the create's competition/group is unambiguous (create-payload.ts);
+  // a plainly named league competition shares the empty group label with its siblings and is
+  // refused (awaiting carry).
+  test('regenerate → release → upserts bounce `unmapped` → creates queued for the next run', async () => {
+    const { flushScheduleOutbox } = await import('../src/medicoach-sync/schedule.js');
+    const c = await json<{ id: string; series: S[] }>(
+      await call('POST', '/competitions', {
+        ...spec({
+          name: 'Premier · Flow T20',
+          schedule: { startDate: '2027-03-06', everyDays: 7, times: ['10:00'] },
+        }),
+        seed: 6,
+      }),
+    );
+    const regen = await call('POST', `/competitions/${c.id}/regenerate`, {
+      // One more team: a bigger draw, so it reuses the old ids f1..f6 AND adds new ones.
+      ...spec({
+        name: 'Premier · Flow T20',
+        teams: [1, 2, 3, 4, 5].map(team),
+        schedule: { startDate: '2027-03-06', everyDays: 7, times: ['10:00'] },
+      }),
+      seed: 7,
+    });
+    assert.equal(regen.status, 200);
+    for (const body of [{ approved: true }, { released: true }]) {
+      const cur = (await repo.getSeries(T, c.id))!;
+      const r = await call('PATCH', `/series/${c.id}`, { ...body, version: cur.version });
+      assert.equal(r.status, 200, await r.text());
+    }
+    const sent: Array<{ ref: string; op?: string }> = [];
+    const out = await flushScheduleOutbox(T, 'cron', {
+      repo,
+      url: 'http://medicoach.test',
+      secret: 's',
+      log: () => {},
+      fetch: (async (_u: string, init: RequestInit) => {
+        const changes = JSON.parse(String(init.body)).changes as Array<{
+          ref: string;
+          op?: string;
+        }>;
+        sent.push(...changes);
+        return new Response(
+          JSON.stringify({
+            version: 1,
+            results: changes.map((ch) => ({
+              ref: ch.ref,
+              status: ch.op === 'delete' ? 'deleted' : ch.op === 'create' ? 'created' : 'unmapped',
+            })),
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }) as typeof fetch,
+    });
+    const mine = (r: { ref: string }) => r.ref.includes(`:fixture:${c.id}:`);
+    const oldIds = new Set(c.series[0].fixtures.map((f) => f.id));
+    const now = (await repo.getSeries(T, c.id)) as unknown as S;
+    const reused = fixtureIds(now).filter((id) => oldIds.has(id));
+    const fresh = fixtureIds(now).filter((id) => !oldIds.has(id));
+    assert.ok(reused.length && fresh.length);
+    const idOf = (ref: string) => ref.split(':').pop()!;
+    // The old draw's copies are deleted.
+    assert.deepEqual(
+      sent
+        .filter((ch) => mine(ch) && ch.op === 'delete')
+        .map((ch) => idOf(ch.ref))
+        .sort(),
+      [...oldIds].sort(),
+    );
+    // New ids went out as upserts, bounced `unmapped`, and are queued as creates.
+    assert.deepEqual(
+      sent
+        .filter((ch) => mine(ch) && !ch.op)
+        .map((ch) => idOf(ch.ref))
+        .sort(),
+      fresh,
+    );
+    assert.ok((out.counts.convertedToCreate ?? 0) >= fresh.length, JSON.stringify(out.counts));
+    const queued = (await repo.listPendingSync(T)).filter(
+      (r) => r.seriesId === c.id && r.op === 'create',
+    );
+    assert.deepEqual(queued.map((r) => r.fixtureId).sort(), fresh);
+    // A reused id names a different match than the copy being deleted: it awaits a carry.
+    const awaiting = (await repo.listMcAwait(T)).find((r) => r.seriesId === c.id)?.refs ?? [];
+    assert.deepEqual(awaiting.map(idOf).sort(), reused);
+  });
+
+  test('regenerate queues deletes for the old draw once the new one landed', async () => {
+    const c = await json<{ id: string; series: S[] }>(
+      await call('POST', '/competitions', { ...spec({ name: 'Swap League' }), seed: 4 }),
+    );
+    const res = await call('POST', `/competitions/${c.id}/regenerate`, {
+      ...spec({ name: 'Swap League' }),
+      seed: 5,
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await deletesOf(c.id), fixtureIds(c.series[0]));
   });
 });
 

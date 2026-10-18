@@ -10,7 +10,8 @@
  *   - a ground double-booking (409 venue_clash) lists the clashes;
  *   - a stale page (409 "series changed") asks to reload;
  *   - removing a fixture medicoach already holds (409 synced_fixture_removed) offers
- *     "Mark cancelled" (the supported path) or "Remove here only" (explicit).
+ *     "Mark cancelled" (keeps the record) or "Remove from both" (explicit: Match Centre
+ *     deletes its copy too, result included).
  */
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { ApiError, type OfficialsNotifyStatusRow } from './api';
@@ -143,6 +144,10 @@ const teamOptions = (s: ManageSeries, clubs: ManageClub[]) =>
     : (s.teams ?? []).map((id) => ({ id, name: clubs.find((c) => c.id === id)?.name ?? id }))
   ).sort((a, b) => a.name.localeCompare(b.name));
 
+/** A new fixture's default round: one past the series' highest round (1 when it has none). */
+export const nextRoundOf = (s: Pick<ManageSeries, 'fixtures'> | undefined) =>
+  Math.max(0, ...((s?.fixtures as Fixture[]) ?? []).map((f) => Number(f.round) || 0)) + 1;
+
 const homeGroundOf = (s: ManageSeries, clubs: ManageClub[], teamId?: string) => {
   if (!teamId) return '';
   const p = s.participants?.find((x) => x.teamId === teamId);
@@ -179,12 +184,8 @@ export function FixtureEditDialog({
   const s = series.find((x) => x.id === seriesId);
   const existing = (s?.fixtures as Fixture[] | undefined)?.find((f) => f.id === fixtureId);
   const teams = s ? teamOptions(s, clubs) : [];
-  const lastRound = Math.max(
-    0,
-    ...((s?.fixtures as Fixture[]) ?? []).map((f) => Number(f.round) || 0),
-  );
   const [draft, setDraft] = useState(() => ({
-    round: (existing?.round as number) ?? lastRound + 1,
+    round: (existing?.round as number) ?? nextRoundOf(s),
     date: (existing?.date as string) ?? '',
     time: (existing?.time as string) ?? '',
     home: (existing?.home as string) ?? '',
@@ -295,7 +296,15 @@ export function FixtureEditDialog({
         {mode === 'add' && (
           <label className="fm-field fm-wide">
             Series
-            <select value={seriesId} onChange={(e) => setSeriesId(e.target.value)}>
+            <select
+              value={seriesId}
+              onChange={(e) => {
+                setSeriesId(e.target.value);
+                // The round default belongs to the series picked, not the one first shown.
+                const picked = series.find((x) => x.id === e.target.value);
+                setDraft((d) => ({ ...d, round: nextRoundOf(picked) }));
+              }}
+            >
               {series.map((x) => (
                 <option key={x.id} value={x.id}>
                   {x.name}
@@ -520,9 +529,9 @@ export function RemoveFixtureDialog({
       </p>
       {err?.synced ? (
         <div className="insights-callout alert fm-error" role="alert">
-          Match Centre already holds this fixture and can’t delete it. Marking it cancelled keeps
-          the record and shows it as cancelled there. Removing it here only leaves it listed in
-          Match Centre, with no way to update it from this console.
+          Match Centre already holds this fixture. Removing it here deletes it from Match Centre
+          too, including any recorded result. Marking it cancelled keeps the record and shows it as
+          cancelled there.
         </div>
       ) : (
         <ErrorBox err={err} />
@@ -536,7 +545,7 @@ export function RemoveFixtureDialog({
         </Btn>
         {err?.synced ? (
           <Btn tone="ink" onClick={() => run('force')} disabled={!!busy}>
-            {busy === 'force' ? 'Removing…' : 'Remove here only'}
+            {busy === 'force' ? 'Removing…' : 'Remove from both'}
           </Btn>
         ) : (
           <Btn tone="ink" onClick={() => run('remove')} disabled={!!busy}>

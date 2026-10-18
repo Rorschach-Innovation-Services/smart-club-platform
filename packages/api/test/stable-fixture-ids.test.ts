@@ -10,6 +10,7 @@ import {
   carrySyncOwnedFields,
   reconcileFixtureIds,
   fixtureSyncRef,
+  stabiliseAgainstStored,
   type IdentityFixture,
 } from '../src/fixture-identity.js';
 
@@ -146,6 +147,19 @@ describe('reconcileFixtureIds', () => {
     assert.deepEqual(r.added, []);
   });
 
+  test('new ids are minted above the persisted high-water mark (a removed id is never reused)', () => {
+    // The series once held f1..f5; f4 and f5 were removed since, so they are not in `existing`.
+    const stored = built(sheet.slice(0, 3));
+    const incoming = built([...sheet.slice(0, 3), row('2026-10-25', 'a', 'd')]);
+    const r = reconcileFixtureIds(stored, incoming, { highWater: 5 });
+    assert.deepEqual(r.added, ['f6']);
+    assert.deepEqual(
+      reconcileFixtureIds(built(sheet.slice(0, 3)), built([...sheet.slice(0, 3), sheet[3]])).added,
+      ['f4'],
+      'without the mark the old max+1 rule stands',
+    );
+  });
+
   test('a first import (nothing stored) writes f1..fN', () => {
     const r = reconcileFixtureIds([], built(sheet));
     assert.deepEqual(
@@ -258,5 +272,36 @@ describe('carrySyncOwnedFields — knockout slot bookkeeping (ADR 0022 §7)', ()
     });
     assert.deepEqual(to.slots, { home: 'win:f9' });
     assert.equal(to.slotsManual, undefined);
+  });
+});
+
+describe('stabiliseAgainstStored (positional importers: EMCU, Lions)', () => {
+  test('re-keys row-order ids against the stored series and its high-water mark', () => {
+    const stored = {
+      fixtures: [{ id: 'f1', date: '2026-10-04', home: 'a', away: 'b' }],
+      maxFixtureIdEver: 7,
+    };
+    const incoming = [
+      { id: 'f1', date: '2026-10-11', home: 'c', away: 'd' },
+      { id: 'f2', date: '2026-10-04', home: 'b', away: 'a' },
+    ];
+    const renames = stabiliseAgainstStored(incoming, stored);
+    assert.deepEqual(
+      incoming.map((f) => f.id),
+      ['f8', 'f1'],
+    );
+    assert.deepEqual(
+      [...renames],
+      [
+        ['f1', 'f8'],
+        ['f2', 'f1'],
+      ],
+    );
+  });
+
+  test('no stored series: a first import keeps f1..fN', () => {
+    const incoming = [{ id: 'f1', date: '2026-10-04', home: 'a', away: 'b' }];
+    assert.equal(stabiliseAgainstStored(incoming, undefined).size, 0);
+    assert.equal(incoming[0].id, 'f1');
   });
 });

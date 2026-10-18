@@ -1185,7 +1185,10 @@ export type ReminderWriteRepo = Pick<
   RepoModule,
   | 'getTenantConfig'
   | 'putPendingSync'
+  | 'getPendingSync'
   | 'getSeasonRun'
+  | 'listSeasonRuns'
+  | 'listSeries'
   | 'putSyncLog'
   | 'upsertMcAwait'
   | 'putSeriesIfVersion'

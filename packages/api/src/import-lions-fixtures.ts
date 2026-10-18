@@ -68,6 +68,7 @@ import {
   type RegistryReport,
 } from './lions-fixture-map.js';
 import { CLUB_MAP } from './lions-import-map.js';
+import { stabiliseAgainstStored } from './fixture-identity.js';
 import { parseAffiliationWorkbook } from './lions-affiliation-parse.js';
 import type { Club, Series, Venue, VenueStatus } from './types.js';
 
@@ -299,6 +300,8 @@ export interface BuildContext {
   /** The venue registry (tenant's, or the would-be registry in --parse-only). */
   venues: Venue[];
   leagueLabel: (key: string) => string;
+  /** The tenant's stored series: a re-import keys fixture ids against them (never recycles). */
+  stored?: Series[];
 }
 
 export interface ResolutionRow {
@@ -465,6 +468,14 @@ export function buildAllSeries(inputs: SeriesInput[], ctx: BuildContext): BuildO
       }
       return wf;
     });
+    // Over a stored series: matched rows keep their ids, new rows go above its high-water mark.
+    const renames = stabiliseAgainstStored(
+      fixtures,
+      ctx.stored?.find((s) => s.id === seriesId),
+    );
+    for (const t of outcome.tbc)
+      if (t.seriesId === seriesId && renames.has(t.fixtureId))
+        t.fixtureId = renames.get(t.fixtureId)!;
 
     const dates = fixtures.map((f) => f.date).sort();
     const series: Series = {
@@ -1072,7 +1083,7 @@ async function runImport(args: Args) {
   }
 
   // ── Build ──
-  const outcome = buildAllSeries(inputs, { clubs, venues, leagueLabel });
+  const outcome = buildAllSeries(inputs, { clubs, venues, leagueLabel, stored: existingSeries });
   printResolutions(outcome, leagueLabel);
 
   const totalFixtures = outcome.built.reduce((n, b) => n + b.fixtures.length, 0);

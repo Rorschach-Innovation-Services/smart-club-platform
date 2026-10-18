@@ -555,6 +555,12 @@ export interface Series {
   withheld?: { venue?: true; time?: true };
   /** Audit: when each withheld field was revealed. Cleared by recall; `releasedAt` is never bumped by a reveal. */
   revealedAt?: { venue?: string; time?: string };
+  /**
+   * The highest numeric `f<N>` fixture id this series has EVER held (kept by every series
+   * write, never lowered), so importers mint new ids above it and a removed fixture's id —
+   * its medicoach sync ref — is never reused for another match.
+   */
+  maxFixtureIdEver?: number;
   version: number;
   [key: string]: unknown;
 }

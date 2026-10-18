@@ -1,5 +1,6 @@
 import { resolveCompetitionDefaults } from '../packages/engine/src/defaults';
 import { Sentry } from './sentry'; // first — installs global error handlers before render
+import { awaitingCarryNotice } from './medicoachAwaitingCarry';
 import { useState as useStateApp, useMemo as useMemoApp, useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 import type { Scorer, Umpire } from './types';
@@ -694,7 +695,12 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       () => api.patchSeries(seriesId, { ...rest, version: cur.version }),
       'Could not save fixtures',
       { rawConflict: true },
-    ).then(() => invalidate(qk.series()));
+    ).then((res) => {
+      // Non-blocking: added fixtures Match Centre can't be sent as creates await a carry.
+      const notice = awaitingCarryNotice(res);
+      if (notice) toastShow(notice, 'warn');
+      return invalidate(qk.series());
+    });
   }
   // Knockout Set team / revert (ADR 0018): one server action on one fixture side, pinned to
   // the cached version. Resolves once the series list has refetched, so the editor's next

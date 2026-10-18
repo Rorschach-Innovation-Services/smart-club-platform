@@ -258,18 +258,90 @@ export const ScorecardResponseSchema = z.object({
   innings: z.array(InningsScorecardWireSchema).optional(),
 });
 
+/** A knockout side that waits on another fixture (create ops, 2026-10-18 additive). */
+export const SyncSlotSchema = z.object({
+  kind: z.enum(['winner', 'loser']),
+  /** The feeder fixture's ref. */
+  ofFixtureRef: ref,
+});
+export type SyncSlot = z.infer<typeof SyncSlotSchema>;
+
+/**
+ * What medicoach needs to create a fixture smart club added (`op: "create"`). A side is a team
+ * ref OR a slot, never both. `phase` is derived by medicoach.
+ */
+export const SyncFixtureCreateSchema = z
+  .object({
+    competitionRef: ref,
+    sport: z.string().min(1),
+    homeTeamRef: ref.optional(),
+    awayTeamRef: ref.optional(),
+    homeSlot: SyncSlotSchema.optional(),
+    awaySlot: SyncSlotSchema.optional(),
+    stage: z.string().min(1),
+    stageLabel: z.string().optional(),
+    groupName: z.string().optional(),
+    round: z.number().int().optional(),
+    venueLat: z.number().optional(),
+    venueLon: z.number().optional(),
+  })
+  .superRefine((c, ctx) => {
+    for (const side of ['home', 'away'] as const) {
+      const team = c[`${side}TeamRef`] !== undefined;
+      const slot = c[`${side}Slot`] !== undefined;
+      if (team === slot)
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${side}: exactly one of ${side}TeamRef / ${side}Slot`,
+          path: [`${side}TeamRef`],
+        });
+    }
+  });
+export type SyncFixtureCreate = z.infer<typeof SyncFixtureCreateSchema>;
+
+export const SchedulePushOpSchema = z.enum(['upsert', 'create', 'delete']);
+
+export const SchedulePushChangeSchema = z
+  .object({
+    ref,
+    /** Absent = "upsert" (back-compat). */
+    op: SchedulePushOpSchema.optional(),
+    /** Required for every op; a "delete" reads only `changedAt`. */
+    schedule: SyncScheduleSchema,
+    /** Present exactly when `op === "create"`. */
+    create: SyncFixtureCreateSchema.optional(),
+  })
+  .superRefine((c, ctx) => {
+    if ((c.op === 'create') !== (c.create !== undefined))
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '`create` is present exactly when op is "create"',
+        path: ['create'],
+      });
+  });
+
 export const SchedulePushRequestSchema = z.object({
   version: z.literal(MEDICOACH_SYNC_VERSION),
   tenant: z.string().min(1),
-  changes: z.array(z.object({ ref, schedule: SyncScheduleSchema })).max(SCHEDULE_PUSH_MAX),
+  changes: z.array(SchedulePushChangeSchema).max(SCHEDULE_PUSH_MAX),
 });
+
+export const SCHEDULE_PUSH_STATUSES = [
+  'applied',
+  'stale',
+  'unchanged',
+  'unmapped',
+  'created',
+  'deleted',
+  'error',
+] as const;
 
 export const SchedulePushResponseSchema = z.object({
   version: z.literal(MEDICOACH_SYNC_VERSION),
   results: z.array(
     z.object({
       ref,
-      status: z.enum(['applied', 'stale', 'unchanged', 'unmapped', 'error']),
+      status: z.enum(SCHEDULE_PUSH_STATUSES),
       message: z.string().optional(),
     }),
   ),

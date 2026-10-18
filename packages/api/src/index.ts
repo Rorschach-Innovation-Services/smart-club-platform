@@ -81,6 +81,7 @@ import { explainSyncError } from './medicoach-sync/explain.js';
 import { carrySyncOwnedFields, fixtureSyncRef } from './fixture-identity.js';
 import {
   buildInboundFixture,
+  deleteRowsFor,
   describeSchedule,
   fixtureSchedule,
   flushScheduleOutbox,
@@ -90,6 +91,7 @@ import {
   recordScheduleDiff,
   requeueRevealedSeries,
   sameMatch,
+  writePendingSync,
   seriesMappedForSync,
   seriesHoldsSchedule,
   type ScheduleFixture,
@@ -258,6 +260,7 @@ import type {
   SeriesSchedule,
   Venue,
   TenantConfig,
+  PendingScheduleSync,
   TutorialVideo,
   UserProfile,
   PlayerRegistration,
@@ -4797,8 +4800,28 @@ type SeriesPatch = Partial<Series> & {
 app.patch('/series/:id', requireAdmin, async (c) => {
   const ra = c.get('requestAuth')!;
   const patch = (await c.req.json()) as SeriesPatch;
-  return c.json(await applySeriesPatch(ra.tenant, c.req.param('id'), patch, ra.email ?? 'unknown'));
+  const out: SeriesPatchOutcome = {};
+  const written = await applySeriesPatch(
+    ra.tenant,
+    c.req.param('id'),
+    patch,
+    ra.email ?? 'unknown',
+    undefined,
+    'admin',
+    out,
+  );
+  // Response-only: fixtures this save added that medicoach can't be sent as creates (they
+  // await a carry — the connection console). Absent when there are none / no sync.
+  return c.json(
+    out.awaitingCarry?.length ? { ...written, medicoachAwaitingCarry: out.awaitingCarry } : written,
+  );
 });
+
+/** What a series write learned beyond the written series (response-only extras). */
+interface SeriesPatchOutcome {
+  /** Fixture ids queued as awaiting a medicoach carry (MCAWAIT#) by this write. */
+  awaitingCarry?: string[];
+}
 
 /**
  * The whole of `PATCH /series/:id` — version pre-check, approval gate (a fixtures edit on a
@@ -4818,7 +4841,10 @@ async function applySeriesPatch(
   runCalendar?: RunCalendarOverride,
   /** Who is changing the schedule — stamped + queued for medicoach unless `medicoach`. */
   origin: ScheduleChangeOrigin = 'admin',
+  out?: SeriesPatchOutcome,
 ): Promise<Series> {
+  // Response-only (PATCH /series answer); an editor echoing it back never persists it.
+  delete (patch as Record<string, unknown>).medicoachAwaitingCarry;
   const current = await repo.getSeries(tenant, id);
   if (!current) throw new HttpError(404, 'series not found');
   // A whole-series PATCH echoes GET /series' response-only fixture keys (the joined
@@ -5009,12 +5035,12 @@ async function applySeriesPatch(
   }
 
   // ── Removing fixtures medicoach already holds ──
-  // Medicoach never deletes a synced fixture (contract v1: organisers mark it Cancelled) and
-  // the v1 contract has no delete, so dropping one here would leave it live in medicoach's
-  // match centre with no way to reach it again. On a released, sync-mapped series the write is
-  // refused (409 `synced_fixture_removed`) unless the admin explicitly confirmed it; the
-  // console offers "Mark cancelled" instead. Removed fixtures' appointments are cleaned up
-  // after the write either way (they would otherwise outlive the fixture, invisibly).
+  // Smart club owns fixture existence (contract §2 create/delete ops, 2026-10-18): a removed
+  // fixture is queued as a delete and medicoach deletes its copy — even one with a recorded
+  // result. That is destructive, so on a released, sync-mapped series the write is refused
+  // (409 `synced_fixture_removed`) unless the admin explicitly confirmed it; the console offers
+  // "Mark cancelled" (keeps the record) as the alternative. Removed fixtures' appointments are
+  // cleaned up after the write either way (they would otherwise outlive the fixture, invisibly).
   const confirmRemoveSynced = patch.confirmRemoveSynced === true;
   delete patch.confirmRemoveSynced;
   let removedFixtureIds: string[] = [];
@@ -5035,7 +5061,7 @@ async function applySeriesPatch(
       if (await seriesMappedForSync(repo, tenant, current, config))
         throw new HttpError(
           409,
-          `${removedFixtureIds.length === 1 ? 'This fixture is' : `${removedFixtureIds.length} fixtures are`} already in medicoach, which can't delete a synced fixture. Mark it cancelled instead — or confirm you want it removed here only.`,
+          `${removedFixtureIds.length === 1 ? 'This fixture is' : `${removedFixtureIds.length} fixtures are`} already in medicoach. Removing ${removedFixtureIds.length === 1 ? 'it' : 'them'} also deletes the medicoach copy, including any recorded result. Mark it cancelled instead to keep the record — or confirm the removal.`,
           { code: 'synced_fixture_removed', fixtureIds: removedFixtureIds },
         );
     }
@@ -5197,6 +5223,12 @@ async function applySeriesPatch(
     throw err;
   }
   await scheduleSync?.enqueue();
+  if (out && scheduleSync?.newRefs.length) {
+    const prefix = `smartclub:${tenant}:fixture:${id}:`;
+    out.awaitingCarry = scheduleSync.newRefs.map((r) =>
+      r.startsWith(prefix) ? r.slice(prefix.length) : r,
+    );
+  }
   if (removedFixtureIds.length) {
     // Best effort, after the write landed: a failure here leaves invisible rows, never a
     // wrong schedule, so it must not fail the edit the admin already made.
@@ -6990,14 +7022,75 @@ app.post('/clubs/:id/clash-hints', async (c) => {
   return c.json({ results });
 });
 
-app.delete('/series/:id', requireAdmin, async (c) => {
-  const { tenant } = c.get('requestAuth')!;
-  await repo.deleteSeries(tenant, c.req.param('id'));
+/**
+ * Delete a series and its smart-club state, keeping medicoach in step (contract §2 delete
+ * ops). The series is read BEFORE it goes; when it is sync-mapped, a self-contained delete
+ * row is built for every fixture medicoach may hold, plus any delete already queued for a
+ * fixture removed earlier (the wipe below would lose it). Then: deleteSeries → officials →
+ * deleteSeriesSyncState (which drops the series' outbox rows). The delete rows are RETURNED,
+ * not written: the caller writes them with `queueSeriesDeletes` once it knows the deletion
+ * stands (after the wipe — always — and, for a regenerate, only once the new draw landed).
+ *
+ * `justCreated`: the series was written earlier in the same request and never left smart
+ * club (a create's rollback) — just the item delete, no reads, exactly as before.
+ */
+async function deleteSeriesWithSync(
+  tenant: string,
+  id: string,
+  opts: {
+    justCreated?: boolean;
+    config?: TenantConfig | null;
+    /** The tenant's outbox, read at most once per request (`pendingOnce`) across series. */
+    pending?: () => Promise<PendingScheduleSync[]>;
+  } = {},
+): Promise<PendingScheduleSync[]> {
+  if (opts.justCreated) {
+    await repo.deleteSeries(tenant, id);
+    return [];
+  }
+  const before = await repo.getSeries(tenant, id);
+  let deletes: PendingScheduleSync[] = [];
+  const config = opts.config !== undefined ? opts.config : await repo.getTenantConfig(tenant);
+  if (before && (await seriesMappedForSync(repo, tenant, before, config))) {
+    deletes = deleteRowsFor(
+      tenant,
+      before,
+      (before.fixtures ?? []) as ScheduleFixture[],
+      'admin',
+      new Date().toISOString(),
+    );
+    const queued = new Set(deletes.map((r) => r.ref));
+    for (const row of await (opts.pending ?? (() => repo.listPendingSync(tenant)))())
+      if (row.seriesId === id && row.op === 'delete' && !queued.has(row.ref)) deletes.push(row);
+  }
+  await repo.deleteSeries(tenant, id);
   // Its fixtures' umpire appointments go with it, and so does its medicoach-sync state
   // (results, outbox rows, held conflicts, report markers); pending captain's reports are
   // voided (ADR 0016).
-  await repo.deleteFixtureOfficialsForSeries(tenant, c.req.param('id'));
-  await repo.deleteSeriesSyncState(tenant, c.req.param('id'));
+  await repo.deleteFixtureOfficialsForSeries(tenant, id);
+  await repo.deleteSeriesSyncState(tenant, id);
+  // Nothing of it awaits a carry any more (the daily reconcile is the net for other paths).
+  await repo.deleteMcAwait(tenant, id);
+  return deletes;
+}
+
+/**
+ * One outbox Query per request for a multi-series delete. Only this series' queued deletes are
+ * read from it, so another series' wipe in the same loop does not stale it.
+ */
+function pendingOnce(tenant: string): () => Promise<PendingScheduleSync[]> {
+  let p: Promise<PendingScheduleSync[]> | undefined;
+  return () => (p ??= repo.listPendingSync(tenant));
+}
+
+/** Write delete rows from `deleteSeriesWithSync` — always AFTER that series' wipe. */
+async function queueSeriesDeletes(tenant: string, rows: PendingScheduleSync[]): Promise<void> {
+  for (const row of rows) await writePendingSync(repo, tenant, row);
+}
+
+app.delete('/series/:id', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  await queueSeriesDeletes(tenant, await deleteSeriesWithSync(tenant, c.req.param('id')));
   return c.json({ ok: true });
 });
 
@@ -7085,7 +7178,9 @@ app.post('/competitions', async (c) => {
       written.push(s.id);
     }
   } catch (err) {
-    await Promise.all(written.map((id) => repo.deleteSeries(tenant, id).catch(() => {})));
+    await Promise.all(
+      written.map((id) => deleteSeriesWithSync(tenant, id, { justCreated: true }).catch(() => {})),
+    );
     throw err;
   }
   return c.json(
@@ -7188,11 +7283,15 @@ app.post('/competitions/:id/regenerate', async (c) => {
   const spec = parseCompetitionBody({ ...(raw ?? {}), id }, inputs.clubs);
   const plan = planOrRefuse(spec);
   const oldIds = current.map((s) => String(s.id));
-  for (const sid of oldIds) {
-    await repo.deleteSeries(tenant, sid);
-    await repo.deleteFixtureOfficialsForSeries(tenant, sid);
-    await repo.deleteSeriesSyncState(tenant, sid);
-  }
+  // Medicoach deletes the old draw's copies (a recalled competition may have been carried) —
+  // but only once the new draw landed: a rollback restores the old series, so its delete rows
+  // are then never written.
+  const oldDeletes: PendingScheduleSync[] = [];
+  const pending = pendingOnce(tenant);
+  for (const sid of oldIds)
+    oldDeletes.push(
+      ...(await deleteSeriesWithSync(tenant, sid, { config: inputs.config, pending })),
+    );
   // Best-effort rollback, as POST /competitions does: a failed create must not lose the old
   // draw. Remove whatever new series landed (ids can coincide with the old ones), then put the
   // old series back from the in-memory `current` list with their original ids and versions.
@@ -7201,11 +7300,17 @@ app.post('/competitions/:id/regenerate', async (c) => {
   const written: string[] = [];
   try {
     for (const s of plan.series) {
+      // Same-id recreation resets maxFixtureIdEver: reused ids rely on medicoach's
+      // side-gated reclaim and the upsert-onto-delete await-carry gate.
       await createSeries(tenant, s as unknown as Series);
       written.push(s.id);
     }
   } catch (err) {
-    await Promise.all(written.map((sid) => repo.deleteSeries(tenant, sid).catch(() => {})));
+    await Promise.all(
+      written.map((sid) =>
+        deleteSeriesWithSync(tenant, sid, { justCreated: true }).catch(() => {}),
+      ),
+    );
     const restored = await Promise.all(
       current.map((s) =>
         repo.putSeries(tenant, s).then(
@@ -7230,6 +7335,7 @@ app.post('/competitions/:id/regenerate', async (c) => {
       { code: 'regenerate_failed', restored: allBack },
     );
   }
+  await queueSeriesDeletes(tenant, oldDeletes);
   return c.json({
     id,
     series: await Promise.all(plan.series.map((s) => repo.getSeries(tenant, s.id))),
@@ -7246,11 +7352,13 @@ app.delete('/competitions/:id', async (c) => {
     throw new HttpError(409, 'this competition is released — recall it before deleting it', {
       code: 'competition_released',
     });
-  for (const s of series) {
-    await repo.deleteSeries(tenant, String(s.id));
-    await repo.deleteFixtureOfficialsForSeries(tenant, String(s.id));
-    await repo.deleteSeriesSyncState(tenant, String(s.id));
-  }
+  const config = await repo.getTenantConfig(tenant);
+  const pending = pendingOnce(tenant);
+  for (const s of series)
+    await queueSeriesDeletes(
+      tenant,
+      await deleteSeriesWithSync(tenant, String(s.id), { config, pending }),
+    );
   return c.json({ ok: true, deleted: series.map((s) => s.id) });
 });
 
