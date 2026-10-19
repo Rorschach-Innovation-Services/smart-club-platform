@@ -1964,10 +1964,6 @@ const appLinksHtml = (): string =>
   `<a href="${MEDICOACH_APP_LINKS.android}" style="color:#1D9E75">Android (Google Play)</a> · ` +
   `<a href="${MEDICOACH_APP_LINKS.web}" style="color:#1D9E75">www.medicoach.co.za</a></p>`;
 
-const watchScoringText = (url: string): string => `▶ Watch how live scoring works: ${url}`;
-const watchScoringHtml = (url: string): string =>
-  `<p><a href="${escapeHtml(url)}" style="color:#1D9E75;font-weight:600">▶ Watch how live scoring works</a></p>`;
-
 export interface EmcuChairScorerEmailInput {
   to: string;
   /** The chair's name; '' ⇒ "Chairperson". */
@@ -1977,39 +1973,51 @@ export interface EmcuChairScorerEmailInput {
   accounts: ScorerAccount[];
   /** Public URL of the staff live-scoring video. */
   staffVideoUrl: string;
+  /** Public URL of the club's results page on the upgraded MediCoach site. */
+  resultsSiteUrl: string;
 }
 
 /**
  * EMCU scorer broadcast — CHAIR email: the club's MediCoach scorer logins (Scorer 1..n table:
- * sign-in email + password), the staff video link and the app links. The ONLY channel that
- * carries credentials. Pure — exported for tests and the CLI's (redacted) dry-run sample.
+ * sign-in email + password), the staff video link and the club's results-page link. Copy is
+ * the 17 Oct 2026 resend wording from the client's Word doc (MediCoach × Dolphins Pipeline
+ * talent framing, private logins, video + results links, "Kind regards, The MediCoach team").
+ * The ONLY channel that carries credentials. Pure — exported for tests and the CLI's
+ * (redacted) dry-run sample.
  */
 export function emcuChairScorerEmailContent(input: Omit<EmcuChairScorerEmailInput, 'to'>): {
   subject: string;
   text: string;
   html: string;
 } {
-  const subject = "Your club's MediCoach scorer accounts";
+  const subject = `Your EMCU scorer logins for ${input.clubName}`;
   const greetName = input.name.trim() || 'Chairperson';
   const n = input.accounts.length;
-  const intro =
-    `EMCU matches for ${input.clubName} are scored live on the MediCoach app this season. ` +
-    `Your club has ${n} scorer account${n === 1 ? '' : 's'}` +
-    (n > 1 ? `, so up to ${n} people can score ${n} different matches at the same time` : '') +
-    ". Give each scorer their own account — don't use one account for two matches at once.";
-  const closing =
-    "Please keep these details within your club's scorers. If you are no longer the " +
-    `chairperson, or an account needs a reset, email ${MEDICOACH_SUPPORT_EMAIL}.`;
+  const count = n === 4 ? 'four' : String(n);
+  const para1 =
+    'MediCoach and the Dolphins Pipeline are working together to find and develop talent across ' +
+    'the EMCU league. Accurate scoring is the first step. Every match you score builds each ' +
+    "player's cricket CV, which scouts and coaches use to spot talent and plan support.";
+  const para2 =
+    `Here are the ${count} scorer login${n === 1 ? '' : 's'} for ${input.clubName}. ` +
+    'Please give each login only to the scorer who will use it, and keep these details private.';
+  const videoLead = 'This short video shows how to sign in and score a match:';
+  const resultsLead =
+    "After the match, you will receive a captain's report, and you can view your club's results " +
+    'on the upgraded site:';
+  const help = 'If a scorer has trouble signing in, reply to this email, and we will help.';
   const rowsText = input.accounts
     .map((a, i) => `Scorer ${i + 1}\n  Sign-in email: ${a.email}\n  Password: ${a.password}`)
     .join('\n\n');
   const text =
     `Dear ${greetName},\n\n` +
-    `${intro}\n\n` +
-    `${watchScoringText(input.staffVideoUrl)}\n\n` +
+    `${para1}\n\n` +
+    `${para2}\n\n` +
     `${rowsText}\n\n` +
-    `${appLinksText()}\n\n` +
-    closing;
+    `${videoLead} ${input.staffVideoUrl}\n\n` +
+    `${resultsLead} ${input.resultsSiteUrl}\n\n` +
+    `${help}\n\n` +
+    'Kind regards,\nThe MediCoach team';
   const cell = 'padding:6px 10px;border:1px solid #D5DCE6;text-align:left';
   const table =
     `<table style="border-collapse:collapse;margin:12px 0">` +
@@ -2023,14 +2031,18 @@ export function emcuChairScorerEmailContent(input: Omit<EmcuChairScorerEmailInpu
       )
       .join('') +
     `</tbody></table>`;
+  const link = (url: string): string =>
+    `<a href="${escapeHtml(url)}" style="color:#1D9E75;font-weight:600">Click this link</a>`;
   const html =
     EMAIL_WRAP_OPEN +
     `<p>Dear ${escapeHtml(greetName)},</p>` +
-    `<p>${escapeHtml(intro)}</p>` +
-    watchScoringHtml(input.staffVideoUrl) +
+    `<p>${escapeHtml(para1)}</p>` +
+    `<p>${escapeHtml(para2)}</p>` +
     table +
-    appLinksHtml() +
-    `<p>${escapeHtml(closing)}</p>` +
+    `<p>${escapeHtml(videoLead)} ${link(input.staffVideoUrl)}</p>` +
+    `<p>${escapeHtml(resultsLead)} ${link(input.resultsSiteUrl)}</p>` +
+    `<p>${escapeHtml(help)}</p>` +
+    `<p>Kind regards,<br/>The MediCoach team</p>` +
     `</div>`;
   return { subject, text, html };
 }

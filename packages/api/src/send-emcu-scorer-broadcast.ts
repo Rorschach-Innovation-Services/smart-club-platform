@@ -12,12 +12,15 @@
  *
  *   npx sst shell --stage <stage> -- npm --prefix packages/api run broadcast:emcu-scorers -- \
  *     --audience chairs --credentials ~/secure/emcu-scorer-credentials.json \
- *     --staff-video-url <https://…> --video-file <staff.mp4>          # dry-run (default)
+ *     --staff-video-url <https://…> --video-file <staff.mp4> \
+ *     --results-site-url <https://…>                                   # dry-run (default)
  *   … --channels email                # chairs: email first (recommended split run)
  *   … --channels whatsapp             # chairs: the WhatsApp notice once the emails are out
  *   … --only <email-or-cell>          # restrict to one person (pre-flight smoke test)
  *   … --exclude-club <clubId>         # leave a club out (repeatable; reported as a skip)
  *   … --welcome-manifest <path>       # chairs: flag chairs whose 8 Oct welcome failed/skipped
+ *   … --results-site-url <https://…>  # chairs: club results page on the upgraded MediCoach site
+ *                                     (required to send the chair email; https only)
  *   … --codes <path>                  # club-code table (default: src/emcu-club-codes.json)
  *   … --include-operators             # keep platform operators (excluded by default)
  *   … --confirm [--resend] [--allow-dry-run-sends]
@@ -686,6 +689,7 @@ export interface EmcuManifest {
     includeOperators: boolean;
     excludeClubs: string[];
     staffVideoUrl: string;
+    resultsSiteUrl?: string;
     videoFile?: string;
     mediaId?: string;
     codesFile: string;
@@ -753,6 +757,53 @@ const manifestPath = (audience: EmcuAudience, runId: string): string =>
 
 // ───────────────────────── Samples (pure) ─────────────────────────
 
+/**
+ * Club short code → curated chair first name, as the client's 17 Oct 2026 doc greets them.
+ * Overrides the stored chair contact name for the CHAIR EMAIL greeting only (the WhatsApp
+ * notice and manifest keep the contact name); codes not listed fall back to the contact name
+ * (then "Chairperson").
+ */
+export const CHAIR_GREETING_BY_CODE: Record<string, string> = {
+  awcc: 'Cebo',
+  toti: 'Lauryn',
+  cucc: 'Raam',
+  chester: 'Busi',
+  crusader: 'Jason',
+  delta: 'Faeez',
+  deaf: 'Steven',
+  ecc: 'Somanathan',
+  fam: 'Lwazi',
+  fhcc: 'Floyd',
+  quins: 'Brennan',
+  hmcc: 'Mike',
+  hcs: 'Bronwyn',
+  kwamashu: 'Nokuthula',
+  lamont: 'Bandile',
+  lindelan: 'Sandile',
+  msc: 'Muzakkir',
+  merebank: 'Rocky',
+  newlands: 'Rajesh',
+  ntuzuma: 'Leon',
+  parkgate: 'Sifiso',
+  phoenix: 'Bradley',
+  ptcc: 'Lionel',
+  railways: 'Dhiraj',
+  dhsob: 'Roxanne',
+  saints: 'Vinothan',
+  simplex: 'Rynel',
+  spartan: 'Neresh',
+  tongaat: 'Kalvin',
+  ukzn: 'Roshnee',
+  umgababa: 'Sthembiso',
+  umlazi: 'Njabulo',
+  verulam: 'I R Pather',
+  westcc: 'Sandile',
+};
+
+/** The chair email's greeting name: the curated map by club code, else the contact name. PURE. */
+export const chairGreetingName = (r: Pick<ChairRecipient, 'code' | 'name'>): string =>
+  CHAIR_GREETING_BY_CODE[r.code] ?? r.name;
+
 const fill = (body: string, params: string[]): string =>
   params.reduce((b, p, i) => b.split(`{{${i + 1}}}`).join(p), body);
 
@@ -761,13 +812,15 @@ export function chairSampleText(
   r: ChairRecipient,
   content: NotifyEmail['emcuChairScorerEmailContent'],
   staffVideoUrl: string,
+  resultsSiteUrl: string,
   waVideo: string,
 ): string {
   const e = content({
-    name: r.name,
+    name: chairGreetingName(r),
     clubName: r.clubName,
     accounts: redactAccounts(r.accounts),
     staffVideoUrl,
+    resultsSiteUrl,
   });
   const def = WHATSAPP_TEMPLATES.emcuScorerAccountsNotice;
   return (
@@ -808,6 +861,7 @@ export interface Args {
   includeOperators: boolean;
   excludeClubs: string[];
   staffVideoUrl?: string;
+  resultsSiteUrl?: string;
   videoFile?: string;
   welcomeManifest?: string;
   allowDryRunSends: boolean;
@@ -846,6 +900,7 @@ export function parseArgs(argv: string[]): Args {
     else if (a === '--include-operators') args.includeOperators = true;
     else if (a === '--exclude-club') args.excludeClubs.push(value(++i, a));
     else if (a === '--staff-video-url') args.staffVideoUrl = value(++i, a);
+    else if (a === '--results-site-url') args.resultsSiteUrl = value(++i, a);
     else if (a === '--video-file') args.videoFile = value(++i, a);
     else if (a === '--welcome-manifest') args.welcomeManifest = value(++i, a);
     else if (a === '--allow-dry-run-sends') args.allowDryRunSends = true;
@@ -864,12 +919,16 @@ export function parseArgs(argv: string[]): Args {
   if (args.staffVideoUrl !== undefined && !/^https:\/\/\S+$/.test(args.staffVideoUrl)) {
     throw new Error('--staff-video-url must be an https URL');
   }
+  if (args.resultsSiteUrl !== undefined && !/^https:\/\/\S+$/.test(args.resultsSiteUrl)) {
+    throw new Error('--results-site-url must be an https URL');
+  }
   return args;
 }
 
 // ───────────────────────── Main ─────────────────────────
 
 const STAFF_VIDEO_PLACEHOLDER = '<staff video URL — pass --staff-video-url>';
+const RESULTS_SITE_PLACEHOLDER = '<results site URL — pass --results-site-url>';
 
 const describePlan = (plan: EmcuPlannedMessage[]): string =>
   plan.map((m) => `${m.kind}:${m.status}${m.reason ? `(${m.reason})` : ''}`).join(', ');
@@ -935,6 +994,7 @@ async function main(): Promise<void> {
   const clubNameById = new Map(allClubs.map((c) => [c.id, c.name]));
 
   const staffVideoUrl = args.staffVideoUrl ?? STAFF_VIDEO_PLACEHOLDER;
+  const resultsSiteUrl = args.resultsSiteUrl ?? RESULTS_SITE_PLACEHOLDER;
   const waVideo = `Meta upload of ${args.videoFile ?? '<--video-file missing>'}`;
 
   let rows: Array<{ entry: EmcuManifestRecipient; target: Omit<SendTarget, 'send'> }> = [];
@@ -1015,7 +1075,7 @@ async function main(): Promise<void> {
     }
     if (chairs[0]) {
       console.log(
-        `\n${chairSampleText(chairs[0], email.emcuChairScorerEmailContent, staffVideoUrl, waVideo)}`,
+        `\n${chairSampleText(chairs[0], email.emcuChairScorerEmailContent, staffVideoUrl, resultsSiteUrl, waVideo)}`,
       );
     }
     sendFor = (i) => {
@@ -1024,10 +1084,11 @@ async function main(): Promise<void> {
         m.kind === 'emcu-chair-email'
           ? email.sendEmcuChairScorerEmail({
               to: m.to!,
-              name: r.name,
+              name: chairGreetingName(r),
               clubName: r.clubName,
               accounts: r.accounts,
               staffVideoUrl: args.staffVideoUrl!,
+              resultsSiteUrl: args.resultsSiteUrl!,
             })
           : whatsapp.sendEmcuScorerAccountsNoticeWhatsApp(
               m.to!,
@@ -1122,6 +1183,9 @@ async function main(): Promise<void> {
   if (args.channels.includes('email') && !args.staffVideoUrl) {
     blockers.push('--staff-video-url is required to send email');
   }
+  if (args.audience === 'chairs' && args.channels.includes('email') && !args.resultsSiteUrl) {
+    blockers.push('--results-site-url is required to send the chair email');
+  }
   const videoBlocker = videoFileBlocker(args.channels, args.videoFile, fileSize);
   if (videoBlocker) blockers.push(videoBlocker);
   const pending = args.channels.includes('whatsapp') ? pendingTemplateFor(args.audience) : null;
@@ -1156,6 +1220,7 @@ async function main(): Promise<void> {
       includeOperators: args.includeOperators,
       excludeClubs: args.excludeClubs,
       staffVideoUrl,
+      ...(args.resultsSiteUrl ? { resultsSiteUrl: args.resultsSiteUrl } : {}),
       ...(args.videoFile ? { videoFile: args.videoFile } : {}),
       codesFile: args.codes,
       ...(args.credentials ? { credentialsFile: args.credentials } : {}),

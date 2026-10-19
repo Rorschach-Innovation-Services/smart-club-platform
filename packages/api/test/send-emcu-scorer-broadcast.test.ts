@@ -14,6 +14,8 @@ import {
   chairClaimKey,
   chairManifestRecipient,
   chairSampleText,
+  chairGreetingName,
+  CHAIR_GREETING_BY_CODE,
   credentialsByClub,
   matchesOnlyContact,
   parseArgs,
@@ -50,6 +52,7 @@ const PASSWORDS = [
   'sly-copper-meadow',
 ];
 const VIDEO = 'https://bucket.s3.af-south-1.amazonaws.com/tutorials/dolphins/staff.mp4';
+const RESULTS = 'https://www.medicoach.co.za/results/umhlali';
 
 const club = (id: string, extra: Partial<EmcuClub> = {}): EmcuClub => ({
   id,
@@ -302,6 +305,7 @@ describe('credentials never leave memory', () => {
       chair,
       emcuChairScorerEmailContent,
       VIDEO,
+      RESULTS,
       'Meta upload of x.mp4',
     );
     for (const p of PASSWORDS) assert.ok(!sample.includes(p), `sample leaked ${p}`);
@@ -343,46 +347,90 @@ describe('credentials never leave memory', () => {
 });
 
 describe('emails', () => {
-  test('chair email: copy, Scorer 1..n table with passwords, app links, support line', () => {
+  test('chair email: the 17 Oct copy, Scorer 1..n table with passwords, video + results links', () => {
     const e = emcuChairScorerEmailContent({
       name: 'Thandi Nkosi',
       clubName: 'Umhlali Cricket Club',
       accounts: chairOf(4).accounts,
       staffVideoUrl: VIDEO,
+      resultsSiteUrl: RESULTS,
     });
-    assert.equal(e.subject, "Your club's MediCoach scorer accounts");
+    assert.equal(e.subject, 'Your EMCU scorer logins for Umhlali Cricket Club');
     assert.ok(e.text.startsWith('Dear Thandi Nkosi,\n\n'));
-    assert.match(
-      e.text,
-      /EMCU matches for Umhlali Cricket Club are scored live on the MediCoach app this season\. Your club has 4 scorer accounts, so up to 4 people can score 4 different matches at the same time\. Give each scorer their own account — don't use one account for two matches at once\./,
+    assert.ok(
+      e.text.includes(
+        "MediCoach and the Dolphins Pipeline are working together to find and develop talent across the EMCU league. Accurate scoring is the first step. Every match you score builds each player's cricket CV, which scouts and coaches use to spot talent and plan support.",
+      ),
     );
-    assert.ok(e.text.includes(`▶ Watch how live scoring works: ${VIDEO}`));
+    assert.ok(
+      e.text.includes(
+        'Here are the four scorer logins for Umhlali Cricket Club. Please give each login only to the scorer who will use it, and keep these details private.',
+      ),
+    );
     assert.match(
       e.text,
       /Scorer 4\n {2}Sign-in email: scorer4\.umhlali@medicoach\.co\.za\n {2}Password: sly-copper-meadow/,
     );
-    assert.ok(e.text.includes('https://apps.apple.com/us/app/medicoach-ams/id6760149086'));
-    assert.ok(e.text.includes('https://play.google.com/store/apps/details?id=co.za.medicoach.app'));
-    assert.ok(e.text.includes('https://www.medicoach.co.za/'));
+    assert.ok(e.text.includes(`This short video shows how to sign in and score a match: ${VIDEO}`));
+    assert.ok(
+      e.text.includes(
+        `After the match, you will receive a captain's report, and you can view your club's results on the upgraded site: ${RESULTS}`,
+      ),
+    );
     assert.ok(
       e.text.endsWith(
-        "Please keep these details within your club's scorers. If you are no longer the chairperson, or an account needs a reset, email info@medicoach.co.za.",
+        'If a scorer has trouble signing in, reply to this email, and we will help.\n\nKind regards,\nThe MediCoach team',
+      ),
+    );
+    for (const out of [e.text, e.html]) {
+      assert.ok(!out.includes('info@'), 'no info@ line');
+      assert.ok(!out.includes('apps.apple.com'), 'no App Store link');
+      assert.ok(!out.includes('play.google.com'), 'no Play link');
+    }
+    assert.ok(
+      e.html.includes(
+        `<a href="${VIDEO}" style="color:#1D9E75;font-weight:600">Click this link</a>`,
+      ),
+    );
+    assert.ok(
+      e.html.includes(
+        `<a href="${RESULTS}" style="color:#1D9E75;font-weight:600">Click this link</a>`,
       ),
     );
     assert.match(e.html, /<th[^>]*>Sign-in email<\/th><th[^>]*>Password<\/th>/);
     assert.ok(e.html.includes('manly-pushover-sustainer'));
+    assert.ok(e.html.includes('Kind regards,<br/>The MediCoach team'));
   });
 
-  test('chair email uses the real count and escapes HTML', () => {
+  test('chair email uses the real count, falls back to "Chairperson" and escapes HTML', () => {
     const e = emcuChairScorerEmailContent({
       name: '',
       clubName: 'A & B <CC>',
       accounts: chairOf(3).accounts,
       staffVideoUrl: VIDEO,
+      resultsSiteUrl: RESULTS,
     });
     assert.ok(e.text.startsWith('Dear Chairperson,'));
-    assert.match(e.text, /Your club has 3 scorer accounts, so up to 3 people/);
+    assert.match(e.text, /Here are the 3 scorer logins for A & B <CC>\./);
     assert.ok(e.html.includes('A &amp; B &lt;CC&gt;'));
+  });
+
+  test('chair greeting map overrides the contact name by club code, else falls back', () => {
+    assert.equal(CHAIR_GREETING_BY_CODE.verulam, 'I R Pather');
+    assert.equal(Object.keys(CHAIR_GREETING_BY_CODE).length, 34);
+    assert.equal(chairGreetingName({ code: 'toti', name: 'Lauryn-Ann Smith' }), 'Lauryn');
+    assert.equal(chairGreetingName({ code: 'umhlali', name: 'Thandi Nkosi' }), 'Thandi Nkosi');
+    assert.equal(chairGreetingName({ code: 'umhlali', name: '' }), '');
+    const sample = chairSampleText(
+      { ...chairOf(4), code: 'saints', name: 'V. Naidoo' },
+      emcuChairScorerEmailContent,
+      VIDEO,
+      RESULTS,
+      'Meta upload of x.mp4',
+    );
+    assert.match(sample, /Dear Vinothan,/);
+    // The WhatsApp notice keeps the stored contact name.
+    assert.match(sample, /V\. Naidoo/);
   });
 
   test('player email: the 10 Oct copy with the how-to video link and app links before the sign-off', () => {
@@ -507,6 +555,14 @@ describe('CLI args + blockers', () => {
     assert.throws(
       () => parseArgs(['--audience', 'players', '--staff-video-url', 'http://x']),
       /https/,
+    );
+    assert.throws(
+      () => parseArgs(['--audience', 'players', '--results-site-url', 'http://x']),
+      /--results-site-url must be an https URL/,
+    );
+    assert.equal(
+      parseArgs(['--audience', 'players', '--results-site-url', RESULTS]).resultsSiteUrl,
+      RESULTS,
     );
   });
 

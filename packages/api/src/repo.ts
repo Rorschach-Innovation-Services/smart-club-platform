@@ -6229,6 +6229,42 @@ export async function updateClearanceFlags(
   return next;
 }
 
+/**
+ * Correct the denormalised `playerName` on a clearance. Exists for the fix-player-name ops CLI:
+ * a name correction on the player row must also reach this copy. A close clone of
+ * {@link updateClearanceFlags} — version-guarded (OCC), canonical item only, written through
+ * clearanceItems. Reads RAW so a rejected clearance's rejectSnapshot survives the full rewrite.
+ * A lost race throws VersionConflictError.
+ */
+export async function updateClearancePlayerName(
+  tenant: string,
+  fromClubId: string,
+  id: string,
+  playerName: string,
+): Promise<PlayerClearance> {
+  const current = await getClearanceRaw(tenant, fromClubId, id);
+  if (!current) throw new Error('clearance not found');
+  const expectedVersion = current.version ?? 0;
+  const next: PlayerClearance = { ...current, playerName, version: expectedVersion + 1 };
+  const { canonical } = clearanceItems(tenant, next);
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: canonical,
+        ConditionExpression: 'version = :v',
+        ExpressionAttributeValues: { ':v': expectedVersion },
+      }),
+    );
+  } catch (err: unknown) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+      throw new VersionConflictError();
+    }
+    throw err;
+  }
+  return publicClearance(next);
+}
+
 /** Raised when a clearance move can't run because the player already exists at the destination. */
 export class PlayerExistsAtDestinationError extends Error {
   constructor() {
