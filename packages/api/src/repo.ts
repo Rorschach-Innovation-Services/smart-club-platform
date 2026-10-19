@@ -3730,6 +3730,69 @@ export async function forwardCaptainsReport(
 }
 
 /**
+ * Ops re-address of a PENDING report (resend-captains-report-notices): a new recipient (fresh
+ * memberId ⇒ new link + new NOTIFY# slot), with or without a captain contact. Conditional on
+ * the report still being pending and addressed to `expectedMemberId`. Unlike a chair's
+ * forward it never touches `forwardCount` (an ops resend must not use up the chair's
+ * forwards), and it clears `reminderSentAt` so the new recipient still gets the one reminder.
+ */
+export async function readdressCaptainsReport(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+  next: {
+    recipient: CaptainsReport['recipient'];
+    /** Omitted ⇒ REMOVE (the chair is reached through the club record). */
+    recipientContact?: NonNullable<CaptainsReport['recipientContact']>;
+    captainName?: string;
+    chairMemberId?: string;
+    linkExpiresAt?: string;
+  },
+  guard: { expectedMemberId: string },
+): Promise<CaptainsReport> {
+  const sets = ['recipient = :r', 'updatedAt = :at'];
+  const removes = ['reminderSentAt'];
+  const values: Record<string, unknown> = {
+    ':r': next.recipient,
+    ':at': new Date().toISOString(),
+    ':pending': 'pending',
+    ':m': guard.expectedMemberId,
+  };
+  if (next.recipientContact) {
+    sets.push('recipientContact = :rc');
+    values[':rc'] = next.recipientContact;
+  } else removes.push('recipientContact');
+  if (next.captainName !== undefined) {
+    sets.push('captainName = :cn');
+    values[':cn'] = next.captainName;
+  }
+  if (next.chairMemberId) {
+    sets.push('chairMemberId = :cm');
+    values[':cm'] = next.chairMemberId;
+  }
+  if (next.linkExpiresAt) {
+    sets.push('linkExpiresAt = :le');
+    values[':le'] = next.linkExpiresAt;
+  }
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression: `SET ${sets.join(', ')} REMOVE ${removes.join(', ')}`,
+        ConditionExpression: 'attribute_exists(pk) AND #s = :pending AND recipient.memberId = :m',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: values,
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return stripKeys<CaptainsReport>(res.Attributes)!;
+  } catch (err) {
+    if (isCcf(err)) throw new CaptainsReportForwardConflict();
+    throw err;
+  }
+}
+
+/**
  * The union office attributes a free-text umpire entry of a SUBMITTED report to a registry
  * umpire. Conditional on the entry still being that free-text name with no umpire id.
  */

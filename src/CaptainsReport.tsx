@@ -684,6 +684,17 @@ function MatchScorecardSection({
               <InningsCard key={i} inn={inn} own={own} defaultOpen={anyOwn ? own : pos === 0} />
             ))}
           </div>
+          {context?.medicoachMatchUrl && (
+            <a
+              className="sc-external"
+              href={context.medicoachMatchUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              View on the scoring site
+              <Icon.Arrow />
+            </a>
+          )}
           <ScorecardAnswer value={value} onChange={onChange} disabled={disabled} />
         </>
       ) : (

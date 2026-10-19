@@ -73,6 +73,10 @@ export async function fetchAndStoreScorecard(
   if (!deps.url || !deps.secret || !medicoachMatchId || !medicoachTournamentId) return 'skipped';
   const where = `${tenant}: scorecard for ${seriesId}/${fixtureId}`;
   try {
+    // An imported card (scripts/import-csa-scorecards.ts) is ground truth for a match scored
+    // off-platform: never fetch over it, whichever caller asks (puller or sweep).
+    const kept = await deps.repo.getFixtureScorecard(tenant, seriesId, fixtureId);
+    if (kept?.terminal && kept.medicoachMatchId.startsWith('csa-')) return 'skipped';
     const pq = scorecardPathAndQuery(medicoachMatchId, medicoachTournamentId, tenant);
     const res = await (deps.fetch ?? fetch)(`${deps.url}${pq}`, {
       method: 'GET',
@@ -186,6 +190,11 @@ export function needsScorecardFetch(
   const recordedMs = Date.parse(result.recordedAt);
   if (!Number.isFinite(recordedMs) || nowMs - recordedMs > SCORECARD_SWEEP_WINDOW_MS) return false;
   if (!card) return true;
+  // An imported card (scripts/import-csa-scorecards.ts): the sweep never refetches it, even
+  // once the fixture gains a medicoach result — the id-mismatch check below would otherwise
+  // treat it as another match's card and overwrite it. (fetchAndStoreScorecard has the same
+  // guard, so the puller's inline fetch on a newly stored result is covered too.)
+  if (card.terminal && card.medicoachMatchId.startsWith('csa-')) return false;
   // The result now points at a different medicoach match: the stored card is not its card.
   if (
     card.medicoachMatchId !== result.medicoachMatchId ||

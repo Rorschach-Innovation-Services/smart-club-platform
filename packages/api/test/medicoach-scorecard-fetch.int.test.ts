@@ -399,6 +399,34 @@ describe('medicoach scorecard fetch', () => {
     assert.equal(stub?.terminal, true);
   });
 
+  test('an imported (csa-) card is never fetched over, even when a medicoach result arrives', async () => {
+    const imported = {
+      seriesId: SERIES,
+      fixtureId: 'f1',
+      medicoachMatchId: 'csa-13662',
+      medicoachTournamentId: 'csa-613',
+      schemaVersion: 1 as const,
+      fetchedAt: NOW.toISOString(),
+      available: true,
+      innings: innings(),
+      terminal: true as const,
+    };
+    await repo.putFixtureScorecard(T, imported);
+    cards = { 'pma-1': available('pma-1') };
+    requests.length = 0;
+    const outcome = await scorecards.fetchAndStoreScorecard(
+      deps(),
+      T,
+      SERIES,
+      'f1',
+      'pma-1',
+      'tour-9',
+    );
+    assert.equal(outcome, 'skipped');
+    assert.equal(scorecardRequests().length, 0, 'no request reaches medicoach');
+    assert.deepEqual(await repo.getFixtureScorecard(T, SERIES, 'f1'), imported);
+  });
+
   test('inline scorecard fetches are capped at 10 per page; the sweep picks up the rest', async () => {
     const ids = Array.from({ length: 12 }, (_, i) => `f${i + 1}`);
     cards = Object.fromEntries(ids.map((f) => [`pma-${f}`, available(`pma-${f}`)]));

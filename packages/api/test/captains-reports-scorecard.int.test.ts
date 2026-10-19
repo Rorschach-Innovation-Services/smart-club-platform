@@ -939,3 +939,43 @@ describe('player erasure', () => {
     assert.equal(log.counts.reportScorecardFeedbackScrubbed, 1);
   });
 });
+
+describe('an imported (CSA) card', () => {
+  const CSA_URL = 'https://cricketpvcms.co.za/tournaments/completed/613/13662';
+  const imported = () =>
+    card({
+      medicoachMatchId: 'csa-13662',
+      medicoachTournamentId: 'csa-613',
+      matchState: 'Complete',
+      terminal: true,
+      sourceUrl: CSA_URL,
+    });
+
+  test('with no FIXRESULT the context carries the card and the CSA link, no result', async () => {
+    await repo.putFixtureScorecard(T, imported());
+    const ctx = await cr.attachScorecardContext(repo, T, await getReport('umzinto'));
+    assert.equal(ctx.scorecard?.fetchedAt, CARD_AT);
+    assert.equal(ctx.scorecard?.innings.length, 1);
+    assert.equal(ctx.medicoachMatchUrl, CSA_URL);
+    assert.equal(ctx.result, undefined);
+    // A recorded result's own medicoach link wins over the card's source link.
+    await storeResult();
+    const withResult = await cr.attachScorecardContext(repo, T, await getReport('umzinto'));
+    assert.equal(withResult.medicoachMatchUrl, 'https://medicoach.example/matches/pma-1');
+  });
+
+  test('the sweep never refetches it, even once the fixture has a medicoach result', async () => {
+    await storeResult({ recordedAt: new Date().toISOString() });
+    const result = (await repo.getFixtureResult(T, S, 'f1'))!;
+    assert.equal(fetchMod.needsScorecardFetch(result, imported(), Date.now()), false);
+    // Without the guard the id mismatch alone would refetch: a non-csa terminal card does.
+    assert.equal(
+      fetchMod.needsScorecardFetch(
+        result,
+        card({ medicoachMatchId: 'other', terminal: true }),
+        Date.now(),
+      ),
+      true,
+    );
+  });
+});

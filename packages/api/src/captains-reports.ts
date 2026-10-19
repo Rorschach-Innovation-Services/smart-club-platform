@@ -1738,7 +1738,11 @@ export async function attachScorecardContext(
     repo.getFixtureResult(tenant, report.seriesId, report.fixtureId),
   ]);
   const live = res && !res.cleared && res.recordedAt ? res : null;
-  const url = live ? httpUrlOrNull(live.medicoachMatchUrl) : null;
+  const url = live
+    ? httpUrlOrNull(live.medicoachMatchUrl)
+    : card?.sourceUrl
+      ? httpUrlOrNull(card.sourceUrl)
+      : null;
   return {
     ...(card?.available
       ? {

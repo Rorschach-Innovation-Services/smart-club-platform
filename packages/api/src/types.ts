@@ -1375,6 +1375,12 @@ export interface StoredFixtureScorecard {
    * 404 / `available: false` never overwrites an available card).
    */
   lastCheckedAt?: string;
+  /**
+   * The source scoring site's match page, for a card imported from outside medicoach (the
+   * CSA site's premier scorecards — scripts/import-csa-scorecards.ts; `medicoachMatchId`
+   * then starts with `csa-`). Served as the match link when the fixture has no result.
+   */
+  sourceUrl?: string;
 }
 
 /** The read-only result joined onto a fixture in GET /series (no captain/player data). */

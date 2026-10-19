@@ -385,6 +385,26 @@ describe('the match scorecard section', () => {
     expect(within(section()).getByRole('radio', { name: /These stats are correct/ })).toBeChecked();
   });
 
+  it('a card with a source link: the innings AND a "View on the scoring site" link', () => {
+    renderWithProviders(
+      <CaptainsReportForm
+        report={shell()}
+        registry={REGISTRY}
+        onSubmit={vi.fn()}
+        scorecardContext={{
+          ...WITH_CARD,
+          medicoachMatchUrl: 'https://cricketpvcms.co.za/tournaments/completed/613/13662',
+        }}
+      />,
+    );
+    const sc = section();
+    expect(within(sc).getByText('Umzinto CC')).toBeInTheDocument();
+    expect(within(sc).getByRole('link', { name: /View on the scoring site/ })).toHaveAttribute(
+      'href',
+      'https://cricketpvcms.co.za/tournaments/completed/613/13662',
+    );
+  });
+
   it('no card yet: the headline result and medicoach link, nothing to answer, not required', async () => {
     const onSubmit = vi.fn(async (_fields: CaptainsReportFields) => {});
     renderWithProviders(
