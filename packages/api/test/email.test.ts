@@ -599,6 +599,15 @@ describe('officialAppointedEmailContent', () => {
     assert.ok(html.includes('venue to be confirmed'));
   });
 
+  test('names the fellow umpire only when one is set', () => {
+    const withCo = officialAppointedEmailContent({ ...base, coOfficialName: 'Bongani Tyali' });
+    assert.ok(withCo.text.includes('  Fellow umpire: Bongani Tyali'));
+    assert.ok(withCo.html.includes('<strong>Fellow umpire:</strong> Bongani Tyali'));
+    const alone = officialAppointedEmailContent(base);
+    assert.ok(!alone.text.includes('Fellow umpire'));
+    assert.ok(!alone.html.includes('Fellow umpire'));
+  });
+
   test('escapes HTML and greets "there" without a name', () => {
     const { text, html } = officialAppointedEmailContent({
       ...base,

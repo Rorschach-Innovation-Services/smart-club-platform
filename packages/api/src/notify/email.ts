@@ -1485,6 +1485,8 @@ export interface OfficialAppointedEmailInput {
   dateLabel: string;
   time?: string;
   venue?: string;
+  /** The fixture's other umpire, when two are allocated. */
+  coOfficialName?: string;
 }
 
 /** The appointment notice to one umpire/referee/scorer for one fixture. */
@@ -1502,6 +1504,7 @@ export function officialAppointedEmailContent(input: OfficialAppointedEmailInput
     ['Date', input.dateLabel],
     ['Time', input.time || 'time to be confirmed'],
     ['Venue', input.venue || 'venue to be confirmed'],
+    ...(input.coOfficialName ? [['Fellow umpire', input.coOfficialName] as [string, string]] : []),
   ];
   const outro = `If you are unavailable for this appointment, please contact ${MEDICOACH_SUPPORT_EMAIL} as soon as possible.`;
   const text =
