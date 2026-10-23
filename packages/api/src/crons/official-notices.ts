@@ -195,6 +195,15 @@ export async function runOfficialNotices(
         const away = resolveTeam(series, fixture.away ?? '', clubsById);
         // Real time/venue even when withheld from clubs (ADR 0011 is club-facing only).
         const venue = fixture.venueOverride?.trim() || fixture.venueName || undefined;
+        // Umpires stand in pairs: name the other one so they can coordinate.
+        const co =
+          row.role === 'umpire'
+            ? (current?.umpires ?? []).find((u) => u.umpireId !== row.umpireId)
+            : undefined;
+        const coReg = co ? umpiresById.get(co.umpireId) : undefined;
+        const coOfficialName = co
+          ? coReg?.fullName || coReg?.displayName || co.name || undefined
+          : undefined;
         const { results } = await deps.send({
           official: {
             name: person?.fullName || person?.displayName || '',
@@ -208,6 +217,7 @@ export async function runOfficialNotices(
           dateLabel: fixtureReminderDateLabel(fixture.date),
           ...(fixture.time ? { time: fixture.time } : {}),
           ...(venue ? { venue } : {}),
+          ...(coOfficialName ? { coOfficialName } : {}),
           channels,
         });
         if (results.some((r) => r.status === 'sent')) {

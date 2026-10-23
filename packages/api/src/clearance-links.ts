@@ -3,8 +3,8 @@
  * digest). Each audience gets its own URL so a chair never lands on an admin route (and vice
  * versa); the frontend reads `?clearance=<id>` to surface that clearance.
  *
- * Pure: the caller resolves the ORIGIN. Anonymous paths (the public register route, transfer-window
- * auto-reject) and the cron must pass `canonicalWebOrigin(slug)` only — never a request Origin
+ * Pure: the caller resolves the ORIGIN. Anonymous paths (the public register route) and the cron
+ * must pass `canonicalWebOrigin(slug)` only — never a request Origin
  * header, which `originAllowed` accepts for any `*.cloudfront.net` host and would let an anonymous
  * caller plant an attacker-controlled link in a legitimately branded email. A null origin means
  * "no link": every notice then renders exactly as it did before links existed.

@@ -1,7 +1,8 @@
 /**
- * Public registration page under a closed transfer window: the SERVER-computed status (on the
- * tenant payload) drives a notice before submit, and a 201 carrying `transferWindow` shows the
- * "recorded, not registered" outcome instead of the clearance-pending one.
+ * Public registration page under a closed registration window (ADR 0017, revised): the
+ * SERVER-computed status (on the tenant payload) replaces the form with a closed page —
+ * whatever the clearances module says — and a submit that races a window closing (the server's
+ * structured 409) lands on the same honest page. Nothing is ever "recorded" while closed.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fireEvent, waitFor } from '@testing-library/react';
@@ -21,6 +22,7 @@ vi.mock('./api', async (importActual) => {
 
 import { RegisterPage } from './RegisterPage';
 import {
+  ApiError,
   getRegistration,
   submitRegistration,
   getRegistrationIdDocUploadUrl,
@@ -83,34 +85,53 @@ describe('RegisterPage — transfer windows', () => {
     vi.mocked(submitRegistration).mockReset();
   });
 
-  it('warns before submit when the server says transfers are closed', async () => {
+  it('shows the closed page instead of the form, naming the next window', async () => {
     const r = renderPage({ transferWindowStatus: { open: false, next: winter } });
-    await r.findByText(/Register as a player/);
-    expect(r.getByText(/Transfers between clubs are currently closed/)).toHaveTextContent(
-      'the next window opens 1 Nov 2026 (Winter)',
+    await r.findByText('Player registration is closed');
+    expect(r.queryByRole('button', { name: 'Register' })).toBeNull();
+    expect(r.getByText(/next registration window/)).toHaveTextContent(
+      'The next registration window, Winter, runs from 1 Nov 2026 to 30 Nov 2026.',
     );
+    expect(r.getByText(/Nothing has been submitted or recorded/)).toBeInTheDocument();
+    expect(r.queryByText(/recorded but|will be recorded|has been notified/)).toBeNull();
   });
 
-  it('shows no notice while open or when no windows are configured', async () => {
+  it('says so when no upcoming window is configured', async () => {
+    const r = renderPage({ transferWindowStatus: { open: false } });
+    await r.findByText('Player registration is closed');
+    expect(r.getByText(/No upcoming registration window/)).toBeInTheDocument();
+  });
+
+  it('shows the closed page with the clearances module off too', async () => {
+    const r = renderPage({
+      features: { 'module.clearances': false },
+      transferWindowStatus: { open: false, next: winter },
+    });
+    await r.findByText('Player registration is closed');
+    expect(r.queryByRole('button', { name: 'Register' })).toBeNull();
+  });
+
+  it('shows the form while open or when no windows are configured', async () => {
     const r = renderPage({ transferWindowStatus: { open: true, current: winter } });
     await r.findByText(/Register as a player/);
-    expect(r.queryByText(/currently closed/)).toBeNull();
+    expect(r.queryByText('Player registration is closed')).toBeNull();
+    const none = renderPage({});
+    await none.findAllByText(/Register as a player/);
   });
 
-  it('a 201 with transferWindow shows "recorded — transfers are closed", not clearance pending', async () => {
-    vi.mocked(submitRegistration).mockResolvedValue({
-      ok: true,
-      transferWindow: { closed: true, nextWindow: winter },
-    } as never);
-    const r = renderPage({ transferWindowStatus: { open: false, next: winter } });
+  it('a submit that races a close (structured 409) lands on the closed page', async () => {
+    vi.mocked(submitRegistration).mockRejectedValue(
+      new ApiError(409, 'player registration is closed — next window: Winter', undefined, {
+        transferWindow: { closed: true, nextWindow: winter },
+      }),
+    );
+    const r = renderPage({ transferWindowStatus: { open: true, current: winter } });
     await r.findByText(/Register as a player/);
     await fillAndSubmit(r);
-    await waitFor(() =>
-      expect(r.getByText('Registration recorded — transfers are closed')).toBeInTheDocument(),
+    await r.findByText('Player registration is closed');
+    expect(r.getByText(/Nothing has been submitted or recorded/)).toHaveTextContent(
+      'any document you attached was discarded',
     );
-    expect(r.getByText(/you have not been registered with Alpha CC/)).toHaveTextContent(
-      'until 1 Nov 2026 (Winter)',
-    );
-    expect(r.queryByText(/clearance pending/i)).toBeNull();
+    expect(r.queryByText(/already registered/)).toBeNull();
   });
 });

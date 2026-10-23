@@ -17,7 +17,6 @@ import {
   sendClearanceOpenedDestEmail,
   sendClearanceOpenedAdminEmail,
   sendClearanceOpenedAdminSummaryEmail,
-  sendClearanceAutoRejectedAdminEmail,
   sendClearanceReminderDigestEmail,
   sendVeteransRequestEmail,
   sendVeteransRequestResolvedEmail,
@@ -51,6 +50,7 @@ import {
   sendFixtureReminderWhatsApp,
   sendOfficialAppointedWhatsApp,
   toE164,
+  PARAM_MAX,
 } from './whatsapp.js';
 
 // Re-export so existing import sites (index.ts) keep resolving these from here.
@@ -689,22 +689,6 @@ export async function sendClearanceAdminSummaryNotice(args: {
   );
 }
 
-/** Tell each tenant admin a registration was auto-rejected outside the transfer window. Email only. */
-export async function sendClearanceAutoRejectedAdminNotice(args: {
-  to: string[];
-  fromClubName: string;
-  playerName: string;
-  toClubName: string;
-  reason: string;
-  /** Deep link to the clearance in the admin console; optional. */
-  adminLink?: string;
-}): Promise<{ results: SendResult[] }> {
-  const { to, ...copy } = args;
-  return sendAdminEmails(to, (address) =>
-    sendClearanceAutoRejectedAdminEmail({ to: address, ...copy }),
-  );
-}
-
 /** The ClearanceReminders cron's per-tenant admin digest, one email per admin. */
 export async function sendClearanceReminderDigest(args: {
   to: string[];
@@ -1114,6 +1098,19 @@ export async function sendFixtureReminder(args: {
 // channel. Officials get the real time/venue even when withheld from clubs (ADR 0011 is a
 // club-facing gate).
 
+/** The `official_appointed` whenWhere param: "Sun 2026-11-15, 09:00 at Kingsmead · with B.Tyali". */
+export function officialWhenWhere(p: {
+  dateLabel: string;
+  time?: string;
+  venue?: string;
+  coOfficialName?: string;
+}): string {
+  const base = `${p.dateLabel}, ${p.time ?? 'time TBC'} at ${p.venue ?? 'venue TBC'}`;
+  const withCo = p.coOfficialName ? `${base} · with ${p.coOfficialName}` : base;
+  // cleanParam truncates at PARAM_MAX: drop the co-umpire rather than cut a name (email still has it).
+  return withCo.length <= PARAM_MAX ? withCo : base;
+}
+
 /** Tell an umpire/referee they were appointed to a fixture. */
 export async function sendOfficialAppointedNotice(args: {
   official: { name?: string; email?: string; phone?: string };
@@ -1126,11 +1123,20 @@ export async function sendOfficialAppointedNotice(args: {
   dateLabel: string;
   time?: string;
   venue?: string;
+  /** The fixture's other umpire (umpire notices only). */
+  coOfficialName?: string;
   channels: Channel[];
 }): Promise<{ results: SendResult[] }> {
   const { official, roleLabel, orgName, seriesName, fixtureLabel, dateLabel, channels } = args;
   const time = args.time?.trim() || undefined;
   const venue = args.venue?.trim() || undefined;
+  const coOfficialName = args.coOfficialName?.trim() || undefined;
+  const whenWhere = officialWhenWhere({
+    dateLabel,
+    ...(time ? { time } : {}),
+    ...(venue ? { venue } : {}),
+    ...(coOfficialName ? { coOfficialName } : {}),
+  });
   const officialName = (official.name ?? '').trim();
 
   const email = async (): Promise<SendResult> => {
@@ -1155,6 +1161,7 @@ export async function sendOfficialAppointedNotice(args: {
           dateLabel,
           ...(time ? { time } : {}),
           ...(venue ? { venue } : {}),
+          ...(coOfficialName ? { coOfficialName } : {}),
         }),
         roleLabel,
       );
@@ -1182,7 +1189,7 @@ export async function sendOfficialAppointedNotice(args: {
         roleLabel,
         orgName,
         matchLine: `${fixtureLabel} · ${seriesName}`,
-        whenWhere: `${dateLabel}, ${time ?? 'time TBC'} at ${venue ?? 'venue TBC'}`,
+        whenWhere,
       });
       return { channel: 'whatsapp', status: 'sent', to: e164, messageId };
     } catch (err) {

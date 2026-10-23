@@ -3,14 +3,15 @@
  *
  *  - config: operator PUT persists (validated + sorted), admin PUT strips it, GET /tenant and
  *    GET /tenant/config serve the windows plus a server-computed status;
- *  - a rep's clearance request while closed → 409 naming the next window, nothing written;
- *  - a public registration that would open a clearance while closed → 201 `transferWindow`,
- *    an auto-rejected canonical + mirror ONLY (no player rows, no count changes), both chairs +
- *    admins notified; a resubmission in the same closed stretch writes and sends nothing;
- *  - a plain first registration is never window-blocked; the chair portal refuses (409);
- *  - once a window opens the same person registers normally;
- *  - Reopen lands a clearance-pending destination row which then approves cleanly, and is
- *    BLOCKED when the person has registered anywhere since;
+ *  - while closed (ADR 0017, revised 2026-10-23) EVERY registration path refuses with the same
+ *    structured 409 (`transferWindow: { closed, nextWindow? }`): public link (+ its ID presign;
+ *    the uploaded ID document is deleted), rep request, chair single add (new player or
+ *    transfer), operator intake commit, admin override, source-club issue, manual remind —
+ *    nothing written, nobody notified. Reject / reassign / reopen stay allowed;
+ *  - windows gate a clearances-off tenant too; a windowless tenant is unaffected;
+ *  - Reopen of a historical window-rejected clearance lands a clearance-pending destination
+ *    row (which then approves once a window opens), and is BLOCKED when the person has
+ *    registered anywhere since;
  *  - club erasure collects the snapshot's ID document.
  *
  * Senders run in dry-run (NOTIFY_DRY_RUN). Run with the API package's test runner (tsx --test).
@@ -164,9 +165,6 @@ async function rosterAt(clubId: string, id: ReturnType<typeof identity>) {
 const playerCount = async (clubId: string): Promise<number> =>
   ((await repo.getClub(TENANT, clubId)) as { playerCount?: number } | null)?.playerCount ?? 0;
 
-const inbound = async (dst: string) =>
-  (await repo.listInboundForDest(TENANT, dst)).filter((x) => x.status === 'rejected');
-
 // Dry-run email capture: every sender logs `[notify:email dry-run] would send …`.
 let logged: string[] = [];
 const realLog = console.log;
@@ -179,8 +177,18 @@ beforeEach(() => {
 afterEach(() => {
   console.log = realLog;
 });
-const autoRejectAdminEmails = () =>
-  logged.filter((l) => l.includes('clearance-auto-rejected (admin) notice'));
+const emailsSent = () => logged.filter((l) => l.includes('[notify:email dry-run] would send'));
+
+/** The structured 409 every closed-window refusal shares. */
+async function assertClosed409(res: Response, nextWindow: TransferWindow | undefined) {
+  assert.equal(res.status, 409, await res.clone().text());
+  const body = (await res.json()) as {
+    error: string;
+    transferWindow?: { closed: boolean; nextWindow?: TransferWindow };
+  };
+  assert.match(body.error, /^player registration is closed — /);
+  assert.deepEqual(body.transferWindow, { closed: true, ...(nextWindow ? { nextWindow } : {}) });
+}
 
 before(async () => {
   const dynalite = (await import('dynalite')).default as (opts?: unknown) => Server;
@@ -282,6 +290,86 @@ describe('config plumbing', () => {
   });
 });
 
+/**
+ * A historical window-closed auto-reject (no production writer any more), seeded directly:
+ * canonical + mirror only, the would-be destination row on the snapshot.
+ */
+async function seedWindowRejected(src: string, dst: string, id: ReturnType<typeof identity>) {
+  const { playerNaturalKey } = await import('../src/player-identity.js');
+  const { randomUUID } = await import('node:crypto');
+  const naturalKey = playerNaturalKey(id as Partial<PlayerRegistration>);
+  const srcClub = (await repo.getClub(TENANT, src))!;
+  const dstClub = (await repo.getClub(TENANT, dst))!;
+  const pendingPlayer = {
+    ...(id as Partial<PlayerRegistration>),
+    naturalKey,
+    clubId: dst,
+    status: 'clearance-pending',
+    isMinor: false,
+    team: teamKey,
+    lastClub: srcClub.name,
+    registeredVia: 'link',
+    idDocMeta: {
+      objectKey: `local/${TENANT}/${dst}/${id.idNumber}.png`,
+      size: 100,
+      contentType: 'image/png',
+    },
+    version: 0,
+    consentAt: '2026-09-01T00:00:00.000Z',
+    createdAt: '2026-09-01T00:00:00.000Z',
+  } as PlayerRegistration;
+  return repo.createAutoRejectedClearance(TENANT, pendingPlayer, {
+    id: randomUUID(),
+    playerNaturalKey: naturalKey,
+    playerName: `${id.firstName} ${id.lastName}`,
+    idNumber: id.idNumber,
+    team: teamKey,
+    fromClubId: src,
+    toClubId: dst,
+    fromClubName: srcClub.name,
+    toClubName: dstClub.name,
+    requestedAt: '2026-09-01T00:00:00.000Z',
+    origin: 'registration',
+    feesCleared: false,
+    misconductCleared: false,
+    status: 'rejected',
+    rejectedAt: '2026-09-01T00:00:00.000Z',
+    rejectedBy: 'system:transfer-window',
+    rejectReason: 'Outside transfer window — next window: Winter',
+    rejectOutcome: 'not-registered',
+    clubApprovedAt: null,
+    adminOverrideAt: null,
+    version: 0,
+  } as PlayerClearance);
+}
+
+/** A pending clearance src → dst opened by a rep request while a window was open. */
+async function openPendingRequest(src: string, dst: string, nk: string): Promise<PlayerClearance> {
+  await setWindows(openWindows());
+  const res = await app.request(`/clubs/${dst}/clearances`, {
+    method: 'POST',
+    headers: headers(repOf(dst)),
+    body: JSON.stringify({ fromClubId: src, playerNaturalKey: nk }),
+  });
+  assert.equal(res.status, 201, await res.clone().text());
+  return (await res.json()) as PlayerClearance;
+}
+
+const chairAdd = (dst: string, id: ReturnType<typeof identity>, extra = {}) =>
+  app.request(`/clubs/${dst}/players`, {
+    method: 'POST',
+    headers: headers(repOf(dst)),
+    body: JSON.stringify({
+      ...id,
+      race: 'African',
+      gender: 'Male',
+      cell: '0831112222',
+      team: teamKey,
+      district: 'Ethekwini',
+      ...extra,
+    }),
+  });
+
 describe('enforcement while closed', () => {
   beforeEach(async () => {
     assert.equal((await setWindows(closedWindows())).status, 200);
@@ -295,106 +383,66 @@ describe('enforcement while closed', () => {
       headers: headers(repOf(dst)),
       body: JSON.stringify({ fromClubId: src, playerNaturalKey: nk }),
     });
-    assert.equal(res.status, 409);
-    assert.match(
-      ((await res.json()) as { error: string }).error,
-      /^transfers are closed — next window: Winter/,
-    );
+    await assertClosed409(res, closedWindows()[0]);
     assert.equal((await repo.getPlayer(TENANT, src, nk))?.status, 'active');
     assert.equal((await repo.listClearancesForSource(TENANT, src)).length, 0);
   });
 
-  test('a registration records an auto-rejected canonical + mirror and NO player rows', async () => {
+  test('a public transfer registration 409s: no clearance, no player rows, nobody notified', async () => {
     const { src, dst } = await seedPair('auto');
     const id = identity();
     const nk = await rosterAt(src, id);
     const srcCountBefore = await playerCount(src);
     const dstCountBefore = await playerCount(dst);
 
-    const res = await register(dst, id, { lastClubId: src });
-    assert.equal(res.status, 201);
-    const body = (await res.json()) as {
-      ok: boolean;
-      clearance?: unknown;
-      transferWindow?: { closed: boolean; nextWindow?: TransferWindow };
-    };
-    assert.deepEqual(body.transferWindow, { closed: true, nextWindow: closedWindows()[0] });
-    assert.equal(body.clearance, undefined, 'no clearance-pending copy for the form');
+    await assertClosed409(await register(dst, id, { lastClubId: src }), closedWindows()[0]);
 
-    // No player rows written or flipped, no count changes.
     assert.equal(await repo.getPlayer(TENANT, dst, nk), null);
     assert.equal((await repo.getPlayer(TENANT, src, nk))?.status, 'active');
     assert.equal(await playerCount(src), srcCountBefore);
     assert.equal(await playerCount(dst), dstCountBefore);
-
-    const [mirror] = await inbound(dst);
-    assert.ok(mirror, 'the destination mirror exists');
-    assert.equal(mirror.rejectSnapshot, undefined, 'the mirror carries no snapshot');
-    const raw = (await repo.getClearanceRaw(TENANT, src, mirror.id)) as PlayerClearance;
-    assert.equal(raw.status, 'rejected');
-    assert.equal(raw.origin, 'registration');
-    assert.equal(raw.rejectedBy, 'system:transfer-window');
-    assert.equal(raw.rejectOutcome, 'not-registered');
-    assert.match(raw.rejectReason ?? '', /^Outside transfer window — next window: Winter \(/);
-    assert.equal(raw.rejectSnapshot?.case, 'window-closed');
-    const pending = raw.rejectSnapshot?.pendingPlayer;
-    assert.equal(pending?.clubId, dst);
-    assert.equal(pending?.status, 'clearance-pending');
-    assert.equal(pending?.idDocMeta?.objectKey, `local/${TENANT}/${dst}/${id.idNumber}.png`);
-    // The admin listing sees it, snapshot-stripped.
-    const listed = (await repo.listAllClearances(TENANT)).find((x) => x.id === raw.id);
-    assert.equal(listed?.status, 'rejected');
-    assert.equal(listed?.rejectSnapshot, undefined);
-
-    // Both chairs got the 'not-registered' rejected notice; admins got the auto-reject email.
+    assert.equal((await repo.listInboundForDest(TENANT, dst)).length, 0, 'no clearance row');
+    assert.equal((await repo.listClearancesForSource(TENANT, src)).length, 0);
     for (const clubId of [src, dst]) {
-      const rows = ((await repo.getClub(TENANT, clubId))?.commLog ?? []).filter(
-        (e) => e.kind === 'clearance-rejected',
-      );
-      assert.equal(rows.length, 1, `${clubId} chair notified once`);
-      assert.equal(rows[0].by, 'system:transfer-window');
+      assert.equal(((await repo.getClub(TENANT, clubId))?.commLog ?? []).length, 0);
     }
-    assert.equal(autoRejectAdminEmails().length, 1);
+    assert.equal(emailsSent().length, 0);
   });
 
-  test('a resubmission in the same closed stretch writes nothing and re-notifies nobody', async () => {
-    const { src, dst } = await seedPair('dup');
-    const id = identity();
-    await rosterAt(src, id);
-    assert.equal((await register(dst, id, { lastClubId: src })).status, 201);
-    const commBefore = (await repo.getClub(TENANT, dst))?.commLog?.length ?? 0;
-    logged = [];
-
-    const again = await register(dst, id, { lastClubId: src });
-    assert.equal(again.status, 201);
-    assert.equal(
-      ((await again.json()) as { transferWindow?: { closed: boolean } }).transferWindow?.closed,
-      true,
-    );
-    assert.equal((await inbound(dst)).length, 1, 'no second rejected clearance');
-    assert.equal((await repo.listClearancesForSource(TENANT, src)).length, 1);
-    assert.equal((await repo.getClub(TENANT, dst))?.commLog?.length ?? 0, commBefore);
-    assert.equal(autoRejectAdminEmails().length, 0);
+  test('a declared on-system previous club with no roster row also 409s', async () => {
+    const { src, dst } = await seedPair('srcless');
+    await assertClosed409(await register(dst, identity(), { lastClubId: src }), closedWindows()[0]);
+    assert.equal((await repo.listInboundForDest(TENANT, dst)).length, 0);
+    assert.equal((await repo.listPlayers(TENANT, dst)).length, 0);
   });
 
-  test("a resubmission's fresh ID upload is deleted; the earlier record's document is kept", async () => {
+  test('a plain first registration is blocked too', async () => {
+    const { dst } = await seedPair('first');
+    await assertClosed409(await register(dst, identity(), { lastClub: '—' }), closedWindows()[0]);
+    assert.equal((await repo.listPlayers(TENANT, dst)).length, 0);
+  });
+
+  test('with no upcoming window the 409 carries no nextWindow', async () => {
+    await setWindows([{ label: 'Past', start: shift(-60), end: shift(-30) }]);
+    const { dst } = await seedPair('nonext');
+    await assertClosed409(await register(dst, identity(), { lastClub: '—' }), undefined);
+  });
+
+  test("the refused submission's uploaded ID document is deleted (own-prefix keys only)", async () => {
     const { mkdtemp, mkdir, writeFile, access, rm } = await import('node:fs/promises');
     const path = await import('node:path');
     const { tmpdir } = await import('node:os');
     const { randomUUID } = await import('node:crypto');
-    const dir = await mkdtemp(path.join(tmpdir(), 'window-repeat-'));
+    const dir = await mkdtemp(path.join(tmpdir(), 'window-closed-'));
     const prevDir = process.env.LOCAL_UPLOADS_DIR;
     process.env.LOCAL_UPLOADS_DIR = dir; // local-disk upload sink (STAGE=local is set above)
     try {
-      const { src, dst } = await seedPair('orphan');
-      const id = identity();
-      await rosterAt(src, id);
-      const upload = async () => {
-        const objectKey = `local/${TENANT}/${dst}/reg-${randomUUID()}-id.png`;
+      const { dst } = await seedPair('orphan');
+      const put = async (objectKey: string) => {
         const onDisk = path.join(dir, objectKey.slice('local/'.length));
         await mkdir(path.dirname(onDisk), { recursive: true });
         await writeFile(onDisk, 'png');
-        return { objectKey, onDisk };
+        return onDisk;
       };
       const exists = (p: string) =>
         access(p).then(
@@ -405,31 +453,16 @@ describe('enforcement while closed', () => {
         idDocMeta: { objectKey, size: 100, contentType: 'image/png' },
       });
 
-      const first = await upload();
-      assert.equal(
-        (await register(dst, id, { lastClubId: src, ...doc(first.objectKey) })).status,
-        201,
-      );
-      const second = await upload();
-      const again = await register(dst, id, { lastClubId: src, ...doc(second.objectKey) });
-      assert.equal(again.status, 201);
-      assert.equal(
-        ((await again.json()) as { transferWindow?: { closed: boolean } }).transferWindow?.closed,
-        true,
-      );
+      const ownKey = `local/${TENANT}/${dst}/reg-${randomUUID()}-id.png`;
+      const own = await put(ownKey);
+      await assertClosed409(await register(dst, identity(), doc(ownKey)), closedWindows()[0]);
+      assert.equal(await exists(own), false, 'the unreferenced upload is gone');
 
-      assert.equal(await exists(second.onDisk), false, 'the unreferenced fresh upload is gone');
-      assert.equal(await exists(first.onDisk), true, "the earlier record's document is kept");
-      const [x] = await inbound(dst);
-      const raw = (await repo.getClearanceRaw(TENANT, src, x.id))!;
-      assert.deepEqual(repo.clearanceDocObjectKeys(raw), [first.objectKey]);
-
-      // Resubmitting the very key the earlier snapshot holds never deletes it.
-      assert.equal(
-        (await register(dst, id, { lastClubId: src, ...doc(first.objectKey) })).status,
-        201,
-      );
-      assert.equal(await exists(first.onDisk), true);
+      // A key under the club's prefix that is NOT a public-link upload shape is never deleted.
+      const otherKey = `local/${TENANT}/${dst}/compliance-doc.png`;
+      const other = await put(otherKey);
+      await assertClosed409(await register(dst, identity(), doc(otherKey)), closedWindows()[0]);
+      assert.equal(await exists(other), true, 'a non-registration key is left alone');
     } finally {
       if (prevDir === undefined) delete process.env.LOCAL_UPLOADS_DIR;
       else process.env.LOCAL_UPLOADS_DIR = prevDir;
@@ -437,131 +470,166 @@ describe('enforcement while closed', () => {
     }
   });
 
-  test('a player already mid-transfer elsewhere gets the in-flight 409, not a spurious auto-reject', async () => {
-    // Pending A→B opened while a window was open (the rep request flips A's row clearance-pending).
-    await setWindows(openWindows());
+  test('the public ID-document presign 409s', async () => {
+    const { dst } = await seedPair('presign');
+    const res = await app.request(`/register/${dst}/id-doc/upload-url?t=tok-${dst}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ contentType: 'image/png' }),
+    });
+    await assertClosed409(res, closedWindows()[0]);
+  });
+
+  test('a player already mid-transfer elsewhere gets the closed 409, nothing new written', async () => {
     const { src, dst } = await seedPair('inflight');
     await repo.createClub(TENANT, mkClub('inflight-c', 'inflight C CC'));
     await repo.putToken('tok-inflight-c', TENANT, 'inflight-c', '2026-06-01T00:00:00.000Z');
     const id = identity();
     const nk = await rosterAt(src, id);
-    const open = await app.request(`/clubs/${dst}/clearances`, {
-      method: 'POST',
-      headers: headers(repOf(dst)),
-      body: JSON.stringify({ fromClubId: src, playerNaturalKey: nk }),
-    });
-    assert.equal(open.status, 201, await open.clone().text());
+    await openPendingRequest(src, dst, nk);
     assert.equal((await repo.getPlayer(TENANT, src, nk))?.status, 'clearance-pending');
 
-    // Windows close; the same person registers to club C naming A.
     await setWindows(closedWindows());
-    const commBefore = async (clubId: string) =>
-      ((await repo.getClub(TENANT, clubId))?.commLog ?? []).length;
-    const before = {
-      src: await commBefore(src),
-      dst: await commBefore(dst),
-      c: await commBefore('inflight-c'),
-    };
     logged = [];
     const res = await register('inflight-c', id, { lastClubId: src });
-    assert.equal(res.status, 409);
-    assert.match(
-      ((await res.json()) as { error: string }).error,
-      /already registered or a transfer is already in progress/,
-    );
-    // Nothing new: only the original A→B clearance exists, nobody was notified.
+    await assertClosed409(res, closedWindows()[0]);
     assert.equal((await repo.listClearancesForSource(TENANT, src)).length, 1);
     assert.equal((await repo.listInboundForDest(TENANT, 'inflight-c')).length, 0);
     assert.equal(await repo.getPlayer(TENANT, 'inflight-c', nk), null);
-    assert.equal(await commBefore(src), before.src);
-    assert.equal(await commBefore(dst), before.dst);
-    assert.equal(await commBefore('inflight-c'), before.c);
-    assert.equal(autoRejectAdminEmails().length, 0);
-  });
-
-  test('a declared on-system previous club with no roster row is also auto-rejected', async () => {
-    const { src, dst } = await seedPair('srcless');
-    const id = identity();
-    const res = await register(dst, id, { lastClubId: src });
-    assert.equal(res.status, 201);
-    assert.equal(
-      ((await res.json()) as { transferWindow?: { closed: boolean } }).transferWindow?.closed,
-      true,
-    );
-    const [x] = await inbound(dst);
-    assert.equal(x?.rejectOutcome, 'not-registered');
-    assert.equal((await repo.listPlayers(TENANT, dst)).length, 0);
-  });
-
-  test('a plain first registration is never window-blocked', async () => {
-    const { dst } = await seedPair('first');
-    const res = await register(dst, identity(), { lastClub: '—' });
-    assert.equal(res.status, 201);
-    assert.deepEqual(await res.json(), { ok: true });
-    const [row] = await repo.listPlayers(TENANT, dst);
-    assert.equal(row?.status, 'active');
+    assert.equal(emailsSent().length, 0);
   });
 
   test('the chair portal refuses a transfer registration (409), writing nothing', async () => {
     const { src, dst } = await seedPair('portal');
     const id = identity();
     const nk = await rosterAt(src, id);
-    const res = await app.request(`/clubs/${dst}/players`, {
-      method: 'POST',
-      headers: headers(repOf(dst)),
-      body: JSON.stringify({
-        ...id,
-        race: 'African',
-        gender: 'Male',
-        cell: '0831112222',
-        team: teamKey,
-        district: 'Ethekwini',
-        lastClubId: src,
-      }),
-    });
-    assert.equal(res.status, 409);
-    assert.match(((await res.json()) as { error: string }).error, /^transfers are closed/);
+    await assertClosed409(await chairAdd(dst, id, { lastClubId: src }), closedWindows()[0]);
     assert.equal(await repo.getPlayer(TENANT, dst, nk), null);
     assert.equal((await repo.getPlayer(TENANT, src, nk))?.status, 'active');
     assert.equal((await repo.listInboundForDest(TENANT, dst)).length, 0);
   });
+
+  test('the chair portal refuses a brand-new player (409)', async () => {
+    const { dst } = await seedPair('portal-new');
+    await assertClosed409(await chairAdd(dst, identity()), closedWindows()[0]);
+    assert.equal((await repo.listPlayers(TENANT, dst)).length, 0);
+  });
+
+  test('the operator roster-intake commit 409s before reading any item', async () => {
+    const res = await app.request(`/platform/tenants/${TENANT}/roster-intake/commit`, {
+      method: 'POST',
+      headers: headers(OPERATOR),
+      body: JSON.stringify({ items: [] }),
+    });
+    await assertClosed409(res, closedWindows()[0]);
+  });
+
+  test('override, source-club issue and manual remind 409; the clearance stays pending', async () => {
+    const { src, dst } = await seedPair('freeze');
+    const nk = await rosterAt(src, identity());
+    const pending = await openPendingRequest(src, dst, nk);
+    await setWindows(closedWindows());
+
+    const override = await app.request(`/admin/clearances/${pending.id}/override`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: src, issueCertificate: false }),
+    });
+    await assertClosed409(override, closedWindows()[0]);
+
+    const issue = await app.request(`/clubs/${src}/clearances/${pending.id}`, {
+      method: 'PATCH',
+      headers: headers(repOf(src)),
+      body: JSON.stringify({ feesCleared: true, misconductCleared: true, action: 'issue' }),
+    });
+    await assertClosed409(issue, closedWindows()[0]);
+
+    logged = [];
+    const remind = await app.request(`/admin/clearances/${pending.id}/remind`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: src }),
+    });
+    await assertClosed409(remind, closedWindows()[0]);
+    assert.equal(emailsSent().length, 0);
+
+    assert.equal((await repo.getClearance(TENANT, src, pending.id))?.status, 'pending');
+    assert.equal((await repo.getPlayer(TENANT, src, nk))?.status, 'clearance-pending');
+  });
+
+  test('reject and reassign still succeed while closed', async () => {
+    const { src, dst } = await seedPair('queue');
+    const nk = await rosterAt(src, identity());
+    const pending = await openPendingRequest(src, dst, nk);
+    // A sourceless registration-origin clearance (declared club, no roster row) to reassign.
+    const sl = await seedPair('queue-sl');
+    await repo.createClub(TENANT, mkClub('queue-new', 'queue New CC'));
+    assert.equal((await register(sl.dst, identity(), { lastClubId: sl.src })).status, 201);
+    const [sourceless] = await repo.listInboundForDest(TENANT, sl.dst);
+    assert.equal(sourceless?.status, 'pending');
+    await setWindows(closedWindows());
+
+    const reject = await app.request(`/admin/clearances/${pending.id}/reject`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: src }),
+    });
+    assert.equal(reject.status, 200, await reject.clone().text());
+
+    const reassign = await app.request(`/admin/clearances/${sourceless.id}/reassign`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: sl.src, newFromClubId: 'queue-new' }),
+    });
+    assert.equal(reassign.status, 200, await reassign.clone().text());
+  });
 });
 
-describe('after the window opens', () => {
-  test('the same person registers normally despite the earlier auto-reject', async () => {
-    await setWindows(closedWindows());
-    const { src, dst } = await seedPair('later');
-    const id = identity();
-    const nk = await rosterAt(src, id);
-    assert.equal((await register(dst, id, { lastClubId: src })).status, 201);
+describe('scope of the gate', () => {
+  test('a clearances-off tenant with windows is gated too', async () => {
+    const cfg = (await repo.getTenantConfig(TENANT))!;
+    await repo.putTenantConfig({
+      ...cfg,
+      transferWindows: closedWindows(),
+      features: { ...(cfg.features ?? {}), 'module.clearances': false },
+    });
+    try {
+      const { dst } = await seedPair('nomod');
+      await assertClosed409(await register(dst, identity(), { lastClub: '—' }), closedWindows()[0]);
+      await assertClosed409(await chairAdd(dst, identity()), closedWindows()[0]);
+      assert.equal((await repo.listPlayers(TENANT, dst)).length, 0);
+    } finally {
+      await repo.putTenantConfig(cfg);
+    }
+  });
 
-    await setWindows(openWindows());
-    const res = await register(dst, id, { lastClubId: src });
+  test('a windowless tenant is unaffected', async () => {
+    await setWindows([]);
+    const { src, dst } = await seedPair('nowin');
+    const res = await register(dst, identity(), { lastClub: '—' });
     assert.equal(res.status, 201);
-    const body = (await res.json()) as {
-      clearance?: { fromClubName: string };
-      transferWindow?: unknown;
-    };
-    assert.equal(body.transferWindow, undefined);
-    assert.equal(body.clearance?.fromClubName, 'later Source CC');
-    assert.equal((await repo.getPlayer(TENANT, dst, nk))?.status, 'clearance-pending');
-    assert.equal((await repo.getPlayer(TENANT, src, nk))?.status, 'clearance-pending');
-    const statuses = (await repo.listInboundForDest(TENANT, dst)).map((x) => x.status).sort();
-    assert.deepEqual(statuses, ['pending', 'rejected']);
+    assert.deepEqual(await res.json(), { ok: true });
+    const id = identity();
+    await rosterAt(src, id);
+    const transfer = await register(dst, id, { lastClubId: src });
+    assert.equal(transfer.status, 201);
+    assert.equal(
+      ((await transfer.json()) as { clearance?: { fromClubName: string } }).clearance?.fromClubName,
+      'nowin Source CC',
+    );
   });
 });
 
 describe('reopen of a window-rejected clearance', () => {
-  test('lands a clearance-pending destination row, then approves cleanly', async () => {
+  test('reopens while closed, stays pending until a window opens, then approves cleanly', async () => {
     await setWindows(closedWindows());
     const { src, dst } = await seedPair('reopen');
     const id = identity();
     const nk = await rosterAt(src, id);
-    assert.equal((await register(dst, id, { lastClubId: src })).status, 201);
-    const [x] = await inbound(dst);
+    const x = await seedWindowRejected(src, dst, id);
     const dstCountBefore = await playerCount(dst);
 
-    // Reopen is an admin action — allowed whatever the window says.
+    // Reopen is queue management — allowed whatever the window says.
     const reopen = await app.request(`/admin/clearances/${x.id}/reopen`, {
       method: 'POST',
       headers: headers(ADMIN),
@@ -581,14 +649,19 @@ describe('reopen of a window-rejected clearance', () => {
     const raw = await repo.getClearanceRaw(TENANT, src, x.id);
     assert.equal(raw?.rejectSnapshot, undefined, 'the snapshot is consumed');
 
-    // The source club approves: the destination row activates, the source row goes.
-    const issue = await app.request(`/clubs/${src}/clearances/${x.id}`, {
-      method: 'PATCH',
-      headers: headers(repOf(src)),
-      body: JSON.stringify({ feesCleared: true, misconductCleared: true, action: 'issue' }),
-    });
-    assert.equal(issue.status, 200, await issue.clone().text());
-    assert.equal(((await issue.json()) as PlayerClearance).status, 'approved');
+    const issue = () =>
+      app.request(`/clubs/${src}/clearances/${x.id}`, {
+        method: 'PATCH',
+        headers: headers(repOf(src)),
+        body: JSON.stringify({ feesCleared: true, misconductCleared: true, action: 'issue' }),
+      });
+    // Still closed: the source club cannot complete it yet.
+    await assertClosed409(await issue(), closedWindows()[0]);
+
+    await setWindows(openWindows());
+    const issued = await issue();
+    assert.equal(issued.status, 200, await issued.clone().text());
+    assert.equal(((await issued.json()) as PlayerClearance).status, 'approved');
     assert.equal((await repo.getPlayer(TENANT, dst, nk))?.status, 'active');
     assert.equal(await repo.getPlayer(TENANT, src, nk), null);
   });
@@ -596,9 +669,7 @@ describe('reopen of a window-rejected clearance', () => {
   test('a sourceless window-rejected clearance reopens with no source row to flip', async () => {
     await setWindows(closedWindows());
     const { src, dst } = await seedPair('reopen-sl');
-    const id = identity();
-    assert.equal((await register(dst, id, { lastClubId: src })).status, 201);
-    const [x] = await inbound(dst);
+    const x = await seedWindowRejected(src, dst, identity());
     const reopened = await repo.reopenClearance(TENANT, src, x.id, { at: 't', by: 'admin' });
     assert.equal(reopened.status, 'pending');
     assert.equal((await repo.listPlayers(TENANT, dst))[0]?.status, 'clearance-pending');
@@ -610,9 +681,8 @@ describe('reopen of a window-rejected clearance', () => {
     const { src, dst } = await seedPair('blocked');
     await repo.createClub(TENANT, mkClub('blocked-other', 'blocked Other CC'));
     const id = identity();
-    assert.equal((await register(dst, id, { lastClubId: src })).status, 201);
-    const [x] = await inbound(dst);
-    // Since the auto-reject they joined a third club as a first registration.
+    const x = await seedWindowRejected(src, dst, id);
+    // Since the auto-reject they joined a third club.
     const nk = await rosterAt('blocked-other', id);
 
     const res = await app.request(`/admin/clearances/${x.id}/reopen`, {
@@ -636,8 +706,7 @@ describe('reopen of a window-rejected clearance', () => {
     const { src, dst } = await seedPair('blocked2');
     const id = identity();
     const nk = await rosterAt(src, id);
-    assert.equal((await register(dst, id, { lastClubId: src })).status, 201);
-    const [x] = await inbound(dst);
+    const x = await seedWindowRejected(src, dst, id);
     await repo.updatePlayer(TENANT, src, nk, { status: 'clearance-pending' });
     await assert.rejects(
       repo.reopenClearance(TENANT, src, x.id, { at: 't', by: 'admin' }),
@@ -652,8 +721,7 @@ describe('POPIA', () => {
     const { src, dst } = await seedPair('erase');
     const id = identity();
     await rosterAt(src, id);
-    assert.equal((await register(dst, id, { lastClubId: src })).status, 201);
-    const [x] = await inbound(dst);
+    const x = await seedWindowRejected(src, dst, id);
     const raw = (await repo.getClearanceRaw(TENANT, src, x.id))!;
     assert.deepEqual(repo.clearanceDocObjectKeys(raw), [
       `local/${TENANT}/${dst}/${id.idNumber}.png`,

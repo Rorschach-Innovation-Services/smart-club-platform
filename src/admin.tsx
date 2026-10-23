@@ -31,6 +31,7 @@ import {
   DEFAULT_REQUIRED_DOCS,
   activeDocs,
   docMinFiles,
+  docMaxFiles,
   CQI_STRUCTURE,
   effectiveAnswers,
   genuineCqiAnswers,
@@ -136,6 +137,7 @@ import {
 } from './api';
 import { parseSupport } from './support';
 import { DocPreviewModal } from './DocPreviewModal';
+import { DocUploadButton } from './DocUploadButton';
 import {
   ClearanceCertificateModal,
   clearanceHasCertificateStatus,
@@ -946,6 +948,9 @@ export function AdminFixtures({
                 umpires={umpires}
                 onSaveOfficials={onSaveOfficials}
                 onCreateUmpire={onCreateUmpire}
+                scorers={onSaveScorers ? scorers : undefined}
+                onSaveScorers={onSaveScorers}
+                onCreateScorer={onCreateScorer}
               />
             ) : null
           }
@@ -1283,6 +1288,17 @@ export function FixtureTable({
     | ((seriesId: string, fixtureId: string, umpireIds: string[]) => Promise<unknown>)
     | undefined,
   onCreateUmpire = undefined as ((displayName: string) => Promise<Umpire>) | undefined,
+  // Scorers ride the same cell; no register ⇒ no scorer line (unless one is already saved).
+  scorers = undefined as Scorer[] | undefined,
+  onSaveScorers = undefined as
+    | ((seriesId: string, fixtureId: string, scorerIds: string[]) => Promise<unknown>)
+    | undefined,
+  onCreateScorer = undefined as
+    | ((
+        displayName: string,
+        contacts?: import('./FixtureManage').PersonContacts,
+      ) => Promise<Scorer>)
+    | undefined,
 }) {
   const vt = useVertical().terms;
   const copy = useCopy();
@@ -1577,7 +1593,7 @@ export function FixtureTable({
               <th>Venue · Suburb</th>
               <th>Away (visitors)</th>
               <th style={{ width: 90, textAlign: 'right' }}>Distance</th>
-              <th style={{ width: 170 }}>Umpires</th>
+              <th style={{ width: 190 }}>Officials</th>
               <th style={{ width: 110 }}>Status</th>
               <th style={{ width: 80 }}></th>
             </tr>
@@ -1720,7 +1736,12 @@ export function FixtureTable({
                       warnings={umpireWarnings.get(`${series.id}#${f.id}`)}
                       onSave={onSaveOfficials}
                       onCreate={onCreateUmpire}
-                      loadNotifyStatus={onSaveOfficials ? api.getOfficialsNotifyStatus : undefined}
+                      loadNotifyStatus={
+                        onSaveOfficials || onSaveScorers ? api.getOfficialsNotifyStatus : undefined
+                      }
+                      scorers={scorers}
+                      onSaveScorers={onSaveScorers}
+                      onCreateScorer={onCreateScorer}
                     />
                   </td>
                   <td>
@@ -5099,6 +5120,14 @@ export function AdminClubDetail({
   onDeleteClub,
   onReconfirmAffiliation,
   allSeries = [],
+  onUploadDoc = undefined,
+  onRemoveDocFile = undefined,
+}: {
+  [prop: string]: any;
+  // Admin on-behalf uploads — the server already authorizes admins on the club doc
+  // routes; absent, the rows stay read-only.
+  onUploadDoc?: (key: string, meta: object) => Promise<unknown>;
+  onRemoveDocFile?: (key: string, objectKey: string) => Promise<unknown>;
 }) {
   const vt = useVertical().terms;
   const seasonLabel = useSeasonLabel();
@@ -5113,6 +5142,10 @@ export function AdminClubDetail({
   const [showChairEdit, setShowChairEdit] = useStateA(false);
   const [showNameEdit, setShowNameEdit] = useStateA(false);
   const [showRemove, setShowRemove] = useStateA(false);
+  // Per-file remove is destructive (no undo) — gate it behind the same confirm the club portal uses.
+  const [confirmRemoveFile, setConfirmRemoveFile] = useStateA<{ key: string; entry: any } | null>(
+    null,
+  );
   const [noteText, setNoteText] = useStateA('');
   const [noteBusy, setNoteBusy] = useStateA(false);
   const cqiOn = useModule('cqi');
@@ -5520,6 +5553,29 @@ export function AdminClubDetail({
                 const canRevert = unavailableAny
                   ? unavailableOld || !!meta?.markedCompliant
                   : override || (sg ? up && sg.markedCompliant : false);
+                // Upload is offered whatever the declared/booked state — the server keeps
+                // those markers on upload.
+                const uploadCtl = !onUploadDoc ? null : sg ? (
+                  sg.files.length < docMaxFiles(d) ? (
+                    <DocUploadButton
+                      clubId={club.id}
+                      doc={d}
+                      label={d.name}
+                      onUploaded={onUploadDoc}
+                      toast={toast}
+                      buttonLabel="Add file"
+                    />
+                  ) : null
+                ) : (
+                  <DocUploadButton
+                    clubId={club.id}
+                    doc={d}
+                    label={d.name}
+                    onUploaded={onUploadDoc}
+                    toast={toast}
+                    variant={real ? 'link' : 'button'}
+                  />
+                );
                 return (
                   <div key={d.key} className={`doc-row ${up ? 'uploaded' : ''}`}>
                     <div className="doc-icon">
@@ -5569,6 +5625,27 @@ export function AdminClubDetail({
                                   >
                                     View
                                   </button>
+                                  {onRemoveDocFile && (
+                                    <>
+                                      {' · '}
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setConfirmRemoveFile({ key: d.key, entry: f })
+                                        }
+                                        style={{
+                                          background: 'none',
+                                          border: 'none',
+                                          padding: 0,
+                                          font: 'inherit',
+                                          color: 'var(--teal-deep)',
+                                          cursor: 'pointer',
+                                        }}
+                                      >
+                                        Remove
+                                      </button>
+                                    </>
+                                  )}
                                 </span>
                               ))}
                             </span>
@@ -5618,6 +5695,7 @@ export function AdminClubDetail({
                             onClick={() => setShowDocPreview({ key: d.key })}
                           />
                         )}
+                        {uploadCtl}
                         {/* Override = compliant via admin flag; offer a lossless revert.
                           Real uploads (Approved) never show this — their files can't
                           be reverted away (safeguarding keeps its files on revert). */}
@@ -5636,12 +5714,17 @@ export function AdminClubDetail({
                           </Btn>
                         )}
                       </div>
-                    ) : d.optional ? (
-                      <Pill dot>Optional</Pill>
                     ) : (
-                      <Pill tone="coral" dot>
-                        Missing
-                      </Pill>
+                      <div className="doc-row-actions">
+                        {d.optional ? (
+                          <Pill dot>Optional</Pill>
+                        ) : (
+                          <Pill tone="coral" dot>
+                            Missing
+                          </Pill>
+                        )}
+                        {uploadCtl}
+                      </div>
                     )}
                   </div>
                 );
@@ -6039,6 +6122,42 @@ export function AdminClubDetail({
           onClose={() => setShowCqiEdit(false)}
         />
       )}
+      {confirmRemoveFile &&
+        onRemoveDocFile &&
+        // Portaled for the same fadeUp-transform reason as the club portal's copy.
+        createPortal(
+          <div
+            className="fix-confirm"
+            onClick={(e) => e.target === e.currentTarget && setConfirmRemoveFile(null)}
+          >
+            <div className="fix-confirm-box">
+              <div className="fix-confirm-icon danger">
+                <Icon.Alert />
+              </div>
+              <div className="fix-confirm-title">Remove this file?</div>
+              <div className="fix-confirm-body">
+                <strong>{docFileMeta(confirmRemoveFile.entry).fileName || 'This file'}</strong> will
+                be permanently deleted — there is no undo, and it would have to be uploaded again.
+              </div>
+              <div className="fix-confirm-actions">
+                <Btn tone="outline" onClick={() => setConfirmRemoveFile(null)}>
+                  Cancel
+                </Btn>
+                <Btn
+                  tone="ink"
+                  onClick={() => {
+                    const { key, entry } = confirmRemoveFile;
+                    setConfirmRemoveFile(null);
+                    onRemoveDocFile(key, entry.objectKey);
+                  }}
+                >
+                  Yes, remove
+                </Btn>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
       {showDocPreview && (
         <DocPreviewModal
           clubId={club.id}
@@ -7582,10 +7701,10 @@ export function AdminTeamAccessView({
 export function TransferWindowBanner({ status }: { status?: TransferWindowStatus }) {
   if (!status) return null;
   const text = status.open
-    ? `Transfers open${status.current ? ` — ${status.current.label} until ${formatDayYear(status.current.end)}` : ''}`
+    ? `Registration open${status.current ? ` — ${status.current.label} until ${formatDayYear(status.current.end)}` : ''}`
     : status.next
-      ? `Transfers closed — next window: ${status.next.label} from ${formatDayYear(status.next.start)}`
-      : 'Transfers closed — no upcoming window';
+      ? `Registration closed — next window: ${status.next.label} from ${formatDayYear(status.next.start)}`
+      : 'Registration closed — no upcoming window';
   return (
     <div
       role="status"
@@ -7600,7 +7719,7 @@ export function TransferWindowBanner({ status }: { status?: TransferWindowStatus
     >
       {text}
       {!status.open &&
-        '. Clubs cannot request clearances; registrations naming another club are auto-rejected.'}
+        '. No player can be registered or transferred: new registrations, clearance requests, issuing and overrides are refused until a window opens. Rejecting, reallocating and reopening still work.'}
     </div>
   );
 }
@@ -7625,6 +7744,12 @@ export function AdminClearances({
   clearancesLoaded = true,
 }) {
   const [confirm, setConfirm] = useStateA<ClearanceConfirmState | null>(null);
+  // While closed, actions that complete a transfer (override, remind the source to issue) are
+  // refused server-side (ADR 0017, revised) — disable them and say why.
+  const windowClosedNote =
+    transferWindowStatus && !transferWindowStatus.open
+      ? `Registration is closed${transferWindowStatus.next ? ` until ${transferWindowStatus.next.label} opens on ${formatDayYear(transferWindowStatus.next.start)}` : ' — no upcoming window'}`
+      : undefined;
   // Optional note the admin attaches to a rejection (shown to both clubs).
   const [reason, setReason] = useStateA('');
   // Override dialog: issue a transfer certificate (default). Unticked for a disposal override.
@@ -7862,6 +7987,12 @@ export function AdminClearances({
                         <Pill tone="muted">Via registration</Pill>
                       </span>
                     )}
+                    {/* Closed window: override/issue/remind are frozen, so say why it's sitting here. */}
+                    {req.status === 'pending' && windowClosedNote && (
+                      <span style={{ marginLeft: 8 }}>
+                        <Pill tone="muted">Parked — completes when the window opens</Pill>
+                      </span>
+                    )}
                   </div>
                   <div className="clr-meta">
                     ID {req.idNumber || '—'} · {teamLabel[req.team] || req.team || '—'} · Requested{' '}
@@ -7908,9 +8039,15 @@ export function AdminClearances({
                     </div>
                   </div>
                   {onRemind && !offSystem && (
-                    <Btn tone="outline" disabled={busy} onClick={() => onRemind(req)}>
-                      {busy && busyAction === 'remind' ? 'Sending…' : 'Send reminder'}
-                    </Btn>
+                    <span title={windowClosedNote}>
+                      <Btn
+                        tone="outline"
+                        disabled={busy || !!windowClosedNote}
+                        onClick={() => onRemind(req)}
+                      >
+                        {busy && busyAction === 'remind' ? 'Sending…' : 'Send reminder'}
+                      </Btn>
+                    </span>
                   )}
                   {canReallocate && (
                     <Btn
@@ -7968,33 +8105,35 @@ export function AdminClearances({
                       {busy && busyAction === 'reject' ? 'Rejecting…' : 'Reject'}
                     </Btn>
                   </span>
-                  <Btn
-                    tone="teal"
-                    icon={Icon.Arrow}
-                    disabled={busy}
-                    onClick={() => {
-                      setReason('');
-                      setIssueCert(true);
-                      setConfirm({
-                        kind: 'override',
-                        title: 'Issue this clearance?',
-                        req,
-                        body: sourcelessKnown
-                          ? `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, on ${req.fromClubName}'s behalf — even though ${req.fromClubName} has no record of them. If this registration should not exist at all, issue it and then remove the player from ${req.toClubName}'s roster (Clubs → ${req.toClubName} → Players). Say which you are doing: the reason is shown to both clubs, and recorded against your name for the union's record.`
-                          : `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, on ${req.fromClubName}'s behalf. Both clubs' chairs will be notified by email where an address is on file.`,
-                        // Keep the dialog open until the request settles. Close on success AND
-                        // on 'conflict' — the toast already told the admin and the card has
-                        // refetched, so a retry would only 409 again. Stay open only for a
-                        // transient 'failed' so the admin can retry.
-                        onYes: async (note, issue) => {
-                          const result = await onOverride(req, note, issue !== false);
-                          if (result !== 'failed') setConfirm(null);
-                        },
-                      });
-                    }}
-                  >
-                    {busy && busyAction === 'override' ? 'Issuing…' : 'Override & approve'}
-                  </Btn>
+                  <span title={windowClosedNote}>
+                    <Btn
+                      tone="teal"
+                      icon={Icon.Arrow}
+                      disabled={busy || !!windowClosedNote}
+                      onClick={() => {
+                        setReason('');
+                        setIssueCert(true);
+                        setConfirm({
+                          kind: 'override',
+                          title: 'Issue this clearance?',
+                          req,
+                          body: sourcelessKnown
+                            ? `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, on ${req.fromClubName}'s behalf — even though ${req.fromClubName} has no record of them. If this registration should not exist at all, issue it and then remove the player from ${req.toClubName}'s roster (Clubs → ${req.toClubName} → Players). Say which you are doing: the reason is shown to both clubs, and recorded against your name for the union's record.`
+                            : `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, on ${req.fromClubName}'s behalf. Both clubs' chairs will be notified by email where an address is on file.`,
+                          // Keep the dialog open until the request settles. Close on success AND
+                          // on 'conflict' — the toast already told the admin and the card has
+                          // refetched, so a retry would only 409 again. Stay open only for a
+                          // transient 'failed' so the admin can retry.
+                          onYes: async (note, issue) => {
+                            const result = await onOverride(req, note, issue !== false);
+                            if (result !== 'failed') setConfirm(null);
+                          },
+                        });
+                      }}
+                    >
+                      {busy && busyAction === 'override' ? 'Issuing…' : 'Override & approve'}
+                    </Btn>
+                  </span>
                 </div>
               )}
 
@@ -8071,15 +8210,23 @@ export function AdminClearances({
                       size="sm"
                       style={{ marginLeft: 'auto' }}
                       disabled={busy}
+                      title={
+                        windowClosedNote
+                          ? `${windowClosedNote}: a reopened clearance stays pending until the window opens`
+                          : undefined
+                      }
                       onClick={() => {
                         setConfirm({
                           kind: 'reopen',
                           title: 'Reopen this clearance?',
                           req,
                           body:
-                            req.rejectOutcome === 'not-registered'
+                            (req.rejectOutcome === 'not-registered'
                               ? `${req.playerName} is placed on ${req.toClubName}'s roster as clearance pending, and ${req.fromClubName}'s chair is asked to decide. It can be rejected again afterwards.`
-                              : `${req.playerName}'s registration goes back to how it was before the rejection, and ${req.fromClubName}'s chair is notified again. It can be rejected again afterwards.`,
+                              : `${req.playerName}'s registration goes back to how it was before the rejection, and ${req.fromClubName}'s chair is notified again. It can be rejected again afterwards.`) +
+                            (windowClosedNote
+                              ? ` ${windowClosedNote}, so it stays pending — it cannot be issued or overridden until the window opens.`
+                              : ''),
                           // Keep the dialog open until the request settles; close on success and
                           // on 'conflict' (already refetched), stay open only on 'failed'.
                           onYes: async () => {

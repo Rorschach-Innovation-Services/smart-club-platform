@@ -500,6 +500,32 @@ describe('reminder runs', () => {
     assert.equal(sends.length, 0);
   });
 
+  test('while the transfer window is closed chair reminders are skipped (unclaimed); the digest still goes', async () => {
+    const clearance = await seedTenant('cr-closed', '2026-10-13T08:00:00Z', {
+      config: { transferWindows: [{ label: 'Summer', start: '2027-01-05', end: '2027-01-20' }] },
+    });
+    await seedChairless('cr-closed', 'clr-closed-dir', '2026-10-13T08:00:00Z');
+    const { summary, sends, digests } = await run(['cr-closed'], TODAY);
+    assert.equal(sends.length, 0, 'no source-chair reminder while closed');
+    assert.equal(summary.reminded, 0);
+    assert.equal(digests.length, 1, 'the admin digest is kept');
+    assert.deepEqual(digests[0].nudged, []);
+    assert.equal(digests[0].chairless.length, 1);
+    assert.equal((await reminderRows('cr-closed')).length, 0);
+    // Never claimed: the day's key is still free for when the window opens.
+    const { clearanceReminderClaimKey } = await import('../src/clearance-reminder.js');
+    assert.equal(
+      await repo.claimInviteSend(
+        'cr-closed',
+        'src',
+        clearanceReminderClaimKey(clearance.id, TODAY),
+        ['email'],
+        'clearance-reminder',
+      ),
+      null,
+    );
+  });
+
   test('chairless (off-system source) clearances are never claimed or sent, but are digested', async () => {
     await seedTenant('cr-chairless', '2026-10-15T08:00:00Z'); // 5 days: not due
     await seedChairless('cr-chairless', 'clr-dir', '2026-10-13T08:00:00Z');

@@ -509,6 +509,9 @@ async function main(): Promise<void> {
   }
 
   const repo = await import('./repo.js');
+  // Registration windows gate imports too (ADR 0017, revised): refuse before any write.
+  const { enforceCliRegistrationWindow } = await import('./transfer-windows.js');
+  enforceCliRegistrationWindow(await repo.getTenantConfig(TENANT), args.confirm);
   await assertMapTargetsExist(repo, args.mapping);
   await ensureLeaguesConfigured(repo, args, referenced);
 

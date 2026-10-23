@@ -16,7 +16,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, fireEvent } from '@testing-library/react';
 import { renderWithProviders } from './test-utils';
-import { ClubClearancesView } from './club';
+import { ClubClearancesView, RequestPlayerForm } from './club';
+import { qk } from './query';
 
 const club = { id: 'src-club', name: 'Riverside CC' };
 
@@ -255,5 +256,44 @@ describe('ClubClearancesView — a ?clearance=<id> notification deep link', () =
     expect(container.querySelector('.clr-card.linked')).toBeNull();
     expect(scrolled).toEqual([]);
     expect(queryByText(NO_MATCH)).toBeNull();
+  });
+});
+
+describe('RequestPlayerForm while the transfer window is closed', () => {
+  const winter = { label: 'Winter window', start: '2027-01-01', end: '2027-01-31' };
+  const renderForm = (status: unknown) =>
+    renderWithProviders(
+      <RequestPlayerForm
+        club={{ id: 'dest', name: 'Hillcrest CC' }}
+        directory={[{ id: 'src-club', name: 'Riverside CC' }]}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        busy={false}
+      />,
+      { seed: [[qk.tenant(), { transferWindowStatus: status }]] },
+    );
+  const fill = (r: ReturnType<typeof renderForm>) => {
+    fireEvent.change(r.getByRole('combobox'), { target: { value: 'src-club' } });
+    fireEvent.change(r.getByPlaceholderText(/RSA ID or passport/), {
+      target: { value: '0001015800088' },
+    });
+  };
+
+  it('shows the closed banner and disables Send request with the closed note as title', () => {
+    const r = renderForm({ open: false, next: winter });
+    fill(r);
+    const note =
+      'Player registration is closed — next window: Winter window (2027-01-01 – 2027-01-31)';
+    expect(r.getByRole('alert')).toHaveTextContent(note);
+    const send = r.getByRole('button', { name: /send request/i });
+    expect(send).toBeDisabled();
+    expect(send).toHaveAttribute('title', note);
+  });
+
+  it('shows no banner and enables Send request while the window is open', () => {
+    const r = renderForm({ open: true, current: winter });
+    fill(r);
+    expect(r.queryByText(/registration is closed/i)).toBeNull();
+    expect(r.getByRole('button', { name: /send request/i })).toBeEnabled();
   });
 });

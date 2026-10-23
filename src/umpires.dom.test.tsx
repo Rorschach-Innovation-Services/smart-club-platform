@@ -13,9 +13,10 @@ import {
   doubleBookingIndex,
   mergeErrorMessage,
   noticeBadge,
+  noContactHint,
 } from './umpires';
 import { ApiError } from './api';
-import type { CaptainsReport, Club, Series, Umpire } from './types';
+import type { CaptainsReport, Club, Scorer, Series, Umpire } from './types';
 
 const ump = (id: string, displayName: string, over: Partial<Umpire> = {}): Umpire => ({
   id,
@@ -30,6 +31,11 @@ const UMPIRES = [
   ump('u-b-tyali', 'B.Tyali'),
   ump('u-s-gasa', 'S.Gasa'),
   ump('u-old', 'Old Name', { active: false, mergedInto: 'u-s-gasa', aliases: [] }),
+];
+
+const SCORERS: Scorer[] = [
+  { id: 'sc-dlamini', displayName: 'T.Dlamini', email: 't@example.org', active: true },
+  { id: 'sc-pillay', displayName: 'R.Pillay', phone: '0820000002', active: true },
 ];
 
 const clubs = [
@@ -166,6 +172,119 @@ describe('UmpireCell', () => {
     expect(screen.getByText(/S\.Gasa/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Assign umpires' })).toBeNull();
     expect(screen.getByRole('img', { name: /possible double booking/i })).toBeTruthy();
+  });
+
+  it('appoints a scorer and a backup through the second line and saves their ids in order', async () => {
+    const onSaveScorers = vi.fn().mockResolvedValue(undefined);
+    const { onSave, user } = renderCell({ scorers: SCORERS, onSaveScorers });
+    await user.click(screen.getByRole('button', { name: 'Assign scorers' }));
+    // One picker at a time.
+    expect(screen.queryByRole('button', { name: 'Assign umpires' })).toBeNull();
+    await user.type(screen.getByLabelText('Scorer'), 'dla');
+    await user.click(screen.getByRole('option', { name: /T\.Dlamini/ }));
+    await user.type(screen.getByLabelText('Backup scorer'), 'pil');
+    await user.click(screen.getByRole('option', { name: /R\.Pillay/ }));
+    await user.click(screen.getByRole('button', { name: /save scorers/i }));
+    expect(onSaveScorers).toHaveBeenCalledWith('s1', 'f1', ['sc-dlamini', 'sc-pillay']);
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it('shows saved scorers read-only without onSaveScorers', () => {
+    renderWithProviders(
+      <UmpireCell
+        series={S1}
+        fixture={{
+          id: 'f1',
+          officials: { umpires: [], scorers: [{ scorerId: 'sc-gone', name: 'Saved Name' }] },
+        }}
+        allSeries={[S1]}
+        clubs={clubs}
+        umpires={UMPIRES}
+      />,
+    );
+    expect(screen.getByText(/Scorers:\s*Saved Name/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Assign scorers' })).toBeNull();
+  });
+
+  it('asks for optional contacts before adding a new scorer, and passes them through', async () => {
+    const onSaveScorers = vi.fn().mockResolvedValue(undefined);
+    const onCreateScorer = vi.fn(
+      async (displayName: string, contacts?: { phone?: string; email?: string }) =>
+        ({ id: 'sc-new', displayName, active: true, ...contacts }) as Scorer,
+    );
+    const { user } = renderCell({ scorers: SCORERS, onSaveScorers, onCreateScorer });
+    await user.click(screen.getByRole('button', { name: 'Assign scorers' }));
+    await user.type(screen.getByLabelText('Scorer'), 'P.Naidoo');
+    await user.click(screen.getByRole('button', { name: /add “P\.Naidoo” as a new scorer/i }));
+    expect(onCreateScorer).not.toHaveBeenCalled();
+    const form = screen.getByRole('group', { name: 'New scorer contacts' });
+    await user.type(within(form).getByLabelText('Email (optional)'), 'p@example.org');
+    await user.click(within(form).getByRole('button', { name: 'Add scorer' }));
+    expect(onCreateScorer).toHaveBeenCalledWith('P.Naidoo', { email: 'p@example.org' });
+    await user.click(screen.getByRole('button', { name: /save scorers/i }));
+    expect(onSaveScorers).toHaveBeenCalledWith('s1', 'f1', ['sc-new']);
+  });
+
+  it('points a contactless scorer at re-adding with contacts, not the Umpires page', () => {
+    expect(noContactHint('scorer')).toMatch(/captured when the scorer is added/);
+    expect(noContactHint('scorer')).not.toMatch(/Umpires page/);
+    expect(noContactHint('umpire')).toMatch(/Add contacts on the Umpires page/);
+  });
+
+  it('shows the scorer hint when an assigned scorer has no contacts', async () => {
+    const { user } = renderCell({
+      scorers: [{ id: 'sc-bare', displayName: 'Z.Bare', active: true }],
+      onSaveScorers: vi.fn().mockResolvedValue(undefined),
+      fixture: {
+        id: 'f1',
+        officials: { umpires: [], scorers: [{ scorerId: 'sc-bare', name: 'Z.Bare' }] },
+      },
+    });
+    await user.click(screen.getByRole('button', { name: 'Assign scorers' }));
+    expect(screen.getByText(/captured when the scorer is added/)).toBeTruthy();
+    expect(screen.queryByText(/Umpires page/)).toBeNull();
+  });
+
+  it('has no scorer line without a register or saved scorers', () => {
+    renderCell();
+    expect(screen.queryByText(/Scorers:/)).toBeNull();
+  });
+
+  it('shows the notice badge next to an assigned scorer', async () => {
+    const loadNotifyStatus = vi.fn().mockResolvedValue({
+      rows: [
+        // The same id as an umpire row would not match: role is part of the key.
+        { fixtureId: 'f1', role: 'umpire', umpireId: 'sc-dlamini', status: 'queued', attempts: 0 },
+        {
+          fixtureId: 'f1',
+          role: 'scorer',
+          umpireId: 'sc-dlamini',
+          status: 'completed',
+          attempts: 1,
+          completedAt: '2026-10-12T08:00:00Z',
+        },
+      ],
+    });
+    const user = userEvent.setup();
+    renderWithProviders(
+      <UmpireCell
+        series={S1}
+        fixture={{
+          id: 'f1',
+          officials: { umpires: [], scorers: [{ scorerId: 'sc-dlamini', name: 'T.Dlamini' }] },
+        }}
+        allSeries={[S1]}
+        clubs={clubs}
+        umpires={UMPIRES}
+        scorers={SCORERS}
+        onSaveScorers={vi.fn().mockResolvedValue(undefined)}
+        loadNotifyStatus={loadNotifyStatus}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Assign scorers' }));
+    expect(loadNotifyStatus).toHaveBeenCalledWith('s1');
+    expect(await screen.findByText('Notified ✓')).toBeTruthy();
+    expect(screen.queryByText(/Notice queued|Waiting for contact details/)).toBeNull();
   });
 });
 

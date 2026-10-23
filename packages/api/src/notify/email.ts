@@ -817,58 +817,6 @@ export async function sendClearanceOpenedAdminSummaryEmail(
   );
 }
 
-export interface ClearanceAutoRejectedAdminEmailInput {
-  to: string;
-  fromClubName: string;
-  playerName: string;
-  toClubName: string;
-  reason: string;
-  /** Deep link to the clearance in the admin console; omitted when no origin resolves. */
-  adminLink?: string;
-}
-
-/**
- * Union-office (tenant admin) notice that a registration arrived outside every transfer window
- * and was recorded as an auto-rejected clearance. Pure — exported for tests.
- */
-export function clearanceAutoRejectedAdminEmailContent(
-  input: Omit<ClearanceAutoRejectedAdminEmailInput, 'to'>,
-): {
-  subject: string;
-  text: string;
-  html: string;
-} {
-  const { fromClubName, playerName, toClubName, reason, adminLink } = input;
-  const subject = `Clearance auto-rejected — ${playerName.replace(/\s+/g, ' ').trim()}`;
-  const body =
-    `${playerName} registered with ${toClubName} naming ${fromClubName} as their previous club, ` +
-    `but transfers are closed, so the clearance was recorded as rejected and the player was not ` +
-    `registered. It is listed under Clearances in the admin console, where it can be reopened.`;
-  const text =
-    `Hello,\n\n${body}\n\nReason: ${reason}\n\n` +
-    `${clearanceLinkText(adminLink)}The union office platform`;
-  const html =
-    EMAIL_WRAP_OPEN +
-    `<p>Hello,</p>` +
-    `<p>${escapeHtml(body)}</p>` +
-    `<p><strong>Reason:</strong> ${escapeHtml(reason)}</p>` +
-    clearanceLinkHtml(adminLink) +
-    `<p>The union office platform</p>` +
-    `</div>`;
-  return { subject, text, html };
-}
-
-export async function sendClearanceAutoRejectedAdminEmail(
-  input: ClearanceAutoRejectedAdminEmailInput,
-): Promise<{ messageId: string }> {
-  return sendSesEmail(
-    input.to,
-    clearanceAutoRejectedAdminEmailContent(input),
-    `clearance-auto-rejected (admin) notice for ${input.fromClubName} → ${input.toClubName}` +
-      dryRunLink(input.adminLink),
-  );
-}
-
 export interface ClearanceReminderDigestLine {
   /** The clearance id (the admin deep link's `?clearance=` value). */
   id: string;
@@ -1485,6 +1433,8 @@ export interface OfficialAppointedEmailInput {
   dateLabel: string;
   time?: string;
   venue?: string;
+  /** The fixture's other umpire, when two are allocated. */
+  coOfficialName?: string;
 }
 
 /** The appointment notice to one umpire/referee/scorer for one fixture. */
@@ -1502,6 +1452,7 @@ export function officialAppointedEmailContent(input: OfficialAppointedEmailInput
     ['Date', input.dateLabel],
     ['Time', input.time || 'time to be confirmed'],
     ['Venue', input.venue || 'venue to be confirmed'],
+    ...(input.coOfficialName ? [['Fellow umpire', input.coOfficialName] as [string, string]] : []),
   ];
   const outro = `If you are unavailable for this appointment, please contact ${MEDICOACH_SUPPORT_EMAIL} as soon as possible.`;
   const text =

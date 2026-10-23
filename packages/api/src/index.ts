@@ -208,6 +208,7 @@ import {
   type NameDobIndex,
   type ClearanceOpenedNotifier,
   type RegisterPlayerOutcome,
+  PUBLIC_REG_UPLOAD_RE,
 } from './register-player.js';
 import { luhnValid, normalizeGender, normalizeRace } from './roster-normalize.js';
 import { parseStructureWorkbookAllSheets } from './structure-parse.js';
@@ -224,7 +225,6 @@ import {
   sendClearanceDestNotice,
   sendClearanceAdminNotice,
   sendClearanceAdminSummaryNotice,
-  sendClearanceAutoRejectedAdminNotice,
   sendVeteransRequestNotice,
   sendVeteransRequestResolvedNotice,
   notifyPostponementOpened,
@@ -351,10 +351,9 @@ import { validateCertTemplate, validateOrgContact } from './certificates/config.
 import { validateFixtureReminders } from './fixture-reminders-config.js';
 import { TENANT_UTC_OFFSET_MINUTES, tenantDate } from './tenant-time.js';
 import {
-  TRANSFER_WINDOW_REJECTOR,
-  closedTransferWindow,
+  RegistrationClosedError,
+  assertRegistrationOpen,
   servedTransferWindowStatus,
-  transfersClosedMessage,
   validateTransferWindows,
 } from './transfer-windows.js';
 import { adminEmailsProvider, type AdminEmailsProvider } from './notify/admin-emails.js';
@@ -972,6 +971,17 @@ app.post('/register/:clubId', async (c) => {
   // player lands on a DIFFERENT club below — safe because every delete/purge path keys
   // off the stored objectKey, never the club prefix, but non-obvious.
   assertOwnObjectKey(resolved.tenant, clubId, idDocMeta.objectKey);
+  // Closed windows refuse before the club inbound/source caps are charged (the per-token counter
+  // above already has been); the ID doc the form already uploaded is
+  // referenced by nothing, so it is discarded (see discardPublicRegUpload).
+  try {
+    assertRegistrationOpen(cfg);
+  } catch (err) {
+    if (err instanceof RegistrationClosedError) {
+      await discardPublicRegUpload(resolved.tenant, clubId, idDocMeta.objectKey);
+    }
+    throw err;
+  }
   // Editable current/destination club: the player may register into a club OTHER than the
   // one whose public link they used. The link club (`clubId`) still owns the token, the
   // rate-limit counter, and the presigned ID-doc key; `destClubId` is only the roster the
@@ -1125,12 +1135,13 @@ app.post('/register/:clubId', async (c) => {
       linkClub: { id: clubId, name: regClub.name },
       directory: directoryClubs(cfg),
       notifyClearanceOpened,
-      // An anonymous submission outside every transfer window must not vanish: it is recorded
-      // as an auto-rejected clearance the union office can reopen.
-      windowClosed: { mode: 'auto-reject', notify: notifyClearanceAutoRejected },
     });
   } catch (err: unknown) {
     if (err instanceof repo.DestinationClubGoneError) throw new HttpError(409, err.message);
+    // A window that closed between the check above and the write: same cleanup.
+    if (err instanceof RegistrationClosedError) {
+      await discardPublicRegUpload(resolved.tenant, clubId, idDocMeta.objectKey);
+    }
     throw err;
   }
   // Deliberately ONE message for every conflict shape: an anonymous caller must not be
@@ -1155,21 +1166,6 @@ app.post('/register/:clubId', async (c) => {
     }
     return c.json({ ok: true, clearance: { fromClubName: result.clearance.fromClubName } }, 201);
   }
-  if (result.outcome === 'clearance-auto-rejected') {
-    // Recorded, not registered. A same-stretch resubmission (`repeat`) gets the identical
-    // answer. No source-club quota charge — nothing landed in its queue to act on.
-    return c.json(
-      {
-        ok: true,
-        transferWindow: {
-          closed: true,
-          ...(result.nextWindow ? { nextWindow: result.nextWindow } : {}),
-        },
-      },
-      201,
-    );
-  }
-
   // Plain-active outcome (no clearance was opened): the player row is live on the joining
   // club's roster now, so materialize the veterans affiliation (write-on-activation).
   // Clearance-pending outcomes returned above — their record is written when the clearance
@@ -1192,6 +1188,28 @@ app.post('/register/:clubId', async (c) => {
   }
   return c.json({ ok: true }, 201);
 });
+
+/**
+ * Delete a public-link ID upload left unreferenced by a refused (window-closed) registration —
+ * otherwise no row or snapshot names it and no erasure path could ever find it. The key is
+ * caller-supplied on an anonymous route, so only keys shaped like this link club's own presign
+ * output are touched (never a delete-anything primitive). Best effort: never throws.
+ */
+async function discardPublicRegUpload(
+  tenant: string,
+  linkClubId: string,
+  objectKey: string,
+): Promise<void> {
+  const ownPrefix =
+    objectKey.startsWith(`${tenant}/${linkClubId}/`) ||
+    objectKey.startsWith(`local/${tenant}/${linkClubId}/`);
+  if (!ownPrefix || !PUBLIC_REG_UPLOAD_RE.test(objectKey)) return;
+  try {
+    await repo.deleteUploadObjects([objectKey]);
+  } catch (err) {
+    console.warn('registration closed: could not discard the uploaded ID document', err);
+  }
+}
 
 // Per-reg-token hourly cap shared by the presign AND submit handlers (one counter per
 // token — a normal registration spends two: presign + submit). High enough for a club's
@@ -1231,6 +1249,9 @@ app.post('/register/:clubId/id-doc/upload-url', async (c) => {
   // Rate-limit the presigned-PUT minting per reg token: the link is shared + long-lived, and
   // this endpoint is unauthenticated, so cap it to bound S3 write/cost amplification from a
   // leaked link. Generous enough for a club's whole roster to register in an onboarding window.
+  // No upload while registration is closed: the submit would be refused and orphan the object.
+  // Checked before the counter so retries against a closed window don't burn the hourly quota.
+  assertRegistrationOpen(await repo.getTenantConfig(resolved.tenant));
   const allowed = await repo.bumpSignupTokenCounter(token, now(), REGISTRATIONS_PER_HOUR);
   if (!allowed) throw new HttpError(429, 'too many registration uploads — please try again later');
   const { contentType } = await c.req
@@ -1747,8 +1768,7 @@ async function notifyClearanceAdminSummary(
  * accepted: at worst one club's chair is not messaged, and the resolution itself stands.
  *
  * Each chair's email links to the clearance in THEIR OWN club portal, built from `linkOrigin`.
- * It defaults to canonicalWebOrigin — the only origin the anonymous auto-reject path may use —
- * and only the authenticated reject/override routes pass adminClearanceLinkOrigin (which may fall
+ * It defaults to canonicalWebOrigin (the safe origin for any non-request caller), and only the authenticated reject/override routes pass adminClearanceLinkOrigin (which may fall
  * back to the request Origin on dev stages). No origin ⇒ no link.
  */
 async function notifyClearanceResolved(
@@ -1799,64 +1819,6 @@ async function notifyClearanceResolved(
     await Promise.all([notifyClub(fromClub), notifyClub(toClub)]);
   } catch (err) {
     console.error('clearance resolved notice failed', err);
-  }
-}
-
-/**
- * Notices for a registration auto-rejected outside the transfer window: both chairs via
- * notifyClearanceResolved ('rejected' with the 'not-registered' copy; an off-system source is
- * skipped as usual) and every tenant admin by email. Never throws.
- *
- * Unlike an admin resolution this fires from the ANONYMOUS register route, so it is capped.
- * The primary guard is upstream — a resubmission in the same closed stretch reuses the existing
- * record and never reaches here — and this per-destination-club daily cap (counting today's
- * window auto-reject email rows, the same read-then-append bound as notifyClearanceOpened) is
- * the backstop against many distinct fabricated identities. Admin emails share the gate. A cap
- * check that cannot read the destination club fails CLOSED — no notices (the clearance is still
- * recorded and listed for admins) — and is reported to Sentry.
- */
-async function notifyClearanceAutoRejected(
-  tenant: string,
-  clearance: PlayerClearance,
-  adminEmails: AdminEmailsProvider = adminEmailsProvider(repo, tenant),
-): Promise<void> {
-  try {
-    const toClub = await repo.getClub(tenant, clearance.toClubId);
-    const sentToday = countToday(
-      toClub?.commLog,
-      (e) =>
-        e.kind === 'clearance-rejected' &&
-        e.channel === 'email' &&
-        e.by === TRANSFER_WINDOW_REJECTOR,
-    );
-    if (sentToday >= CLEARANCE_NOTICES_PER_DAY) {
-      console.warn(
-        `transfer-window auto-reject notices for ${tenant}/${clearance.toClubId}: ${CAP_REACHED}`,
-      );
-      return;
-    }
-  } catch (err) {
-    Sentry.captureException(err);
-    console.error('transfer-window auto-reject cap check failed — notices skipped', err);
-    return;
-  }
-  await notifyClearanceResolved(tenant, clearance, 'rejected', TRANSFER_WINDOW_REJECTOR);
-  try {
-    const admins = await adminEmails();
-    if (admins.length > 0) {
-      // Anonymous path: canonical origin only, never the request Origin.
-      const adminLink = clearanceAdminLink(canonicalWebOrigin(tenant), clearance.id);
-      await sendClearanceAutoRejectedAdminNotice({
-        to: admins,
-        fromClubName: clearance.fromClubName,
-        playerName: clearance.playerName,
-        toClubName: clearance.toClubName,
-        reason: clearance.rejectReason ?? '',
-        ...(adminLink ? { adminLink } : {}),
-      });
-    }
-  } catch (err) {
-    console.error('transfer-window auto-reject admin notice failed', err);
   }
 }
 
@@ -2609,10 +2571,6 @@ app.post('/clubs/:id/players', async (c) => {
   if (result.outcome === 'existing-registration-under-legacy-key') {
     throw new HttpError(409, legacyKeyMessage(result.matchedClubName));
   }
-  if (result.outcome === 'clearance-auto-rejected') {
-    // Unreachable: without `windowClosed` the core refuses (409) instead of auto-rejecting.
-    throw new HttpError(409, 'transfers are closed');
-  }
   const player = result.player;
   // Soft duplicate warning (ADR 0019): the same name + dob under another identity elsewhere.
   const possibleExistingAt = playerSyncEnabled(cfg)
@@ -2803,9 +2761,6 @@ async function registerChairRows(
           error: legacyKeyMessage(r.matchedClubName),
           errorShort: legacyKeyShortMessage(r.matchedClubName),
         });
-      } else if (r.outcome === 'clearance-auto-rejected') {
-        // Unreachable: without `windowClosed` the core refuses (409 → per-row error) instead.
-        results.push({ ...base, outcome: 'error', naturalKey, error: 'transfers are closed' });
       } else {
         results.push({ ...base, outcome: 'created', naturalKey, ...warnAt(r.player) });
         // An in-request later row with the same name + dob under another ID is warned too.
@@ -3826,11 +3781,8 @@ app.post('/clubs/:id/clearances', async (c) => {
   }
   if (body.fromClubId === toClubId)
     throw new HttpError(400, 'source and destination are the same club');
-  // Outside every transfer window a rep request is refused outright — the rep is present to
-  // read why. (A public registration instead records an auto-rejected clearance: an anonymous
-  // submission must not vanish. See transfer-windows.ts.)
-  const closed = closedTransferWindow(await getTenantConfigCached(c, ra.tenant));
-  if (closed) throw new HttpError(409, transfersClosedMessage(closed.next));
+  // Outside every transfer window no registration of any kind may start (ADR 0017, revised).
+  assertRegistrationOpen(await getTenantConfigCached(c, ra.tenant));
   const [fromClub, toClub] = await Promise.all([
     repo.getClub(ra.tenant, body.fromClubId),
     repo.getClub(ra.tenant, toClubId),
@@ -3922,6 +3874,8 @@ app.patch('/clubs/:id/clearances/:cid', async (c) => {
   }>();
   try {
     if (body.action === 'issue') {
+      // Issuing completes the transfer: no transfer completion while windows are closed.
+      assertRegistrationOpen(await getTenantConfigCached(c, ra.tenant));
       const fees = body.feesCleared ?? current.feesCleared;
       const misconduct = body.misconductCleared ?? current.misconductCleared;
       if (!fees || !misconduct)
@@ -4175,6 +4129,11 @@ app.patch('/clubs/:id/docs/:key', async (c) => {
     throw new HttpError(400, 'file type not accepted for this document');
   }
   const docMeta = current.docMeta ?? {};
+  // Admin on-behalf uploads carry who did it; club-rep uploads stay unstamped.
+  const adminStamp =
+    ra.membership.role === 'admin'
+      ? { uploadedBy: ra.email, uploadedByRole: 'admin' as const }
+      : {};
   if (isMultiFileDoc(docDef, docMeta[key])) {
     // Multi-file docs (safeguarding pattern) APPEND — files coexist (no
     // delete-previous), and the doc only completes at the definition's minimum.
@@ -4193,6 +4152,7 @@ app.patch('/clubs/:id/docs/:key', async (c) => {
             size: meta.size,
             contentType: meta.contentType,
             uploadedAt: now(),
+            ...adminStamp,
           },
         ];
     const updated = await applyClubPatch(
@@ -4244,6 +4204,7 @@ app.patch('/clubs/:id/docs/:key', async (c) => {
           size: meta.size,
           contentType: meta.contentType,
           uploadedAt: now(),
+          ...adminStamp,
         },
       },
     },
@@ -11667,6 +11628,8 @@ app.post('/platform/tenants/:slug/roster-intake/commit', async (c) => {
   const slug = c.req.param('slug');
   const cfg = await repo.getTenantConfig(slug);
   if (!cfg) throw new HttpError(404, 'tenant not found');
+  // Intake writes active rows: no new registration while windows are closed (parse/review stay open).
+  assertRegistrationOpen(cfg);
   const body = await c.req
     .json<{ items?: RosterIntakeCommitItem[] }>()
     .catch(() => ({}) as { items?: RosterIntakeCommitItem[] });
@@ -13332,6 +13295,8 @@ app.post('/admin/clearances/:cid/override', async (c) => {
     issueCertificate?: boolean;
   }>();
   if (!body.fromClubId) throw new HttpError(400, 'fromClubId required');
+  // Override completes the transfer (every variant): blocked while windows are closed.
+  assertRegistrationOpen(await getTenantConfigCached(c, ra.tenant));
   if (body.reason !== undefined && (typeof body.reason !== 'string' || body.reason.length > 500)) {
     throw new HttpError(400, 'reason must be a string of at most 500 characters');
   }
@@ -13629,6 +13594,8 @@ app.post('/admin/clearances/:cid/remind', async (c) => {
   const fromClub = await repo.getClub(ra.tenant, body.fromClubId);
   if (!fromClub) throw new HttpError(422, 'source club is not on the system');
   const tenantConfig = await getTenantConfigCached(c, ra.tenant).catch(() => null);
+  // A reminder asks the source chair to complete a transfer they cannot complete while closed.
+  assertRegistrationOpen(tenantConfig);
   const channels: Channel[] = hasFeature(tenantConfig, 'whatsappInvites', true)
     ? ['email', 'whatsapp']
     : ['email'];

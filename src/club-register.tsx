@@ -48,7 +48,7 @@ import {
   dobFromSaId,
 } from './data';
 import { labelByKey, leagueOptionsForDistrict } from '../packages/engine/src/leagues';
-import { useModule, useVertical } from './branding';
+import { useModule, useTransferWindowStatus, useVertical } from './branding';
 import { Btn, Icon, Pill, ScrollX } from './atoms';
 import { qk } from './query';
 import {
@@ -176,6 +176,28 @@ function registerOutcomeBase(res: RegisterPlayerResponse, previousClub?: string)
       previousClub ? `${previousClub} isn’t` : 'Their previous club isn’t'
     } on the system, so the union office has been asked to check the transfer.`;
   return `${name} registered.`;
+}
+
+/**
+ * While the tenant's transfer window is closed every registration is refused (409), so say so
+ * up front instead of after a submit. Copy mirrors the API's registrationClosedMessage; the
+ * server stays the backstop. `null` ⇒ open or no windows configured.
+ */
+export function useRegistrationClosedNote(): string | null {
+  const status = useTransferWindowStatus();
+  if (!status || status.open) return null;
+  return status.next
+    ? `Player registration is closed — next window: ${status.next.label} (${status.next.start} – ${status.next.end})`
+    : 'Player registration is closed — no upcoming registration window is configured';
+}
+
+export function RegistrationClosedBanner({ note }: { note: string | null }) {
+  if (!note) return null;
+  return (
+    <div className="field-error" role="alert" style={{ marginBottom: 12 }}>
+      {note}
+    </div>
+  );
 }
 
 export function RegisterPlayerForm({
@@ -341,8 +363,10 @@ export function RegisterPlayerForm({
     onDone();
   }
 
+  const closedNote = useRegistrationClosedNote();
   return (
     <div className="rp-form">
+      <RegistrationClosedBanner note={closedNote} />
       <div className="rp-section">
         <div className="rp-section-head">
           <div className="rp-section-eyebrow">Team</div>
@@ -745,7 +769,13 @@ export function RegisterPlayerForm({
         <Btn tone="outline" onClick={onCancel} disabled={busy}>
           Cancel
         </Btn>
-        <Btn tone="teal" icon={Icon.Check} disabled={!!blocker || busy} onClick={submit}>
+        <Btn
+          tone="teal"
+          icon={Icon.Check}
+          disabled={!!blocker || busy || !!closedNote}
+          title={closedNote ?? undefined}
+          onClick={submit}
+        >
           {busy ? 'Registering…' : 'Register player'}
         </Btn>
       </div>
@@ -921,8 +951,10 @@ export function QuickAddPlayersGrid({
     }
   }
 
+  const closedNote = useRegistrationClosedNote();
   return (
     <div className="rp-form">
+      <RegistrationClosedBanner note={closedNote} />
       <p className="ph-desc" style={{ marginBottom: 12 }}>
         Add up to {CHAIR_BATCH_MAX_ROWS} players at once with just their names and ID. Contact
         details can be added later. A player already registered at another club opens a clearance
@@ -1106,7 +1138,8 @@ export function QuickAddPlayersGrid({
         <Btn
           tone="teal"
           icon={Icon.Check}
-          disabled={busy || !pending.length || problems.length > 0}
+          disabled={busy || !pending.length || problems.length > 0 || !!closedNote}
+          title={closedNote ?? undefined}
           onClick={submit}
         >
           {busy
@@ -1185,6 +1218,7 @@ export function ClubRosterUpload({
 }) {
   const invalidate = useInvalidateRoster(club.id);
   const leagueLabel = labelByKey(leagues as never[]);
+  const closedNote = useRegistrationClosedNote();
   const [file, setFile] = useState<File | null>(null);
   const [parse, setParse] = useState<ChairRosterParseResponse | null>(null);
   const [ageGroupMap, setAgeGroupMap] = useState<Record<string, string>>({});
@@ -1428,6 +1462,7 @@ export function ClubRosterUpload({
 
   return (
     <div className="rp-form">
+      <RegistrationClosedBanner note={closedNote} />
       <div className="rp-section">
         <div className="rp-section-head">
           <div className="rp-section-eyebrow">Step 1</div>
@@ -1634,7 +1669,8 @@ export function ClubRosterUpload({
         <Btn
           tone="teal"
           icon={Icon.Check}
-          disabled={busy || !parse || counts.includedRows === 0}
+          disabled={busy || !parse || counts.includedRows === 0 || !!closedNote}
+          title={closedNote ?? undefined}
           onClick={startCommit}
         >
           Register {counts.includedRows} player{counts.includedRows === 1 ? '' : 's'}

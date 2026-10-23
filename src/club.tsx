@@ -78,7 +78,14 @@ import {
   formatWeekdayLong,
   formatWeekdayName,
 } from './dates';
-import { useCopy, useFeature, useModule, useSeasonLabel, useVertical } from './branding';
+import {
+  useCopy,
+  useFeature,
+  useModule,
+  useSeasonLabel,
+  useTransferWindowStatus,
+  useVertical,
+} from './branding';
 import { pitchCountLabel } from './vertical';
 import {
   Icon,
@@ -106,6 +113,8 @@ import {
   QuickAddPlayersGrid,
   ClubRosterUpload,
   REGISTER_MODE_TITLE,
+  RegistrationClosedBanner,
+  useRegistrationClosedNote,
 } from './club-register';
 import type { RegisterMode } from './club-register';
 import {
@@ -136,110 +145,7 @@ import { RegLinkModal } from './RegLinkModal';
 import { PlayerDetailModal } from './PlayerDetailModal';
 import { ClubNameModal } from './ClubNameModal';
 import { SeriesOriginPill } from './season-run';
-
-/* ─── Compliance doc upload — presigned S3 PUT, then mark uploaded ─── */
-interface DocUploadButtonProps {
-  clubId: string;
-  doc: { key: string; accepts?: string[] };
-  label?: ReactNode;
-  onUploaded: (key: string, meta: any) => void | Promise<void>;
-  toast: (msg: string, tone?: string) => void;
-  variant?: string;
-  buttonLabel?: ReactNode;
-}
-function DocUploadButton({
-  clubId,
-  doc,
-  label,
-  onUploaded,
-  toast,
-  variant = 'button',
-  buttonLabel,
-}: DocUploadButtonProps) {
-  const docKey = doc.key;
-  const inputRef = useRefC<HTMLInputElement | null>(null);
-  const [busy, setBusy] = useStateC(false);
-  const isReplace = variant === 'link';
-  async function handleFile(e: ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    // file.type is often empty for .doc/.docx — resolve from the extension before
-    // validating, or valid Word files get rejected / mislabelled as PDF.
-    const mime = resolveDocMime(file);
-    if (!docMimeAllowed(doc, mime)) {
-      toast(
-        `${docFormats(doc)
-          .map((f) => f.toUpperCase())
-          .join(', ')} files only`,
-        'warn',
-      );
-      if (inputRef.current) inputRef.current.value = '';
-      return;
-    }
-    setBusy(true);
-    try {
-      if (import.meta.env.VITE_LOCAL_AUTH === '1') {
-        // Local dev: no S3 — record the doc metadata without an actual upload.
-        // The key must be unique per file: safeguarding stores several entries,
-        // and a constant key would make every upload dedupe into the first.
-        await onUploaded(docKey, {
-          objectKey: `local/${docKey}-${crypto.randomUUID()}.${extFromMime(mime)}`,
-          size: file.size,
-          contentType: mime,
-        });
-      } else {
-        // Use the server-echoed contentType for the PUT — it must match the
-        // presigned ContentType exactly or S3 rejects the upload.
-        const { uploadUrl, objectKey, contentType } = await getDocUploadUrl(clubId, docKey, mime);
-        await uploadToPresigned(uploadUrl, file, contentType);
-        await onUploaded(docKey, { objectKey, size: file.size, contentType });
-      }
-      // onUploaded rejects if the server-side record failed, so this only fires on
-      // real success (and the failure toast is surfaced by the caller's withToast).
-      toast(`${label} ${isReplace ? 'replaced' : 'uploaded'}`);
-    } catch (err) {
-      // The mark-uploaded step toasts its own error (err.alreadyToasted); only the
-      // presigned-upload steps (getDocUploadUrl / uploadToPresigned) need surfacing here.
-      if (err && !err.alreadyToasted) toast(err.message || 'Upload failed', 'warn');
-    } finally {
-      setBusy(false);
-      if (inputRef.current) inputRef.current.value = '';
-    }
-  }
-  return (
-    <>
-      <input
-        ref={inputRef}
-        type="file"
-        accept={docAccept(doc)}
-        style={{ display: 'none' }}
-        onChange={handleFile}
-      />
-      {isReplace ? (
-        <button
-          type="button"
-          disabled={busy}
-          aria-busy={busy}
-          onClick={() => inputRef.current?.click()}
-          style={{
-            background: 'none',
-            border: 'none',
-            padding: 0,
-            font: 'inherit',
-            color: 'var(--teal-deep)',
-            cursor: busy ? 'default' : 'pointer',
-          }}
-        >
-          {busy ? 'Replacing…' : buttonLabel || 'Replace'}
-        </button>
-      ) : (
-        <Btn tone="ink" size="sm" icon={Icon.Upload} onClick={() => inputRef.current?.click()}>
-          {busy ? 'Uploading…' : buttonLabel || 'Upload'}
-        </Btn>
-      )}
-    </>
-  );
-}
+import { DocUploadButton } from './DocUploadButton';
 
 /* ─── Ground map (Leaflet + OpenStreetMap + Nominatim geocoding) ─── */
 
@@ -6057,10 +5963,13 @@ export function RequestPlayerForm({ club, directory, onSubmit, onCancel, busy })
   const others = (directory ?? []).filter((c) => c.id !== club.id);
   // Accept any non-empty ID: SA players use a 13-digit RSA ID, non-SA players a
   // passport/visa string. The server matches case/whitespace-insensitively.
-  const canSubmit = fromClubId && idNumber.trim().length > 0 && !busy;
+  // The server refuses new requests while registration is closed; say so up front.
+  const closedNote = useRegistrationClosedNote();
+  const canSubmit = fromClubId && idNumber.trim().length > 0 && !busy && !closedNote;
 
   return (
     <div className="rp-form">
+      <RegistrationClosedBanner note={closedNote} />
       <div className="rp-section">
         <div className="rp-section-head">
           <div className="rp-section-eyebrow">Incoming transfer</div>
@@ -6119,6 +6028,7 @@ export function RequestPlayerForm({ club, directory, onSubmit, onCancel, busy })
           tone="teal"
           icon={Icon.Arrow}
           disabled={!canSubmit}
+          title={closedNote ?? undefined}
           onClick={() => onSubmit({ fromClubId, idNumber, note: note || undefined })}
         >
           {busy ? 'Sending…' : 'Send request'}
@@ -6161,6 +6071,12 @@ export function ClubClearancesView({
   );
   const [highlightId, setHighlightId] = useStateC<string | null>(null);
   const [linkNoticeDismissed, setLinkNoticeDismissed] = useStateC(false);
+  // Issuing completes the transfer, which the server refuses while registration is closed.
+  const windowStatus = useTransferWindowStatus();
+  const issueClosedNote =
+    windowStatus && !windowStatus.open
+      ? `Registration is closed${windowStatus.next ? ` until ${windowStatus.next.label} opens on ${formatDayYear(windowStatus.next.start)}` : ' — no upcoming window'}`
+      : undefined;
   const linkHandledRef = useRefC(false);
   const linkMissing = clearanceLinkMissing(linkId, [...incoming, ...outgoing]);
   useEffectC(() => {
@@ -6320,16 +6236,18 @@ export function ClubClearancesView({
                     <span className="clr-ready-msg">
                       ✓ Both checks complete. Issue clearance certificate.
                     </span>
-                    <Btn
-                      tone="teal"
-                      size="sm"
-                      icon={Icon.Arrow}
-                      disabled={busy}
-                      onClick={() => onApprove(req)}
-                    >
-                      {/* Issuing also issues the transfer certificate inline (~1–3s). */}
-                      {busy ? 'Issuing certificate…' : `Issue clearance to ${req.toClubName}`}
-                    </Btn>
+                    <span title={issueClosedNote}>
+                      <Btn
+                        tone="teal"
+                        size="sm"
+                        icon={Icon.Arrow}
+                        disabled={busy || !!issueClosedNote}
+                        onClick={() => onApprove(req)}
+                      >
+                        {/* Issuing also issues the transfer certificate inline (~1–3s). */}
+                        {busy ? 'Issuing certificate…' : `Issue clearance to ${req.toClubName}`}
+                      </Btn>
+                    </span>
                   </div>
                 )}
               </div>

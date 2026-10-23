@@ -365,6 +365,49 @@ describe('drain (cron)', () => {
     assert.equal(second.sends.filter((s) => s.seriesName === 'Series s-drain').length, 0);
   });
 
+  test('two umpires: each notice names the other; single umpire and referee name nobody', async () => {
+    await repo.putSeries(TENANT, series('s-pair', [fx('f1'), fx('f2')]));
+    await appoint('s-pair', 'f1', {
+      umpires: ['u-a-ngubane', 'u-b-tyali'],
+      referee: { umpireId: 'u-c-ref' },
+    });
+    await appoint('s-pair', 'f2', { umpires: ['u-a-ngubane'] });
+    const { sends } = await run();
+    const mine = sends.filter((s) => s.seriesName === 'Series s-pair');
+    const pair = mine.filter((s) => s.roleLabel === 'umpire' && s.coOfficialName);
+    assert.deepEqual(
+      pair.map((s) => `${s.official.name}>${s.coOfficialName}`).sort(),
+      ['Andile Ngubane>B.Tyali', 'B.Tyali>Andile Ngubane'],
+      'register names (fullName first, displayName fallback)',
+    );
+    assert.equal(mine.length, 4);
+    assert.equal(mine.find((s) => s.roleLabel === 'referee')?.coOfficialName, undefined);
+    assert.equal(mine.filter((s) => s.roleLabel === 'umpire' && !s.coOfficialName).length, 1);
+  });
+
+  test('whenWhere carries the co-umpire only while it fits the 100-char param', () => {
+    assert.equal(
+      notify.officialWhenWhere({
+        dateLabel: 'Sun 2026-11-15',
+        time: '09:00',
+        venue: 'Kingsmead',
+        coOfficialName: 'B.Tyali',
+      }),
+      'Sun 2026-11-15, 09:00 at Kingsmead · with B.Tyali',
+    );
+    const long = notify.officialWhenWhere({
+      dateLabel: 'Sun 2026-11-15',
+      time: '09:00',
+      venue: 'Kingsmead Cricket Stadium Main Oval, Old Fort Road, Stamford Hill, Durban',
+      coOfficialName: 'Bongani Tyali',
+    });
+    assert.equal(
+      long,
+      'Sun 2026-11-15, 09:00 at Kingsmead Cricket Stadium Main Oval, Old Fort Road, Stamford Hill, Durban',
+    );
+    assert.ok(long.length <= 100);
+  });
+
   test('WhatsApp joins once the template is registered', async () => {
     await repo.putSeries(TENANT, series('s-wa', [fx('f1')]));
     await appoint('s-wa', 'f1', { umpires: ['u-b-tyali'] });
@@ -561,6 +604,7 @@ describe('scorer notices', () => {
     assert.equal(scorerSend?.official.name, 'Sipho Scorer');
     assert.equal(scorerSend?.official.email, 'ss@example.org');
     assert.equal(scorerSend?.official.phone, '0820000009');
+    assert.equal(scorerSend?.coOfficialName, undefined, 'scorers never name a co-official');
 
     // Partial save (umpires only): the stored scorer is kept, its completed row untouched.
     await appoint('s-sc', 'f1', { umpires: ['u-b-tyali'] });

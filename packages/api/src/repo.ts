@@ -128,7 +128,7 @@ import {
   broadcastPartitionPk,
   broadcastDeliveryKey,
 } from './keys.js';
-import { PLATFORM_TENANT, TRANSFER_WINDOW_REJECTOR } from './types.js';
+import { PLATFORM_TENANT } from './types.js';
 import { refs as medicoachRefs } from './medicoach-bundle.js';
 import type {
   Club,
@@ -6171,8 +6171,10 @@ async function createPlayerWithSourcelessClearanceUnsynced(
  * whose case D (off-system source) leaves the player ACTIVE at the destination, admitting every
  * player who names a directory club. Because no player row exists, the duplicate-pending guards
  * (which key on player rows) never see this record, so re-registering once a window opens is
- * unblocked by construction; the caller's same-nk→destination short-circuit
- * (findWindowRejectedClearances) is what stops resubmissions during the closed stretch.
+ * unblocked by construction.
+ *
+ * Historical rows only: no production writer since registration while closed became a plain
+ * 409 (ADR 0017, revised 2026-10-23). Kept so tests and the erasure suite can seed such rows.
  *
  * Guards: the destination-club existence check (never write a mirror into a club mid-delete)
  * and attribute_not_exists on the canonical (a replayed id never double-writes). The dynalite
@@ -6229,26 +6231,6 @@ export async function createAutoRejectedClearance(
     throw err;
   }
   return publicClearance(rejected);
-}
-
-/**
- * Window-closed auto-rejected clearances INTO `toClubId` for this identity, newest first — read
- * from the destination's own mirror partition (no tenant-wide scan). A reopened one no longer
- * qualifies (reopen clears rejectedBy).
- */
-export async function findWindowRejectedClearances(
-  tenant: string,
-  toClubId: string,
-  naturalKey: string,
-): Promise<PlayerClearance[]> {
-  return (await listInboundForDest(tenant, toClubId))
-    .filter(
-      (x) =>
-        x.playerNaturalKey === naturalKey &&
-        x.status === 'rejected' &&
-        x.rejectedBy === TRANSFER_WINDOW_REJECTOR,
-    )
-    .sort((a, b) => (b.rejectedAt ?? '').localeCompare(a.rejectedAt ?? ''));
 }
 
 /**

@@ -46,6 +46,15 @@ import type { TransferWindow } from './types';
  * refused). Anything else — a 5xx, a network drop, a failed upload PUT — gets a human sentence
  * that says which step failed instead of a bare "internal error".
  */
+/** The structured closed-window 409 (`transferWindow` on the body), or null. */
+export function closedWindowOf(err: unknown): { nextWindow?: TransferWindow } | null {
+  if (!(err instanceof ApiError) || err.status !== 409) return null;
+  const tw = err.details?.transferWindow as
+    | { closed?: boolean; nextWindow?: TransferWindow }
+    | undefined;
+  return tw?.closed ? { ...(tw.nextWindow ? { nextWindow: tw.nextWindow } : {}) } : null;
+}
+
 export function registrationErrorMessage(err: unknown, phase: 'upload' | 'submit'): string {
   if (err instanceof ApiError && err.status === 409) {
     return 'This person is already registered, or a transfer is already in progress. Contact your club or the union office if you think this is wrong.';
@@ -126,8 +135,10 @@ export function RegisterPage() {
   const [clubs, setClubs] = useState<{ id: string; name: string; directory?: boolean }[]>([]);
   // Set when the submit opened a transfer — drives the clearance success variant.
   const [clearanceFrom, setClearanceFrom] = useState('');
-  // Set when the submit arrived outside every transfer window (recorded, not registered).
-  const [windowClosed, setWindowClosed] = useState<{ nextWindow?: TransferWindow } | null>(null);
+  // Set when a submit raced a window closing (the server's structured 409): nothing was recorded.
+  const [closedOnSubmit, setClosedOnSubmit] = useState<{ nextWindow?: TransferWindow } | null>(
+    null,
+  );
   const [d, setD] = useState(EMPTY);
   const [idFile, setIdFile] = useState<File | null>(null);
   const [error, setError] = useState('');
@@ -140,9 +151,10 @@ export function RegisterPage() {
   const seasonLabel = useSeasonLabel();
   const clearancesOn = useModule('clearances');
   const veteransOn = useModule('veterans');
-  // Server-computed (never the device clock): closed ⇒ a transfer can't complete right now.
+  // Server-computed (never the device clock): closed ⇒ no registration of any kind right now,
+  // whether or not the clearances module is on.
   const windowStatus = useTransferWindowStatus();
-  const transfersClosed = clearancesOn && !!windowStatus && !windowStatus.open;
+  const registrationClosed = !!windowStatus && !windowStatus.open;
   // Until GET /tenant settles, useVertical() falls back to cricket — gate the first paint on
   // it so a football tenant never flashes cricket fields / cricket copy.
   const tenantSettled = useTenantSettled();
@@ -356,12 +368,12 @@ export function RegisterPage() {
         guardianName: minor ? d.guardianName : undefined,
         idDocMeta: { objectKey, size: idFile.size, contentType },
       });
-      if (res?.transferWindow?.closed)
-        setWindowClosed({ nextWindow: res.transferWindow.nextWindow });
-      else if (res?.clearance?.fromClubName) setClearanceFrom(res.clearance.fromClubName);
+      if (res?.clearance?.fromClubName) setClearanceFrom(res.clearance.fromClubName);
       setState('done');
     } catch (err) {
-      setError(registrationErrorMessage(err, phase));
+      const closed = closedWindowOf(err);
+      if (closed) setClosedOnSubmit(closed);
+      else setError(registrationErrorMessage(err, phase));
     } finally {
       setBusy(false);
     }
@@ -390,28 +402,6 @@ export function RegisterPage() {
       currentClubId === clubId
         ? clubName
         : currentClubOptions.find((c) => c.id === currentClubId)?.name || clubName;
-    if (windowClosed) {
-      const next = windowClosed.nextWindow;
-      return (
-        <CenterCard>
-          <h1 className="ps-title" style={{ fontSize: 22 }}>
-            Registration recorded — transfers are closed
-          </h1>
-          <p className="ps-desc">
-            Your details have been recorded, but because you were registered at another club and
-            transfers are closed
-            {next ? (
-              <>
-                {' '}
-                until <strong>{formatDayYear(next.start)}</strong> ({next.label})
-              </>
-            ) : null}
-            , you have not been registered with {joiningClubName}. The Union office has been
-            notified.
-          </p>
-        </CenterCard>
-      );
-    }
     if (clearanceFrom) {
       // The server names the clearance's REAL source: it may match the player's directory
       // pick, or a real club it auto-routed to via the ID-number match — so classify by
@@ -452,6 +442,39 @@ export function RegisterPage() {
         </h1>
         <p className="ps-desc">
           Thanks — your registration for {joiningClubName} has been received.
+        </p>
+      </CenterCard>
+    );
+  }
+
+  if (registrationClosed || closedOnSubmit) {
+    // Before the form, so nothing can be filled in or uploaded while closed. The server
+    // refuses too (and discards a raced upload); this page says so plainly.
+    const next = closedOnSubmit ? closedOnSubmit.nextWindow : windowStatus?.next;
+    return (
+      <CenterCard>
+        <div className="ps-eyebrow">Player registration</div>
+        <h1 className="ps-title" style={{ fontSize: 22 }}>
+          Player registration is closed
+        </h1>
+        <p className="ps-desc">
+          {clubName
+            ? `${clubName} can't take new player registrations or transfers right now.`
+            : "New player registrations and transfers can't be taken right now."}{' '}
+          {next ? (
+            <>
+              The next registration window, <strong>{next.label}</strong>, runs from{' '}
+              <strong>{formatDayYear(next.start)}</strong> to{' '}
+              <strong>{formatDayYear(next.end)}</strong>.
+            </>
+          ) : (
+            <>No upcoming registration window has been announced yet.</>
+          )}
+        </p>
+        <p className="ps-desc">
+          Nothing has been submitted or recorded
+          {closedOnSubmit ? ' — any document you attached was discarded' : ''}. Please come back and
+          register once the window opens.
         </p>
       </CenterCard>
     );
@@ -664,20 +687,6 @@ export function RegisterPage() {
 
         {(clearancesOn || (veteransOn && clubs.length > 0)) && (
           <Section title={clearancesOn ? 'Registration history' : 'Veterans'}>
-            {transfersClosed && (
-              <div
-                className="reg-span"
-                role="note"
-                style={{ fontSize: 12.5, color: 'var(--gold, #E0B341)', marginBottom: 8 }}
-              >
-                Transfers between clubs are currently closed
-                {windowStatus?.next
-                  ? ` — the next window opens ${formatDayYear(windowStatus.next.start)} (${windowStatus.next.label})`
-                  : ''}
-                . If you were last registered at another club, your registration will be recorded
-                but not completed until the Union office reopens it.
-              </div>
-            )}
             {!clearancesOn ? null : clubs.length === 0 ? (
               // Older backend (no club list in the link context) — legacy free text.
               <Field

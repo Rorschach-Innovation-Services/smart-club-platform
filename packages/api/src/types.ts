@@ -380,10 +380,10 @@ export interface TenantConfig {
    */
   fixtureReminders?: FixtureRemindersConfig;
   /**
-   * Transfer windows: inclusive tenant wall-clock date ranges (ADR 0008) in which a clearance may
-   * be opened. Absent OR empty ⇒ no restriction (an empty list must never lock a tenant out).
-   * Outside every window a rep-initiated request 409s and a public registration that would open
-   * a clearance records it auto-rejected instead (see transfer-windows.ts). Operator-only:
+   * Transfer windows: inclusive tenant wall-clock date ranges (ADR 0008) in which players may be
+   * registered or transferred. Absent OR empty ⇒ no restriction (an empty list must never lock a
+   * tenant out). Outside every window every registration path 409s (RegistrationClosedError —
+   * see transfer-windows.ts). Operator-only:
    * PUT /tenant/config strips it, only PUT /platform/tenants/:slug writes it (validated by
    * validateTransferWindows, sorted by start). Served on GET /tenant and GET /tenant/config
    * together with a server-computed `transferWindowStatus`.

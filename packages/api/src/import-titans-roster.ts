@@ -471,6 +471,9 @@ async function main(): Promise<void> {
 
   // Live checks (dry-run AND confirm; never --parse-only, which must stay AWS-free).
   const repo = await import('./repo.js');
+  // Registration windows gate imports too (ADR 0017, revised): refuse before any write.
+  const { enforceCliRegistrationWindow } = await import('./transfer-windows.js');
+  enforceCliRegistrationWindow(await repo.getTenantConfig(TENANT), args.confirm);
   const liveClubs = await repo.listClubs(TENANT);
   const { duplicateNaturalKeys: liveDupKeys, report: liveDupReport } =
     await findLiveCrossClubDuplicates(writable, (naturalKey, excludeClubId) =>

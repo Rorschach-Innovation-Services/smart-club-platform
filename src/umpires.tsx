@@ -6,12 +6,14 @@ import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 
 import { Btn, Icon, Pill } from './atoms';
 import { ApiError, type OfficialsNotifyStatusRow } from './api';
 import {
+  MAX_SCORERS_PER_FIXTURE,
   MAX_UMPIRES_PER_FIXTURE,
   findUmpireDoubleBookings,
   normaliseUmpireAlias,
   type UmpireBooking,
 } from '../packages/engine/src/umpires';
-import type { CaptainsReport, Club, FixtureOfficials, Series, Umpire } from './types';
+import type { CaptainsReport, Club, FixtureOfficials, Scorer, Series, Umpire } from './types';
+import type { PersonContacts } from './FixtureManage';
 import {
   umpireRatingAverages,
   type UmpireRatingSummary,
@@ -151,14 +153,31 @@ export function noticeBadge(
 }
 
 /** True when the registry entry has neither an email nor a cell, so no notice can go out. */
-export function lacksContact(u: Umpire | undefined): boolean {
+export function lacksContact(u: { phone?: string; email?: string } | undefined): boolean {
   return !!u && !(u.email ?? '').trim() && !(u.phone ?? '').trim();
 }
 
-const NO_CONTACT_HINT =
-  'No email or cell on file — they won’t get an appointment notice. Add contacts on the Umpires page.';
+/**
+ * Where to fix a missing contact differs by register: umpires are edited on the Umpires page,
+ * but there is no scorer edit screen — a scorer's contacts are only captured when they're added.
+ */
+export function noContactHint(noun: string): string {
+  const fix =
+    noun === 'scorer'
+      ? 'Scorer contacts are captured when the scorer is added — add them as a new scorer with a phone or email.'
+      : 'Add contacts on the Umpires page.';
+  return `No email or cell on file — they won’t get an appointment notice. ${fix}`;
+}
 
-function matches(u: Umpire, q: string): boolean {
+/** What a slot needs of a register entry — umpires and scorers both fit (scorers have no aliases). */
+type OfficialEntry = Pick<
+  Umpire,
+  'id' | 'displayName' | 'fullName' | 'phone' | 'email' | 'active'
+> & {
+  aliases?: string[];
+};
+
+function matches(u: OfficialEntry, q: string): boolean {
   const n = normaliseUmpireAlias(q);
   if (!n) return true;
   return (
@@ -176,18 +195,25 @@ function UmpireSlot({
   onChange,
   onCreate,
   notice,
+  noun = 'umpire',
+  captureContacts = false,
 }: {
   label: string;
   value: string | null;
   exclude: (string | null)[];
-  umpires: Umpire[];
+  umpires: OfficialEntry[];
   onChange: (id: string | null) => void;
-  onCreate?: (displayName: string) => Promise<Umpire>;
+  onCreate?: (displayName: string, contacts?: PersonContacts) => Promise<{ id: string }>;
+  /** Ask for an optional phone/email before creating (scorers), as the hub's officials dialog does. */
+  captureContacts?: boolean;
   /** This official's appointment-notice ledger row, when one exists. */
   notice?: OfficialsNotifyStatusRow;
+  /** What the "+ Add" option calls a new register entry. */
+  noun?: string;
 }) {
   const [q, setQ] = useState('');
   const [busy, setBusy] = useState(false);
+  const [contacts, setContacts] = useState<{ phone: string; email: string } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const listId = useId();
@@ -231,7 +257,7 @@ function UmpireSlot({
             <Pill tone="muted">{badge.label}</Pill>
           </span>
         )}
-        {lacksContact(chosen) && <span className="ump-sub">{NO_CONTACT_HINT}</span>}
+        {lacksContact(chosen) && <span className="ump-sub">{noContactHint(noun)}</span>}
       </div>
     );
   }
@@ -242,6 +268,56 @@ function UmpireSlot({
     (u) => u.active && (u.aliases ?? []).includes(normaliseUmpireAlias(q)),
   );
   const canAdd = !!onCreate && q.trim().length > 1 && !exact;
+  async function create(extra?: PersonContacts) {
+    setBusy(true);
+    try {
+      const created = extra ? await onCreate!(q.trim(), extra) : await onCreate!(q.trim());
+      setQ('');
+      setContacts(null);
+      onChange(created.id);
+    } catch {
+      // The caller toasts the reason (e.g. the name already exists).
+    } finally {
+      setBusy(false);
+    }
+  }
+  if (canAdd && contacts)
+    return (
+      <div className="ump-slot">
+        <span className="ump-slot-l">{label}</span>
+        <div className="ump-options" role="group" aria-label={`New ${noun} contacts`}>
+          <div className="ump-option-sub">
+            New {noun} “{q.trim()}”. A phone or email lets them get the appointment notice.
+          </div>
+          {(['phone', 'email'] as const).map((k) => (
+            <label key={k} className="ump-slot-l">
+              {k === 'phone' ? 'Phone (optional)' : 'Email (optional)'}
+              <input
+                type={k === 'email' ? 'email' : 'tel'}
+                value={contacts[k]}
+                onChange={(e) => setContacts({ ...contacts, [k]: e.target.value })}
+              />
+            </label>
+          ))}
+          <button
+            type="button"
+            className="ump-add"
+            disabled={busy}
+            onClick={() =>
+              create({
+                ...(contacts.phone.trim() ? { phone: contacts.phone.trim() } : {}),
+                ...(contacts.email.trim() ? { email: contacts.email.trim() } : {}),
+              })
+            }
+          >
+            Add {noun}
+          </button>
+          <button type="button" disabled={busy} onClick={() => setContacts(null)}>
+            Back
+          </button>
+        </div>
+      </div>
+    );
   return (
     <div className="ump-slot">
       <label className="ump-slot-l">
@@ -295,20 +371,9 @@ function UmpireSlot({
               type="button"
               className="ump-add"
               disabled={busy}
-              onClick={async () => {
-                setBusy(true);
-                try {
-                  const created = await onCreate!(q.trim());
-                  setQ('');
-                  onChange(created.id);
-                } catch {
-                  // The caller toasts the reason (e.g. the name already exists).
-                } finally {
-                  setBusy(false);
-                }
-              }}
+              onClick={() => (captureContacts ? setContacts({ phone: '', email: '' }) : create())}
             >
-              + Add “{q.trim()}” as a new umpire
+              + Add “{q.trim()}” as a new {noun}
             </button>
           )}
         </div>
@@ -328,11 +393,21 @@ export interface UmpireCellProps {
   /** Absent ⇒ read-only (names only). */
   onSave?: (seriesId: string, fixtureId: string, umpireIds: string[]) => Promise<unknown>;
   onCreate?: (displayName: string) => Promise<Umpire>;
-  /** Loads the series' notice ledger while the picker is open; failures show no badge. */
+  /** Loads the series' notice ledger while a picker is open; failures show no badge. */
   loadNotifyStatus?: (seriesId: string) => Promise<{ rows: OfficialsNotifyStatusRow[] }>;
+  /** The scorer register. Absent with nothing saved ⇒ no scorer line (non-cricket verticals). */
+  scorers?: Scorer[];
+  /** Absent ⇒ the scorer line is read-only. Saved independently of the umpires. */
+  onSaveScorers?: (seriesId: string, fixtureId: string, scorerIds: string[]) => Promise<unknown>;
+  onCreateScorer?: (displayName: string, contacts?: PersonContacts) => Promise<Scorer>;
 }
 
-/** The fixture table's Umpires cell: names, a double-booking ⚠, and a 1–2 slot picker. */
+type OfficialKind = 'umpires' | 'scorers';
+
+const SCORER_LABELS = ['Scorer', 'Backup scorer'];
+
+/** The fixture table's Officials cell: umpire names with a double-booking ⚠, the scorers,
+ *  and one slot picker open at a time. */
 export function UmpireCell({
   series,
   fixture,
@@ -343,10 +418,17 @@ export function UmpireCell({
   onSave,
   onCreate,
   loadNotifyStatus,
+  scorers,
+  onSaveScorers,
+  onCreateScorer,
 }: UmpireCellProps) {
   const saved = fixture.officials?.umpires ?? [];
-  const [open, setOpen] = useState(false);
+  const savedScorers = fixture.officials?.scorers ?? [];
+  const showScorers = scorers !== undefined || savedScorers.length > 0;
+  const scorerRegister = scorers ?? [];
+  const [openKind, setOpenKind] = useState<OfficialKind | null>(null);
   const [notices, setNotices] = useState<OfficialsNotifyStatusRow[]>([]);
+  const open = openKind !== null;
   useEffect(() => {
     if (!open || !loadNotifyStatus) return;
     let live = true;
@@ -358,11 +440,10 @@ export function UmpireCell({
       live = false;
     };
   }, [open, loadNotifyStatus, series.id]);
-  const noticeFor = (umpireId: string | null) =>
-    umpireId
-      ? notices.find(
-          (n) => n.fixtureId === fixture.id && n.role === 'umpire' && n.umpireId === umpireId,
-        )
+  // Scorer ledger rows carry the register id in `umpireId` too.
+  const noticeFor = (role: 'umpire' | 'scorer', id: string | null) =>
+    id
+      ? notices.find((n) => n.fixtureId === fixture.id && n.role === role && n.umpireId === id)
       : undefined;
   const [slots, setSlots] = useState<(string | null)[]>([]);
   const [saving, setSaving] = useState(false);
@@ -370,23 +451,31 @@ export function UmpireCell({
     umpires.find((u) => u.id === id)?.displayName ??
     saved.find((u) => u.umpireId === id)?.name ??
     id;
+  const scorerNameOf = (id: string) =>
+    scorerRegister.find((u) => u.id === id)?.displayName ??
+    savedScorers.find((u) => u.scorerId === id)?.name ??
+    id;
   const pool = allSeries.some((s) => s.id === series.id) ? allSeries : [...allSeries, series];
   const draftIds = slots.filter((x): x is string => !!x);
-  const draftWarnings = open
-    ? doubleBookingWarnings(series.id, fixture.id, draftIds, pool, clubs, nameOf)
-    : [];
+  const draftWarnings =
+    openKind === 'umpires'
+      ? doubleBookingWarnings(series.id, fixture.id, draftIds, pool, clubs, nameOf)
+      : [];
 
-  function start() {
-    const ids = saved.map((u) => u.umpireId);
-    setSlots(Array.from({ length: MAX_UMPIRES_PER_FIXTURE }, (_, i) => ids[i] ?? null));
-    setOpen(true);
+  function start(kind: OfficialKind) {
+    const ids =
+      kind === 'umpires' ? saved.map((u) => u.umpireId) : savedScorers.map((u) => u.scorerId);
+    const max = kind === 'umpires' ? MAX_UMPIRES_PER_FIXTURE : MAX_SCORERS_PER_FIXTURE;
+    setSlots(Array.from({ length: max }, (_, i) => ids[i] ?? null));
+    setOpenKind(kind);
   }
   async function save() {
-    if (!onSave) return;
+    const write = openKind === 'scorers' ? onSaveScorers : onSave;
+    if (!write) return;
     setSaving(true);
     try {
-      await onSave(series.id, fixture.id, draftIds);
-      setOpen(false);
+      await write(series.id, fixture.id, draftIds);
+      setOpenKind(null);
     } catch {
       // Toasted by the caller; keep the picker open so the choice isn't lost.
     } finally {
@@ -394,6 +483,7 @@ export function UmpireCell({
     }
   }
 
+  const isScorers = openKind === 'scorers';
   return (
     <div className="ump-cell">
       <div className="ump-names">
@@ -419,23 +509,50 @@ export function UmpireCell({
             className="fix-action-btn ump-edit"
             title="Assign umpires"
             aria-label="Assign umpires"
-            onClick={start}
+            onClick={() => start('umpires')}
           >
             <Icon.Whistle />
           </button>
         )}
       </div>
+      {showScorers && (
+        <div className="ump-names">
+          Scorers:{' '}
+          {savedScorers.length ? (
+            savedScorers.map((u) => scorerNameOf(u.scorerId)).join(', ')
+          ) : (
+            <span className="ump-none">—</span>
+          )}
+          {onSaveScorers && !open && (
+            <button
+              type="button"
+              className="fix-action-btn ump-edit"
+              title="Assign scorers"
+              aria-label="Assign scorers"
+              onClick={() => start('scorers')}
+            >
+              <Icon.Form />
+            </button>
+          )}
+        </div>
+      )}
       {open && (
-        <div className="ump-picker" role="group" aria-label="Assign umpires">
+        <div
+          className="ump-picker"
+          role="group"
+          aria-label={isScorers ? 'Assign scorers' : 'Assign umpires'}
+        >
           {slots.map((id, i) => (
             <UmpireSlot
-              key={i}
-              label={`Umpire ${i + 1}`}
+              key={`${openKind}-${i}`}
+              label={isScorers ? (SCORER_LABELS[i] ?? `Scorer ${i + 1}`) : `Umpire ${i + 1}`}
               value={id}
               exclude={slots.filter((_, j) => j !== i)}
-              umpires={umpires}
-              onCreate={onCreate}
-              notice={noticeFor(id)}
+              umpires={isScorers ? scorerRegister : umpires}
+              onCreate={isScorers ? onCreateScorer : onCreate}
+              noun={isScorers ? 'scorer' : 'umpire'}
+              captureContacts={isScorers}
+              notice={noticeFor(isScorers ? 'scorer' : 'umpire', id)}
               onChange={(next) => setSlots((prev) => prev.map((x, j) => (j === i ? next : x)))}
             />
           ))}
@@ -448,11 +565,11 @@ export function UmpireCell({
             </div>
           )}
           <div className="ump-picker-actions">
-            <Btn tone="ghost" size="sm" onClick={() => setOpen(false)} disabled={saving}>
+            <Btn tone="ghost" size="sm" onClick={() => setOpenKind(null)} disabled={saving}>
               Cancel
             </Btn>
             <Btn tone="ink" size="sm" icon={Icon.Check} onClick={save} disabled={saving}>
-              {saving ? 'Saving…' : 'Save umpires'}
+              {saving ? 'Saving…' : isScorers ? 'Save scorers' : 'Save umpires'}
             </Btn>
           </div>
         </div>

@@ -8,14 +8,15 @@
  * the UTC day — at 23:00 SAST on a window's last day it is still open; at 00:00 SAST the next day
  * it is closed, even though UTC is still on the earlier date.
  *
- * Absent OR empty ⇒ no restriction. Windows govern TRANSFERS only: a plain first registration is
- * never window-blocked.
+ * Absent OR empty ⇒ no restriction. Windows gate ALL player registration (ADR 0017, revised
+ * 2026-10-23): while closed, no new active registration and no transfer completion on any path —
+ * public link, chair forms, operator intake, admin clearance completion, import CLIs. Queue
+ * management (reject, reassign, reopen → pending) stays allowed. Exempt by design: the veterans
+ * second-club affiliation and the remediation CLIs (resolve-duplicate-players, fix-player-name).
  */
 import { HttpError } from './auth.js';
 import { tenantDate } from './tenant-time.js';
 import type { TenantConfig, TransferWindow, TransferWindowStatus } from './types.js';
-
-export { TRANSFER_WINDOW_REJECTOR } from './types.js';
 
 // KEEP IN SYNC with the operator console's client mirror in src/platform-transfer-windows.tsx
 // (these limits + isCalendarDate + the validation rules in normaliseTransferWindows).
@@ -96,7 +97,7 @@ export function servedTransferWindowStatus(
     : undefined;
 }
 
-/** The closed status when transfers are closed for this tenant on `today`, else null. */
+/** The closed status when registration is closed for this tenant on `today`, else null. */
 export function closedTransferWindow(
   cfg: Pick<TenantConfig, 'transferWindows'> | null | undefined,
   today: string = tenantToday(),
@@ -105,38 +106,60 @@ export function closedTransferWindow(
   return status && !status.open ? status : null;
 }
 
-/**
- * The first day of the closed stretch `today` sits in: the day after the latest window that
- * ended before today, or undefined when no window has ended yet (closed since forever). Keys
- * the auto-reject duplicate short-circuit — a resubmission in the same closed stretch reuses
- * the existing rejected record; one from an earlier stretch does not.
- */
-export function closedPeriodStart(
-  windows: TransferWindow[] | undefined,
-  today: string,
-): string | undefined {
-  const ended = (windows ?? [])
-    .filter((w) => w.end < today)
-    .map((w) => w.end)
-    .sort();
-  if (ended.length === 0) return undefined;
-  const d = new Date(`${ended[ended.length - 1]}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + 1);
-  return d.toISOString().slice(0, 10);
-}
-
 const describeWindow = (w: TransferWindow) => `${w.label} (${w.start} – ${w.end})`;
 
-/** The auto-reject reason stored on the clearance (shown to both clubs and the union office). */
-export function windowClosedRejectReason(next: TransferWindow | undefined): string {
+/** The 409 message whenever a registration (new or transfer) is refused while windows are closed. */
+export function registrationClosedMessage(next: TransferWindow | undefined): string {
   return next
-    ? `Outside transfer window — next window: ${describeWindow(next)}`
-    : 'Outside transfer window — no upcoming window configured';
+    ? `player registration is closed — next window: ${describeWindow(next)}`
+    : 'player registration is closed — no upcoming registration window is configured';
 }
 
-/** The 409 message for an authenticated clearance request while transfers are closed. */
-export function transfersClosedMessage(next: TransferWindow | undefined): string {
-  return next
-    ? `transfers are closed — next window: ${describeWindow(next)}`
-    : 'transfers are closed — no upcoming transfer window is configured';
+/** The structured closed refusal: one 409 shape for every path, so clients can render it. */
+export class RegistrationClosedError extends HttpError {
+  constructor(public nextWindow: TransferWindow | undefined) {
+    super(409, registrationClosedMessage(nextWindow), {
+      transferWindow: { closed: true, ...(nextWindow ? { nextWindow } : {}) },
+    });
+    this.name = 'RegistrationClosedError';
+  }
+}
+
+/** No-op when the tenant has no windows or one is open today; throws RegistrationClosedError. */
+export function assertRegistrationOpen(
+  cfg: Pick<TenantConfig, 'transferWindows'> | null | undefined,
+  today: string = tenantToday(),
+): void {
+  const closed = closedTransferWindow(cfg, today);
+  if (closed) throw new RegistrationClosedError(closed.next);
+}
+
+/**
+ * The import/ops CLIs' refusal text when registration is closed for `cfg` today, else null. There
+ * is no override flag: the fix is to adjust the windows, so the operator does it deliberately.
+ */
+export function cliRegistrationClosedRefusal(
+  cfg: Pick<TenantConfig, 'transferWindows'> | null | undefined,
+  today: string = tenantToday(),
+): string | null {
+  const closed = closedTransferWindow(cfg, today);
+  return closed
+    ? `${registrationClosedMessage(closed.next)} — adjust the tenant's transfer windows in the platform console`
+    : null;
+}
+
+/**
+ * The write-CLI guard: under --confirm a closed tenant throws (before any write); a dry run still
+ * runs and only warns, so the operator sees the refusal coming.
+ */
+export function enforceCliRegistrationWindow(
+  cfg: Pick<TenantConfig, 'transferWindows'> | null | undefined,
+  confirm: boolean,
+  warn: (message: string) => void = console.warn,
+  today: string = tenantToday(),
+): void {
+  const refusal = cliRegistrationClosedRefusal(cfg, today);
+  if (!refusal) return;
+  if (confirm) throw new Error(refusal);
+  warn(`⚠ ${refusal} — --confirm will refuse.`);
 }

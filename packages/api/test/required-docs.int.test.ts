@@ -424,7 +424,15 @@ describe('doc routes under a custom catalogue (ADR 0009)', () => {
     assert.equal(res.status, 200);
     const club = await repo.getClub(CUSTOM_TENANT, 'bloatcc');
     const meta = club?.docMeta?.committee as Record<string, unknown>;
-    assert.deepEqual(Object.keys(meta).sort(), ['contentType', 'objectKey', 'size', 'uploadedAt']);
+    // An admin caller adds only the server-built on-behalf stamp.
+    assert.deepEqual(Object.keys(meta).sort(), [
+      'contentType',
+      'objectKey',
+      'size',
+      'uploadedAt',
+      'uploadedBy',
+      'uploadedByRole',
+    ]);
     assert.equal(meta.junk, undefined, 'arbitrary client fields must not be persisted');
     assert.equal(meta.files, undefined, 'a forged files[] must not reach the record');
   });
@@ -516,5 +524,50 @@ describe('file-delete recompute keeps a club "unavailable" declaration', () => {
     };
     assert.deepEqual(club.docMeta.facilityAgreement, { files: [], unavailable: true, at });
     assert.equal(club.docs.facilityAgreement, true);
+  });
+});
+
+describe('admin on-behalf uploads are stamped; club-rep uploads are not', () => {
+  const REP = devAuthAs('rep-stamp', 'rep@doccustom', [
+    { tenantId: CUSTOM_TENANT, role: 'rep', clubIds: ['stampcc'] },
+  ]);
+  const record = (auth: string, key: string, objectKey: string) =>
+    app.request(`/clubs/stampcc/docs/${key}`, {
+      method: 'PATCH',
+      headers: headers(auth, CUSTOM_TENANT),
+      body: JSON.stringify({ objectKey, size: 10 }),
+    });
+  before(async () => {
+    await repo.createClub(CUSTOM_TENANT, baseClub('stampcc'));
+  });
+
+  test('multi-file: the appended file entry carries the admin stamp, the rep entry does not', async () => {
+    assert.equal((await record(ADMIN, 'facilityAgreement', 'local/stamp-admin.pdf')).status, 200);
+    assert.equal((await record(REP, 'facilityAgreement', 'local/stamp-rep.pdf')).status, 200);
+    const club = (await repo.getClub(CUSTOM_TENANT, 'stampcc')) as Club;
+    const files = (club.docMeta?.facilityAgreement as { files: Record<string, unknown>[] }).files;
+    const byKey = Object.fromEntries(files.map((f) => [f.objectKey, f]));
+    assert.equal(byKey['local/stamp-admin.pdf'].uploadedBy, 'admin@doccustom');
+    assert.equal(byKey['local/stamp-admin.pdf'].uploadedByRole, 'admin');
+    assert.equal(byKey['local/stamp-rep.pdf'].uploadedBy, undefined);
+    assert.equal(byKey['local/stamp-rep.pdf'].uploadedByRole, undefined);
+  });
+
+  test('single-file: admin stamp on the record, removed again by a rep replace', async () => {
+    assert.equal((await record(ADMIN, 'committee', 'local/stamp-c1.pdf')).status, 200);
+    let meta = (await repo.getClub(CUSTOM_TENANT, 'stampcc'))?.docMeta?.committee as Record<
+      string,
+      unknown
+    >;
+    assert.equal(meta.uploadedBy, 'admin@doccustom');
+    assert.equal(meta.uploadedByRole, 'admin');
+
+    assert.equal((await record(REP, 'committee', 'local/stamp-c2.pdf')).status, 200);
+    meta = (await repo.getClub(CUSTOM_TENANT, 'stampcc'))?.docMeta?.committee as Record<
+      string,
+      unknown
+    >;
+    assert.equal(meta.uploadedBy, undefined);
+    assert.equal(meta.uploadedByRole, undefined);
   });
 });
