@@ -2851,6 +2851,8 @@ function Shell({
               )
             }
             onRevertDoc={(key) => revertComplianceFor(activeClub, [key])}
+            onUploadDoc={uploadDoc}
+            onRemoveDocFile={removeDocFile}
           />
         );
       if (view === 'affiliations')

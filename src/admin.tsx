@@ -31,6 +31,7 @@ import {
   DEFAULT_REQUIRED_DOCS,
   activeDocs,
   docMinFiles,
+  docMaxFiles,
   CQI_STRUCTURE,
   effectiveAnswers,
   genuineCqiAnswers,
@@ -136,6 +137,7 @@ import {
 } from './api';
 import { parseSupport } from './support';
 import { DocPreviewModal } from './DocPreviewModal';
+import { DocUploadButton } from './DocUploadButton';
 import {
   ClearanceCertificateModal,
   clearanceHasCertificateStatus,
@@ -5113,6 +5115,14 @@ export function AdminClubDetail({
   onDeleteClub,
   onReconfirmAffiliation,
   allSeries = [],
+  onUploadDoc = undefined,
+  onRemoveDocFile = undefined,
+}: {
+  [prop: string]: any;
+  // Admin on-behalf uploads — the server already authorizes admins on the club doc
+  // routes; absent, the rows stay read-only.
+  onUploadDoc?: (key: string, meta: object) => Promise<unknown>;
+  onRemoveDocFile?: (key: string, objectKey: string) => Promise<unknown>;
 }) {
   const vt = useVertical().terms;
   const seasonLabel = useSeasonLabel();
@@ -5534,6 +5544,29 @@ export function AdminClubDetail({
                 const canRevert = unavailableAny
                   ? unavailableOld || !!meta?.markedCompliant
                   : override || (sg ? up && sg.markedCompliant : false);
+                // Upload is offered whatever the declared/booked state — the server keeps
+                // those markers on upload.
+                const uploadCtl = !onUploadDoc ? null : sg ? (
+                  sg.files.length < docMaxFiles(d) ? (
+                    <DocUploadButton
+                      clubId={club.id}
+                      doc={d}
+                      label={d.name}
+                      onUploaded={onUploadDoc}
+                      toast={toast}
+                      buttonLabel="Add file"
+                    />
+                  ) : null
+                ) : (
+                  <DocUploadButton
+                    clubId={club.id}
+                    doc={d}
+                    label={d.name}
+                    onUploaded={onUploadDoc}
+                    toast={toast}
+                    variant={real ? 'link' : 'button'}
+                  />
+                );
                 return (
                   <div key={d.key} className={`doc-row ${up ? 'uploaded' : ''}`}>
                     <div className="doc-icon">
@@ -5583,6 +5616,25 @@ export function AdminClubDetail({
                                   >
                                     View
                                   </button>
+                                  {onRemoveDocFile && (
+                                    <>
+                                      {' · '}
+                                      <button
+                                        type="button"
+                                        onClick={() => onRemoveDocFile(d.key, f.objectKey)}
+                                        style={{
+                                          background: 'none',
+                                          border: 'none',
+                                          padding: 0,
+                                          font: 'inherit',
+                                          color: 'var(--teal-deep)',
+                                          cursor: 'pointer',
+                                        }}
+                                      >
+                                        Remove
+                                      </button>
+                                    </>
+                                  )}
                                 </span>
                               ))}
                             </span>
@@ -5632,6 +5684,7 @@ export function AdminClubDetail({
                             onClick={() => setShowDocPreview({ key: d.key })}
                           />
                         )}
+                        {uploadCtl}
                         {/* Override = compliant via admin flag; offer a lossless revert.
                           Real uploads (Approved) never show this — their files can't
                           be reverted away (safeguarding keeps its files on revert). */}
@@ -5650,12 +5703,17 @@ export function AdminClubDetail({
                           </Btn>
                         )}
                       </div>
-                    ) : d.optional ? (
-                      <Pill dot>Optional</Pill>
                     ) : (
-                      <Pill tone="coral" dot>
-                        Missing
-                      </Pill>
+                      <div className="doc-row-actions">
+                        {d.optional ? (
+                          <Pill dot>Optional</Pill>
+                        ) : (
+                          <Pill tone="coral" dot>
+                            Missing
+                          </Pill>
+                        )}
+                        {uploadCtl}
+                      </div>
                     )}
                   </div>
                 );

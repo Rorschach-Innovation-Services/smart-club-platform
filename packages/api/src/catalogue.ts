@@ -210,8 +210,10 @@ export interface DocFileEntry {
   size: number;
   contentType?: string;
   uploadedAt: string;
-  /** Operator email that committed this file (bulk-intake audit trail only). */
+  /** Who committed this file: the operator (bulk intake) or, with uploadedByRole
+   *  'admin', a tenant admin uploading on the club's behalf. */
   uploadedBy?: string;
+  uploadedByRole?: 'admin';
   /** Original filename as picked by the operator (bulk-intake audit trail only). */
   sourceName?: string;
 }

@@ -6,7 +6,7 @@
  * A `.dom.` suite because club.tsx imports leaflet, which reads `window` at module load.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { screen, within } from '@testing-library/react';
+import { screen, within, fireEvent, waitFor } from '@testing-library/react';
 import { renderWithProviders } from './test-utils';
 import { DocumentsView } from './club';
 import { AdminClubDetail } from './admin';
@@ -139,7 +139,11 @@ describe('DocumentsView — per-tenant catalogue', () => {
   });
 });
 
-function renderAdmin(club: Record<string, unknown>, onRevertDoc = vi.fn()) {
+function renderAdmin(
+  club: Record<string, unknown>,
+  onRevertDoc = vi.fn(),
+  extra: Record<string, unknown> = {},
+) {
   // AdminClubDetail's props are untyped JS-era destructuring (every handler required by
   // inference); only the ones this surface touches matter here.
   const props = {
@@ -149,6 +153,7 @@ function renderAdmin(club: Record<string, unknown>, onRevertDoc = vi.fn()) {
     requiredDocs: CATALOGUE,
     onRevertDoc,
     onMarkCompliant: vi.fn(),
+    ...extra,
   } as unknown as Parameters<typeof AdminClubDetail>[0];
   renderWithProviders(<AdminClubDetail {...props} />);
   return screen.getByText('Compliance documents').closest('.card') as HTMLElement;
@@ -184,6 +189,47 @@ describe('AdminClubDetail — compliance doc rows', () => {
       expect(within(row).queryByText('Override')).toBeNull();
       expect(within(row).queryByRole('button', { name: 'Revert' })).toBeNull();
     }
+  });
+
+  it('uploads a missing single-file doc on the club’s behalf (local mode)', async () => {
+    vi.stubEnv('VITE_LOCAL_AUTH', '1');
+    try {
+      const onUploadDoc = vi.fn().mockResolvedValue(undefined);
+      const card = renderAdmin(baseClub(), vi.fn(), { onUploadDoc, onRemoveDocFile: vi.fn() });
+      const row = within(card).getByText('Club constitution').closest('.doc-row') as HTMLElement;
+      expect(within(row).getByRole('button', { name: /upload/i })).toBeInTheDocument();
+      const input = row.querySelector('input[type="file"]') as HTMLInputElement;
+      const pdf = new File(['%PDF'], 'c.pdf', { type: 'application/pdf' });
+      fireEvent.change(input, { target: { files: [pdf] } });
+      await waitFor(() => expect(onUploadDoc).toHaveBeenCalledTimes(1));
+      const [key, meta] = onUploadDoc.mock.calls[0];
+      expect(key).toBe('constitution');
+      expect(meta).toMatchObject({ size: pdf.size, contentType: 'application/pdf' });
+      expect(meta.objectKey).toMatch(/^local\/constitution-.+\.pdf$/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('offers Add file and a per-file Remove on a multi-file doc', () => {
+    const onRemoveDocFile = vi.fn().mockResolvedValue(undefined);
+    const card = renderAdmin(
+      baseClub({ docs: { fees: true }, docMeta: { fees: { files: [file(1)] } } }),
+      vi.fn(),
+      { onUploadDoc: vi.fn(), onRemoveDocFile },
+    );
+    const row = within(card).getByText('Affiliation fees').closest('.doc-row') as HTMLElement;
+    expect(within(row).getByRole('button', { name: /add file/i })).toBeInTheDocument();
+    fireEvent.click(within(row).getByRole('button', { name: 'Remove' }));
+    expect(onRemoveDocFile).toHaveBeenCalledWith('fees', 't/club/fees-1.pdf');
+  });
+
+  it('shows no upload or remove controls without the handlers', () => {
+    const card = renderAdmin(
+      baseClub({ docs: { fees: true }, docMeta: { fees: { files: [file(1)] } } }),
+    );
+    expect(within(card).queryByRole('button', { name: /upload|add file|replace/i })).toBeNull();
+    expect(within(card).queryByRole('button', { name: 'Remove' })).toBeNull();
   });
 
   it('counts the documents KPI against non-optional docs only', () => {

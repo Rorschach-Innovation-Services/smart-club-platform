@@ -4175,6 +4175,11 @@ app.patch('/clubs/:id/docs/:key', async (c) => {
     throw new HttpError(400, 'file type not accepted for this document');
   }
   const docMeta = current.docMeta ?? {};
+  // Admin on-behalf uploads carry who did it; club-rep uploads stay unstamped.
+  const adminStamp =
+    ra.membership.role === 'admin'
+      ? { uploadedBy: ra.email, uploadedByRole: 'admin' as const }
+      : {};
   if (isMultiFileDoc(docDef, docMeta[key])) {
     // Multi-file docs (safeguarding pattern) APPEND — files coexist (no
     // delete-previous), and the doc only completes at the definition's minimum.
@@ -4193,6 +4198,7 @@ app.patch('/clubs/:id/docs/:key', async (c) => {
             size: meta.size,
             contentType: meta.contentType,
             uploadedAt: now(),
+            ...adminStamp,
           },
         ];
     const updated = await applyClubPatch(
@@ -4244,6 +4250,7 @@ app.patch('/clubs/:id/docs/:key', async (c) => {
           size: meta.size,
           contentType: meta.contentType,
           uploadedAt: now(),
+          ...adminStamp,
         },
       },
     },
