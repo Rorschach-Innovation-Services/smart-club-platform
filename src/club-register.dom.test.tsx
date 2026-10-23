@@ -442,3 +442,62 @@ describe('BulkOutcomePill — soft duplicate warning', () => {
     expect(queryByRole('note')).toBeNull();
   });
 });
+
+describe('chair registration while the transfer window is closed', () => {
+  const winter = { label: 'Winter window', start: '2027-01-01', end: '2027-01-31' };
+  const closedSeed = (status: unknown): Array<[readonly unknown[], unknown]> => [
+    [qk.tenant(), { transferWindowStatus: status }],
+  ];
+
+  it('shows the closed banner and disables Register on the single form', () => {
+    const r = renderWithProviders(
+      <RegisterPlayerForm
+        club={club}
+        leagues={leagues}
+        districts={['North', 'South']}
+        toast={vi.fn()}
+        onDone={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+      { seed: closedSeed({ open: false, next: winter }) },
+    );
+    const note =
+      'Player registration is closed — next window: Winter window (2027-01-01 – 2027-01-31)';
+    expect(r.getByRole('alert')).toHaveTextContent(note);
+    const submit = r.getByRole('button', { name: /register player/i });
+    expect(submit).toBeDisabled();
+    expect(submit).toHaveAttribute('title', note);
+  });
+
+  it('uses the no-upcoming copy and disables the quick-add submit', () => {
+    const r = renderWithProviders(
+      <QuickAddPlayersGrid
+        club={club}
+        leagues={leagues}
+        toast={vi.fn()}
+        onDone={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+      { seed: closedSeed({ open: false }) },
+    );
+    expect(r.getByRole('alert')).toHaveTextContent(
+      'Player registration is closed — no upcoming registration window is configured',
+    );
+    expect(r.getByRole('button', { name: /^register/i })).toBeDisabled();
+  });
+
+  it('shows no banner while the window is open', () => {
+    const r = renderWithProviders(
+      <RegisterPlayerForm
+        club={club}
+        leagues={leagues}
+        districts={['North', 'South']}
+        toast={vi.fn()}
+        onDone={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+      { seed: closedSeed({ open: true, current: winter }) },
+    );
+    expect(r.queryByText(/registration is closed/i)).toBeNull();
+  });
+});

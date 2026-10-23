@@ -18,6 +18,12 @@ const SC2 = `E2E Scorer B ${RUN}`;
 async function addNew(picker: Locator, slot: string, name: string, noun: string) {
   await picker.getByRole('combobox', { name: slot, exact: true }).fill(name);
   await picker.getByRole('button', { name: `+ Add “${name}” as a new ${noun}` }).click();
+  // A new scorer asks for optional contacts first (the appointment notice needs one).
+  if (noun === 'scorer') {
+    const form = picker.getByRole('group', { name: 'New scorer contacts' });
+    await form.getByLabel('Email (optional)').fill('e2e-scorer@example.org');
+    await form.getByRole('button', { name: 'Add scorer' }).click();
+  }
   await expect(picker.getByRole('button', { name: `Remove ${name}` })).toBeVisible();
 }
 

@@ -1293,7 +1293,12 @@ export function FixtureTable({
   onSaveScorers = undefined as
     | ((seriesId: string, fixtureId: string, scorerIds: string[]) => Promise<unknown>)
     | undefined,
-  onCreateScorer = undefined as ((displayName: string) => Promise<Scorer>) | undefined,
+  onCreateScorer = undefined as
+    | ((
+        displayName: string,
+        contacts?: import('./FixtureManage').PersonContacts,
+      ) => Promise<Scorer>)
+    | undefined,
 }) {
   const vt = useVertical().terms;
   const copy = useCopy();
@@ -5137,6 +5142,10 @@ export function AdminClubDetail({
   const [showChairEdit, setShowChairEdit] = useStateA(false);
   const [showNameEdit, setShowNameEdit] = useStateA(false);
   const [showRemove, setShowRemove] = useStateA(false);
+  // Per-file remove is destructive (no undo) — gate it behind the same confirm the club portal uses.
+  const [confirmRemoveFile, setConfirmRemoveFile] = useStateA<{ key: string; entry: any } | null>(
+    null,
+  );
   const [noteText, setNoteText] = useStateA('');
   const [noteBusy, setNoteBusy] = useStateA(false);
   const cqiOn = useModule('cqi');
@@ -5621,7 +5630,9 @@ export function AdminClubDetail({
                                       {' · '}
                                       <button
                                         type="button"
-                                        onClick={() => onRemoveDocFile(d.key, f.objectKey)}
+                                        onClick={() =>
+                                          setConfirmRemoveFile({ key: d.key, entry: f })
+                                        }
                                         style={{
                                           background: 'none',
                                           border: 'none',
@@ -6111,6 +6122,42 @@ export function AdminClubDetail({
           onClose={() => setShowCqiEdit(false)}
         />
       )}
+      {confirmRemoveFile &&
+        onRemoveDocFile &&
+        // Portaled for the same fadeUp-transform reason as the club portal's copy.
+        createPortal(
+          <div
+            className="fix-confirm"
+            onClick={(e) => e.target === e.currentTarget && setConfirmRemoveFile(null)}
+          >
+            <div className="fix-confirm-box">
+              <div className="fix-confirm-icon danger">
+                <Icon.Alert />
+              </div>
+              <div className="fix-confirm-title">Remove this file?</div>
+              <div className="fix-confirm-body">
+                <strong>{docFileMeta(confirmRemoveFile.entry).fileName || 'This file'}</strong> will
+                be permanently deleted — there is no undo, and it would have to be uploaded again.
+              </div>
+              <div className="fix-confirm-actions">
+                <Btn tone="outline" onClick={() => setConfirmRemoveFile(null)}>
+                  Cancel
+                </Btn>
+                <Btn
+                  tone="ink"
+                  onClick={() => {
+                    const { key, entry } = confirmRemoveFile;
+                    setConfirmRemoveFile(null);
+                    onRemoveDocFile(key, entry.objectKey);
+                  }}
+                >
+                  Yes, remove
+                </Btn>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
       {showDocPreview && (
         <DocPreviewModal
           clubId={club.id}
@@ -7938,6 +7985,12 @@ export function AdminClearances({
                     {req.origin === 'registration' && (
                       <span style={{ marginLeft: 8 }}>
                         <Pill tone="muted">Via registration</Pill>
+                      </span>
+                    )}
+                    {/* Closed window: override/issue/remind are frozen, so say why it's sitting here. */}
+                    {req.status === 'pending' && windowClosedNote && (
+                      <span style={{ marginLeft: 8 }}>
+                        <Pill tone="muted">Parked — completes when the window opens</Pill>
                       </span>
                     )}
                   </div>

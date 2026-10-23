@@ -13,6 +13,7 @@ import {
   type UmpireBooking,
 } from '../packages/engine/src/umpires';
 import type { CaptainsReport, Club, FixtureOfficials, Scorer, Series, Umpire } from './types';
+import type { PersonContacts } from './FixtureManage';
 import {
   umpireRatingAverages,
   type UmpireRatingSummary,
@@ -156,8 +157,17 @@ export function lacksContact(u: { phone?: string; email?: string } | undefined):
   return !!u && !(u.email ?? '').trim() && !(u.phone ?? '').trim();
 }
 
-const NO_CONTACT_HINT =
-  'No email or cell on file — they won’t get an appointment notice. Add contacts on the Umpires page.';
+/**
+ * Where to fix a missing contact differs by register: umpires are edited on the Umpires page,
+ * but there is no scorer edit screen — a scorer's contacts are only captured when they're added.
+ */
+export function noContactHint(noun: string): string {
+  const fix =
+    noun === 'scorer'
+      ? 'Scorer contacts are captured when the scorer is added — add them as a new scorer with a phone or email.'
+      : 'Add contacts on the Umpires page.';
+  return `No email or cell on file — they won’t get an appointment notice. ${fix}`;
+}
 
 /** What a slot needs of a register entry — umpires and scorers both fit (scorers have no aliases). */
 type OfficialEntry = Pick<
@@ -186,13 +196,16 @@ function UmpireSlot({
   onCreate,
   notice,
   noun = 'umpire',
+  captureContacts = false,
 }: {
   label: string;
   value: string | null;
   exclude: (string | null)[];
   umpires: OfficialEntry[];
   onChange: (id: string | null) => void;
-  onCreate?: (displayName: string) => Promise<{ id: string }>;
+  onCreate?: (displayName: string, contacts?: PersonContacts) => Promise<{ id: string }>;
+  /** Ask for an optional phone/email before creating (scorers), as the hub's officials dialog does. */
+  captureContacts?: boolean;
   /** This official's appointment-notice ledger row, when one exists. */
   notice?: OfficialsNotifyStatusRow;
   /** What the "+ Add" option calls a new register entry. */
@@ -200,6 +213,7 @@ function UmpireSlot({
 }) {
   const [q, setQ] = useState('');
   const [busy, setBusy] = useState(false);
+  const [contacts, setContacts] = useState<{ phone: string; email: string } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const listId = useId();
@@ -243,7 +257,7 @@ function UmpireSlot({
             <Pill tone="muted">{badge.label}</Pill>
           </span>
         )}
-        {lacksContact(chosen) && <span className="ump-sub">{NO_CONTACT_HINT}</span>}
+        {lacksContact(chosen) && <span className="ump-sub">{noContactHint(noun)}</span>}
       </div>
     );
   }
@@ -254,6 +268,56 @@ function UmpireSlot({
     (u) => u.active && (u.aliases ?? []).includes(normaliseUmpireAlias(q)),
   );
   const canAdd = !!onCreate && q.trim().length > 1 && !exact;
+  async function create(extra?: PersonContacts) {
+    setBusy(true);
+    try {
+      const created = extra ? await onCreate!(q.trim(), extra) : await onCreate!(q.trim());
+      setQ('');
+      setContacts(null);
+      onChange(created.id);
+    } catch {
+      // The caller toasts the reason (e.g. the name already exists).
+    } finally {
+      setBusy(false);
+    }
+  }
+  if (canAdd && contacts)
+    return (
+      <div className="ump-slot">
+        <span className="ump-slot-l">{label}</span>
+        <div className="ump-options" role="group" aria-label={`New ${noun} contacts`}>
+          <div className="ump-option-sub">
+            New {noun} “{q.trim()}”. A phone or email lets them get the appointment notice.
+          </div>
+          {(['phone', 'email'] as const).map((k) => (
+            <label key={k} className="ump-slot-l">
+              {k === 'phone' ? 'Phone (optional)' : 'Email (optional)'}
+              <input
+                type={k === 'email' ? 'email' : 'tel'}
+                value={contacts[k]}
+                onChange={(e) => setContacts({ ...contacts, [k]: e.target.value })}
+              />
+            </label>
+          ))}
+          <button
+            type="button"
+            className="ump-add"
+            disabled={busy}
+            onClick={() =>
+              create({
+                ...(contacts.phone.trim() ? { phone: contacts.phone.trim() } : {}),
+                ...(contacts.email.trim() ? { email: contacts.email.trim() } : {}),
+              })
+            }
+          >
+            Add {noun}
+          </button>
+          <button type="button" disabled={busy} onClick={() => setContacts(null)}>
+            Back
+          </button>
+        </div>
+      </div>
+    );
   return (
     <div className="ump-slot">
       <label className="ump-slot-l">
@@ -307,18 +371,7 @@ function UmpireSlot({
               type="button"
               className="ump-add"
               disabled={busy}
-              onClick={async () => {
-                setBusy(true);
-                try {
-                  const created = await onCreate!(q.trim());
-                  setQ('');
-                  onChange(created.id);
-                } catch {
-                  // The caller toasts the reason (e.g. the name already exists).
-                } finally {
-                  setBusy(false);
-                }
-              }}
+              onClick={() => (captureContacts ? setContacts({ phone: '', email: '' }) : create())}
             >
               + Add “{q.trim()}” as a new {noun}
             </button>
@@ -346,7 +399,7 @@ export interface UmpireCellProps {
   scorers?: Scorer[];
   /** Absent ⇒ the scorer line is read-only. Saved independently of the umpires. */
   onSaveScorers?: (seriesId: string, fixtureId: string, scorerIds: string[]) => Promise<unknown>;
-  onCreateScorer?: (displayName: string) => Promise<Scorer>;
+  onCreateScorer?: (displayName: string, contacts?: PersonContacts) => Promise<Scorer>;
 }
 
 type OfficialKind = 'umpires' | 'scorers';
@@ -478,7 +531,7 @@ export function UmpireCell({
               aria-label="Assign scorers"
               onClick={() => start('scorers')}
             >
-              <Icon.Whistle />
+              <Icon.Form />
             </button>
           )}
         </div>
@@ -498,6 +551,7 @@ export function UmpireCell({
               umpires={isScorers ? scorerRegister : umpires}
               onCreate={isScorers ? onCreateScorer : onCreate}
               noun={isScorers ? 'scorer' : 'umpire'}
+              captureContacts={isScorers}
               notice={noticeFor(isScorers ? 'scorer' : 'umpire', id)}
               onChange={(next) => setSlots((prev) => prev.map((x, j) => (j === i ? next : x)))}
             />

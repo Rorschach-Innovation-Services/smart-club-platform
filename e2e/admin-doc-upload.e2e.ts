@@ -53,12 +53,9 @@ test('an admin uploads, adds and removes compliance documents for a club', async
 
   await sg.getByRole('button', { name: 'Remove' }).first().click();
   const confirm = page.locator('.fix-confirm-box');
-  if (await confirm.isVisible().catch(() => false)) {
-    await confirm
-      .getByRole('button', { name: /Remove/ })
-      .last()
-      .click();
-  }
+  await expect(confirm).toContainText('Remove this file?');
+  await confirm.getByRole('button', { name: 'Yes, remove' }).click();
+  await expect(confirm).toHaveCount(0);
   await expect(page.locator('.toast', { hasText: 'File removed' })).toBeVisible();
   await expect(sg.getByRole('button', { name: 'View' })).toHaveCount(1);
 });

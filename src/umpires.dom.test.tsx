@@ -13,6 +13,7 @@ import {
   doubleBookingIndex,
   mergeErrorMessage,
   noticeBadge,
+  noContactHint,
 } from './umpires';
 import { ApiError } from './api';
 import type { CaptainsReport, Club, Scorer, Series, Umpire } from './types';
@@ -203,6 +204,45 @@ describe('UmpireCell', () => {
     );
     expect(screen.getByText(/Scorers:\s*Saved Name/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Assign scorers' })).toBeNull();
+  });
+
+  it('asks for optional contacts before adding a new scorer, and passes them through', async () => {
+    const onSaveScorers = vi.fn().mockResolvedValue(undefined);
+    const onCreateScorer = vi.fn(
+      async (displayName: string, contacts?: { phone?: string; email?: string }) =>
+        ({ id: 'sc-new', displayName, active: true, ...contacts }) as Scorer,
+    );
+    const { user } = renderCell({ scorers: SCORERS, onSaveScorers, onCreateScorer });
+    await user.click(screen.getByRole('button', { name: 'Assign scorers' }));
+    await user.type(screen.getByLabelText('Scorer'), 'P.Naidoo');
+    await user.click(screen.getByRole('button', { name: /add “P\.Naidoo” as a new scorer/i }));
+    expect(onCreateScorer).not.toHaveBeenCalled();
+    const form = screen.getByRole('group', { name: 'New scorer contacts' });
+    await user.type(within(form).getByLabelText('Email (optional)'), 'p@example.org');
+    await user.click(within(form).getByRole('button', { name: 'Add scorer' }));
+    expect(onCreateScorer).toHaveBeenCalledWith('P.Naidoo', { email: 'p@example.org' });
+    await user.click(screen.getByRole('button', { name: /save scorers/i }));
+    expect(onSaveScorers).toHaveBeenCalledWith('s1', 'f1', ['sc-new']);
+  });
+
+  it('points a contactless scorer at re-adding with contacts, not the Umpires page', () => {
+    expect(noContactHint('scorer')).toMatch(/captured when the scorer is added/);
+    expect(noContactHint('scorer')).not.toMatch(/Umpires page/);
+    expect(noContactHint('umpire')).toMatch(/Add contacts on the Umpires page/);
+  });
+
+  it('shows the scorer hint when an assigned scorer has no contacts', async () => {
+    const { user } = renderCell({
+      scorers: [{ id: 'sc-bare', displayName: 'Z.Bare', active: true }],
+      onSaveScorers: vi.fn().mockResolvedValue(undefined),
+      fixture: {
+        id: 'f1',
+        officials: { umpires: [], scorers: [{ scorerId: 'sc-bare', name: 'Z.Bare' }] },
+      },
+    });
+    await user.click(screen.getByRole('button', { name: 'Assign scorers' }));
+    expect(screen.getByText(/captured when the scorer is added/)).toBeTruthy();
+    expect(screen.queryByText(/Umpires page/)).toBeNull();
   });
 
   it('has no scorer line without a register or saved scorers', () => {

@@ -221,6 +221,11 @@ describe('AdminClubDetail — compliance doc rows', () => {
     const row = within(card).getByText('Affiliation fees').closest('.doc-row') as HTMLElement;
     expect(within(row).getByRole('button', { name: /add file/i })).toBeInTheDocument();
     fireEvent.click(within(row).getByRole('button', { name: 'Remove' }));
+    // Destructive: nothing happens until the confirm is accepted.
+    expect(onRemoveDocFile).not.toHaveBeenCalled();
+    const dialog = document.querySelector('.fix-confirm-box') as HTMLElement;
+    expect(dialog).toHaveTextContent('Remove this file?');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Yes, remove' }));
     expect(onRemoveDocFile).toHaveBeenCalledWith('fees', 't/club/fees-1.pdf');
   });
 

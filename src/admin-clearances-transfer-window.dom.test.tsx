@@ -116,6 +116,24 @@ describe('completion freeze while closed', () => {
     expect(within(card()).getByRole('button', { name: /Override & approve/ })).toBeEnabled();
   });
 
+  it('tags a pending clearance as parked while closed, and only then', () => {
+    setup([clearance()], { open: false, next: winter });
+    expect(within(card()).getByText('Parked — completes when the window opens')).toBeTruthy();
+  });
+
+  it('shows no parked tag while open', () => {
+    setup([clearance()], { open: true, current: winter });
+    expect(screen.queryByText(/Parked/)).toBeNull();
+  });
+
+  it('does not tag resolved clearances while closed', () => {
+    setup([clearance({ status: 'approved', clubApprovedAt: '2026-07-02T09:00:00.000Z' })], {
+      open: false,
+      next: winter,
+    });
+    expect(screen.queryByText(/Parked/)).toBeNull();
+  });
+
   it('reopen while closed warns the clearance stays pending until the window opens', async () => {
     const { user } = setup([autoRejected()], { open: false, next: winter });
     await user.click(within(card()).getByRole('button', { name: 'Reopen' }));

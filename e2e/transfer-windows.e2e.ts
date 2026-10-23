@@ -287,6 +287,8 @@ test('reopening while closed parks the player as clearance pending', async ({ pa
   await dialog.getByRole('button', { name: 'Yes, reopen clearance' }).click();
   await expect(dialog).toHaveCount(0);
   await expect(page.locator('.toast', { hasText: 'reopened' })).toBeVisible();
+  // Pending again but frozen: the card says so instead of looking actionable.
+  await expect(card).toContainText('Parked — completes when the window opens');
 
   await expect
     .poll(async () => (await getPlayerByName(request, TO.id, queuedName))?.status)
