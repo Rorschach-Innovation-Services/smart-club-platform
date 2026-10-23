@@ -23,14 +23,7 @@ import { Sentry } from './instrument.js';
 import * as repo from './repo.js';
 import { HttpError } from './auth.js';
 import { hasModule } from './features.js';
-import {
-  TRANSFER_WINDOW_REJECTOR,
-  closedPeriodStart,
-  closedTransferWindow,
-  tenantToday,
-  transfersClosedMessage,
-  windowClosedRejectReason,
-} from './transfer-windows.js';
+import { assertRegistrationOpen } from './transfer-windows.js';
 import {
   playerNaturalKey,
   resolvePlayerDob,
@@ -44,7 +37,6 @@ import type {
   PlayerClearance,
   PlayerRegistration,
   TenantConfig,
-  TransferWindow,
 } from './types.js';
 
 const now = () => new Date().toISOString();
@@ -185,15 +177,6 @@ export type ClearanceOpenedNotifier = (
   by: string,
 ) => Promise<void>;
 
-/**
- * The notices for a registration auto-rejected outside the transfer window (index.ts's
- * notifyClearanceAutoRejected: both chairs + tenant admins, capped). Never throws.
- */
-export type ClearanceAutoRejectedNotifier = (
-  tenant: string,
-  clearance: PlayerClearance,
-) => Promise<void>;
-
 export interface RegisterPlayerOptions {
   registeredVia: NonNullable<PlayerRegistration['registeredVia']>;
   /** Stamped on the row when present (portal paths); the public link leaves it absent. */
@@ -211,14 +194,6 @@ export interface RegisterPlayerOptions {
   directory?: DirectoryClub[];
   notifyClearanceOpened: ClearanceOpenedNotifier;
   prefetch?: RegisterPrefetch;
-  /**
-   * What happens when the registration would open a clearance while the tenant's transfer
-   * windows are all closed. Absent ⇒ refuse with HttpError(409) — right for the authenticated
-   * chair paths, whose user is present to read it (ADR: same asymmetry as the rep request route).
-   * 'auto-reject' ⇒ record the clearance already rejected (createAutoRejectedClearance) and
-   * notify — the anonymous public link, whose submission must not silently vanish.
-   */
-  windowClosed?: { mode: 'auto-reject'; notify: ClearanceAutoRejectedNotifier };
 }
 
 /**
@@ -230,16 +205,6 @@ export type RegisterPlayerOutcome =
   | { outcome: 'created'; player: PlayerRegistration }
   | { outcome: 'review-opened'; player: PlayerRegistration; reviewId: string }
   | { outcome: 'clearance-opened'; player: PlayerRegistration; clearance: PlayerClearance }
-  | {
-      /** Outside every transfer window: recorded rejected, NO player row written. `repeat` ⇔
-       *  an earlier submission in the same closed stretch already recorded it (nothing new
-       *  written, nobody re-notified). */
-      outcome: 'clearance-auto-rejected';
-      player: PlayerRegistration;
-      clearance: PlayerClearance;
-      nextWindow?: TransferWindow;
-      repeat: boolean;
-    }
   | { outcome: 'duplicate'; player: PlayerRegistration }
   | { outcome: 'clearance-already-open'; player: PlayerRegistration }
   | {
@@ -399,6 +364,7 @@ export function possibleExistingRegistrations(
  * With the clearances module OFF the row always lands active, noting (never touching) any prior
  * registration elsewhere — see registerWithoutClearance.
  *
+ * Throws RegistrationClosedError (409) while the tenant's windows are closed — nothing written.
  * Throws HttpError(400) for an input below the identity minimum, or a declared previous club
  * that no longer exists; repo.DestinationClubGoneError propagates (the destination was deleted
  * mid-flight). Dedup/in-flight conflicts are OUTCOMES, never throws.
@@ -478,15 +444,6 @@ export async function registerPlayerForClub(
     }
     throw err;
   }
-  if (opened?.kind === 'auto-rejected') {
-    return {
-      outcome: 'clearance-auto-rejected',
-      player,
-      clearance: opened.clearance,
-      ...(opened.nextWindow ? { nextWindow: opened.nextWindow } : {}),
-      repeat: opened.repeat,
-    };
-  }
   if (opened) return { outcome: 'clearance-opened', player, clearance: opened.clearance };
 
   // Off-system previous club: a free-text "Other" club with no on-system match, so no clearance
@@ -521,100 +478,13 @@ export async function registerPlayerForClub(
   return { outcome: 'created', player };
 }
 
-type Materialized =
-  | { kind: 'opened'; clearance: PlayerClearance }
-  | {
-      kind: 'auto-rejected';
-      clearance: PlayerClearance;
-      nextWindow?: TransferWindow;
-      repeat: boolean;
-    };
-
-/**
- * The transfer-window gate, run where a clearance is about to be opened (`player` already
- * mutated to its would-be destination shape). Returns null when transfers are open; otherwise
- * refuses (409) or records the auto-rejected clearance per `opts.windowClosed`.
- */
-async function gateClosedWindow(
-  tenant: string,
-  player: PlayerRegistration,
-  clearance: PlayerClearance,
-  opts: RegisterPlayerOptions,
-): Promise<Materialized | null> {
-  const today = tenantToday();
-  const closed = closedTransferWindow(opts.tenantConfig, today);
-  if (!closed) return null;
-  if (opts.windowClosed?.mode !== 'auto-reject') {
-    throw new HttpError(409, transfersClosedMessage(closed.next));
-  }
-  const nextWindow = closed.next;
-  // Same destination dedup the open-window path gets from its conditional put: an identity
-  // already on this roster is a duplicate (or in-flight), not a new auto-reject.
-  if (await repo.getPlayer(tenant, player.clubId, player.naturalKey)) {
-    throw new repo.PlayerExistsAtDestinationError();
-  }
-  // Resubmission during the same closed stretch: reuse the record — no second PII snapshot,
-  // no second round of notices.
-  const since = closedPeriodStart(opts.tenantConfig?.transferWindows, today);
-  const earlier = (
-    await repo.findWindowRejectedClearances(tenant, player.clubId, player.naturalKey)
-  ).find((x) => !since || (x.rejectedAt ? tenantToday(new Date(x.rejectedAt)) : '') >= since);
-  if (earlier) {
-    await discardRepeatUploads(tenant, player, earlier);
-    return { kind: 'auto-rejected', clearance: earlier, nextWindow, repeat: true };
-  }
-  const rejected = await repo.createAutoRejectedClearance(tenant, player, {
-    ...clearance,
-    status: 'rejected',
-    rejectedAt: now(),
-    rejectedBy: TRANSFER_WINDOW_REJECTOR,
-    rejectReason: windowClosedRejectReason(nextWindow),
-    rejectOutcome: 'not-registered',
-  });
-  await opts.windowClosed.notify(tenant, rejected);
-  return { kind: 'auto-rejected', clearance: rejected, nextWindow, repeat: false };
-}
+type Materialized = { kind: 'opened'; clearance: PlayerClearance };
 
 /** The basename shape of a public-link ID upload (POST /register/:clubId/id-doc/upload-url). */
-const PUBLIC_REG_UPLOAD_RE = /\/reg-[0-9a-f-]{36}-id\.(pdf|jpg|png)$/;
+export const PUBLIC_REG_UPLOAD_RE = /\/reg-[0-9a-f-]{36}-id\.(pdf|jpg|png)$/;
 
-/**
- * A closed-window RESUBMISSION reuses the earlier auto-rejected record, so the ID document the
- * public form just presign-uploaded for it is referenced by nothing — no row, no snapshot — and
- * no erasure path could ever find it. Delete it now. Only keys shaped like a public-link upload
- * are touched (the objectKey is caller-supplied on an anonymous route, so this must never become
- * a delete-anything primitive), and never one the earlier record's snapshot still names. Best
- * effort: never throws — a failure costs only an orphaned object, never the response.
- */
-async function discardRepeatUploads(
-  tenant: string,
-  player: PlayerRegistration,
-  earlier: PlayerClearance,
-): Promise<void> {
-  try {
-    // The route already asserts the key against the link club's prefix; re-assert the tenant
-    // here so this function is tenant-scoped no matter who calls it. The link club can differ
-    // from the destination, so the guard stops at the tenant segment.
-    const fresh = [player.idDocMeta?.objectKey, player.previousIdDocMeta?.objectKey].filter(
-      (k): k is string =>
-        !!k &&
-        PUBLIC_REG_UPLOAD_RE.test(k) &&
-        (k.startsWith(`${tenant}/`) || k.startsWith('local/')),
-    );
-    if (fresh.length === 0) return;
-    // The listing mirror carries no snapshot: read the canonical for the keys it still holds.
-    const raw = await repo.getClearanceRaw(tenant, earlier.fromClubId, earlier.id);
-    if (!raw) return; // can't prove the keys are unreferenced — leave them
-    const kept = new Set(repo.clearanceDocObjectKeys(raw));
-    const orphaned = [...new Set(fresh)].filter((k) => !kept.has(k));
-    if (orphaned.length) await repo.deleteUploadObjects(orphaned);
-  } catch (err) {
-    console.warn('closed-window resubmission: could not discard the fresh ID upload', err);
-  }
-}
-
-/** The write half of registerPlayerForClub (mutates `player`). Returns the clearance it opened
- *  (or auto-rejected). */
+/** The write half of registerPlayerForClub (mutates `player`). Returns the clearance it opened.
+ *  Every write branch is window-gated (assertRegistrationOpen): nothing is written while closed. */
 async function materialize(
   tenant: string,
   player: PlayerRegistration,
@@ -657,7 +527,14 @@ async function materialize(
     const priorSources = elsewhere.filter(
       (e) => e.status === 'active' || e.status === 'clearance-pending',
     );
-    await registerWithoutClearance(tenant, player, lastClubId, directory, priorSources);
+    await registerWithoutClearance(
+      tenant,
+      player,
+      lastClubId,
+      directory,
+      priorSources,
+      tenantConfig,
+    );
     return undefined;
   }
 
@@ -707,8 +584,7 @@ async function materialize(
       adminOverrideAt: null,
       version: 0,
     };
-    const gated = await gateClosedWindow(tenant, player, clearance, opts);
-    if (gated) return gated;
+    assertRegistrationOpen(tenantConfig);
     await repo.createPlayerWithClearance(tenant, player, clearance);
     // Best-effort chairman heads-up (never throws). The source club record isn't loaded on
     // this branch — the cross-club lookup returns roster rows — so fetch it FRESH just for the
@@ -772,8 +648,7 @@ async function materialize(
       adminOverrideAt: null,
       version: 0,
     };
-    const gated = await gateClosedWindow(tenant, player, clearance, opts);
-    if (gated) return gated;
+    assertRegistrationOpen(tenantConfig);
     await repo.createPlayerWithSourcelessClearance(tenant, player, clearance);
     // A directory source (null) has no club record and no chairman on file, so the notifier
     // skips the source-chair send — but the destination chair and the union office (the only
@@ -781,6 +656,7 @@ async function materialize(
     await opts.notifyClearanceOpened(tenant, tenantConfig, sourceClub, clearance, notifyBy);
     return { kind: 'opened', clearance };
   }
+  assertRegistrationOpen(tenantConfig);
   player.status = 'active';
   await repo.createPlayer(tenant, player);
   return undefined;
@@ -803,7 +679,10 @@ async function registerWithoutClearance(
   lastClubId: string,
   directory: DirectoryClub[],
   priorSources: Array<{ clubId: string; clubName: string }>,
+  tenantConfig: TenantConfig | null,
 ): Promise<void> {
+  // Windows gate registration whether or not the clearances module is on.
+  assertRegistrationOpen(tenantConfig);
   player.status = 'active';
   if (priorSources.length > 0) {
     player.lastClub = priorSources[0].clubName;

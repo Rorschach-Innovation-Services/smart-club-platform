@@ -25,7 +25,7 @@ const setDate = (el: HTMLElement, value: string) => fireEvent.change(el, { targe
 describe('TransferWindowCard', () => {
   it('starts empty ("open all year") with Save disabled until a window is added', async () => {
     const { user } = setup();
-    expect(screen.getByText(/transfers are open all year/i)).toBeInTheDocument();
+    expect(screen.getByText(/registration is open all year/i)).toBeInTheDocument();
     expect(saveBtn()).toBeDisabled();
     await user.click(screen.getByRole('button', { name: /add window/i }));
     expect(saveBtn()).toBeEnabled();

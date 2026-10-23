@@ -78,7 +78,14 @@ import {
   formatWeekdayLong,
   formatWeekdayName,
 } from './dates';
-import { useCopy, useFeature, useModule, useSeasonLabel, useVertical } from './branding';
+import {
+  useCopy,
+  useFeature,
+  useModule,
+  useSeasonLabel,
+  useTransferWindowStatus,
+  useVertical,
+} from './branding';
 import { pitchCountLabel } from './vertical';
 import {
   Icon,
@@ -6058,6 +6065,12 @@ export function ClubClearancesView({
   );
   const [highlightId, setHighlightId] = useStateC<string | null>(null);
   const [linkNoticeDismissed, setLinkNoticeDismissed] = useStateC(false);
+  // Issuing completes the transfer, which the server refuses while registration is closed.
+  const windowStatus = useTransferWindowStatus();
+  const issueClosedNote =
+    windowStatus && !windowStatus.open
+      ? `Registration is closed${windowStatus.next ? ` until ${windowStatus.next.label} opens on ${formatDayYear(windowStatus.next.start)}` : ' — no upcoming window'}`
+      : undefined;
   const linkHandledRef = useRefC(false);
   const linkMissing = clearanceLinkMissing(linkId, [...incoming, ...outgoing]);
   useEffectC(() => {
@@ -6217,16 +6230,18 @@ export function ClubClearancesView({
                     <span className="clr-ready-msg">
                       ✓ Both checks complete. Issue clearance certificate.
                     </span>
-                    <Btn
-                      tone="teal"
-                      size="sm"
-                      icon={Icon.Arrow}
-                      disabled={busy}
-                      onClick={() => onApprove(req)}
-                    >
-                      {/* Issuing also issues the transfer certificate inline (~1–3s). */}
-                      {busy ? 'Issuing certificate…' : `Issue clearance to ${req.toClubName}`}
-                    </Btn>
+                    <span title={issueClosedNote}>
+                      <Btn
+                        tone="teal"
+                        size="sm"
+                        icon={Icon.Arrow}
+                        disabled={busy || !!issueClosedNote}
+                        onClick={() => onApprove(req)}
+                      >
+                        {/* Issuing also issues the transfer certificate inline (~1–3s). */}
+                        {busy ? 'Issuing certificate…' : `Issue clearance to ${req.toClubName}`}
+                      </Btn>
+                    </span>
                   </div>
                 )}
               </div>

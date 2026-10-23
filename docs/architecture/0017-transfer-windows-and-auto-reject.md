@@ -1,6 +1,7 @@
 # ADR 0017 — Transfer windows: outside them, registrations are recorded auto-rejected
 
-**Status:** Accepted (October 2026).
+**Status:** Accepted (October 2026). **Revised 2026-10-23** — windows now gate all registration
+and the auto-reject creation mode is superseded; see [Revised (2026-10-23)](#revised-2026-10-23).
 
 ## Context
 
@@ -172,3 +173,62 @@ overrides as usual.
 - **Let tenant admins edit windows.** Decided against with the user: windows are
   operator-configured, like districts and season calendars, so the admin console shows the status
   but has no editor.
+
+<a id="revised-2026-10-23"></a>
+
+## Revised (2026-10-23)
+
+**Scope: all registration, not transfers only.** Windows now gate every way a player can be put
+on a roster or moved between clubs. Sections 2 and 3 above are superseded.
+
+**The invariant.** While a tenant's windows are closed, no NEW active registration and no
+transfer COMPLETION happens on any path. Queue-management writes — reject, reassign, reopen
+(which lands pending rows) — remain allowed. A tenant with no windows configured stays
+unrestricted. Windows apply whether or not the clearances module is on.
+
+**Auto-reject-while-closed is superseded by a plain 409.** Every refusal is one structured shape
+(`RegistrationClosedError`, `transfer-windows.ts`): `409 { error: 'player registration is closed
+— next window: <label> (<start> – <end>)', transferWindow: { closed: true, nextWindow? } }`.
+Nothing is recorded and nobody is notified. The original worry — an anonymous submission
+vanishing — is answered at the front instead: the public page shows a closed page before the
+form whenever the served status is closed, so the player is told up front rather than after
+uploading an ID document. Sections 4–5's write side (the auto-reject creation path, the
+same-stretch duplicate short-circuit, its notices and cap) is deleted. Historical
+window-rejected rows remain: they keep their badge and `not-registered` outcome, erasure still
+purges their snapshot documents, and Reopen still admits them. A clearance reopened while
+closed parks as `pending` until a window opens.
+
+**Per-action matrix while closed.**
+
+| Action                                                      | While closed                                      |
+| ----------------------------------------------------------- | ------------------------------------------------- |
+| Public link registration + its ID-document presign          | 409                                               |
+| Chair single add, quick-add, spreadsheet commit             | 409 (bulk: per-row error)                         |
+| Rep clearance request                                       | 409                                               |
+| Operator roster-intake commit                               | 409 (parse/review stay open)                      |
+| Source club issue (`action: 'issue'`)                       | 409 (fees/misconduct flag edits allowed)          |
+| Admin override (every variant, with or without certificate) | 409                                               |
+| Admin manual remind                                         | 409                                               |
+| Admin reject / reassign / reopen                            | allowed                                           |
+| ClearanceReminders cron                                     | source-chair reminders skipped; admin digest kept |
+
+**CLI policy.** `open-clearance --ignore-window` is removed; it and the roster import CLIs
+(`import-titans-roster`, `import-tuskers-roster`) and `backfill-declared-club-clearance` refuse
+under `--confirm` while closed (a dry run still runs and warns). The fix is to adjust the
+tenant's windows in the platform console, deliberately. The remediation CLIs
+(`resolve-duplicate-players`, `fix-player-name`) are exempt: they correct existing records, they
+do not register anyone.
+
+**Exempt by design.** The veterans second-club affiliation endpoints — a capture-only
+affiliation, not a registration or a transfer.
+
+**Noted edges.**
+
+- Same-club re-registration (previous club = the joining club) is now blocked while closed, like
+  any other registration.
+- A window closing between the form's GET and its POST: the server 409s, and the ID document the
+  form already uploaded is deleted best-effort (only a key under the link club's prefix shaped
+  like a public-link upload). The form lands on the same closed page.
+- Old-SPA / new-API skew: until the frontend deploys, the old public form maps every 409 to
+  its generic "already registered, or a transfer is already in progress" copy, and the old
+  portal shows the server's plain error string; neither shows the closed page.

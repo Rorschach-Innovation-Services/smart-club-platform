@@ -49,10 +49,10 @@ pending ──issue (source)──────────────► approv
 `rejected` is now **reversible**: reopen returns it to `pending`, and reject → reopen may
 repeat. `approved` and `admin-override` are terminal.
 
-A public registration that arrives while every transfer window is closed is **created already
-`rejected`** (`rejectedBy: 'system:transfer-window'`, `rejectOutcome: 'not-registered'`) and
-never passes through `pending`; reopen works on it like any other reject. See
-[Transfer windows & auto-reject](#transfer-windows-and-auto-reject).
+Historical window-closed auto-rejects (written before 2026-10-23) were **created already
+`rejected`** (`rejectedBy: 'system:transfer-window'`, `rejectOutcome: 'not-registered'`); reopen
+still works on them. Nothing writes such rows any more — a registration while windows are closed
+is refused with a 409. See [Transfer windows](#transfer-windows-and-auto-reject).
 
 ### Player status
 
@@ -74,10 +74,11 @@ never read.
 - `400` — `fromClubId` and an `idNumber` (or `playerNaturalKey`) required; source and
   destination the same club.
 - `404` — club not found; player not found at source club.
-- `409` — a clearance for this player is already pending; destination club gone; transfers are
-  closed (`transfers are closed — next window: <label> (<start> – <end>)`, or `transfers are
-closed — no upcoming transfer window is configured`). The window check runs **first**, before
-  the clubs or the player are loaded, so it wins over every other 409 while transfers are closed.
+- `409` — a clearance for this player is already pending; destination club gone; registration
+  is closed (`player registration is closed — next window: <label> (<start> – <end>)`, or
+  `player registration is closed — no upcoming registration window is configured`, with
+  `transferWindow: { closed: true, nextWindow? }` in the body). The window check runs **first**,
+  before the clubs or the player are loaded, so it wins over every other 409 while closed.
 - `201` — the created clearance.
 
 Best-effort: the source chairman, the destination chairman and the tenant admins are told
@@ -188,9 +189,11 @@ source rep is not asked to re-tick). Reject → reopen may repeat.
 Best-effort: **both** chairs are notified (`notifyClearanceReopened`), but with **different
 content** — see [Notifications](#notifications).
 
-A window-closed auto-reject reopens through this same route, and reopen is **not**
-window-gated — it is how the union office admits a transfer while transfers are closed. See the
-`window-closed` entries in the [reopen contract](#reopen-contract).
+A historical window-closed auto-reject reopens through this same route, and reopen is **not**
+window-gated — it only returns the clearance to `pending`. A clearance reopened while windows
+are closed stays pending until a window opens: override, the source club's issue and the manual
+remind all 409 while closed. See the `window-closed` entries in the
+[reopen contract](#reopen-contract).
 
 ### `POST /admin/clearances/:cid/remind` — nudge the source chair (admin)
 
@@ -427,8 +430,7 @@ club), `'clearance-approved'`, `'clearance-rejected'`, `'clearance-reopened'` (b
 | **Created** via a chair bulk route (`/players/batch`, `/roster/commit`)  | as above, per clearance                                                                                        | as above, per clearance                                                                           | **one summary email per admin per request**, listing every clearance it opened (capped ones included) | as above                                                                                                                |
 | **Issued / overridden**                                                  | email                                                                                                          | email                                                                                             | —                                                                                                     | `clearance-approved`, both clubs                                                                                        |
 | **Rejected** (admin)                                                     | email, worded by `rejectOutcome`                                                                               | email                                                                                             | —                                                                                                     | `clearance-rejected`, both clubs                                                                                        |
-| **Auto-rejected** (window closed)                                        | email, `not-registered` copy (on-system source only)                                                           | email                                                                                             | email ("Clearance auto-rejected — {player}", with the reason)                                         | `clearance-rejected`, both clubs, `by: 'system:transfer-window'`                                                        |
-| **Reopened** (incl. an auto-reject)                                      | pending email with reopened preamble + pending WhatsApp                                                        | email only; WA recorded `skipped`                                                                 | —                                                                                                     | `clearance-reopened`, both clubs                                                                                        |
+| **Reopened** (incl. a historical auto-reject)                            | pending email with reopened preamble + pending WhatsApp                                                        | email only; WA recorded `skipped`                                                                 | —                                                                                                     | `clearance-reopened`, both clubs                                                                                        |
 | **Manual remind**                                                        | email + WhatsApp (WA when `whatsappInvites` is on); bypasses the cap                                           | —                                                                                                 | —                                                                                                     | `clearance-reminder`, key `clearance-<id>-reminder-<date>-<channel>`                                                    |
 | **Cron remind**                                                          | email + WhatsApp (WA only when `whatsappInvites` is on **and** the template's registry status is `registered`) | —                                                                                                 | one digest email per admin per tenant per run                                                         | `clearance-reminder` + INVITE# marker                                                                                   |
 
@@ -451,14 +453,8 @@ Notes on the matrix:
   summary lists capped clearances too: it is one email per authenticated request, which already
   bounds it. The admin list is resolved once per request (`adminEmailsProvider`, a per-request
   memo), with the profile reads run in parallel.
-- **Auto-reject has its own cap.** `notifyClearanceResolved` is normally uncapped (resolutions
-  are authenticated admin actions), but the auto-reject fires from the **anonymous** register
-  route. The wrapper (`notifyClearanceAutoRejected`) counts today's (UTC) `clearance-rejected`
-  email rows by `system:transfer-window` on the **destination** club; at 3 it skips the chair
-  and admin notices entirely (a log line, no comm-log rows). If the destination club can't be
-  read, the check **fails closed**: no notices, and the error goes to Sentry. The auto-rejected
-  clearance is still recorded. The primary guard is upstream: a resubmission in the same closed
-  stretch never reaches the notifier at all.
+- **No auto-reject notices.** Since 2026-10-23 a registration while windows are closed is a
+  plain 409: nothing is recorded and nobody is notified.
 
 ### ClearanceReminders cron
 
@@ -529,69 +525,48 @@ key is `clearance-<id>-reopened-v<version>-<channel>`; it bypasses the daily cap
 
 Operators may set `TenantConfig.transferWindows` (inclusive SAST date ranges; absent or `[]` ⇒
 unrestricted — see [tenant.md](tenant.md) and
-[ADR 0017](../architecture/0017-transfer-windows-and-auto-reject.md)). When windows are
-configured and none contains today's tenant date, **transfers are closed**. Windows govern
-transfers only: a plain first registration (no previous club, not registered elsewhere) is never
-blocked, and with the `clearances` module off there are no windows to apply.
+[ADR 0017](../architecture/0017-transfer-windows-and-auto-reject.md), revised 2026-10-23). When
+windows are configured and none contains today's tenant date, **player registration is closed**:
+no new active registration and no transfer completion on any path, whether or not the
+`clearances` module is on. Queue management (reject, reassign, reopen → pending) stays allowed.
 
-| Path                                                             | When closed                                                      |
-| ---------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `POST /register/:clubId` (public link, anonymous)                | clearance created **auto-rejected**; `201` with `transferWindow` |
-| `POST /clubs/:id/clearances` (rep)                               | `409 transfers are closed — …`                                   |
-| Chair portal registration (`POST /clubs/:id/players`, bulk rows) | the same 409 (bulk: per-row `error`)                             |
-| `open-clearance.ts` CLI                                          | warns; refuses unless `--ignore-window`                          |
-
-On the registration paths the window gate runs where a clearance is about to open, **after**
-the pending-elsewhere check (a player already mid-transfer still gets the usual
-`already registered or a transfer is already in progress` 409) and after a destination-roster
-check (an identity already at the destination is reported as a duplicate, not auto-rejected).
-
-### The auto-rejected clearance
-
-`createAutoRejectedClearance` writes the canonical (with `gsi1`) + mirror only — **no player
-rows, no status flips, no count changes** — so the player is not registered anywhere by it, and
-the source club's row (if any) stays `active`. Fields:
+Every refusal is the same structured 409 (`RegistrationClosedError`):
 
 ```
-status:        'rejected'
-rejectedAt:    <now>
-rejectedBy:    'system:transfer-window'
-rejectReason:  'Outside transfer window — next window: <label> (<start> – <end>)'
-               | 'Outside transfer window — no upcoming window configured'
-rejectOutcome: 'not-registered'
-rejectSnapshot (canonical only): { case: 'window-closed', pendingPlayer: <would-be destination row> }
+409 → { error: 'player registration is closed — next window: <label> (<start> – <end>)',
+        transferWindow: { closed: true, nextWindow?: { label, start, end } } }
 ```
 
-`pendingPlayer` is the full `clearance-pending` row the registration would have written,
-ID-document metadata included; `clearanceDocObjectKeys` collects its `idDocMeta` /
-`previousIdDocMeta` object keys so erasure purges them. The usual
-[snapshot containment](#snapshot-containment--retention) applies: it never reaches the mirror or
-an HTTP response. Create-then-reject was deliberately not used — reject case D would leave a
-directory-source registrant **active** at the destination.
+| Path                                                                        | When closed                                                 |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `POST /register/:clubId` (public link) + its `id-doc/upload-url` presign    | 409; nothing recorded, nobody notified; uploaded ID deleted |
+| `POST /clubs/:id/clearances` (rep)                                          | 409                                                         |
+| Chair portal registration (`POST /clubs/:id/players`, bulk, roster commit)  | 409 (bulk: per-row `error`)                                 |
+| `POST /platform/tenants/:slug/roster-intake/commit` (operator)              | 409 (parse/review routes stay open)                         |
+| `PATCH /clubs/:id/clearances/:cid` `action: 'issue'` (source club)          | 409 (flag edits still allowed)                              |
+| `POST /admin/clearances/:cid/override` (every variant)                      | 409                                                         |
+| `POST /admin/clearances/:cid/remind`                                        | 409                                                         |
+| `reject` / `reassign` / `reopen`                                            | allowed                                                     |
+| ClearanceReminders cron                                                     | source-chair reminders skipped; admin digest still sent     |
+| `open-clearance.ts`, roster import CLIs, `backfill-declared-club-clearance` | refuse under `--confirm` (no override flag); dry runs warn  |
 
-**Resubmissions.** Before creating, the core looks for a window-rejected clearance for the same
-identity into the same destination (`findWindowRejectedClearances`, destination mirror
-partition) rejected within the **current closed stretch** (from the day after the latest window
-that ended). If found, the existing record is returned (`repeat`): nothing is written, nobody is
-re-notified, and the 201 is identical. The ID document the form just uploaded for the
-resubmission is referenced by nothing, so it is deleted best-effort (only a public-link
-`reg-<uuid>-id.<ext>` key, and never one the earlier record's snapshot still names). A reopened clearance no longer matches (reopen clears
-`rejectedBy`), and a registration once a window opens is unblocked by construction — no player
-row exists for the duplicate-pending guards to see.
+There is no `--ignore-window` override: to register outside a window, adjust the tenant's
+transfer windows in the platform console. Exempt by design: the veterans second-club
+affiliation endpoints and the remediation CLIs (`resolve-duplicate-players`, `fix-player-name`).
 
-### `POST /register/:clubId` response when closed
+On the public route the presign is refused too, so normally no ID document is uploaded. When a
+window closes between the presign and the submit, the submit's 409 deletes the uploaded object
+best-effort — only a key under the link club's own prefix shaped like a public-link upload
+(`reg-<uuid>-id.<ext>`), never an arbitrary caller-supplied key.
 
-```
-201 → { ok: true, transferWindow: { closed: true, nextWindow?: { label, start, end } } }
-```
+### Historical auto-rejected clearances
 
-`nextWindow` is absent when no later window is configured. The source club's hourly
-registration quota is **not** charged (nothing landed in its queue). The public form shows its
-"recorded, but transfers are closed" copy from this payload, and its pre-submit notice from the
-server-computed `transferWindowStatus` on `GET /tenant`.
-
-The console lists the clearance with an "Auto-rejected — window closed" badge and a
-`not-registered` outcome; **Reopen** admits it (see the [reopen contract](#reopen-contract)).
+Before 2026-10-23 a public registration while closed was recorded as an auto-rejected clearance
+(`createAutoRejectedClearance`: canonical + mirror only, no player rows; `rejectedBy:
+'system:transfer-window'`, `rejectOutcome: 'not-registered'`, snapshot `{ case: 'window-closed',
+pendingPlayer }`). No production code writes these any more. Existing rows keep their
+"Auto-rejected — window closed" badge, erasure still purges their snapshot ID documents, and
+**Reopen** still admits them (see the [reopen contract](#reopen-contract)).
 
 <a id="disposing-of-junk"></a>## Disposing of junk
 

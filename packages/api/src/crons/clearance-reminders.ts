@@ -40,6 +40,9 @@
  * on). NOTIFY_DRY_RUN is honoured by the senders themselves; markers and comm-log rows are still
  * written so a dry run is observable end to end.
  *
+ * While the tenant's transfer windows are closed, source-chair reminders are skipped (the chair
+ * cannot complete the transfer); the admin digest's chairless / no-contact lines still go out.
+ *
  * Deliberately does NOT import index.ts (see crons/fixture-reminders.ts for why).
  */
 import '../instrument.js'; // MUST be first — inits Sentry before any client is built
@@ -68,6 +71,7 @@ import { canonicalWebOrigin } from '../origins.js';
 import { clearanceAdminLink, clearanceChairLink } from '../clearance-links.js';
 import { orgCopy } from '../branding.js';
 import { tenantDate } from '../tenant-time.js';
+import { closedTransferWindow } from '../transfer-windows.js';
 import type { Channel, Club, PlayerClearance, TenantConfig } from '../types.js';
 
 /** Who the comm-log rows name as the sender. */
@@ -219,6 +223,10 @@ export async function runClearanceReminders(
       if (pending.length === 0) continue;
       const channels = reminderChannels(cfg, deps.whatsappTemplateStatus);
       const origin = deps.portalLinkFor(tenant);
+      // While the tenant's windows are closed no chair can complete a transfer (ADR 0017,
+      // revised), so chair reminders are suppressed — checked before any marker is claimed.
+      // The admin digest (chairless / no-contact lines) still goes out so the office keeps sight.
+      const windowClosed = !!closedTransferWindow(cfg, today);
       const clubs = new Map<string, Club | null>();
       const clubOf = async (id: string): Promise<Club | null> => {
         if (!clubs.has(id)) clubs.set(id, await repo.getClub(tenant, id));
@@ -260,6 +268,7 @@ export async function runClearanceReminders(
             digestMentions.push({ clearance, clubId: fromClub.id });
             continue;
           }
+          if (windowClosed) continue;
           if (
             !isReminderDue(
               clearance,

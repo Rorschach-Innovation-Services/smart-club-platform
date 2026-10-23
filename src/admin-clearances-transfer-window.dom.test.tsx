@@ -1,7 +1,8 @@
 /**
  * AdminClearances under transfer windows: the server-computed open/closed banner, the
- * "Auto-rejected — window closed" badge on clearances the system rejected outside a window, and
- * the 'not-registered' outcome wording (the player was never put on the destination roster).
+ * completion freeze while closed (override + remind disabled, reopen warns it stays pending),
+ * the "Auto-rejected — window closed" badge on historical window rejects, and the
+ * 'not-registered' outcome wording (the player was never put on the destination roster).
  */
 import { describe, it, expect, vi } from 'vitest';
 import { screen, within } from '@testing-library/react';
@@ -72,28 +73,55 @@ const card = () => screen.getByText(/sipho/i).closest('.clr-card') as HTMLElemen
 describe('transfer-window banner', () => {
   it('says nothing when the tenant has no windows (status absent)', () => {
     setup([]);
-    expect(screen.queryByText(/transfers (open|closed)/i)).toBeNull();
+    expect(screen.queryByText(/registration (open|closed)/i)).toBeNull();
   });
 
-  it('shows the current window while transfers are open', () => {
+  it('shows the current window while registration is open', () => {
     setup([], { open: true, current: winter });
-    expect(screen.getByText(/transfers open/i)).toHaveTextContent(
-      'Transfers open — Winter until 30 Nov 2026',
+    expect(screen.getByText(/registration open/i)).toHaveTextContent(
+      'Registration open — Winter until 30 Nov 2026',
     );
   });
 
-  it('names the next window while transfers are closed', () => {
+  it('names the next window while closed and says all registration is refused', () => {
     setup([], { open: false, next: winter });
-    const banner = screen.getByText(/transfers closed/i);
-    expect(banner).toHaveTextContent('Transfers closed — next window: Winter from 1 Nov 2026');
-    expect(banner).toHaveTextContent(/registrations naming another club are auto-rejected/);
+    const banner = screen.getByText(/registration closed/i);
+    expect(banner).toHaveTextContent('Registration closed — next window: Winter from 1 Nov 2026');
+    expect(banner).toHaveTextContent(/No player can be registered or transferred/);
+    expect(banner).not.toHaveTextContent(/auto-rejected/);
   });
 
   it('says when no window is coming', () => {
     setup([], { open: false });
-    expect(screen.getByText(/transfers closed/i)).toHaveTextContent(
-      'Transfers closed — no upcoming window',
+    expect(screen.getByText(/registration closed/i)).toHaveTextContent(
+      'Registration closed — no upcoming window',
     );
+  });
+});
+
+describe('completion freeze while closed', () => {
+  it('disables Override & approve with a tooltip naming the window', () => {
+    setup([clearance()], { open: false, next: winter });
+    const btn = within(card()).getByRole('button', { name: /Override & approve/ });
+    expect(btn).toBeDisabled();
+    expect(btn.closest('span')).toHaveAttribute(
+      'title',
+      'Registration is closed until Winter opens on 1 Nov 2026',
+    );
+    expect(within(card()).getByRole('button', { name: 'Reject' })).toBeEnabled();
+  });
+
+  it('leaves Override & approve enabled while open', () => {
+    setup([clearance()], { open: true, current: winter });
+    expect(within(card()).getByRole('button', { name: /Override & approve/ })).toBeEnabled();
+  });
+
+  it('reopen while closed warns the clearance stays pending until the window opens', async () => {
+    const { user } = setup([autoRejected()], { open: false, next: winter });
+    await user.click(within(card()).getByRole('button', { name: 'Reopen' }));
+    expect(
+      screen.getByText(/so it stays pending — it cannot be issued or overridden/),
+    ).toBeInTheDocument();
   });
 });
 

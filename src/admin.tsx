@@ -7654,10 +7654,10 @@ export function AdminTeamAccessView({
 export function TransferWindowBanner({ status }: { status?: TransferWindowStatus }) {
   if (!status) return null;
   const text = status.open
-    ? `Transfers open${status.current ? ` — ${status.current.label} until ${formatDayYear(status.current.end)}` : ''}`
+    ? `Registration open${status.current ? ` — ${status.current.label} until ${formatDayYear(status.current.end)}` : ''}`
     : status.next
-      ? `Transfers closed — next window: ${status.next.label} from ${formatDayYear(status.next.start)}`
-      : 'Transfers closed — no upcoming window';
+      ? `Registration closed — next window: ${status.next.label} from ${formatDayYear(status.next.start)}`
+      : 'Registration closed — no upcoming window';
   return (
     <div
       role="status"
@@ -7672,7 +7672,7 @@ export function TransferWindowBanner({ status }: { status?: TransferWindowStatus
     >
       {text}
       {!status.open &&
-        '. Clubs cannot request clearances; registrations naming another club are auto-rejected.'}
+        '. No player can be registered or transferred: new registrations, clearance requests, issuing and overrides are refused until a window opens. Rejecting, reallocating and reopening still work.'}
     </div>
   );
 }
@@ -7697,6 +7697,12 @@ export function AdminClearances({
   clearancesLoaded = true,
 }) {
   const [confirm, setConfirm] = useStateA<ClearanceConfirmState | null>(null);
+  // While closed, actions that complete a transfer (override, remind the source to issue) are
+  // refused server-side (ADR 0017, revised) — disable them and say why.
+  const windowClosedNote =
+    transferWindowStatus && !transferWindowStatus.open
+      ? `Registration is closed${transferWindowStatus.next ? ` until ${transferWindowStatus.next.label} opens on ${formatDayYear(transferWindowStatus.next.start)}` : ' — no upcoming window'}`
+      : undefined;
   // Optional note the admin attaches to a rejection (shown to both clubs).
   const [reason, setReason] = useStateA('');
   // Override dialog: issue a transfer certificate (default). Unticked for a disposal override.
@@ -7980,9 +7986,15 @@ export function AdminClearances({
                     </div>
                   </div>
                   {onRemind && !offSystem && (
-                    <Btn tone="outline" disabled={busy} onClick={() => onRemind(req)}>
-                      {busy && busyAction === 'remind' ? 'Sending…' : 'Send reminder'}
-                    </Btn>
+                    <span title={windowClosedNote}>
+                      <Btn
+                        tone="outline"
+                        disabled={busy || !!windowClosedNote}
+                        onClick={() => onRemind(req)}
+                      >
+                        {busy && busyAction === 'remind' ? 'Sending…' : 'Send reminder'}
+                      </Btn>
+                    </span>
                   )}
                   {canReallocate && (
                     <Btn
@@ -8040,33 +8052,35 @@ export function AdminClearances({
                       {busy && busyAction === 'reject' ? 'Rejecting…' : 'Reject'}
                     </Btn>
                   </span>
-                  <Btn
-                    tone="teal"
-                    icon={Icon.Arrow}
-                    disabled={busy}
-                    onClick={() => {
-                      setReason('');
-                      setIssueCert(true);
-                      setConfirm({
-                        kind: 'override',
-                        title: 'Issue this clearance?',
-                        req,
-                        body: sourcelessKnown
-                          ? `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, on ${req.fromClubName}'s behalf — even though ${req.fromClubName} has no record of them. If this registration should not exist at all, issue it and then remove the player from ${req.toClubName}'s roster (Clubs → ${req.toClubName} → Players). Say which you are doing: the reason is shown to both clubs, and recorded against your name for the union's record.`
-                          : `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, on ${req.fromClubName}'s behalf. Both clubs' chairs will be notified by email where an address is on file.`,
-                        // Keep the dialog open until the request settles. Close on success AND
-                        // on 'conflict' — the toast already told the admin and the card has
-                        // refetched, so a retry would only 409 again. Stay open only for a
-                        // transient 'failed' so the admin can retry.
-                        onYes: async (note, issue) => {
-                          const result = await onOverride(req, note, issue !== false);
-                          if (result !== 'failed') setConfirm(null);
-                        },
-                      });
-                    }}
-                  >
-                    {busy && busyAction === 'override' ? 'Issuing…' : 'Override & approve'}
-                  </Btn>
+                  <span title={windowClosedNote}>
+                    <Btn
+                      tone="teal"
+                      icon={Icon.Arrow}
+                      disabled={busy || !!windowClosedNote}
+                      onClick={() => {
+                        setReason('');
+                        setIssueCert(true);
+                        setConfirm({
+                          kind: 'override',
+                          title: 'Issue this clearance?',
+                          req,
+                          body: sourcelessKnown
+                            ? `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, on ${req.fromClubName}'s behalf — even though ${req.fromClubName} has no record of them. If this registration should not exist at all, issue it and then remove the player from ${req.toClubName}'s roster (Clubs → ${req.toClubName} → Players). Say which you are doing: the reason is shown to both clubs, and recorded against your name for the union's record.`
+                            : `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, on ${req.fromClubName}'s behalf. Both clubs' chairs will be notified by email where an address is on file.`,
+                          // Keep the dialog open until the request settles. Close on success AND
+                          // on 'conflict' — the toast already told the admin and the card has
+                          // refetched, so a retry would only 409 again. Stay open only for a
+                          // transient 'failed' so the admin can retry.
+                          onYes: async (note, issue) => {
+                            const result = await onOverride(req, note, issue !== false);
+                            if (result !== 'failed') setConfirm(null);
+                          },
+                        });
+                      }}
+                    >
+                      {busy && busyAction === 'override' ? 'Issuing…' : 'Override & approve'}
+                    </Btn>
+                  </span>
                 </div>
               )}
 
@@ -8143,15 +8157,23 @@ export function AdminClearances({
                       size="sm"
                       style={{ marginLeft: 'auto' }}
                       disabled={busy}
+                      title={
+                        windowClosedNote
+                          ? `${windowClosedNote}: a reopened clearance stays pending until the window opens`
+                          : undefined
+                      }
                       onClick={() => {
                         setConfirm({
                           kind: 'reopen',
                           title: 'Reopen this clearance?',
                           req,
                           body:
-                            req.rejectOutcome === 'not-registered'
+                            (req.rejectOutcome === 'not-registered'
                               ? `${req.playerName} is placed on ${req.toClubName}'s roster as clearance pending, and ${req.fromClubName}'s chair is asked to decide. It can be rejected again afterwards.`
-                              : `${req.playerName}'s registration goes back to how it was before the rejection, and ${req.fromClubName}'s chair is notified again. It can be rejected again afterwards.`,
+                              : `${req.playerName}'s registration goes back to how it was before the rejection, and ${req.fromClubName}'s chair is notified again. It can be rejected again afterwards.`) +
+                            (windowClosedNote
+                              ? ` ${windowClosedNote}, so it stays pending — it cannot be issued or overridden until the window opens.`
+                              : ''),
                           // Keep the dialog open until the request settles; close on success and
                           // on 'conflict' (already refetched), stay open only on 'failed'.
                           onYes: async () => {

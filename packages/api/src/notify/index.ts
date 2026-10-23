@@ -17,7 +17,6 @@ import {
   sendClearanceOpenedDestEmail,
   sendClearanceOpenedAdminEmail,
   sendClearanceOpenedAdminSummaryEmail,
-  sendClearanceAutoRejectedAdminEmail,
   sendClearanceReminderDigestEmail,
   sendVeteransRequestEmail,
   sendVeteransRequestResolvedEmail,
@@ -686,22 +685,6 @@ export async function sendClearanceAdminSummaryNotice(args: {
   const { to, ...copy } = args;
   return sendAdminEmails(to, (address) =>
     sendClearanceOpenedAdminSummaryEmail({ to: address, ...copy }),
-  );
-}
-
-/** Tell each tenant admin a registration was auto-rejected outside the transfer window. Email only. */
-export async function sendClearanceAutoRejectedAdminNotice(args: {
-  to: string[];
-  fromClubName: string;
-  playerName: string;
-  toClubName: string;
-  reason: string;
-  /** Deep link to the clearance in the admin console; optional. */
-  adminLink?: string;
-}): Promise<{ results: SendResult[] }> {
-  const { to, ...copy } = args;
-  return sendAdminEmails(to, (address) =>
-    sendClearanceAutoRejectedAdminEmail({ to: address, ...copy }),
   );
 }
 

@@ -1,9 +1,9 @@
 /**
  * Operator console: per-tenant transfer windows (`TenantConfig.transferWindows`).
  *
- * Inclusive date ranges in which clubs may open clearances. Outside every window a rep's request
- * is refused and a public registration that names another club is recorded as an auto-rejected
- * clearance the union office can reopen. No windows ⇒ no restriction. Same shape as
+ * Inclusive date ranges in which players may be registered or transferred. Outside every window
+ * ALL registration is closed on every path (ADR 0017, revised): new registrations, clearance
+ * requests, issuing and overrides are refused. No windows ⇒ no restriction. Same shape as
  * ClearanceCertificateCard: local draft, dirty tracking, the WHOLE list saved in one write.
  * `PUT /platform/tenants/:slug` re-validates (≤12, label 1–60, real dates, start ≤ end) and
  * stores the list sorted by start.
@@ -109,11 +109,11 @@ export function TransferWindowCard({
   return (
     <Card
       title="Transfer windows"
-      sub="Dates on which clubs may open clearances. Outside every window, rep requests are refused and public registrations naming another club are recorded as auto-rejected (the union office can reopen them). No windows means transfers are always open."
+      sub="Dates on which players may be registered or transferred. Outside every window, ALL player registration is closed: new registrations, transfers, clearance issuing and overrides are refused on every path, including imports. No windows means registration is always open."
     >
       {rows.length === 0 && (
         <p style={{ ...HINT, marginTop: 0, marginBottom: 12 }}>
-          No windows — transfers are open all year.
+          No windows — registration is open all year.
         </p>
       )}
       {rows.map((r, i) => (

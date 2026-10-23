@@ -44,6 +44,7 @@ import { randomUUID } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import * as repo from './repo.js';
+import { enforceCliRegistrationWindow } from './transfer-windows.js';
 import { playerKey, clearanceKey, inboundClearanceKey, clearanceGsi1 } from './keys.js';
 import { tableName } from './env.js';
 import type { PlayerClearance, PlayerRegistration, Club } from './types.js';
@@ -215,6 +216,8 @@ async function main() {
   if (!tenant || tenant.startsWith('-')) {
     throw new Error('usage: backfill-declared-club-clearance <tenant> [--confirm]');
   }
+  // Opening a clearance is a registration: refused under --confirm while windows are closed.
+  enforceCliRegistrationWindow(await repo.getTenantConfig(tenant), confirm);
 
   const affected = await findAffected(tenant);
   console.log(

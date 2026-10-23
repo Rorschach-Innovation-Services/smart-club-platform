@@ -28,7 +28,6 @@ import {
   clearanceOpenedDestEmailContent,
   clearanceOpenedAdminEmailContent,
   clearanceOpenedAdminSummaryEmailContent,
-  clearanceAutoRejectedAdminEmailContent,
   clearanceReminderDigestEmailContent,
 } from '../src/notify/email.js';
 import { orgCopy } from '../src/branding.js';
@@ -484,21 +483,6 @@ describe('clearance notice deep links', () => {
       without.text,
       /listed under Clearances in the admin console\.\n\nThe union office platform$/,
     );
-  });
-
-  test('admin auto-rejected: per-clearance admin link after the reason, none without', () => {
-    const base = { ...adminCopy, reason: 'transfers are closed' };
-    const withLink = clearanceAutoRejectedAdminEmailContent({ ...base, adminLink: ADMIN_LINK });
-    assert.ok(
-      withLink.text.includes(
-        `Reason: transfers are closed\n\nReview it here: ${ADMIN_LINK}\n\nThe union office platform`,
-      ),
-    );
-    assert.ok(withLink.html.includes(`<a href="${ADMIN_LINK}">`));
-    const without = clearanceAutoRejectedAdminEmailContent(base);
-    assert.ok(!without.text.includes('Review it here'));
-    assert.ok(!without.html.includes('<a '));
-    assert.match(without.text, /Reason: transfers are closed\n\nThe union office platform$/);
   });
 
   test('admin summary: links the clearances LIST, none without', () => {

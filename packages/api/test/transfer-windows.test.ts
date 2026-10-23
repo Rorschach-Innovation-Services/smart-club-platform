@@ -9,9 +9,11 @@ import {
   transferWindowStatus,
   tenantToday,
   closedTransferWindow,
-  closedPeriodStart,
-  windowClosedRejectReason,
-  transfersClosedMessage,
+  registrationClosedMessage,
+  assertRegistrationOpen,
+  RegistrationClosedError,
+  cliRegistrationClosedRefusal,
+  enforceCliRegistrationWindow,
 } from '../src/transfer-windows.js';
 import { HttpError } from '../src/auth.js';
 
@@ -153,36 +155,71 @@ describe('SAST day boundary (UTC+2)', () => {
   });
 });
 
-describe('closedTransferWindow / closedPeriodStart / messages', () => {
+describe('closedTransferWindow / registration gate / messages', () => {
+  const windows = [w('A', '2026-01-01', '2026-01-31'), w('Mid', '2027-01-05', '2027-01-20')];
+
   test('no config, absent or empty windows ⇒ never closed', () => {
     assert.equal(closedTransferWindow(null, '2026-10-06'), null);
     assert.equal(closedTransferWindow({}, '2026-10-06'), null);
     assert.equal(closedTransferWindow({ transferWindows: [] }, '2026-10-06'), null);
   });
 
-  test('the closed stretch starts the day after the latest ended window', () => {
-    const windows = [w('A', '2026-01-01', '2026-01-31'), w('B', '2026-06-01', '2026-06-30')];
-    assert.equal(closedPeriodStart(windows, '2026-10-06'), '2026-07-01');
-    assert.equal(closedPeriodStart(windows, '2026-03-01'), '2026-02-01');
-    assert.equal(closedPeriodStart(windows, '2025-12-01'), undefined);
-    // Month/year rollover.
+  test('messages name the next window, or say none is configured', () => {
     assert.equal(
-      closedPeriodStart([w('Y', '2026-12-01', '2026-12-31')], '2027-01-10'),
-      '2027-01-01',
+      registrationClosedMessage(w('Mid', '2027-01-05', '2027-01-20')),
+      'player registration is closed — next window: Mid (2027-01-05 – 2027-01-20)',
+    );
+    assert.equal(
+      registrationClosedMessage(undefined),
+      'player registration is closed — no upcoming registration window is configured',
     );
   });
 
-  test('reasons name the next window, or say none is configured', () => {
-    const next = w('Mid', '2027-01-05', '2027-01-20');
-    assert.equal(
-      windowClosedRejectReason(next),
-      'Outside transfer window — next window: Mid (2027-01-05 – 2027-01-20)',
+  test('assertRegistrationOpen: no windows or open ⇒ no-op', () => {
+    assertRegistrationOpen(null, '2026-10-06');
+    assertRegistrationOpen({ transferWindows: [] }, '2026-10-06');
+    assertRegistrationOpen({ transferWindows: windows }, '2026-01-15');
+  });
+
+  test('assertRegistrationOpen: closed with a next window ⇒ structured 409', () => {
+    assert.throws(
+      () => assertRegistrationOpen({ transferWindows: windows }, '2026-10-06'),
+      (err: unknown) =>
+        err instanceof RegistrationClosedError &&
+        err instanceof HttpError &&
+        err.status === 409 &&
+        /next window: Mid/.test(err.message) &&
+        JSON.stringify(err.details) ===
+          JSON.stringify({
+            transferWindow: { closed: true, nextWindow: w('Mid', '2027-01-05', '2027-01-20') },
+          }),
     );
-    assert.equal(
-      windowClosedRejectReason(undefined),
-      'Outside transfer window — no upcoming window configured',
+  });
+
+  test('assertRegistrationOpen: closed with no upcoming window ⇒ no nextWindow', () => {
+    assert.throws(
+      () => assertRegistrationOpen({ transferWindows: windows }, '2027-03-01'),
+      (err: unknown) =>
+        err instanceof RegistrationClosedError &&
+        JSON.stringify(err.details) === JSON.stringify({ transferWindow: { closed: true } }),
     );
-    assert.match(transfersClosedMessage(next), /^transfers are closed — next window: Mid/);
-    assert.match(transfersClosedMessage(undefined), /no upcoming transfer window/);
+  });
+
+  test('CLI guard: refuses under --confirm, warns on a dry run, silent when open', () => {
+    const cfg = { transferWindows: windows };
+    assert.match(
+      cliRegistrationClosedRefusal(cfg, '2026-10-06') ?? '',
+      /closed — next window: Mid .* adjust the tenant's transfer windows in the platform console$/,
+    );
+    assert.equal(cliRegistrationClosedRefusal(cfg, '2026-01-10'), null);
+    assert.throws(
+      () => enforceCliRegistrationWindow(cfg, true, () => {}, '2026-10-06'),
+      /player registration is closed/,
+    );
+    const warned: string[] = [];
+    enforceCliRegistrationWindow(cfg, false, (m) => warned.push(m), '2026-10-06');
+    assert.equal(warned.length, 1);
+    enforceCliRegistrationWindow(cfg, true, (m) => warned.push(m), '2026-01-10');
+    assert.equal(warned.length, 1);
   });
 });

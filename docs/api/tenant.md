@@ -196,7 +196,8 @@ operator's `PUT /platform/tenants/:slug`
 > `2026-02-30` are rejected) and stored sorted by `start`. Overlaps are allowed. **Absent or
 > `[]` means unrestricted** — an empty list never locks a tenant out. Dates are inclusive tenant
 > wall-clock days (SAST, [ADR 0008](../architecture/0008-configurable-league-structures.md)): at
-> 23:00 SAST on a window's last day transfers are still open.
+> 23:00 SAST on a window's last day registration is still open. Outside every window ALL player
+> registration (new and transfer) is closed on every path.
 >
 > Read back on both `GET /tenant` and `GET /tenant/config`, each with a server-computed
 > `transferWindowStatus: { open, current?, next? }` (`current` = the window containing today,
