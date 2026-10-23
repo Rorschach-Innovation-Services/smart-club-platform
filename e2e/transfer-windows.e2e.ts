@@ -12,6 +12,7 @@ import {
   openClearancesFilteredTo,
   operatorAuth,
   registerViaApi,
+  repAuthHeader,
   seedRegistrationClearance,
   signInAsRep,
   signInAsAdmin,
@@ -221,10 +222,17 @@ test("a rep's clearance request is refused while registration is closed", async 
   await expect(modal).toBeVisible();
   await modal.locator('select.field-select').selectOption(FROM.id);
   await modal.getByPlaceholder('RSA ID or passport / visa number').fill(repIdNumber);
-  await modal.getByRole('button', { name: 'Send request' }).click();
+  // The modal says so up front and won't send...
+  await expect(modal.getByRole('alert')).toContainText(/player registration is closed/i);
+  await expect(modal.getByRole('button', { name: 'Send request' })).toBeDisabled();
 
-  await expect(page.locator('.toast', { hasText: CLOSED_MSG })).toBeVisible();
-  await expect(modal).toBeVisible();
+  // ...and the route refuses on its own too.
+  const res = await request.post(`${API_BASE}/clubs/${TO.id}/clearances`, {
+    headers: apiHeaders(repAuthHeader(TO.id)),
+    data: { fromClubId: FROM.id, idNumber: repIdNumber },
+  });
+  expect(res.status(), await res.text()).toBe(409);
+  expect(await res.json()).toMatchObject({ error: CLOSED_MSG });
   expect(await clearanceNames(request)).not.toContain(`Test ${name}`);
   expect((await getPlayerByName(request, FROM.id, name))?.status).toBe('active');
 });
@@ -250,7 +258,8 @@ test('the admin console blocks completion while closed but still rejects', async
     new RegExp(`Registration is closed until ${WINDOW.label}`),
   );
   const remind = card.getByRole('button', { name: 'Send reminder' });
-  if (await remind.count()) await expect(remind).toBeDisabled();
+  await expect(remind).toBeVisible();
+  await expect(remind).toBeDisabled();
 
   // The reminder route refuses on its own too.
   const clrs = (await (

@@ -55,13 +55,16 @@ export { toE164 } from './e164.js';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Character budget cleanParam truncates every template parameter to. */
+export const PARAM_MAX = 100;
+
 /**
  * Meta rejects template parameters containing newlines, tabs, or 4+ consecutive
  * spaces. Clearance params include a player name typed as free text on the PUBLIC
  * register form, so collapse every whitespace run to a single space and bound the
  * length — a hostile value must not be able to break (or bloat) the send.
  */
-function cleanParam(value: string, max = 100): string {
+function cleanParam(value: string, max = PARAM_MAX): string {
   const collapsed = value.replace(/\s+/g, ' ').trim();
   return collapsed.length > max ? `${collapsed.slice(0, max - 1).trimEnd()}…` : collapsed;
 }

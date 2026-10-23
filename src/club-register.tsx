@@ -191,7 +191,7 @@ export function useRegistrationClosedNote(): string | null {
     : 'Player registration is closed — no upcoming registration window is configured';
 }
 
-function RegistrationClosedBanner({ note }: { note: string | null }) {
+export function RegistrationClosedBanner({ note }: { note: string | null }) {
   if (!note) return null;
   return (
     <div className="field-error" role="alert" style={{ marginBottom: 12 }}>

@@ -6,7 +6,8 @@
  * atomically. The source club then approves in the portal to complete the move.
  *
  * Transfer windows apply: when the tenant has windows configured and none is open today, the
- * tool refuses (no override flag — adjust the tenant's windows in the platform console).
+ * tool refuses under --confirm (no override flag — adjust the tenant's windows in the platform
+ * console); a dry run only warns.
  *
  * Dry-run by default; pass --confirm to write. Point at prod with:
  *   AWS_PROFILE=medicoach AWS_REGION=af-south-1 \
@@ -15,7 +16,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import * as repo from './repo.js';
-import { cliRegistrationClosedRefusal } from './transfer-windows.js';
+import { enforceCliRegistrationWindow } from './transfer-windows.js';
 import type { PlayerClearance } from './types.js';
 
 const normalizeId = (s: string) => s.trim().toUpperCase();
@@ -30,8 +31,7 @@ async function main() {
   }
   if (fromClubId === toClubId) throw new Error('fromClubId and toClubId must differ');
 
-  const refusal = cliRegistrationClosedRefusal(await repo.getTenantConfig(tenant));
-  if (refusal) throw new Error(refusal);
+  enforceCliRegistrationWindow(await repo.getTenantConfig(tenant), confirm);
 
   const fromClub = await repo.getClub(tenant, fromClubId);
   if (!fromClub) throw new Error(`source club not found: ${fromClubId}`);

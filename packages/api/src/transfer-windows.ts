@@ -18,8 +18,6 @@ import { HttpError } from './auth.js';
 import { tenantDate } from './tenant-time.js';
 import type { TenantConfig, TransferWindow, TransferWindowStatus } from './types.js';
 
-export { TRANSFER_WINDOW_REJECTOR } from './types.js';
-
 // KEEP IN SYNC with the operator console's client mirror in src/platform-transfer-windows.tsx
 // (these limits + isCalendarDate + the validation rules in normaliseTransferWindows).
 export const TRANSFER_WINDOWS_MAX = 12;
@@ -99,7 +97,7 @@ export function servedTransferWindowStatus(
     : undefined;
 }
 
-/** The closed status when transfers are closed for this tenant on `today`, else null. */
+/** The closed status when registration is closed for this tenant on `today`, else null. */
 export function closedTransferWindow(
   cfg: Pick<TenantConfig, 'transferWindows'> | null | undefined,
   today: string = tenantToday(),

@@ -113,6 +113,8 @@ import {
   QuickAddPlayersGrid,
   ClubRosterUpload,
   REGISTER_MODE_TITLE,
+  RegistrationClosedBanner,
+  useRegistrationClosedNote,
 } from './club-register';
 import type { RegisterMode } from './club-register';
 import {
@@ -5961,10 +5963,13 @@ export function RequestPlayerForm({ club, directory, onSubmit, onCancel, busy })
   const others = (directory ?? []).filter((c) => c.id !== club.id);
   // Accept any non-empty ID: SA players use a 13-digit RSA ID, non-SA players a
   // passport/visa string. The server matches case/whitespace-insensitively.
-  const canSubmit = fromClubId && idNumber.trim().length > 0 && !busy;
+  // The server refuses new requests while registration is closed; say so up front.
+  const closedNote = useRegistrationClosedNote();
+  const canSubmit = fromClubId && idNumber.trim().length > 0 && !busy && !closedNote;
 
   return (
     <div className="rp-form">
+      <RegistrationClosedBanner note={closedNote} />
       <div className="rp-section">
         <div className="rp-section-head">
           <div className="rp-section-eyebrow">Incoming transfer</div>
@@ -6023,6 +6028,7 @@ export function RequestPlayerForm({ club, directory, onSubmit, onCancel, busy })
           tone="teal"
           icon={Icon.Arrow}
           disabled={!canSubmit}
+          title={closedNote ?? undefined}
           onClick={() => onSubmit({ fromClubId, idNumber, note: note || undefined })}
         >
           {busy ? 'Sending…' : 'Send request'}

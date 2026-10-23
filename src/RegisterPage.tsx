@@ -56,8 +56,6 @@ export function closedWindowOf(err: unknown): { nextWindow?: TransferWindow } | 
 }
 
 export function registrationErrorMessage(err: unknown, phase: 'upload' | 'submit'): string {
-  // Registration closed: the server's message names the next window.
-  if (closedWindowOf(err) && err instanceof ApiError) return err.message;
   if (err instanceof ApiError && err.status === 409) {
     return 'This person is already registered, or a transfer is already in progress. Contact your club or the union office if you think this is wrong.';
   }

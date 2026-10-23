@@ -971,7 +971,8 @@ app.post('/register/:clubId', async (c) => {
   // player lands on a DIFFERENT club below — safe because every delete/purge path keys
   // off the stored objectKey, never the club prefix, but non-obvious.
   assertOwnObjectKey(resolved.tenant, clubId, idDocMeta.objectKey);
-  // Closed windows refuse before any cap is charged; the ID doc the form already uploaded is
+  // Closed windows refuse before the club inbound/source caps are charged (the per-token counter
+  // above already has been); the ID doc the form already uploaded is
   // referenced by nothing, so it is discarded (see discardPublicRegUpload).
   try {
     assertRegistrationOpen(cfg);
@@ -1248,10 +1249,11 @@ app.post('/register/:clubId/id-doc/upload-url', async (c) => {
   // Rate-limit the presigned-PUT minting per reg token: the link is shared + long-lived, and
   // this endpoint is unauthenticated, so cap it to bound S3 write/cost amplification from a
   // leaked link. Generous enough for a club's whole roster to register in an onboarding window.
+  // No upload while registration is closed: the submit would be refused and orphan the object.
+  // Checked before the counter so retries against a closed window don't burn the hourly quota.
+  assertRegistrationOpen(await repo.getTenantConfig(resolved.tenant));
   const allowed = await repo.bumpSignupTokenCounter(token, now(), REGISTRATIONS_PER_HOUR);
   if (!allowed) throw new HttpError(429, 'too many registration uploads — please try again later');
-  // No upload while registration is closed: the submit would be refused and orphan the object.
-  assertRegistrationOpen(await repo.getTenantConfig(resolved.tenant));
   const { contentType } = await c.req
     .json<{ contentType?: string }>()
     .catch(() => ({ contentType: undefined }));

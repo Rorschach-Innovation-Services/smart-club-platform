@@ -50,6 +50,7 @@ import {
   sendFixtureReminderWhatsApp,
   sendOfficialAppointedWhatsApp,
   toE164,
+  PARAM_MAX,
 } from './whatsapp.js';
 
 // Re-export so existing import sites (index.ts) keep resolving these from here.
@@ -1106,8 +1107,8 @@ export function officialWhenWhere(p: {
 }): string {
   const base = `${p.dateLabel}, ${p.time ?? 'time TBC'} at ${p.venue ?? 'venue TBC'}`;
   const withCo = p.coOfficialName ? `${base} · with ${p.coOfficialName}` : base;
-  // cleanParam truncates at 100: drop the co-umpire rather than cut a name (email still has it).
-  return withCo.length <= 100 ? withCo : base;
+  // cleanParam truncates at PARAM_MAX: drop the co-umpire rather than cut a name (email still has it).
+  return withCo.length <= PARAM_MAX ? withCo : base;
 }
 
 /** Tell an umpire/referee they were appointed to a fixture. */
