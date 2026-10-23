@@ -458,6 +458,52 @@ describe('the lock indicator', () => {
   });
 });
 
+describe('the officials column', () => {
+  it('shows umpires and scorers on each fixture, each with its own assign button', () => {
+    renderWithProviders(
+      <FixtureTable
+        series={series({
+          fixtures: [
+            {
+              id: 'f1',
+              round: 1,
+              date: '2026-08-08',
+              home: 'spartan',
+              away: 'tongaat',
+              officials: {
+                umpires: [{ umpireId: 'u-gasa', name: 'S.Gasa' }],
+                scorers: [{ scorerId: 'sc-dlamini', name: 'T.Dlamini' }],
+              },
+            },
+          ],
+        } as Partial<Series>)}
+        clubs={clubs}
+        allCalendars={[calendar]}
+        onUpdateSeries={vi.fn()}
+        onDeleteSeries={vi.fn()}
+        onDuplicateSeries={vi.fn()}
+        onAskRelease={vi.fn()}
+        onAskRecall={vi.fn()}
+        onAskReveal={vi.fn()}
+        onApprove={vi.fn()}
+        onUnapprove={vi.fn()}
+        onAllocateVenues={vi.fn()}
+        onCheckClashes={vi.fn().mockResolvedValue({ results: [] })}
+        toast={vi.fn()}
+        onSaveOfficials={vi.fn()}
+        scorers={[{ id: 'sc-dlamini', displayName: 'T.Dlamini', active: true }]}
+        onSaveScorers={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('columnheader', { name: 'Officials' })).toBeVisible();
+    const row = screen.getByRole('row', { name: /S\.Gasa/ });
+    expect(within(row).getByText(/Scorers:\s*T\.Dlamini/)).toBeVisible();
+    expect(within(row).getByRole('button', { name: 'Assign umpires' })).toBeVisible();
+    expect(within(row).getByRole('button', { name: 'Assign scorers' })).toBeVisible();
+  });
+});
+
 describe('adding a fixture', () => {
   it('steps one week on from the last fixture on a legacy series', async () => {
     // Asking for `nextRound` dates ANCHORED AT the last fixture compounds the two:

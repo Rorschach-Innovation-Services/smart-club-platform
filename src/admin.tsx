@@ -946,6 +946,9 @@ export function AdminFixtures({
                 umpires={umpires}
                 onSaveOfficials={onSaveOfficials}
                 onCreateUmpire={onCreateUmpire}
+                scorers={onSaveScorers ? scorers : undefined}
+                onSaveScorers={onSaveScorers}
+                onCreateScorer={onCreateScorer}
               />
             ) : null
           }
@@ -1283,6 +1286,12 @@ export function FixtureTable({
     | ((seriesId: string, fixtureId: string, umpireIds: string[]) => Promise<unknown>)
     | undefined,
   onCreateUmpire = undefined as ((displayName: string) => Promise<Umpire>) | undefined,
+  // Scorers ride the same cell; no register ⇒ no scorer line (unless one is already saved).
+  scorers = undefined as Scorer[] | undefined,
+  onSaveScorers = undefined as
+    | ((seriesId: string, fixtureId: string, scorerIds: string[]) => Promise<unknown>)
+    | undefined,
+  onCreateScorer = undefined as ((displayName: string) => Promise<Scorer>) | undefined,
 }) {
   const vt = useVertical().terms;
   const copy = useCopy();
@@ -1577,7 +1586,7 @@ export function FixtureTable({
               <th>Venue · Suburb</th>
               <th>Away (visitors)</th>
               <th style={{ width: 90, textAlign: 'right' }}>Distance</th>
-              <th style={{ width: 170 }}>Umpires</th>
+              <th style={{ width: 190 }}>Officials</th>
               <th style={{ width: 110 }}>Status</th>
               <th style={{ width: 80 }}></th>
             </tr>
@@ -1720,7 +1729,12 @@ export function FixtureTable({
                       warnings={umpireWarnings.get(`${series.id}#${f.id}`)}
                       onSave={onSaveOfficials}
                       onCreate={onCreateUmpire}
-                      loadNotifyStatus={onSaveOfficials ? api.getOfficialsNotifyStatus : undefined}
+                      loadNotifyStatus={
+                        onSaveOfficials || onSaveScorers ? api.getOfficialsNotifyStatus : undefined
+                      }
+                      scorers={scorers}
+                      onSaveScorers={onSaveScorers}
+                      onCreateScorer={onCreateScorer}
                     />
                   </td>
                   <td>
