@@ -427,7 +427,7 @@ export function suggestedAction(
     return 'Probably a typo: one ID fails the SA ID checksum. Ask the office to merge the two registrations.';
   if (c.sameIdIgnoringSpaces && (subject.legacyKey || c.legacyKey))
     return 'Older registration from before IDs were used: same person. Ask the office to merge them.';
-  if (c.sameIdIgnoringSpaces && idDiffers)
+  if (c.sameIdIgnoringSpaces && c.diff.includes('id-spacing'))
     return 'Same ID apart from spacing: same person. Ask the office to merge them.';
   if (c.sameIdIgnoringSpaces) return 'Same ID: same person. Ask the office to merge them.';
   if (idDiffers && c.diff.includes('club'))
@@ -481,9 +481,7 @@ function DuplicateCompare({ r, c }: { r: api.MedicoachPlayerReview; c: ReviewCan
           ))}
         </tbody>
       </table>
-      {c.sameIdIgnoringSpaces && diff.has('id') && (
-        <p className="mcs-note">Same ID apart from spacing.</p>
-      )}
+      {diff.has('id-spacing') && <p className="mcs-note">Same ID apart from spacing.</p>}
       {advice && (
         <p className="mcs-reason" role="note" data-testid="mcs-suggested-action">
           <strong>Suggested:</strong> {advice}

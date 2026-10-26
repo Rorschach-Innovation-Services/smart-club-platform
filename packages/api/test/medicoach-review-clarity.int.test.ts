@@ -270,7 +270,7 @@ describe('GET /player-reviews detail', () => {
     const c = cards[0].candidates[0];
     assert.equal(c.idValid, null, 'no checksum for passports');
     assert.equal(c.sameIdIgnoringSpaces, true);
-    assert.deepEqual(c.diff, ['club', 'id']);
+    assert.deepEqual(c.diff, ['club', 'id-spacing'], 'spacing alone is not an ID difference');
   });
 
   test('a medicoach review keeps its candidates as they are', async () => {
@@ -349,10 +349,60 @@ describe('registration compacts a spaced ID', () => {
   });
 });
 
+describe('registration refuses a re-key of an ID stored with spaces', () => {
+  for (const typed of ['S 0556434', 'S0556434']) {
+    test(`re-registering "${typed}" over a stored "S 0556434" row is refused`, async () => {
+      const spacedKey = identity.playerNaturalKey({
+        idType: 'passport',
+        nationality: 'India',
+        idNumber: 'S 0556434',
+      });
+      const stored = mkPlayer({
+        naturalKey: spacedKey,
+        firstName: 'Suhel',
+        lastName: 'Patel',
+        idType: 'passport',
+        nationality: 'India',
+        dob: '1995-05-05',
+        idNumber: 'S 0556434',
+      });
+      await repo.createPlayer(T, stored);
+      const res = await reg.registerPlayerForClub(
+        T,
+        mkClub('simplex', 'Simplex CC'),
+        {
+          firstName: 'Suhel',
+          lastName: 'Patel',
+          idType: 'passport',
+          nationality: 'India',
+          dob: '1995-05-05',
+          idNumber: typed,
+        },
+        { registeredVia: 'portal', tenantConfig: config(), notifyClearanceOpened: async () => {} },
+      );
+      assert.equal(res.outcome, 'existing-registration-under-legacy-key');
+      const all = [
+        ...(await repo.listPlayers(T, 'newlands')),
+        ...(await repo.listPlayers(T, 'simplex')),
+      ];
+      assert.equal(all.length, 1, 'no new row');
+      assert.equal(all[0].naturalKey, spacedKey);
+    });
+  }
+});
+
 describe('link-player-sync CLI', () => {
   const lines: string[] = [];
   const log = (l: string) => lines.push(l);
   const deps = () => ({ url: stubUrl, secret: SECRET, log });
+  const MC = '3f2b8c1e-9a4d-4e7b-8c21-5d6e7f8a9b0c';
+  const OTHER_MC = '11111111-2222-4333-8444-555555555555';
+  const linkArgs = (nk: string, confirm: boolean, mcPlayer = MC) => ({
+    tenant: T,
+    nk: nk.slice(0, 10),
+    mcPlayer,
+    confirm,
+  });
   beforeEach(() => {
     lines.length = 0;
   });
@@ -371,7 +421,7 @@ describe('link-player-sync CLI', () => {
   test('dry run writes nothing', async () => {
     const a = await heldSurvivor();
     const out = await cli.run(
-      { tenant: T, nk: a.naturalKey.slice(0, 10), mcPlayer: 'pl_9', confirm: false },
+      { tenant: T, nk: a.naturalKey.slice(0, 10), mcPlayer: MC, confirm: false },
       repo,
       deps(),
     );
@@ -379,20 +429,89 @@ describe('link-player-sync CLI', () => {
     assert.equal(await repo.getPendingPlayerSync(T, a.naturalKey), null);
     assert.ok(await repo.getPlayerReview(T, a.naturalKey));
     assert.equal(pushes.length, 0);
-    assert.ok(!lines.join('\n').includes(a.naturalKey), 'full key never printed');
+    const out2 = lines.join('\n');
+    assert.ok(!out2.includes(a.naturalKey), 'full key never printed');
+    assert.ok(out2.includes(MC), 'full medicoach id printed');
+    assert.match(out2, /sync intent: upsert · pending erase: no/);
+  });
+
+  test('refuses when the sync intent is not upsert (dry run shows it)', async () => {
+    const p = mkPlayer({ idNumber: saId('000411', '512308'), status: 'inactive' });
+    await repo.createPlayer(T, p);
+    const dry = await cli.run(linkArgs(p.naturalKey, false), repo, deps());
+    assert.equal(dry.outcome, 'refused');
+    assert.match(lines.join('\n'), /sync intent: remove/);
+    const out = await cli.run(linkArgs(p.naturalKey, true), repo, deps());
+    assert.equal(out.outcome, 'refused');
+    assert.equal((await repo.getPendingPlayerSync(T, p.naturalKey))?.resolution, undefined);
+    assert.equal(pushes.length, 0);
+  });
+
+  test('refuses on a pending erase tombstone; dry run shows it', async () => {
+    const a = await heldSurvivor();
+    await repo.putPlayerSyncTombstone(T, a.naturalKey, new Date().toISOString());
+    const dry = await cli.run(linkArgs(a.naturalKey, false), repo, deps());
+    assert.equal(dry.outcome, 'refused');
+    assert.match(lines.join('\n'), /pending erase: erase \(tombstone\)/);
+    const out = await cli.run(linkArgs(a.naturalKey, true), repo, deps());
+    assert.equal(out.outcome, 'refused');
+    const row = await repo.getPendingPlayerSync(T, a.naturalKey);
+    assert.equal(row?.op, 'erase', 'tombstone untouched');
+    assert.equal(row?.resolution, undefined);
+    assert.equal(pushes.length, 0);
+  });
+
+  test('refuses when an erase is owed first', async () => {
+    const a = await heldSurvivor();
+    await repo.putPlayerSyncTombstone(T, a.naturalKey, '2026-01-01T00:00:00.000Z');
+    await repo.putPendingPlayerSync(T, a.naturalKey, new Date().toISOString()); // re-registered
+    assert.equal((await repo.getPendingPlayerSync(T, a.naturalKey))?.eraseFirst, true);
+    const out = await cli.run(linkArgs(a.naturalKey, true), repo, deps());
+    assert.equal(out.outcome, 'refused');
+    assert.match(lines.join('\n'), /pending erase: erase owed first/);
+    assert.equal(pushes.length, 0);
+  });
+
+  test('warns when --mc-player is not a candidate on the held review', async () => {
+    const p = mkPlayer({ idNumber: saId('000411', '512308') });
+    await repo.createPlayer(T, p);
+    const review = {
+      naturalKey: p.naturalKey,
+      reason: 'medicoach-needs-review' as const,
+      detectedAt: new Date().toISOString(),
+      playerName: 'Akhiel Sinath',
+      dob: '2000-04-11',
+      clubName: 'Newlands CC',
+      candidates: [{ playerId: MC, name: 'Akhiel Sinath', dob: null, institutionName: 'X' }],
+    };
+    await repo.putPlayerReview(T, review);
+    await cli.run(linkArgs(p.naturalKey, false), repo, deps());
+    assert.match(lines.join('\n'), /matches a medicoach candidate on the held review: yes/);
+    lines.length = 0;
+    await cli.run(linkArgs(p.naturalKey, false, OTHER_MC), repo, deps());
+    assert.match(lines.join('\n'), /WARNING: not one of the 1 medicoach candidate/);
+  });
+
+  test('medicoach creating instead of linking is reported as such; the review is kept', async () => {
+    const a = await heldSurvivor();
+    answer = () => ({ status: 'created', playerId: OTHER_MC });
+    const out = await cli.run(linkArgs(a.naturalKey, true), repo, deps());
+    assert.equal(out.outcome, 'unexpected');
+    assert.match(lines.join('\n'), /did not report a link for this person \(created 1, linked 0/);
+    assert.ok(await repo.getPlayerReview(T, a.naturalKey), 'review kept');
   });
 
   test('--confirm sends a link resolution past the guard and clears the review', async () => {
     const a = await heldSurvivor();
-    answer = () => ({ status: 'linked', playerId: 'pl_9' });
+    answer = () => ({ status: 'linked', playerId: MC });
     const out = await cli.run(
-      { tenant: T, nk: a.naturalKey.slice(0, 10), mcPlayer: 'pl_9', confirm: true },
+      { tenant: T, nk: a.naturalKey.slice(0, 10), mcPlayer: MC, confirm: true },
       repo,
       deps(),
     );
     assert.equal(out.outcome, 'linked');
     assert.equal(pushes.flat().length, 1);
-    assert.deepEqual(pushes[0][0].resolution, { action: 'link', playerId: 'pl_9' });
+    assert.deepEqual(pushes[0][0].resolution, { action: 'link', playerId: MC });
     assert.equal(await repo.getPendingPlayerSync(T, a.naturalKey), null);
     assert.equal(await repo.getPlayerReview(T, a.naturalKey), null);
     assert.match(lines.join('\n'), /linked/);
@@ -402,13 +521,13 @@ describe('link-player-sync CLI', () => {
     const a = await heldSurvivor();
     failAll = true;
     const out = await cli.run(
-      { tenant: T, nk: a.naturalKey.slice(0, 10), mcPlayer: 'pl_9', confirm: true },
+      { tenant: T, nk: a.naturalKey.slice(0, 10), mcPlayer: MC, confirm: true },
       repo,
       deps(),
     );
     assert.equal(out.outcome, 'queued');
     const row = await repo.getPendingPlayerSync(T, a.naturalKey);
-    assert.deepEqual(row?.resolution, { action: 'link', playerId: 'pl_9' });
+    assert.deepEqual(row?.resolution, { action: 'link', playerId: MC });
     assert.ok(await repo.getPlayerReview(T, a.naturalKey), 'review kept');
   });
 
@@ -418,9 +537,13 @@ describe('link-player-sync CLI', () => {
       () => cli.parseArgs(['--tenant', T, '--nk', 'abc', '--mc-player', 'x']),
       /at least 8/,
     );
+    assert.throws(
+      () => cli.parseArgs(['--tenant', T, '--nk', 'abcdef01', '--mc-player', 'pl_1']),
+      /UUID/,
+    );
     assert.deepEqual(
-      cli.parseArgs(['--tenant', T, '--nk', 'abcdef01', '--mc-player', 'pl_1', '--confirm']),
-      { tenant: T, nk: 'abcdef01', mcPlayer: 'pl_1', confirm: true },
+      cli.parseArgs(['--tenant', T, '--nk', 'abcdef01', '--mc-player', MC, '--confirm']),
+      { tenant: T, nk: 'abcdef01', mcPlayer: MC, confirm: true },
     );
   });
 });

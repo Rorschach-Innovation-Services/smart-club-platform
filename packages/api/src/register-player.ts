@@ -100,7 +100,9 @@ export function isDummyId(normalised: string): boolean {
 export function idIndexKey(
   p: Pick<PlayerRegistration, 'idNumber' | 'idType' | 'nationality'>,
 ): string | null {
-  const id = normalizeId(p.idNumber);
+  // Compacted so a row stored before input compaction ("S 0556434") still collides with the
+  // same ID typed cleanly — otherwise the guard misses it and the person is duplicated.
+  const id = normalizeId(compactIdNumber(p.idNumber));
   if (isDummyId(id)) return null;
   return (p.idType ?? 'sa-id') === 'passport'
     ? `passport:${normalizeId(p.nationality)}:${id}`

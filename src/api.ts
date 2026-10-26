@@ -1206,7 +1206,8 @@ export interface MedicoachPlayerReview {
     } & Partial<MedicoachReviewIdentity> & {
         /** Same ID number as the held player once spaces and dashes are ignored. */
         sameIdIgnoringSpaces?: boolean;
-        /** Fields that differ from the held player: `name`, `dob`, `club`, `id`. */
+        /** Fields that differ from the held player: `name`, `dob`, `club`, `id` (`id-spacing` when
+         *  the IDs differ only in spaces/dashes — not counted as `id`). */
         diff?: string[];
       }
   >;

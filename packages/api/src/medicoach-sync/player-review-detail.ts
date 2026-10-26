@@ -2,11 +2,13 @@
  * Read-time detail for a held player review (ADR 0019), so the admin card can be decided
  * without opening two registrations side by side. A review stores only names, dob and club;
  * this loads the registration rows behind the subject and each smart-club candidate with
- * targeted point reads (club resolved by name, else one GetItem per club) — never a table scan.
+ * targeted point reads (club resolved by name, else one BatchGetItem across the tenant's clubs,
+ * 100 keys per call) — never a table scan.
  *
  * Output never carries a full ID number: the last four characters and whether an SA ID passes
  * its checksum are enough to tell a typo from a different document.
  */
+import { compactIdNumber, normalizeId } from '../player-identity.js';
 import { luhnValid } from '../roster-normalize.js';
 import type { Club, PlayerRegistration, PlayerSyncReview } from '../types.js';
 
@@ -25,21 +27,27 @@ export interface ReviewIdentityDetail {
 export interface ReviewCandidateDetail extends ReviewIdentityDetail {
   /** Same ID number as the held player once spaces and dashes are ignored. */
   sameIdIgnoringSpaces: boolean;
-  /** The fields that differ from the held player: `name`, `dob`, `club`, `id`. */
+  /**
+   * The fields that differ from the held player: `name`, `dob`, `club`, `id`. IDs equal once
+   * spaces/dashes are ignored are NOT `id`; when they differ only in spacing the list carries
+   * `id-spacing` instead (the card says "same ID apart from spacing").
+   */
   diff: string[];
 }
 
 export interface ReviewDetailRepo {
   listClubs(tenant: string): Promise<Club[]>;
   getPlayer(tenant: string, clubId: string, naturalKey: string): Promise<PlayerRegistration | null>;
+  batchGetPlayers(
+    tenant: string,
+    pairs: Array<{ clubId: string; naturalKey: string }>,
+  ): Promise<{ rows: PlayerRegistration[]; unresolved: number }>;
 }
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
-/** "S 0556434" and "S0556434" are the same document. */
-export function compactId(id: string | undefined): string {
-  return (id ?? '').replace(/[\s-]+/g, '').toUpperCase();
-}
+/** "S 0556434" and "S0556434" are the same document (compacted + normalised). */
+const compactId = (id: string | undefined): string => normalizeId(compactIdNumber(id));
 
 /** Checksum verdict: SA IDs only. */
 export function idValidity(row: Pick<PlayerRegistration, 'idNumber' | 'idType'> | null) {
@@ -79,7 +87,8 @@ export function diffFields(
   if (norm(subject.club) !== norm(cand.club)) diff.push('club');
   const a = (subject.row?.idNumber ?? '').trim().toUpperCase();
   const b = (cand.row?.idNumber ?? '').trim().toUpperCase();
-  if (a !== b) diff.push('id');
+  if (compactId(a) !== compactId(b)) diff.push('id');
+  else if (a !== b) diff.push('id-spacing');
   return diff;
 }
 
@@ -93,7 +102,7 @@ function pick(rows: PlayerRegistration[]): PlayerRegistration | null {
 
 /**
  * Loader with a per-request cache. Tries the club the review names first (one GetItem);
- * otherwise one GetItem per club in the tenant, in parallel.
+ * otherwise one BatchGetItem over the tenant's other clubs (≤100 keys per call).
  */
 export function rowLoader(repo: ReviewDetailRepo, tenant: string) {
   let clubs: Promise<Club[]> | null = null;
@@ -106,10 +115,13 @@ export function rowLoader(repo: ReviewDetailRepo, tenant: string) {
       const row = await repo.getPlayer(tenant, named.id, nk);
       if (row) return row;
     }
-    const rows = await Promise.all(
-      all.filter((c) => c !== named).map((c) => repo.getPlayer(tenant, c.id, nk)),
+    const others = all.filter((c) => c !== named);
+    if (!others.length) return null;
+    const { rows } = await repo.batchGetPlayers(
+      tenant,
+      others.map((c) => ({ clubId: c.id, naturalKey: nk })),
     );
-    return pick(rows.filter((r): r is PlayerRegistration => !!r));
+    return pick(rows);
   };
   return (nk: string, clubName: string | null) => {
     const key = `${nk}|${norm(clubName)}`;

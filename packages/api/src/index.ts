@@ -203,6 +203,7 @@ import {
   addToNameDobIndex,
   possibleExistingRegistrations,
   addToIdIndex,
+  buildIdNumberIndex,
   legacyKeyMessage,
   legacyKeyShortMessage,
   legacyKeyHit,
@@ -11779,6 +11780,13 @@ app.post('/platform/tenants/:slug/roster-intake/commit', async (c) => {
     slice.forEach((p, idx) => elsewhereByPair.set(pairKey(p.clubId, p.naturalKey), results[idx]));
   }
 
+  // ID-number dedup guard (the registration core's legacyKeyHit): a row whose compacted ID
+  // matches a stored row under a DIFFERENT natural key — e.g. one stored before input
+  // compaction as "S 0556434" — is refused, never written as a second row for the person.
+  const idIndex = built.some((b) => b.player.idNumber)
+    ? await buildIdNumberIndex(slug, clubs)
+    : undefined;
+
   const crossClubConflicts: RosterIntakeCrossClubConflict[] = [];
   const toWrite: typeof built = [];
   for (const b of built) {
@@ -11795,6 +11803,17 @@ app.post('/platform/tenants/:slug/roster-intake/commit', async (c) => {
         clubId: b.clubId,
         playerNaturalKey: b.player.naturalKey,
         claimedBy: otherClubNames.join(', '),
+      });
+      continue;
+    }
+    const legacy = idIndex ? legacyKeyHit(idIndex, b.player) : undefined;
+    if (legacy) {
+      crossClubConflicts.push({
+        rowNumber: b.rowNumber,
+        clubId: b.clubId,
+        playerNaturalKey: b.player.naturalKey,
+        claimedBy: legacy.clubName,
+        alreadyRegisteredAt: legacy.clubName,
       });
       continue;
     }

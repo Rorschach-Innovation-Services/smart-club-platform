@@ -4336,6 +4336,40 @@ export async function getRejectSourceProbes(
 }
 
 /**
+ * Batch point-read whole player rows for (clubId, naturalKey) pairs — BatchGetItem, 100 keys
+ * per call, chunks in parallel, UnprocessedKeys retried (up to 3 attempts). Keys still
+ * unprocessed after that are returned in `unresolved`, never reported as absent.
+ */
+export async function batchGetPlayers(
+  tenant: string,
+  pairs: Array<{ clubId: string; naturalKey: string }>,
+): Promise<{ rows: PlayerRegistration[]; unresolved: number }> {
+  const unique = new Map(pairs.map((p) => [`${p.clubId}#${p.naturalKey}`, p]));
+  const all = [...unique.values()];
+  const rows: PlayerRegistration[] = [];
+  let unresolved = 0;
+  const chunks: Array<typeof all> = [];
+  for (let i = 0; i < all.length; i += 100) chunks.push(all.slice(i, i + 100));
+  await Promise.all(
+    chunks.map(async (chunk) => {
+      let batch = chunk.map((p) => playerKey(tenant, p.clubId, p.naturalKey));
+      for (let attempt = 0; attempt < 3 && batch.length; attempt++) {
+        const res = await ddb.send(
+          new BatchGetCommand({ RequestItems: { [TABLE]: { Keys: batch } } }),
+        );
+        for (const item of res.Responses?.[TABLE] ?? []) {
+          const row = stripKeys<PlayerRegistration>(item);
+          if (row) rows.push(row);
+        }
+        batch = (res.UnprocessedKeys?.[TABLE]?.Keys ?? []) as typeof batch;
+      }
+      unresolved += batch.length;
+    }),
+  );
+  return { rows, unresolved };
+}
+
+/**
  * The demographics projection of every player row across the given clubs — a
  * parallel per-club fan-out of the listPlayers Query, flattened. Cohorts are
  * hundreds of players and the fleet is small, so the fan-out matches the

@@ -14,6 +14,10 @@
  * resolution) and flushes that one person. Their PLAYERREVIEW row is deleted only once the
  * send succeeded; a failed or dry-run send leaves the row queued for the 15-minute sync.
  *
+ * Refused when the person is opted out, their sync intent is not `upsert`, or an erase
+ * (tombstone / erase owed first) is pending; the dry run shows each of these. `--mc-player`
+ * must be a UUID and is checked against the held review's medicoach candidates (warning only).
+ *
  * Dry run (default) prints who the prefix matched (masked) and what would happen. Output never
  * prints a full natural key.
  */
@@ -21,9 +25,12 @@ import { pathToFileURL } from 'node:url';
 import { medicoachSyncSecret, medicoachSyncUrl } from '../env.js';
 import { maskKey } from '../resolve-duplicate-players.js';
 import { describePerson, matchPerson, MIN_PREFIX } from './player-sync-opt-out.js';
-import { flushPlayerOutbox, loadPlayerSyncSnapshot } from './players.js';
+import { flushPlayerOutbox, intentOf, loadPlayerSyncSnapshot } from './players.js';
 
 type RepoModule = typeof import('../repo.js');
+
+/** Medicoach player ids are UUIDs; anything else is a typo (or a smart-club key pasted in). */
+const MC_PLAYER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const USAGE =
   'usage: link-player-sync --tenant <t> --nk <natural-key prefix> --mc-player <id> [--confirm]';
@@ -61,10 +68,13 @@ export function parseArgs(argv: string[]): LinkArgs {
   if (!out.mcPlayer) throw new UsageError('--mc-player is required');
   if (out.nk.length < MIN_PREFIX)
     throw new UsageError(`--nk needs at least ${MIN_PREFIX} characters of the key`);
+  if (!MC_PLAYER_ID.test(out.mcPlayer))
+    throw new UsageError('--mc-player must be a medicoach player id (a UUID)');
   return out as LinkArgs;
 }
 
-export type LinkOutcome = 'dry-run' | 'linked' | 'queued' | 'review' | 'refused';
+/** `unexpected`: medicoach answered, but not with exactly one link/update for this person. */
+export type LinkOutcome = 'dry-run' | 'linked' | 'queued' | 'review' | 'refused' | 'unexpected';
 
 export interface LinkDeps {
   url?: string;
@@ -89,10 +99,37 @@ export async function run(args: LinkArgs, repo: RepoModule, deps: LinkDeps = {})
   log(`${args.confirm ? 'CONFIRM' : 'DRY RUN'} — tenant ${tenant}, player ${maskKey(nk)}`);
   for (const line of describePerson(rows, (id) => snap.clubsById.get(id)?.name ?? id)) log(line);
   log(`  medicoach player: ${args.mcPlayer}`);
+  const candidateIds = (review?.candidates ?? [])
+    .map((c) => c.playerId)
+    .filter((id): id is string => !!id);
+  if (candidateIds.length) {
+    if (candidateIds.includes(args.mcPlayer))
+      log('  matches a medicoach candidate on the held review: yes');
+    else
+      log(
+        `  ! WARNING: not one of the ${candidateIds.length} medicoach candidate(s) on the held review — check the id.`,
+      );
+  }
+  const intent = intentOf(snap, nk);
+  const pendingErase =
+    pending?.op === 'erase' ? 'erase (tombstone)' : pending?.eraseFirst ? 'erase owed first' : null;
   log(`  queued change: ${pending ? 'yes' : 'no'} · held review: ${review ? review.reason : 'no'}`);
+  log(`  sync intent: ${intent.op} · pending erase: ${pendingErase ?? 'no'}`);
 
   if (optOut) {
     log('Refused: this person is opted out of the player sync — nothing is sent to medicoach.');
+    return { outcome: 'refused' as LinkOutcome };
+  }
+  if (intent.op !== 'upsert') {
+    log(
+      `Refused: this person's sync intent is "${intent.op}", not "upsert" — a link would not be sent as one.`,
+    );
+    return { outcome: 'refused' as LinkOutcome };
+  }
+  if (pendingErase) {
+    log(
+      `Refused: an ${pendingErase} is pending for this person — let it go out (or resolve it) before linking.`,
+    );
     return { outcome: 'refused' as LinkOutcome };
   }
   log('Would link this person to that medicoach player and send them now.');
@@ -118,14 +155,20 @@ export async function run(args: LinkArgs, repo: RepoModule, deps: LinkDeps = {})
   // A review written by THIS flush (medicoach wants another decision) is newer than the one
   // we started with — keep it. The original review is cleared only on a successful send.
   const newReview = !!after && after.detectedAt !== review?.detectedAt;
+  const c = summary.counts;
   let outcome: LinkOutcome;
   if (stillPending) outcome = 'queued';
   else if (newReview) outcome = 'review';
-  else {
+  else if (c.linked + c.updated === 1) {
     if (after) await repo.deletePlayerReview(tenant, nk);
     outcome = 'linked';
+  } else {
+    // Sent, but medicoach did not report the one link we asked for (created a new player,
+    // erased, stale, …). Keep the review — the flush clears it on any success — so an admin
+    // still sees this person.
+    if (review && !after) await repo.putPlayerReview(tenant, review);
+    outcome = 'unexpected';
   }
-  const c = summary.counts;
   log(
     `  flush: ${summary.status} — sent ${c.sent}, linked ${c.linked}, needs review ${c.needsReview}, errors ${c.errors}`,
   );
@@ -134,7 +177,9 @@ export async function run(args: LinkArgs, repo: RepoModule, deps: LinkDeps = {})
       ? '✓ linked: medicoach accepted the link; the held review was cleared.'
       : outcome === 'review'
         ? '! medicoach needs another decision — see the review on the admin page.'
-        : '! not sent yet (dry run or medicoach unreachable): left queued for the next sync; the review is kept.',
+        : outcome === 'unexpected'
+          ? `! medicoach did not report a link for this person (created ${c.created}, linked ${c.linked}, updated ${c.updated}, unchanged ${c.unchanged}, removed ${c.removed}, erased ${c.erased}, stale ${c.stale}); the review is kept.`
+          : '! not sent yet (dry run or medicoach unreachable): left queued for the next sync; the review is kept.',
   );
   return { outcome, summary };
 }
