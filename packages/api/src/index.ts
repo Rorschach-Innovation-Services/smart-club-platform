@@ -76,6 +76,7 @@ import {
   flushPlayerOutbox,
   playerSyncCoverageProbe,
 } from './medicoach-sync/players.js';
+import { enrichPlayerReview, rowLoader } from './medicoach-sync/player-review-detail.js';
 import { playerSyncEnabled } from './medicoach-sync/player-placement.js';
 import { explainSyncError } from './medicoach-sync/explain.js';
 import { carrySyncOwnedFields, fixtureSyncRef } from './fixture-identity.js';
@@ -110,6 +111,7 @@ import {
   playerNaturalKey,
   resolvePlayerDob,
   normalizeId,
+  compactIdNumber,
   computeIsMinor,
   dobFromSaId,
 } from './player-identity.js';
@@ -2817,7 +2819,8 @@ function validateChairBatchItem(
     return { error: 'names must be 80 characters or fewer' };
   }
   const idType = item.idType === 'passport' ? 'passport' : 'sa-id';
-  const idNumber = typeof item.idNumber === 'string' ? normalizeId(item.idNumber) : '';
+  const idNumber =
+    typeof item.idNumber === 'string' ? normalizeId(compactIdNumber(item.idNumber)) : '';
   if (!idNumber) return { error: 'an ID number (or passport number) is required' };
   let dob: string;
   if (idType === 'sa-id') {
@@ -3165,7 +3168,9 @@ app.post('/clubs/:id/roster/commit', async (c) => {
   const leagueKeys = playerLeagueKeys(cfg);
   const clubIds = new Set([id]);
   const rows: ChairBulkRow[] = body.items.map((raw, index) => {
-    const item: ChairRosterCommitItem = raw && typeof raw === 'object' ? raw : {};
+    const given: ChairRosterCommitItem = raw && typeof raw === 'object' ? raw : {};
+    // Compacted before validation, storage and hashing (a spaced ID is the same person).
+    const item: ChairRosterCommitItem = { ...given, idNumber: compactIdNumber(given.idNumber) };
     const base = {
       index,
       ...(typeof item.rowNumber === 'number' ? { rowNumber: item.rowNumber } : {}),
@@ -5646,7 +5651,7 @@ app.post('/integrations/medicoach/players/retry', async (c) => {
 });
 
 /** A review as the page shows it. The other person's natural key never leaves the server. */
-function playerReviewView(r: PlayerSyncReview) {
+function playerReviewView<R extends PlayerSyncReview>(r: R) {
   return {
     ...r,
     candidates: r.candidates.map(({ naturalKey: _nk, ...rest }) => rest),
@@ -5661,9 +5666,42 @@ function playerReviewView(r: PlayerSyncReview) {
 app.get('/integrations/medicoach/player-reviews', async (c) => {
   const { tenant } = c.get('requestAuth')!;
   const reviews = await repo.listPlayerReviews(tenant);
-  return c.json(
-    reviews.sort((a, b) => b.detectedAt.localeCompare(a.detectedAt)).map(playerReviewView),
+  // Detail for the side-by-side card (last 4 of the ID, checksum, registered date, …) is read
+  // from the registration rows now — targeted point reads, never a scan (player-review-detail).
+  const load = rowLoader(repo, tenant);
+  const enriched = await Promise.all(
+    reviews
+      .sort((a, b) => b.detectedAt.localeCompare(a.detectedAt))
+      .map((r) => enrichPlayerReview(r, load)),
   );
+  return c.json(enriched.map(playerReviewView));
+});
+
+/**
+ * The people opted out of the player sync (ADR 0019) — who, why, by whom, when — so the
+ * "not sent at their request" count can be opened. Personal data: admins only, like the rest
+ * of /integrations. Opting back in stays a CLI step (player-sync-opt-out --remove).
+ */
+app.get('/integrations/medicoach/player-opt-outs', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const optOuts = await repo.listPlayerSyncOptOutRecords(tenant);
+  const load = rowLoader(repo, tenant);
+  const clubs = optOuts.length ? await repo.listClubs(tenant) : [];
+  const clubName = (id: string | undefined) => clubs.find((cl) => cl.id === id)?.name ?? null;
+  const out = await Promise.all(
+    optOuts.map(async (o) => {
+      const row = await load(o.naturalKey, null);
+      return {
+        name: row ? `${row.firstName} ${row.lastName}`.trim() : null,
+        club: clubName(row?.clubId),
+        reason: o.reason,
+        note: o.note ?? null,
+        by: o.by,
+        at: o.at,
+      };
+    }),
+  );
+  return c.json(out.sort((a, b) => b.at.localeCompare(a.at)));
 });
 
 /**
@@ -11633,7 +11671,10 @@ app.post('/platform/tenants/:slug/roster-intake/commit', async (c) => {
   const body = await c.req
     .json<{ items?: RosterIntakeCommitItem[] }>()
     .catch(() => ({}) as { items?: RosterIntakeCommitItem[] });
-  const items = Array.isArray(body.items) ? body.items : [];
+  // IDs compacted before validation, storage and hashing (a spaced ID is the same person).
+  const items = (Array.isArray(body.items) ? body.items : []).map((item) =>
+    item && typeof item === 'object' ? { ...item, idNumber: compactIdNumber(item.idNumber) } : item,
+  );
   if (items.length > ROSTER_INTAKE_MAX_ITEMS) {
     throw new HttpError(400, `no more than ${ROSTER_INTAKE_MAX_ITEMS} items per request`);
   }

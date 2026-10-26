@@ -401,6 +401,98 @@ function movesClub(candidateClub: string | null, ourClub: string | null): boolea
   return !!norm(candidateClub) && !!norm(ourClub) && norm(candidateClub) !== norm(ourClub);
 }
 
+type ReviewCandidate = api.MedicoachPlayerReview['candidates'][number];
+
+/** "••••1234 · valid" — never the full ID. */
+function idText(d: Partial<api.MedicoachReviewIdentity> | undefined): string {
+  if (!d?.idLast4) return d?.legacyKey ? 'No ID (older registration)' : '—';
+  const check =
+    d.idValid === true ? ' · valid SA ID' : d.idValid === false ? ' · checksum fails' : '';
+  return `••••${d.idLast4}${check}`;
+}
+
+const dateText = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : '—');
+
+/**
+ * What an admin should probably do about a possible duplicate, from the side-by-side detail —
+ * or null when nothing stands out. Most specific first.
+ */
+export function suggestedAction(
+  subject: api.MedicoachReviewIdentity | undefined,
+  c: ReviewCandidate,
+): string | null {
+  if (!subject || !c.diff) return null;
+  const idDiffers = c.diff.includes('id');
+  if (idDiffers && (subject.idValid === false || c.idValid === false))
+    return 'Probably a typo: one ID fails the SA ID checksum. Ask the office to merge the two registrations.';
+  if (c.sameIdIgnoringSpaces && (subject.legacyKey || c.legacyKey))
+    return 'Older registration from before IDs were used: same person. Ask the office to merge them.';
+  if (c.sameIdIgnoringSpaces && idDiffers)
+    return 'Same ID apart from spacing: same person. Ask the office to merge them.';
+  if (c.sameIdIgnoringSpaces) return 'Same ID: same person. Ask the office to merge them.';
+  if (idDiffers && c.diff.includes('club'))
+    return 'Different documents at two clubs. Ask both clubs which one is current.';
+  return null;
+}
+
+/** Plain-language text for a medicoach review message that leaves no Link/Create. */
+export function blockedReviewText(message: string | undefined): string {
+  if (message?.includes('out-of-tenant-identity-conflict'))
+    return 'This person already exists in the Match Centre under another organisation, so medicoach won’t add them here.';
+  return 'medicoach can’t add this player.';
+}
+
+/** Side-by-side: the held registration vs another one here; differing rows highlighted. */
+function DuplicateCompare({ r, c }: { r: api.MedicoachPlayerReview; c: ReviewCandidate }) {
+  const diff = new Set(c.diff ?? []);
+  const rows: Array<[string, string, string, boolean]> = [
+    ['Name', r.playerName || '—', c.name || '—', diff.has('name')],
+    ['Club', r.clubName ?? '—', c.institutionName ?? '—', diff.has('club')],
+    ['ID', idText(r.subject), idText(c), diff.has('id')],
+    ['Date of birth', r.dob ?? '—', c.dob ?? '—', diff.has('dob')],
+    ['Registered', dateText(r.subject?.registeredAt), dateText(c.registeredAt), false],
+  ];
+  const advice = suggestedAction(r.subject, c);
+  return (
+    <div>
+      <table
+        className="mcs-compare"
+        aria-label={`Compared with ${c.name || 'the other registration'}`}
+      >
+        <thead>
+          <tr>
+            <th scope="col">
+              <span className="sr-only">Field</span>
+            </th>
+            <th scope="col">This registration</th>
+            <th scope="col">Other registration</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(([label, a, b, differs]) => (
+            <tr key={label} className={differs ? 'mcs-diff' : undefined}>
+              <th scope="row">{label}</th>
+              <td>{a}</td>
+              <td>
+                {b}
+                {differs && <span className="sr-only"> (differs)</span>}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {c.sameIdIgnoringSpaces && diff.has('id') && (
+        <p className="mcs-note">Same ID apart from spacing.</p>
+      )}
+      {advice && (
+        <p className="mcs-reason" role="note" data-testid="mcs-suggested-action">
+          <strong>Suggested:</strong> {advice}
+        </p>
+      )}
+    </div>
+  );
+}
+
 /** One held player: who, why, the candidates, and the decisions that apply. */
 function PlayerReviewCard({
   r,
@@ -431,8 +523,8 @@ function PlayerReviewCard({
       </div>
       {blocked && (
         <p className="mcs-error-text" role="note">
-          {r.message || 'medicoach cannot add this player'} — medicoach can&apos;t link or create
-          this player from here. Ask the medicoach team to fix it on their side, then dismiss.
+          {blockedReviewText(r.message)} They can&apos;t be linked or created from here. Ask the
+          medicoach team to fix it on their side, then dismiss.
         </p>
       )}
       <p className="mcs-note" hidden={blocked}>
@@ -440,7 +532,15 @@ function PlayerReviewCard({
           ? 'Not sent until you choose: link this registration to one of these medicoach players, or create a new one.'
           : 'Not sent until you decide: if these are different people, confirm it; if it is the same person, fix the ID on smart club first, then dismiss.'}
       </p>
-      <ul className="mcs-list" aria-label="Candidates">
+      {!medicoach &&
+        r.candidates.map((c, i) =>
+          c.diff ? <DuplicateCompare key={`cmp-${i}`} r={r} c={c} /> : null,
+        )}
+      <ul
+        className="mcs-list"
+        aria-label="Candidates"
+        hidden={!medicoach && r.candidates.every((c) => !!c.diff)}
+      >
         {r.candidates.map((c, i) => (
           <li key={c.playerId ?? i}>
             <div>
@@ -500,12 +600,66 @@ function PlayerReviewCard({
           tone="outline"
           size="sm"
           disabled={busy !== null}
+          title="Drops this review and the change waiting to be sent"
           onClick={() => onResolve({ action: 'dismiss' }, 'Dismissed')}
         >
           Dismiss
         </Btn>
       </div>
+      <p className="mcs-note">
+        Dismiss sends nothing: it drops this review and the queued change. The player goes to
+        medicoach again only after their registration changes.
+      </p>
     </article>
+  );
+}
+
+const OPT_OUT_REASON: Record<api.MedicoachPlayerOptOut['reason'], string> = {
+  'medicoach-account-deleted': 'deleted their Match Centre account',
+  other: 'other reason',
+};
+
+/** Who is opted out, loaded when opened. Opting back in is a platform-operator step. */
+function OptedOutDetails() {
+  const [open, setOpen] = useState(false);
+  const list = useQuery({
+    queryKey: qk.medicoachPlayerOptOuts(),
+    queryFn: api.getMedicoachPlayerOptOuts,
+    enabled: open,
+  });
+  return (
+    <details
+      className="mcs-details"
+      onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
+    >
+      <summary>Details</summary>
+      <div className="mcs-details-body">
+        {list.isLoading ? (
+          'Loading…'
+        ) : list.isError ? (
+          'Couldn’t load the list.'
+        ) : !list.data?.length ? (
+          'No one is opted out.'
+        ) : (
+          <ul className="mcs-list" aria-label="Opted-out players">
+            {list.data.map((o, i) => (
+              <li key={`${o.at}-${i}`}>
+                <div>
+                  <div className="mcs-card-title">{o.name || 'Unknown player'}</div>
+                  <div className="ump-sub">
+                    {[o.club, OPT_OUT_REASON[o.reason], o.note].filter(Boolean).join(' · ')}
+                  </div>
+                  <div className="ump-sub">
+                    Since {dateText(o.at)} · by {o.by}
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="mcs-note">To send someone again, ask your platform operator.</p>
+      </div>
+    </details>
   );
 }
 
@@ -583,6 +737,7 @@ function PlayersPanel({
         <div className="mcs-note" data-testid="mcs-players-opted-out">
           {players.optedOut} player(s) are not sent to the Match Centre at their request — for
           example, they deleted their Match Centre account. Their registration here is unchanged.
+          <OptedOutDetails />
         </div>
       )}
       {players.parked > 0 && (

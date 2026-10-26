@@ -1175,6 +1175,17 @@ export type MedicoachPlayerSyncStatus =
       lastError?: string;
       lastErrorText?: string;
     };
+/**
+ * Read-time detail about one smart-club registration on a review card. Never the full ID:
+ * the last four characters, and whether an SA ID passes its checksum (null for passports).
+ */
+export interface MedicoachReviewIdentity {
+  idLast4: string | null;
+  idValid: boolean | null;
+  registeredAt: string | null;
+  /** Keyed by an older scheme (an email-era registration), not by the ID number. */
+  legacyKey: boolean;
+}
 /** One held player (PERSONAL DATA — admin only). */
 export interface MedicoachPlayerReview {
   naturalKey: string;
@@ -1184,12 +1195,30 @@ export interface MedicoachPlayerReview {
   playerName: string;
   dob: string | null;
   clubName: string | null;
-  candidates: Array<{
-    playerId?: string;
-    name: string;
-    dob: string | null;
-    institutionName: string | null;
-  }>;
+  /** The held registration itself (absent from older API builds). */
+  subject?: MedicoachReviewIdentity;
+  candidates: Array<
+    {
+      playerId?: string;
+      name: string;
+      dob: string | null;
+      institutionName: string | null;
+    } & Partial<MedicoachReviewIdentity> & {
+        /** Same ID number as the held player once spaces and dashes are ignored. */
+        sameIdIgnoringSpaces?: boolean;
+        /** Fields that differ from the held player: `name`, `dob`, `club`, `id`. */
+        diff?: string[];
+      }
+  >;
+}
+/** A person never sent to medicoach at their request (PERSONAL DATA — admin only). */
+export interface MedicoachPlayerOptOut {
+  name: string | null;
+  club: string | null;
+  reason: 'medicoach-account-deleted' | 'other';
+  note: string | null;
+  by: string;
+  at: string;
 }
 export type MedicoachPlayerResolution =
   | { action: 'link'; medicoachPlayerId: string }
@@ -1348,6 +1377,8 @@ export interface MedicoachResolveResult {
 }
 export const getMedicoachPlayerReviews = () =>
   request<MedicoachPlayerReview[]>('/integrations/medicoach/player-reviews');
+export const getMedicoachPlayerOptOuts = () =>
+  request<MedicoachPlayerOptOut[]>('/integrations/medicoach/player-opt-outs');
 export const resolveMedicoachPlayerReview = (
   naturalKey: string,
   resolution: MedicoachPlayerResolution,

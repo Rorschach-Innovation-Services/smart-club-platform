@@ -83,6 +83,17 @@ export function resolvePlayerDob(body: Partial<PlayerRegistration>): string | nu
 }
 
 /** Normalise an ID for storage/matching — trims and upper-cases (passports are alphanumeric). */
+/**
+ * An ID number as typed, with inner whitespace and dashes removed ("S 0556434" →
+ * "S0556434", "800101-5009-087" → "8001015009087"). Applied at INPUT, before an ID is stored
+ * and hashed, so a spaced entry can't diverge from the same ID typed cleanly. Deliberately NOT
+ * folded into {@link normalizeId}: that also normalises nationality and feeds every stored
+ * natural key, so changing it would re-key existing rows. Absent stays absent.
+ */
+export function compactIdNumber<T extends string | undefined>(idNumber: T): T {
+  return (typeof idNumber === 'string' ? idNumber.replace(/[\s-]+/g, '') : idNumber) as T;
+}
+
 export function normalizeId(idNumber: string | undefined): string {
   return (idNumber || '').trim().toUpperCase();
 }

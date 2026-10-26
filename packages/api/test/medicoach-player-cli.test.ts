@@ -15,6 +15,7 @@ import {
 } from '../src/medicoach-sync/enqueue-players.js';
 import {
   duplicateGroups,
+  spacedIdRows,
   parseArgs as parseAudit,
 } from '../src/medicoach-sync/audit-player-duplicates.js';
 
@@ -133,5 +134,27 @@ describe('audit-player-duplicates', () => {
   test('a pair an admin confirmed distinct is reported as settled', async () => {
     const groups = duplicateGroups(await loadPlayerSyncSnapshot(fakeRepo(['k3#k4']), T));
     assert.equal(groups[0].allConfirmedDistinct, true);
+  });
+
+  test('lists rows whose stored ID has spaces or dashes; masked, no ID', async () => {
+    const saved = rosters.b;
+    rosters.b = [
+      ...saved,
+      row({ naturalKey: 'k6', clubId: 'b', firstName: 'Suhel', idNumber: 'S 0556434' }),
+      row({ naturalKey: 'k7', clubId: 'b', idNumber: '800101-5009-087' }),
+      row({ naturalKey: 'k8', clubId: 'b', idNumber: ' S0556434 ' }),
+    ];
+    try {
+      const rows = spacedIdRows(await loadPlayerSyncSnapshot(fakeRepo(), T));
+      assert.equal(rows.length, 2, 'outer whitespace alone is not flagged');
+      assert.deepEqual(
+        rows.map((r) => r.club),
+        ['B CC', 'B CC'],
+      );
+      const printed = JSON.stringify(rows);
+      assert.ok(!printed.includes('0556434') && !printed.includes('Suhel'), 'masked');
+    } finally {
+      rosters.b = saved;
+    }
   });
 });

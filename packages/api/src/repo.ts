@@ -2306,6 +2306,17 @@ export async function listPlayerSyncOptOuts(tenant: string): Promise<Set<string>
   return new Set(items.map((i) => String(i.sk).slice(skPrefix.length)));
 }
 
+/** Every opt-out record (reason, note, who, when) — the admin page lists them. */
+export async function listPlayerSyncOptOutRecords(tenant: string): Promise<PlayerSyncOptOut[]> {
+  const { pk, skPrefix } = playerSyncOptOutListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<PlayerSyncOptOut>(i)!).filter(Boolean);
+}
+
 /**
  * Note that this person changed, for the medicoach player sync (ADR 0019). Called from every
  * repo write that changes a player row, so routes AND import CLIs are covered. A no-op unless

@@ -24,7 +24,10 @@ import {
  *  - smart club's own possible duplicate (same name + dob, two IDs): neither is pushed;
  *    "They are different people" pushes both;
  *  - Dismiss drops a review and pushes nothing;
- *  - an `out-of-tenant-identity-conflict` review (no candidates) offers Dismiss only;
+ *  - the possible-duplicate card compares both registrations side by side (differing rows
+ *    highlighted, last 4 of the ID only) and suggests asking both clubs;
+ *  - an `out-of-tenant-identity-conflict` review (no candidates) explains itself in plain
+ *    words (the code under Details) and offers Dismiss only;
  *  - "Retry waiting players" re-queues the parked row and the next sync sends it.
  *
  * A stack reused without the sync env answers "Sync now" with a dry run, and the spec skips.
@@ -280,6 +283,18 @@ test('registrations queue, sync, and land in the Players panel as counts and rev
   await expect(card(page, NAME.twin).first()).toContainText(
     'Same name and date of birth under another ID here',
   );
+
+  // Side by side: the two passports differ, as do the clubs; never a full ID number.
+  const twin = card(page, NAME.twin).first();
+  const compare = twin.getByRole('table', { name: /^Compared with/ });
+  await expect(compare.getByRole('row', { name: /^ID/ })).toHaveClass(/mcs-diff/);
+  await expect(compare.getByRole('row', { name: /^Club/ })).toHaveClass(/mcs-diff/);
+  await expect(compare.getByRole('row', { name: /^Date of birth/ })).not.toHaveClass(/mcs-diff/);
+  await expect(compare.getByRole('row', { name: /^ID/ })).toContainText('••••');
+  await expect(twin).not.toContainText(`MCP${RUN}`.toUpperCase());
+  await expect(twin.getByTestId('mcs-suggested-action')).toContainText(
+    'Different documents at two clubs',
+  );
 });
 
 test('link needs a candidate, create must acknowledge every candidate; each is sent at once', async ({
@@ -346,9 +361,12 @@ test('different people, dismiss, and a no-candidate identity conflict offers Dis
   await expect(page.getByText('Marked as different people — sent to medicoach')).toBeVisible();
   await expect(card(page, NAME.twin)).toHaveCount(0);
 
-  // The out-of-tenant conflict: medicoach's message, no Link/Create.
+  // The out-of-tenant conflict: plain words (medicoach's code under Details), no Link/Create.
   const conflict = card(page, NAME.conflict);
-  await expect(conflict).toContainText('out-of-tenant-identity-conflict');
+  await expect(conflict.getByRole('note')).toContainText(
+    'already exists in the Match Centre under another organisation',
+  );
+  await expect(conflict.locator('details')).toContainText('out-of-tenant-identity-conflict');
   await expect(conflict.getByRole('button')).toHaveText(['Dismiss']);
   await conflict.getByRole('button', { name: 'Dismiss' }).click();
   await expect(conflict).toHaveCount(0);
