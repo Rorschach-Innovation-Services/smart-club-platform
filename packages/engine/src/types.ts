@@ -38,6 +38,16 @@ export interface League {
    * via the operator wizard/SetupLeagueDialog.
    */
   setup?: { structureId: string; calendarId: string };
+  /**
+   * Captain's report notice timing for this league (packages/api/src/captains-reports.ts).
+   * Absent ⇒ the default: card-less match-day opens and every notice from 18:00 SAST.
+   *  - `deferMatchDayNotices`: no card-less match-day open — the report opens when the result
+   *    lands (e.g. CSA-scraped premier results early Monday). Bounded: a fixture still without
+   *    a stored result after the following Monday 12:00 SAST is opened card-less anyway.
+   *  - `noticeFromHour`: the SAST hour (0–23) this league's notices may go out from, until
+   *    midnight. Absent ⇒ REPORT_NOTICE_HOUR (18).
+   */
+  captainsReport?: { deferMatchDayNotices?: boolean; noticeFromHour?: number };
 }
 
 /* ─── SEASON CALENDAR (ADR 0008) ───

@@ -9885,6 +9885,22 @@ function validateLeagues(
   );
   if (badFlag)
     throw new HttpError(400, `fixturesOnly on league "${badFlag.label}" must be a boolean`);
+  const badReport = (leagues as League[]).find((l) => {
+    const cr = l.captainsReport as unknown;
+    if (cr === undefined) return false;
+    if (!cr || typeof cr !== 'object' || Array.isArray(cr)) return true;
+    const { deferMatchDayNotices: d, noticeFromHour: h, ...rest } = cr as Record<string, unknown>;
+    return (
+      Object.keys(rest).length > 0 ||
+      (d !== undefined && typeof d !== 'boolean') ||
+      (h !== undefined && !(Number.isInteger(h) && (h as number) >= 0 && (h as number) <= 23))
+    );
+  });
+  if (badReport)
+    throw new HttpError(
+      400,
+      `captainsReport on league "${badReport.label}" must be { deferMatchDayNotices?: boolean, noticeFromHour?: 0–23 }`,
+    );
   if (validDistricts) {
     const bad = (leagues as League[]).find((l) => !validDistricts.has(l.district));
     if (bad)

@@ -844,7 +844,8 @@
       "key": "premier",
       "label": "Premier League",
       "group": "Overarching Leagues",
-      "district": "All districts"
+      "district": "All districts",
+      "captainsReport": { "deferMatchDayNotices": true, "noticeFromHour": 4 }
     },
     {
       "key": "promotion",
@@ -856,7 +857,8 @@
       "key": "premierWomen",
       "label": "Premier Women’s League",
       "group": "Overarching Leagues",
-      "district": "All districts"
+      "district": "All districts",
+      "captainsReport": { "deferMatchDayNotices": true, "noticeFromHour": 4 }
     },
     {
       "key": "promotion-women-s-league",
