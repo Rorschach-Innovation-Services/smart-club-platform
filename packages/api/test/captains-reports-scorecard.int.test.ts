@@ -998,25 +998,54 @@ describe('an imported (CSA) card', () => {
 });
 
 describe('the scorecard-absent note (a manual result with no usable card)', () => {
-  const TEXT =
-    "CSA's published scorecard for this match could not be used. View it on the scoring site.";
+  // Copy split, decided in review: CSA-flavoured ONLY when the result points at a scored match
+  // (a medicoachMatchId or a match url — the CSA scrape path); a plain manual result gets the
+  // general sentence, which asserts nothing about CSA. The "View it on the scoring site." link
+  // is the url, rendered only when one exists. A no-result (abandoned / washout) gets nothing.
+  const CSA = "CSA's published scorecard for this match could not be used.";
+  const GENERAL = 'No scorecard is available for this match.';
 
-  test('a cardless manual result carries the note with the scoring-site link', async () => {
+  test('a cardless manual result of a scored match: CSA copy + the scoring-site link', async () => {
     await storeResult({ resultSource: 'manual' });
     const body = (await (await linkGet('umzinto')).json()) as Record<string, unknown>;
     assert.equal(body.scorecard, undefined);
     assert.ok(body.result);
     assert.deepEqual(body.scorecardAbsentNote, {
-      text: TEXT,
+      text: CSA,
       url: 'https://medicoach.example/matches/pma-1',
     });
   });
 
-  test('without a medicoach url the sentence still shows, with no link', async () => {
+  test('a medicoach match id but no url: CSA copy, no link', async () => {
     await storeResult({ resultSource: 'manual', medicoachMatchUrl: null });
     await repo.putFixtureScorecard(T, card({ available: false, innings: undefined }));
     const body = (await (await linkGet('umzinto')).json()) as Record<string, unknown>;
-    assert.deepEqual(body.scorecardAbsentNote, { text: TEXT });
+    assert.deepEqual(body.scorecardAbsentNote, { text: CSA });
+  });
+
+  test('a plain (non-CSA) manual result: the general sentence, never CSA', async () => {
+    await storeResult({
+      resultSource: 'manual',
+      medicoachMatchUrl: null,
+      medicoachMatchId: undefined,
+      medicoachTournamentId: undefined,
+    });
+    const body = (await (await linkGet('umzinto')).json()) as Record<string, unknown>;
+    assert.deepEqual(body.scorecardAbsentNote, { text: GENERAL });
+  });
+
+  test('never for a no-result (abandoned / washout)', async () => {
+    await storeResult({ resultSource: 'manual', winner: 'none', summary: 'Abandoned' });
+    let body = (await (await linkGet('umzinto')).json()) as Record<string, unknown>;
+    assert.equal(body.scorecardAbsentNote, undefined);
+    await storeResult({
+      resultSource: 'manual',
+      noResult: true,
+      winner: null,
+      orderAt: '2026-10-04T15:00:00.000Z',
+    });
+    body = (await (await linkGet('umzinto')).json()) as Record<string, unknown>;
+    assert.equal(body.scorecardAbsentNote, undefined);
   });
 
   test('never alongside an available card, and never for a live result', async () => {

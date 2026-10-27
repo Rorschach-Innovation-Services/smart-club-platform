@@ -727,7 +727,7 @@ function MatchScorecardSection({
                     target="_blank"
                     rel="noopener noreferrer"
                   >
-                    View on the scoring site
+                    View it on the scoring site.
                     <Icon.Arrow />
                   </a>
                 </>

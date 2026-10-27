@@ -735,6 +735,8 @@ describe('5. abandoned', () => {
       summary: 'Abandoned',
       winner: 'none',
     });
+    // An abandoned match has no card to explain: no scorecard-absent note.
+    assert.equal((view as { scorecardAbsentNote?: unknown }).scorecardAbsentNote, undefined);
     // Card-less ⇒ no scorecard answer is required.
     const ok = await linkPut(PREMIER, 'f3', 'umzinto', complete());
     assert.equal(ok.status, 200);

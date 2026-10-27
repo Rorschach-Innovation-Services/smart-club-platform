@@ -643,8 +643,10 @@ describe('the success card', () => {
 });
 
 describe('the scorecard-absent note', () => {
-  const TEXT =
-    "CSA's published scorecard for this match could not be used. View it on the scoring site.";
+  // Copy split (API: scorecardAbsentNoteFor): CSA-flavoured when the result points at a
+  // scored match, else the general sentence; the link only when a url exists.
+  const TEXT = "CSA's published scorecard for this match could not be used.";
+  const GENERAL = 'No scorecard is available for this match.';
   const render = (ctx: ScorecardContext) =>
     renderWithProviders(
       <CaptainsReportForm
@@ -664,15 +666,15 @@ describe('the scorecard-absent note', () => {
     const note = within(section()).getByTestId('scorecard-absent-note');
     expect(note).toHaveTextContent(TEXT);
     expect(within(section()).getAllByRole('link')).toHaveLength(1);
-    expect(within(note).getByRole('link', { name: /View on the scoring site/ })).toHaveAttribute(
+    expect(within(note).getByRole('link', { name: /View it on the scoring site/ })).toHaveAttribute(
       'href',
       'https://medicoach.example/matches/1',
     );
   });
 
   it('without a url: the sentence, no link', () => {
-    render({ result: WITH_CARD.result, scorecardAbsentNote: { text: TEXT } });
-    expect(within(section()).getByTestId('scorecard-absent-note')).toHaveTextContent(TEXT);
+    render({ result: WITH_CARD.result, scorecardAbsentNote: { text: GENERAL } });
+    expect(within(section()).getByTestId('scorecard-absent-note')).toHaveTextContent(GENERAL);
     expect(within(section()).queryByRole('link')).toBeNull();
   });
 

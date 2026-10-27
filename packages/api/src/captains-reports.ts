@@ -1920,8 +1920,33 @@ export interface ScorecardContext {
   scorecardAbsentNote?: { text: string; url?: string };
 }
 
-export const SCORECARD_ABSENT_NOTE_TEXT =
-  "CSA's published scorecard for this match could not be used. View it on the scoring site.";
+/**
+ * The scorecard-absent note's copy. CSA-flavoured only when the result points at a scored match
+ * (a `medicoachMatchId` or a match url — the CSA scrape path); otherwise the general sentence,
+ * which asserts nothing about CSA. "View it on the scoring site." is rendered as the link, and
+ * only when a url exists.
+ */
+export const SCORECARD_ABSENT_NOTE_CSA_TEXT =
+  "CSA's published scorecard for this match could not be used.";
+export const SCORECARD_ABSENT_NOTE_GENERAL_TEXT = 'No scorecard is available for this match.';
+
+/**
+ * Whether a manual, card-less result gets the note (and which copy). Never for a no-result
+ * (abandoned / washout: `noResult` or `winner: 'none'`) — there is no card to explain.
+ */
+function scorecardAbsentNoteFor(
+  live: StoredFixtureResult,
+  card: StoredFixtureScorecard | null | undefined,
+): ScorecardContext['scorecardAbsentNote'] {
+  if (live.resultSource !== 'manual' || card?.available) return undefined;
+  if (live.noResult || live.winner === 'none') return undefined;
+  const url = httpUrlOrNull(live.medicoachMatchUrl);
+  const csa = !!live.medicoachMatchId || !!url;
+  return {
+    text: csa ? SCORECARD_ABSENT_NOTE_CSA_TEXT : SCORECARD_ABSENT_NOTE_GENERAL_TEXT,
+    ...(url ? { url } : {}),
+  };
+}
 
 /**
  * The scorecard context for ONE report's detail view (the `/r/` link and the portal's report
@@ -1948,6 +1973,7 @@ export async function attachScorecardContext(
     : card?.sourceUrl
       ? httpUrlOrNull(card.sourceUrl)
       : null;
+  const absentNote = live ? scorecardAbsentNoteFor(live, card) : undefined;
   return {
     ...(card?.available
       ? {
@@ -1969,16 +1995,7 @@ export async function attachScorecardContext(
         }
       : {}),
     ...(url ? { medicoachMatchUrl: url } : {}),
-    ...(live && live.resultSource === 'manual' && !card?.available
-      ? {
-          scorecardAbsentNote: {
-            text: SCORECARD_ABSENT_NOTE_TEXT,
-            ...(httpUrlOrNull(live.medicoachMatchUrl)
-              ? { url: httpUrlOrNull(live.medicoachMatchUrl)! }
-              : {}),
-          },
-        }
-      : {}),
+    ...(absentNote ? { scorecardAbsentNote: absentNote } : {}),
   };
 }
 
