@@ -1498,7 +1498,19 @@ export async function loadLinkedReport(
   nowMs: number,
   secret: string,
 ): Promise<
-  | { ok: true; tenant: string; report: CaptainsReport; memberId: string; isChairLink: boolean }
+  | {
+      ok: true;
+      tenant: string;
+      report: CaptainsReport;
+      memberId: string;
+      isChairLink: boolean;
+      /**
+       * The TOKEN's expiry (epoch seconds). The token is the capability: access and submit
+       * gate on it alone, and the link page shows it. The stored `linkExpiresAt` only drives
+       * when notices/reminders stop, so a re-signed (extended) link outlives it.
+       */
+      tokenExpiresAt: number;
+    }
   | { ok: false; status: 404 | 410; error: string }
 > {
   const check = verifyReportLinkToken(token, secret, nowMs);
@@ -1511,7 +1523,7 @@ export async function loadLinkedReport(
             'This link has expired. Your club chair can still file the report from the club portal.',
         }
       : { ok: false, status: 404, error: 'not found' };
-  const { t: tenant, r: reportId, m: memberId } = check.payload;
+  const { t: tenant, r: reportId, m: memberId, e: tokenExpiresAt } = check.payload;
   const key = parseCaptainsReportId(reportId);
   if (!key) return { ok: false, status: 404, error: 'not found' };
   const report = await repo.getCaptainsReport(tenant, key.seriesId, key.fixtureId, key.clubId);
@@ -1524,7 +1536,7 @@ export async function loadLinkedReport(
   if (report.status === 'void' || (!isCurrent && !isKeptChairLink))
     return { ok: false, status: 410, error: 'this link is no longer valid' };
   const isChairLink = isKeptChairLink || (isCurrent && report.recipient.kind === 'chair');
-  return { ok: true, tenant, report, memberId, isChairLink };
+  return { ok: true, tenant, report, memberId, isChairLink, tokenExpiresAt };
 }
 
 // ───────────────────────── "Send to captain" ─────────────────────────

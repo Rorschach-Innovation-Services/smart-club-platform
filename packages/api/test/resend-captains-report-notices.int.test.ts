@@ -479,3 +479,50 @@ describe('--confirm', () => {
     assert.equal(notices.length, 0);
   });
 });
+
+// The token is the capability: a hand-signed (extended) link outlives the STORED expiry,
+// which only stops notices. Access, submit and the shown "Link expires" follow the token.
+describe('link expiry follows the token, not the stored report expiry', () => {
+  const signed = async (r: CaptainsReport, e: number) => {
+    const { captainsReportLinkSecret } = await import('../src/env.js');
+    return reports.signReportLinkToken(
+      { t: 'dolphins', r: r.id, m: r.recipient.memberId, e },
+      captainsReportLinkSecret(),
+    );
+  };
+
+  test('an extended token opens and submits a report whose stored expiry has passed', async () => {
+    const storedExpiry = new Date(Date.now() - DAY).toISOString();
+    await openPending('umzinto', { linkExpiresAt: storedExpiry });
+    const r = (await get('umzinto'))!;
+    const e = Math.floor(Date.now() / 1000) + 7 * 24 * 3600;
+    const token = await signed(r, e);
+    const opened = await linkGet(token);
+    assert.equal(opened.status, 200);
+    const body = (await opened.json()) as { report: { linkExpiresAt?: string } };
+    assert.equal(body.report.linkExpiresAt, new Date(e * 1000).toISOString());
+    assert.notEqual(body.report.linkExpiresAt, storedExpiry);
+    const submitted = await submitVia(token);
+    assert.equal(submitted.status, 200);
+    assert.equal((await get('umzinto'))!.status, 'submitted');
+  });
+
+  test('a genuinely expired token still refuses (410), even with a future stored expiry', async () => {
+    await openPending('umzinto', {
+      linkExpiresAt: new Date(Date.now() + 5 * DAY).toISOString(),
+    });
+    const r = (await get('umzinto'))!;
+    const token = await signed(r, Math.floor(Date.now() / 1000) - 60);
+    assert.equal((await linkGet(token)).status, 410);
+    assert.equal((await submitVia(token)).status, 410);
+    assert.equal((await get('umzinto'))!.status, 'pending');
+  });
+
+  test('a normal link (token e == stored) shows the stored expiry exactly as before', async () => {
+    await openPending('umzinto');
+    const r = (await get('umzinto'))!;
+    const res = await linkGet(await linkFor(r, r.recipient.memberId));
+    const body = (await res.json()) as { report: { linkExpiresAt?: string } };
+    assert.equal(body.report.linkExpiresAt, r.linkExpiresAt);
+  });
+});

@@ -292,6 +292,7 @@ import {
   forwardReport,
   hasContact,
   loadLinkedReport,
+  reportExpirySeconds,
   MAX_FORWARDS,
   NOTICE_FAILED_ERROR,
   notifyOperatorsOfCorrection,
@@ -8287,7 +8288,16 @@ async function linkedReportOr410(c: Context<HonoEnv>) {
   return found;
 }
 
-async function linkPayload(tenant: string, report: CaptainsReport, isChairLink: boolean) {
+/**
+ * `tokenExpiresAt` is the opened link's own expiry: the page's "Link expires" follows the
+ * token (the capability), never the stored report expiry, which only stops notices.
+ */
+async function linkPayload(
+  tenant: string,
+  report: CaptainsReport,
+  isChairLink: boolean,
+  tokenExpiresAt: number,
+) {
   const [cfg, umpires, views, context] = await Promise.all([
     repo.getTenantConfig(tenant),
     repo.listUmpires(tenant),
@@ -8295,7 +8305,12 @@ async function linkPayload(tenant: string, report: CaptainsReport, isChairLink: 
     attachScorecardContext(repo, tenant, report),
   ]);
   return {
-    report: views[0],
+    // A normal link (token expiry == the stored one) passes the stored value through
+    // untouched; only a re-signed / extended link shows its own.
+    report:
+      reportExpirySeconds(report) === tokenExpiresAt
+        ? views[0]
+        : { ...views[0], linkExpiresAt: new Date(tokenExpiresAt * 1000).toISOString() },
     // The match scorecard to confirm (+ headline result / medicoach link when there is none).
     ...context,
     // "Send to captain" is offered to the CHAIR's link only; a captain's link never gets a
@@ -8315,8 +8330,8 @@ async function linkPayload(tenant: string, report: CaptainsReport, isChairLink: 
 }
 
 app.get('/captains-report-link/:token', async (c) => {
-  const { tenant, report, isChairLink } = await linkedReportOr410(c);
-  return c.json(await linkPayload(tenant, report, isChairLink));
+  const { tenant, report, isChairLink, tokenExpiresAt } = await linkedReportOr410(c);
+  return c.json(await linkPayload(tenant, report, isChairLink, tokenExpiresAt));
 });
 
 /** The chair's link only: the club's eligible players for "Send to captain" (names only). */
@@ -8331,7 +8346,7 @@ app.get('/captains-report-link/:token/forward-candidates', async (c) => {
 });
 
 app.post('/captains-report-link/:token/forward', async (c) => {
-  const { tenant, report, isChairLink } = await linkedReportOr410(c);
+  const { tenant, report, isChairLink, tokenExpiresAt } = await linkedReportOr410(c);
   if (!isChairLink) throw new HttpError(403, 'only the club chair can send this report on');
   const body = ((await c.req.json().catch(() => null)) ?? {}) as { candidateId?: unknown };
   if (typeof body.candidateId !== 'string' || !body.candidateId)
@@ -8340,11 +8355,11 @@ app.post('/captains-report-link/:token/forward', async (c) => {
     { repo },
     { tenant, report, candidateId: body.candidateId, via: 'link' },
   ).catch(flowError);
-  return c.json(await linkPayload(tenant, updated, true));
+  return c.json(await linkPayload(tenant, updated, true, tokenExpiresAt));
 });
 
 app.put('/captains-report-link/:token', async (c) => {
-  const { tenant, report, memberId, isChairLink } = await linkedReportOr410(c);
+  const { tenant, report, memberId, isChairLink, tokenExpiresAt } = await linkedReportOr410(c);
   const { fields, submit } = await reportFieldsFrom(
     tenant,
     report,
@@ -8355,7 +8370,7 @@ app.put('/captains-report-link/:token', async (c) => {
     via: 'link',
     memberId,
   });
-  return c.json(await linkPayload(tenant, saved, isChairLink));
+  return c.json(await linkPayload(tenant, saved, isChairLink, tokenExpiresAt));
 });
 
 /* ─── Season runs (ADR 0008) ───
