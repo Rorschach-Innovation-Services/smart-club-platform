@@ -14,7 +14,7 @@
  *  - drafts save partial answers and a cleared answer is REMOVED;
  *  - the link payload and the portal DETAIL route carry the scorecard context (the list never);
  *  - a newer card fetched later marks submitted answers stale (the scorecard sweep hook);
- *  - `available: false` is re-checked for 3 days before it turns terminal (404 at once);
+ *  - `available: false` is re-checked for 3 days before it turns terminal (a 404 too);
  *  - player erasure scrubs the person's name from a correction's text and counts it.
  *
  * Replaced: the operator correction sender (captured) and medicoach's HTTP (a fake `fetch`).
@@ -780,7 +780,7 @@ describe('available:false is re-checked for 3 days', () => {
     assert.equal(fetchMod.needsScorecardFetch(result, stub, day3.getTime() + DAY), false);
   });
 
-  test('a card published inside the window replaces the stub; a 404 is terminal at once', async () => {
+  test('a card published inside the window replaces the stub; a 404 is re-checked, then ages out', async () => {
     await storeResult();
     const t0 = new Date('2026-10-04T15:00:00.000Z');
     await fetchMod.fetchAndStoreScorecard(
@@ -814,7 +814,24 @@ describe('available:false is re-checked for 3 days', () => {
       'tour-9',
     );
     const gone = await repo.getFixtureScorecard(T, S, 'f1');
-    assert.equal(gone?.terminal, true);
+    assert.equal(gone?.available, false);
+    assert.equal(gone?.terminal, undefined, 'a 404 is not terminal at once');
+    // Still 404 after the 3-day window: it ages out exactly like available:false.
+    const aged = new Date(t0.getTime() + fetchMod.SCORECARD_UNAVAILABLE_WINDOW_MS);
+    assert.equal(
+      await fetchMod.fetchAndStoreScorecard(
+        fetchDeps(medicoach(404, { error: 'not found' }), aged),
+        T,
+        S,
+        'f1',
+        'pma-gone',
+        'tour-9',
+      ),
+      'not-found',
+    );
+    const agedOut = await repo.getFixtureScorecard(T, S, 'f1');
+    assert.equal(agedOut?.terminal, true);
+    assert.equal(agedOut?.fetchedAt, t0.toISOString());
   });
 });
 
