@@ -45,7 +45,12 @@ export interface League {
    *    lands (e.g. CSA-scraped premier results early Monday). Bounded: a fixture still without
    *    a stored result after the following Monday 12:00 SAST is opened card-less anyway.
    *  - `noticeFromHour`: the SAST hour (0–23) this league's notices may go out from, until
-   *    midnight. Absent ⇒ REPORT_NOTICE_HOUR (18).
+   *    midnight. Absent ⇒ REPORT_NOTICE_HOUR (18). NOT guarded: set WITHOUT
+   *    `deferMatchDayNotices` it also moves the card-less match-day opens to that hour ON the
+   *    match day (before the result). Set both, as premier does.
+   *  - The fallback only looks back DEFERRED_FALLBACK_LOOKBACK_DAYS (7): if both the scrape and
+   *    the sync are down past that, the fixture's card-less fallback is lost.
+   * Operator-set: a tenant-admin leagues PUT keeps the STORED value (like `setup`).
    */
   captainsReport?: { deferMatchDayNotices?: boolean; noticeFromHour?: number };
 }

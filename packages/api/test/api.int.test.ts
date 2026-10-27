@@ -8228,3 +8228,69 @@ describe('fixtures-only leagues (League.fixturesOnly — a KO Cup on its own cal
     assert.match(((await res.json()) as { error: string }).error, /fixturesOnly/);
   });
 });
+
+describe('League.captainsReport (operator-set notice timing)', () => {
+  const OP = devAuthAs('op-cr', 'operator@platform', [
+    { tenantId: '*', role: 'operator', clubIds: [] },
+  ]);
+  let saved: import('../src/types.js').League[];
+  before(async () => {
+    saved = (await repo.getTenantConfig('dolphins'))!.leagues ?? [];
+  });
+  after(async () => {
+    const cfg = (await repo.getTenantConfig('dolphins'))!;
+    await repo.putTenantConfig({ ...cfg, leagues: saved });
+  });
+  const withTiming = (cr: unknown) =>
+    saved.map((l, i) => (i === 0 ? { ...l, captainsReport: cr } : l));
+  const put = (url: string, auth: string, leagues: unknown) =>
+    app.request(url, { method: 'PUT', headers: headers(auth), body: JSON.stringify({ leagues }) });
+  const stored = async () => (await repo.getTenantConfig('dolphins'))!.leagues![0].captainsReport;
+
+  test('shape: hour 24, a non-integer hour, an unknown key or a non-boolean flag are 400', async () => {
+    for (const cr of [
+      { noticeFromHour: 24 },
+      { noticeFromHour: 4.5 },
+      { noticeFromHour: -1 },
+      { deferMatchDayNotices: 'yes' },
+      { noticeFromHour: 4, extra: true },
+      'early',
+    ]) {
+      const res = await put('/platform/tenants/dolphins', OP, withTiming(cr));
+      assert.equal(res.status, 400, JSON.stringify(cr));
+      assert.match(((await res.json()) as { error: string }).error, /captainsReport/);
+    }
+  });
+
+  test('the operator sets it; a GET round-trip echo saves; a tenant-admin PUT cannot drop it', async () => {
+    const cr = { deferMatchDayNotices: true, noticeFromHour: 4 };
+    assert.equal((await put('/platform/tenants/dolphins', OP, withTiming(cr))).status, 200);
+    assert.deepEqual(await stored(), cr);
+
+    // The tenant console's GET echo (field included) saves unchanged.
+    const view = (await (
+      await app.request('/tenant/config', { headers: headers(ADMIN) })
+    ).json()) as {
+      leagues: unknown[];
+    };
+    assert.equal((await put('/tenant/config', ADMIN, view.leagues)).status, 200);
+    assert.deepEqual(await stored(), cr);
+
+    // A cached list WITHOUT the field (rename) keeps the stored value…
+    const renamed = saved.map((l, i) => (i === 0 ? { ...l, label: `${l.label} (r)` } : l));
+    assert.equal((await put('/tenant/config', ADMIN, renamed)).status, 200);
+    assert.deepEqual(await stored(), cr);
+    // …and a tenant admin cannot forge one either.
+    assert.equal(
+      (await put('/tenant/config', ADMIN, withTiming({ noticeFromHour: 1 }))).status,
+      200,
+    );
+    assert.deepEqual(await stored(), cr);
+
+    // The operator portal: absent keeps it, null clears it.
+    assert.equal((await put('/platform/tenants/dolphins', OP, saved)).status, 200);
+    assert.deepEqual(await stored(), cr);
+    assert.equal((await put('/platform/tenants/dolphins', OP, withTiming(null))).status, 200);
+    assert.equal(await stored(), undefined);
+  });
+});

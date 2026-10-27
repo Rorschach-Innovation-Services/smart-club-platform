@@ -152,6 +152,21 @@ export function noticeLeagueResolver(
   const leagues = new Map((config?.leagues ?? []).map((l) => [l.key, l]));
   const seriesById = new Map<string, Promise<Series | null>>();
   const runLeague = new Map<string, Promise<string | undefined>>();
+  // A failed read falls back to the default (18:00) window — never aborts the caller's loop.
+  // The failure is not cached as a rejection; it is logged and reported once per item.
+  const resolveFailed = (err: unknown, what: string): undefined => {
+    console.warn(
+      `[captains-report] ${tenant}: league lookup for ${what} failed — default window used (${
+        err instanceof Error ? err.message : 'error'
+      })`,
+    );
+    void import('./instrument.js')
+      .then(({ Sentry }) =>
+        Sentry.captureException(err, { tags: { tenant, job: 'captains-report-league' } }),
+      )
+      .catch(() => {});
+    return undefined;
+  };
   const forSeries = async (series: Series | null | undefined): Promise<League | undefined> => {
     if (!active || !series) return undefined;
     let key = (series as { leagueKey?: unknown }).leagueKey;
@@ -160,7 +175,10 @@ export function noticeLeagueResolver(
       if (!runLeague.has(runId))
         runLeague.set(
           runId,
-          repo.getSeasonRun(tenant, runId).then((r) => r?.leagueKey ?? undefined),
+          repo.getSeasonRun(tenant, runId).then(
+            (r) => r?.leagueKey ?? undefined,
+            (err) => resolveFailed(err, `season run ${runId}`),
+          ),
         );
       key = await runLeague.get(runId);
     }
@@ -170,7 +188,13 @@ export function noticeLeagueResolver(
     forSeries,
     async forSeriesId(seriesId: string): Promise<League | undefined> {
       if (!active) return undefined;
-      if (!seriesById.has(seriesId)) seriesById.set(seriesId, repo.getSeries(tenant, seriesId));
+      if (!seriesById.has(seriesId))
+        seriesById.set(
+          seriesId,
+          repo
+            .getSeries(tenant, seriesId)
+            .catch((err) => resolveFailed(err, `series ${seriesId}`) ?? null),
+        );
       return forSeries(await seriesById.get(seriesId));
     },
   };
@@ -889,7 +913,9 @@ const daysBefore = (date: string, days: number) =>
 /**
  * Open the reports of every fixture PLAYED on the target dates (default today and the
  * MATCH_DAY_LOOKBACK_DAYS before it, SAST), result or not. Runs inside the 18:00 notice window
- * only; a shut window returns at once without reading anything (`windowClosed`).
+ * only. For a tenant with no league override, a shut window returns at once without reading
+ * anything (`windowClosed`); with an override, the series are listed and each is judged against
+ * its own league's window (`windowClosed` when none was open).
  *
  * A side that already has a report row of ANY status is left alone: `openCaptainsReportIfAbsent`
  * succeeds on a VOID row, so re-walking it would resurrect a report withdrawn by a cleared
@@ -1372,6 +1398,8 @@ export interface ReportRetrySummary {
 export async function retryPendingReportOpens(
   tenant: string,
   deps: CaptainsReportDeps,
+  /** The tenant config when the caller already holds it (saves a read); else read here. */
+  opts?: { config?: TenantConfig | null },
 ): Promise<ReportRetrySummary> {
   const { repo } = deps;
   const now = deps.now ?? (() => new Date());
@@ -1381,7 +1409,7 @@ export async function retryPendingReportOpens(
   // Before 18:00 SAST nothing is sent: every marker stays queued, untouched (a deferral is
   // never an attempt — it must not count toward REPORT_OPEN_MAX_ATTEMPTS). A league with its
   // own `noticeFromHour` is judged per marker: a mixed batch drains only the open leagues.
-  const config = await repo.getTenantConfig(tenant);
+  const config = opts?.config !== undefined ? opts.config : await repo.getTenantConfig(tenant);
   const perLeague = hasCaptainsReportLeagueOverrides(config);
   if (!perLeague && !reportNoticeWindowOpen(now())) return { ...out, deferred: markers.length };
   const leagueOf = noticeLeagueResolver(repo, tenant, config);
@@ -1670,6 +1698,8 @@ export interface ReminderSummary {
 export async function sendReportReminders(
   tenant: string,
   deps: CaptainsReportDeps,
+  /** The tenant config when the caller already holds it (saves a read); else read here. */
+  opts?: { config?: TenantConfig | null },
 ): Promise<ReminderSummary> {
   const { repo } = deps;
   const now = deps.now ?? (() => new Date());
@@ -1678,9 +1708,9 @@ export async function sendReportReminders(
   // reminders stay due (the window runs to midnight, so none is lost to the gate alone).
   // A league with its own `noticeFromHour` is judged per report.
   const defaultOpen = reportNoticeWindowOpen(now());
-  let config: TenantConfig | null | undefined;
+  let config: TenantConfig | null | undefined = opts?.config;
   if (!defaultOpen) {
-    config = await repo.getTenantConfig(tenant);
+    if (config === undefined) config = await repo.getTenantConfig(tenant);
     if (!hasCaptainsReportLeagueOverrides(config)) return out;
   }
   const nowMs = now().getTime();

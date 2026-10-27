@@ -448,3 +448,83 @@ describe('sendReportReminders', () => {
     assert.equal(notices.length, 0);
   });
 });
+
+describe('read discipline and resolution', () => {
+  /** `repo` with every call counted by name. */
+  const counting = () => {
+    const calls: string[] = [];
+    const proxy = new Proxy(repo, {
+      get(target, prop, recv) {
+        const v = Reflect.get(target, prop, recv);
+        if (typeof v !== 'function') return v;
+        return (...args: unknown[]) => {
+          calls.push(String(prop));
+          return (v as (...a: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    }) as typeof repo;
+    return { proxy, calls };
+  };
+
+  test('no override + closed window: the sync-run paths read nothing beyond the old reads', async () => {
+    await seed(false);
+    await storeResult(PREMIER, 'f3', PREMIER_REF, true);
+    const cfg = await config();
+    const t = at(MON, 5);
+    const { proxy, calls } = counting();
+    const d = { ...deps(t), repo: proxy };
+    const retry = await reports.retryPendingReportOpens('dolphins', d, { config: cfg });
+    assert.equal(retry.deferred, 1);
+    assert.deepEqual(calls, ['listReportOpenMarkers'], 'retry: only the marker list, as before');
+    calls.length = 0;
+    assert.deepEqual(await reports.sendReportReminders('dolphins', d, { config: cfg }), {
+      due: 0,
+      sent: 0,
+      undelivered: 0,
+    });
+    assert.deepEqual(calls, [], 'reminders: nothing read');
+    const md = await reports.openMatchDayReports('dolphins', cfg, d);
+    assert.equal(md.windowClosed, true);
+    assert.deepEqual(calls, [], 'match-day: nothing read');
+  });
+
+  test('a deferred league resolved through its season run (no series leagueKey) drains early', async () => {
+    await seed();
+    await repo.putSeasonRun('dolphins', {
+      id: 'run-premier',
+      leagueKey: 'premier',
+      seasonLabel: '2026/27',
+      stages: [],
+      structureSnapshot: {},
+      calendarSnapshot: {},
+      version: 1,
+    } as never);
+    await repo.putSeries(
+      'dolphins',
+      series(PREMIER, ['umzinto', 'african-warriors'], [fx('f3', 'umzinto', 'african-warriors')], {
+        seasonRunId: 'run-premier',
+      }),
+    );
+    await storeResult(PREMIER, 'f3', PREMIER_REF, true);
+    await storeResult(PROMO, 'f7', PROMO_REF, true);
+    const r = await reports.retryPendingReportOpens('dolphins', deps(at(MON, 5)));
+    assert.deepEqual([r.done, r.deferred], [1, 1]);
+    assert.deepEqual(seriesOfNotices(), [PREMIER]);
+  });
+
+  test('a failed league lookup falls back to the default window instead of throwing', async () => {
+    await seed();
+    await storeResult(PREMIER, 'f3', PREMIER_REF, true);
+    const broken = new Proxy(repo, {
+      get(target, prop, recv) {
+        if (prop === 'getSeries') return async () => Promise.reject(new Error('ddb blip'));
+        return Reflect.get(target, prop, recv);
+      },
+    }) as typeof repo;
+    const r = await reports.retryPendingReportOpens('dolphins', {
+      ...deps(at(MON, 5)),
+      repo: broken,
+    });
+    assert.deepEqual([r.done, r.deferred], [0, 1], 'held for 18:00, loop not aborted');
+  });
+});

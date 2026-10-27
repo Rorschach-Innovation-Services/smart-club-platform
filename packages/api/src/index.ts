@@ -9424,6 +9424,8 @@ async function applyTenantConfigPatch(
         ...l,
         competitions: storedByKey.get(l.key)?.competitions,
         setup: storedByKey.get(l.key)?.setup,
+        // Operator-set notice timing (League.captainsReport): same rule as `setup`.
+        captainsReport: storedByKey.get(l.key)?.captainsReport,
       }));
     }
   }
@@ -9887,7 +9889,8 @@ function validateLeagues(
     throw new HttpError(400, `fixturesOnly on league "${badFlag.label}" must be a boolean`);
   const badReport = (leagues as League[]).find((l) => {
     const cr = l.captainsReport as unknown;
-    if (cr === undefined) return false;
+    // null = clear it (operator PUT); absent = keep what is stored (see keepStoredCompetitions).
+    if (cr === undefined || cr === null) return false;
     if (!cr || typeof cr !== 'object' || Array.isArray(cr)) return true;
     const { deferMatchDayNotices: d, noticeFromHour: h, ...rest } = cr as Record<string, unknown>;
     return (
@@ -10445,6 +10448,24 @@ function keepStoredCompetitions(incoming: League[], stored: League[]): League[] 
 }
 
 /**
+ * The operator PUT sets a league's `captainsReport` (notice timing). A league sent WITHOUT the
+ * field keeps the stored value (a portal tab built before it existed must not wipe it);
+ * `null` clears it.
+ */
+function keepStoredCaptainsReport(incoming: League[], stored: League[]): League[] {
+  const storedByKey = new Map(stored.map((l) => [l.key, l.captainsReport]));
+  return incoming.map((l) => {
+    const { captainsReport, ...rest } = l as League & { captainsReport?: unknown };
+    if (captainsReport === null) return rest;
+    if (captainsReport === undefined) {
+      const kept = storedByKey.get(l.key);
+      return kept ? { ...rest, captainsReport: kept } : rest;
+    }
+    return l;
+  });
+}
+
+/**
  * PUT /platform/tenants/:slug — merge-patch branding / features / leagues /
  * districts / submissionDeadline (whitelisted: the operator portal edits nothing
  * else). Shares applyTenantConfigPatch with PUT /tenant/config, so the same
@@ -10516,7 +10537,10 @@ app.put('/platform/tenants/:slug', async (c) => {
   }
   if (body.leagues !== undefined) {
     validateLeagues(body.leagues); // shape 400s must win over the guard's 409
-    patch.leagues = keepStoredCompetitions(body.leagues, (await getCurrent()).leagues ?? []);
+    patch.leagues = keepStoredCaptainsReport(
+      keepStoredCompetitions(body.leagues, (await getCurrent()).leagues ?? []),
+      (await getCurrent()).leagues ?? [],
+    );
     // Operator-side delete guard: unlike the tenant admin console, the operator has
     // no view of club registrations, so a write that drops a league key clubs still
     // reference is rejected outright — an orphaned key breaks player registration.
