@@ -641,3 +641,43 @@ describe('the success card', () => {
     );
   });
 });
+
+describe('the scorecard-absent note', () => {
+  const TEXT =
+    "CSA's published scorecard for this match could not be used. View it on the scoring site.";
+  const render = (ctx: ScorecardContext) =>
+    renderWithProviders(
+      <CaptainsReportForm
+        report={shell()}
+        registry={REGISTRY}
+        onSubmit={vi.fn()}
+        scorecardContext={ctx}
+      />,
+    );
+
+  it('a cardless manual result shows the sentence and ONE scoring-site link', () => {
+    render({
+      result: WITH_CARD.result,
+      medicoachMatchUrl: 'https://medicoach.example/matches/1',
+      scorecardAbsentNote: { text: TEXT, url: 'https://medicoach.example/matches/1' },
+    });
+    const note = within(section()).getByTestId('scorecard-absent-note');
+    expect(note).toHaveTextContent(TEXT);
+    expect(within(section()).getAllByRole('link')).toHaveLength(1);
+    expect(within(note).getByRole('link', { name: /View on the scoring site/ })).toHaveAttribute(
+      'href',
+      'https://medicoach.example/matches/1',
+    );
+  });
+
+  it('without a url: the sentence, no link', () => {
+    render({ result: WITH_CARD.result, scorecardAbsentNote: { text: TEXT } });
+    expect(within(section()).getByTestId('scorecard-absent-note')).toHaveTextContent(TEXT);
+    expect(within(section()).queryByRole('link')).toBeNull();
+  });
+
+  it('a carded report never shows it', () => {
+    render(WITH_CARD);
+    expect(screen.queryByTestId('scorecard-absent-note')).toBeNull();
+  });
+});

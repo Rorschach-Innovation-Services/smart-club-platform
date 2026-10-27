@@ -996,3 +996,40 @@ describe('an imported (CSA) card', () => {
     );
   });
 });
+
+describe('the scorecard-absent note (a manual result with no usable card)', () => {
+  const TEXT =
+    "CSA's published scorecard for this match could not be used. View it on the scoring site.";
+
+  test('a cardless manual result carries the note with the scoring-site link', async () => {
+    await storeResult({ resultSource: 'manual' });
+    const body = (await (await linkGet('umzinto')).json()) as Record<string, unknown>;
+    assert.equal(body.scorecard, undefined);
+    assert.ok(body.result);
+    assert.deepEqual(body.scorecardAbsentNote, {
+      text: TEXT,
+      url: 'https://medicoach.example/matches/pma-1',
+    });
+  });
+
+  test('without a medicoach url the sentence still shows, with no link', async () => {
+    await storeResult({ resultSource: 'manual', medicoachMatchUrl: null });
+    await repo.putFixtureScorecard(T, card({ available: false, innings: undefined }));
+    const body = (await (await linkGet('umzinto')).json()) as Record<string, unknown>;
+    assert.deepEqual(body.scorecardAbsentNote, { text: TEXT });
+  });
+
+  test('never alongside an available card, and never for a live result', async () => {
+    await storeResult({ resultSource: 'manual' });
+    await repo.putFixtureScorecard(T, card());
+    let body = (await (await linkGet('umzinto')).json()) as Record<string, unknown>;
+    assert.ok(body.scorecard);
+    assert.equal(body.scorecardAbsentNote, undefined);
+
+    await repo.putFixtureScorecard(T, card({ available: false, innings: undefined }));
+    await storeResult({ resultSource: 'live', orderAt: '2026-10-04T15:00:00.000Z' });
+    body = (await (await linkGet('umzinto')).json()) as Record<string, unknown>;
+    assert.equal(body.scorecard, undefined);
+    assert.equal(body.scorecardAbsentNote, undefined);
+  });
+});

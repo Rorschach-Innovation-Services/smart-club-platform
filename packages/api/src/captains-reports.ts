@@ -1912,7 +1912,16 @@ export interface ScorecardContext {
   };
   /** Medicoach's own match page (http(s) only). */
   medicoachMatchUrl?: string;
+  /**
+   * A MANUAL result with no available card (CSA's published card could not be used): why
+   * there is no scorecard, plus the scoring site's page when the result carries one. Never
+   * present alongside an available card.
+   */
+  scorecardAbsentNote?: { text: string; url?: string };
 }
+
+export const SCORECARD_ABSENT_NOTE_TEXT =
+  "CSA's published scorecard for this match could not be used. View it on the scoring site.";
 
 /**
  * The scorecard context for ONE report's detail view (the `/r/` link and the portal's report
@@ -1960,6 +1969,16 @@ export async function attachScorecardContext(
         }
       : {}),
     ...(url ? { medicoachMatchUrl: url } : {}),
+    ...(live && live.resultSource === 'manual' && !card?.available
+      ? {
+          scorecardAbsentNote: {
+            text: SCORECARD_ABSENT_NOTE_TEXT,
+            ...(httpUrlOrNull(live.medicoachMatchUrl)
+              ? { url: httpUrlOrNull(live.medicoachMatchUrl)! }
+              : {}),
+          },
+        }
+      : {}),
   };
 }
 
