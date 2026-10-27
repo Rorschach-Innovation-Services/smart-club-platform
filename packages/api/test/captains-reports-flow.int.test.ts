@@ -1103,6 +1103,11 @@ describe('POST /integrations/whatsapp/status (forwarded by medicoach, sync-signe
 
 describe('dates in notices', () => {
   test('a September match reads "Sep" (the platform formatter), never "Sept"', async () => {
+    // A FIXED go-live before the match: the suite's GO_LIVE is relative to today, and once
+    // today passed mid-October it fell after 20 Sep and the report was skipped as
+    // before-go-live (no notice at all — the old TypeError).
+    await resetTable();
+    await seed('2026-09-01');
     const s = (await repo.getSeries('dolphins', 's-planb-premier-men-t20-g1'))!;
     await repo.putSeries('dolphins', {
       ...s,
