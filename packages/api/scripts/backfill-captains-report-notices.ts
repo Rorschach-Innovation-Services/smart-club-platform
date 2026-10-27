@@ -35,6 +35,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { WILDCARD_WEB_SUFFIX } from '../../../infra/tenants.js';
 import { bootstrapNotifyEnvFromSst } from '../src/notify-env-bootstrap.js';
+import { sstStage } from '../src/env.js';
 
 /** packages/api — where the backup lands unless `--backup-dir` says otherwise. */
 const DEFAULT_BACKUP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -88,15 +89,7 @@ export function parseBackfillArgs(argv: string[]): BackfillArgs {
 }
 
 /** The stage `sst shell` injected (`SST_STAGE`, else `SST_RESOURCE_App.stage`), or null. */
-export function sstStage(env: NodeJS.ProcessEnv = process.env): string | null {
-  if (env.SST_STAGE?.trim()) return env.SST_STAGE.trim();
-  try {
-    const app = env.SST_RESOURCE_App ? JSON.parse(env.SST_RESOURCE_App) : null;
-    return typeof app?.stage === 'string' ? app.stage : null;
-  } catch {
-    return null;
-  }
-}
+export { sstStage };
 
 /**
  * The captain's-report link base for this run: an explicit `--link-base`, else an env value

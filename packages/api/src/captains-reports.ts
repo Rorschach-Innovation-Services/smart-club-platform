@@ -38,7 +38,12 @@ import { isSlotRef } from '../../engine/src/formats.js';
 import { formatSastWeekdayDay, formatWeekdayDayYear } from '../../../src/dates.js';
 import { orgCopy } from './branding.js';
 import { chairContactOf } from './club-contacts.js';
-import { captainsReportLinkBase, captainsReportLinkSecret } from './env.js';
+import {
+  captainsReportLinkBase,
+  captainsReportLinkSecret,
+  isLoopbackLinkHost,
+  sstStage,
+} from './env.js';
 import { hasFeature } from './features.js';
 import { toE164 } from './notify/e164.js';
 import { isWithheld, projectSeriesForClub } from './series-projection.js';
@@ -1278,7 +1283,23 @@ export function setDefaultReportNoticeSender(
  * sent (`no-email`, `no-cell`, `template-pending`, `send-failed`); a dry-run send returns a
  * `dry-run-` message id, which the caller records as not sent.
  */
-export async function sendReportNotice(n: ReportNotice): Promise<NoticeResult[]> {
+export async function sendReportNotice(
+  n: ReportNotice,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<NoticeResult[]> {
+  // A prod notice must never carry a dead link: `captainsReportLinkBase()` silently falls back
+  // to localhost when its env is unset (two real sends went out that way). Refuse loudly on
+  // every channel, sending nothing. Other stages are unchanged (local dev links are fine).
+  if (sstStage(env) === 'prod' && isLoopbackLinkHost(n.url)) {
+    console.error(
+      `[captains-report] ${n.tenant} ${n.reportId}: refusing prod notice — link base is ${new URL(n.url).origin}`,
+    );
+    return n.channels.map((channel) => ({
+      channel,
+      status: 'failed' as const,
+      reason: 'dead-link-base' as const,
+    }));
+  }
   const { sendCaptainsReportDueEmail } = await import('./notify/email.js');
   const { sendCaptainsReportDueWhatsApp, WhatsAppTemplatePendingError } =
     await import('./notify/whatsapp.js');

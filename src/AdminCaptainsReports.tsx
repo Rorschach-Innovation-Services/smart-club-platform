@@ -63,6 +63,7 @@ const SKIP_LABEL: Record<NonNullable<CaptainsReportDelivery['reason']>, string> 
   'dry-run': 'not sent (dry run)',
   'template-pending': 'template pending',
   'send-failed': 'failed',
+  'dead-link-base': 'not sent — link base is localhost',
 };
 
 /** One delivery row as a notice chip (exported for the operator consoles). */

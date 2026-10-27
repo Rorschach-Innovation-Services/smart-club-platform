@@ -126,3 +126,35 @@ export function captainsReportLinkSecret(): string {
 export function captainsReportLinkBase(): string {
   return (process.env.CAPTAINS_REPORT_LINK_BASE_URL || 'http://localhost:5173').replace(/\/+$/, '');
 }
+
+/**
+ * The SST stage (`SST_STAGE`, else `SST_RESOURCE_App.stage` — what `sst shell` and deployed
+ * functions carry), or null. The backfill/resend scripts' stage detection lives here so the
+ * notice sender can apply the same rule.
+ */
+export function sstStage(env: NodeJS.ProcessEnv = process.env): string | null {
+  if (env.SST_STAGE?.trim()) return env.SST_STAGE.trim();
+  try {
+    const app = env.SST_RESOURCE_App ? JSON.parse(env.SST_RESOURCE_App) : null;
+    return typeof app?.stage === 'string' ? app.stage : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A link host that is dead to every recipient (the local dev fallback). Pure. */
+export function isLoopbackLinkHost(url: string): boolean {
+  let host = '';
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return false;
+  }
+  return (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '[::1]' ||
+    host === '::1' ||
+    host.endsWith('.localhost')
+  );
+}
