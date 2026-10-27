@@ -735,6 +735,33 @@ describe('the reminder', () => {
     assert.equal(notices.length, 0, 'at most once');
   });
 
+  test('an all-failed reminder (dead link base) is not spent: the next in-window run sends it', async () => {
+    page = liveResultPage('manual');
+    await pull();
+    const report = await own();
+    const expiryMs = Date.parse(report.linkExpiresAt!);
+    const { sendReportReminders } = await import('../src/captains-reports.js');
+    const at = (ms: number) => ({ repo, now: () => new Date(ms), ...capture });
+
+    respond = (n) =>
+      n.channels.map((channel) => ({ channel, status: 'failed', reason: 'dead-link-base' }));
+    notices.length = 0;
+    await sendReportReminders('dolphins', at(expiryMs - 2 * DAY + 60_000));
+    assert.equal(notices.filter((n) => n.reportId === report.id).length, 1, 'attempted');
+    const failed = await own();
+    assert.equal(failed.reminderSentAt, undefined, 'the one reminder is not consumed');
+    assert.ok(
+      failed.deliveries!.some((d) => d.purpose === 'reminder' && d.reason === 'dead-link-base'),
+    );
+
+    respond = defaultRespond;
+    notices.length = 0;
+    await sendReportReminders('dolphins', at(expiryMs - 2 * DAY + 20 * 60_000));
+    const mine = notices.filter((n) => n.reportId === report.id);
+    assert.equal(mine.length, 1);
+    assert.ok((await own()).reminderSentAt);
+  });
+
   test('never for a submitted report or after the link expired', async () => {
     page = liveResultPage('manual');
     await pull();

@@ -1208,7 +1208,9 @@ async function notifyRecipient(
   const failed = !delivered && deliveries.some((d) => d.status === 'failed');
   await repo.recordCaptainsReportDeliveries(tenant, report, deliveries, {
     ...(delivered ? { notifiedAt: at } : {}),
-    ...(reminder ? { reminderSentAt: at } : {}),
+    // An all-failed reminder (e.g. `dead-link-base`) must not spend the report's one reminder:
+    // no stamp, claim released below, so the next in-window run sends it.
+    ...(reminder && !failed ? { reminderSentAt: at } : {}),
   });
   for (const d of deliveries)
     if (d.channel === 'whatsapp' && d.status === 'sent' && d.messageId)
@@ -1218,7 +1220,7 @@ async function notifyRecipient(
         fixtureId: report.fixtureId,
         clubId: report.clubId,
       });
-  if (failed && !reminder) {
+  if (failed) {
     await repo.releaseCaptainsReportNotify(tenant, report.id, audience);
     return 'failed';
   }
