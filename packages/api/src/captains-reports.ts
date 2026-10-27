@@ -159,17 +159,19 @@ export function noticeLeagueResolver(
   const runLeague = new Map<string, Promise<string | undefined>>();
   // A failed read falls back to the default (18:00) window — never aborts the caller's loop.
   // The failure is not cached as a rejection; it is logged and reported once per item.
-  const resolveFailed = (err: unknown, what: string): undefined => {
+  // Awaited (not fire-and-forget): a Lambda frozen right after the run would drop the capture.
+  const resolveFailed = async (err: unknown, what: string): Promise<undefined> => {
     console.warn(
       `[captains-report] ${tenant}: league lookup for ${what} failed — default window used (${
         err instanceof Error ? err.message : 'error'
       })`,
     );
-    void import('./instrument.js')
-      .then(({ Sentry }) =>
-        Sentry.captureException(err, { tags: { tenant, job: 'captains-report-league' } }),
-      )
-      .catch(() => {});
+    try {
+      const { Sentry } = await import('./instrument.js');
+      Sentry.captureException(err, { tags: { tenant, job: 'captains-report-league' } });
+    } catch {
+      // Visibility only: never affects the caller's window.
+    }
     return undefined;
   };
   const forSeries = async (series: Series | null | undefined): Promise<League | undefined> => {
@@ -198,7 +200,7 @@ export function noticeLeagueResolver(
           seriesId,
           repo
             .getSeries(tenant, seriesId)
-            .catch((err) => resolveFailed(err, `series ${seriesId}`) ?? null),
+            .catch(async (err) => (await resolveFailed(err, `series ${seriesId}`)) ?? null),
         );
       return forSeries(await seriesById.get(seriesId));
     },

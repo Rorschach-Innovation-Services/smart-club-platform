@@ -50,7 +50,13 @@ export interface League {
    *    match day (before the result). Set both, as premier does.
    *  - The fallback only looks back DEFERRED_FALLBACK_LOOKBACK_DAYS (7): if both the scrape and
    *    the sync are down past that, the fixture's card-less fallback is lost.
-   * Operator-set: a tenant-admin leagues PUT keeps the STORED value (like `setup`).
+   * Operator-set: a tenant-admin leagues PUT keeps the STORED value (like `setup`); the
+   * operator PUT treats `null` or an empty `{}` as "no override" (cleared).
+   * Ops: a broken link base (prod notices refused as `dead-link-base`) fails each opening, and
+   * after REPORT_OPEN_MAX_ATTEMPTS (5 ≈ 75 min of 15-minute syncs) the REPORTOPEN# marker is
+   * given up (Sentry). Fix the link base, then recover with
+   * packages/api/scripts/resend-captains-report-notices.ts. Failed reminders are not spent:
+   * the next in-window run retries them.
    */
   captainsReport?: { deferMatchDayNotices?: boolean; noticeFromHour?: number };
 }

@@ -8293,4 +8293,20 @@ describe('League.captainsReport (operator-set notice timing)', () => {
     assert.equal((await put('/platform/tenants/dolphins', OP, withTiming(null))).status, 200);
     assert.equal(await stored(), undefined);
   });
+
+  test('an explicit empty {} is "no override": stored absent, the tenant stays out of per-league mode', async () => {
+    const { hasCaptainsReportLeagueOverrides } = await import('../src/captains-reports.js');
+    const cr = { noticeFromHour: 4 };
+    assert.equal((await put('/platform/tenants/dolphins', OP, withTiming(cr))).status, 200);
+    assert.deepEqual(await stored(), cr);
+    assert.equal((await put('/platform/tenants/dolphins', OP, withTiming({}))).status, 200);
+    assert.equal(await stored(), undefined);
+    const cfg = await repo.getTenantConfig('dolphins');
+    assert.equal(
+      (cfg!.leagues ?? []).some((l) => 'captainsReport' in l),
+      saved.some((l) => 'captainsReport' in l),
+    );
+    if (!saved.some((l) => l.captainsReport))
+      assert.equal(hasCaptainsReportLeagueOverrides(cfg), false);
+  });
 });

@@ -34,6 +34,8 @@ for (const url of [
   'http://localhost:5173/r/tok',
   'http://127.0.0.1:5173/r/tok',
   'http://[::1]:5173/r/tok',
+  'http://0.0.0.0:5173/r/tok',
+  'http://127.1.2.3:5173/r/tok',
 ]) {
   test(`prod refuses a ${new URL(url).hostname} link on every channel`, async () => {
     for (const env of [prod, prodViaApp]) {

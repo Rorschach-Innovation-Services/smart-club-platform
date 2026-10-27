@@ -10465,13 +10465,20 @@ function keepStoredCompetitions(incoming: League[], stored: League[]): League[] 
 /**
  * The operator PUT sets a league's `captainsReport` (notice timing). A league sent WITHOUT the
  * field keeps the stored value (a portal tab built before it existed must not wipe it);
- * `null` clears it.
+ * `null` clears it, and so does an explicit EMPTY object (`{}`, or only undefined keys): it
+ * carries no override, yet storing it would flip `hasCaptainsReportLeagueOverrides` and put the
+ * tenant in per-league notice mode (extra reads every run) for nothing.
  */
 function keepStoredCaptainsReport(incoming: League[], stored: League[]): League[] {
   const storedByKey = new Map(stored.map((l) => [l.key, l.captainsReport]));
   return incoming.map((l) => {
     const { captainsReport, ...rest } = l as League & { captainsReport?: unknown };
     if (captainsReport === null) return rest;
+    if (
+      typeof captainsReport === 'object' &&
+      Object.values(captainsReport as Record<string, unknown>).every((v) => v === undefined)
+    )
+      return rest;
     if (captainsReport === undefined) {
       const kept = storedByKey.get(l.key);
       return kept ? { ...rest, captainsReport: kept } : rest;
@@ -10552,9 +10559,10 @@ app.put('/platform/tenants/:slug', async (c) => {
   }
   if (body.leagues !== undefined) {
     validateLeagues(body.leagues); // shape 400s must win over the guard's 409
+    const storedLeagues = (await getCurrent()).leagues ?? [];
     patch.leagues = keepStoredCaptainsReport(
-      keepStoredCompetitions(body.leagues, (await getCurrent()).leagues ?? []),
-      (await getCurrent()).leagues ?? [],
+      keepStoredCompetitions(body.leagues, storedLeagues),
+      storedLeagues,
     );
     // Operator-side delete guard: unlike the tenant admin console, the operator has
     // no view of club registrations, so a write that drops a league key clubs still
