@@ -1,0 +1,285 @@
+{
+  "version": 1,
+  "tenant": "e2e-csa",
+  "nextCursor": "2026-10-27T21:27:55.195Z",
+  "hasMore": false,
+  "fixtures": [
+    {
+      "ref": "smartclub:e2e-csa:fixture:PREMIER:e2e-csa-f-dh-1330",
+      "syncStamp": "2026-10-01T00:00:00.000Z",
+      "schedule": {
+        "scheduledTime": "2026-10-25T13:30:00+02:00",
+        "timeTbc": false,
+        "dateTbc": false,
+        "venue": null,
+        "postponed": false,
+        "cancelled": false,
+        "changedAt": "1970-01-01T00:00:00.000Z"
+      },
+      "teams": {
+        "homeRef": "smartclub:e2e-csa:team:premier:DELTA",
+        "awayRef": "smartclub:e2e-csa:team:premier:CRUSADERS"
+      },
+      "result": null,
+      "resultClearedAt": null
+    },
+    {
+      "ref": "smartclub:e2e-csa:fixture:PREMIER:e2e-csa-f-livebook",
+      "syncStamp": "2026-10-01T00:00:00.000Z",
+      "schedule": {
+        "scheduledTime": "2026-10-18T09:00:00+02:00",
+        "timeTbc": false,
+        "dateTbc": false,
+        "venue": null,
+        "postponed": false,
+        "cancelled": false,
+        "changedAt": "1970-01-01T00:00:00.000Z"
+      },
+      "teams": {
+        "homeRef": "smartclub:e2e-csa:team:premier:QUINS",
+        "awayRef": "smartclub:e2e-csa:team:premier:SNATAL"
+      },
+      "result": null,
+      "resultClearedAt": null
+    },
+    {
+      "ref": "smartclub:e2e-csa:fixture:PREMIER:e2e-csa-f-locked",
+      "syncStamp": "2026-10-01T00:00:00.000Z",
+      "schedule": {
+        "scheduledTime": "2026-10-18T09:00:00+02:00",
+        "timeTbc": false,
+        "dateTbc": false,
+        "venue": null,
+        "postponed": false,
+        "cancelled": false,
+        "changedAt": "1970-01-01T00:00:00.000Z"
+      },
+      "teams": {
+        "homeRef": "smartclub:e2e-csa:team:premier:DELTA",
+        "awayRef": "smartclub:e2e-csa:team:premier:CHATSUTD"
+      },
+      "result": null,
+      "resultClearedAt": null
+    },
+    {
+      "ref": "smartclub:e2e-csa:fixture:PREMIER:e2e-csa-f-refused",
+      "syncStamp": "2026-10-01T00:00:00.000Z",
+      "schedule": {
+        "scheduledTime": "2026-10-18T09:00:00+02:00",
+        "timeTbc": false,
+        "dateTbc": false,
+        "venue": null,
+        "postponed": false,
+        "cancelled": false,
+        "changedAt": "1970-01-01T00:00:00.000Z"
+      },
+      "teams": {
+        "homeRef": "smartclub:e2e-csa:team:premier:TOTI",
+        "awayRef": "smartclub:e2e-csa:team:premier:CRUSADERS"
+      },
+      "result": null,
+      "resultClearedAt": null
+    },
+    {
+      "ref": "smartclub:e2e-csa:fixture:PREMIER:e2e-csa-f-tbc",
+      "syncStamp": "2026-10-01T00:00:00.000Z",
+      "schedule": {
+        "scheduledTime": null,
+        "timeTbc": false,
+        "dateTbc": true,
+        "venue": null,
+        "postponed": false,
+        "cancelled": false,
+        "changedAt": "1970-01-01T00:00:00.000Z"
+      },
+      "teams": {
+        "homeRef": "smartclub:e2e-csa:team:premier:HILLARY",
+        "awayRef": "smartclub:e2e-csa:team:premier:UMZINTO"
+      },
+      "result": null,
+      "resultClearedAt": null
+    },
+    {
+      "ref": "smartclub:e2e-csa:fixture:PREMIER:e2e-csa-f-unmatched",
+      "syncStamp": "2026-10-01T00:00:00.000Z",
+      "schedule": {
+        "scheduledTime": "2026-10-25T13:30:00+02:00",
+        "timeTbc": false,
+        "dateTbc": false,
+        "venue": null,
+        "postponed": false,
+        "cancelled": false,
+        "changedAt": "1970-01-01T00:00:00.000Z"
+      },
+      "teams": {
+        "homeRef": "smartclub:e2e-csa:team:premier:DURBAN",
+        "awayRef": "smartclub:e2e-csa:team:premier:HILLARY"
+      },
+      "result": null,
+      "resultClearedAt": null
+    },
+    {
+      "ref": "smartclub:e2e-csa:fixture:PREMIER:e2e-csa-f-human",
+      "syncStamp": "2026-10-27T21:29:44.837Z",
+      "schedule": {
+        "scheduledTime": "2026-10-18T09:00:00+02:00",
+        "timeTbc": false,
+        "dateTbc": false,
+        "venue": null,
+        "postponed": false,
+        "cancelled": false,
+        "changedAt": "1970-01-01T00:00:00.000Z"
+      },
+      "teams": {
+        "homeRef": "smartclub:e2e-csa:team:premier:RHYTHM",
+        "awayRef": "smartclub:e2e-csa:team:premier:CHATSSPT"
+      },
+      "result": {
+        "homeScore": "77 all out (15.1)",
+        "awayScore": "194/4 (20)",
+        "summary": "Chatsworth Sporting CC 1st XI won by 117 runs",
+        "winner": "away",
+        "method": "normal",
+        "noResult": false,
+        "source": "live",
+        "recordedAt": "2026-10-27T21:29:44.837Z",
+        "scoringSide": "home",
+        "captainRef": null,
+        "medicoachMatchUrl": "https://live.e2e.invalid/e2e-csa-ukzn/scorecard/bbb72861-a2c3-4779-911e-e2a96666bea7?tournamentId=e2e-csa-t-613",
+        "medicoachMatchId": "bbb72861-a2c3-4779-911e-e2a96666bea7",
+        "medicoachTournamentId": "e2e-csa-t-613"
+      },
+      "resultClearedAt": null
+    },
+    {
+      "ref": "smartclub:e2e-csa:fixture:PREMIER:e2e-csa-f-happy",
+      "syncStamp": "2026-10-27T21:29:47.161Z",
+      "schedule": {
+        "scheduledTime": "2026-10-18T09:00:00+02:00",
+        "timeTbc": false,
+        "dateTbc": false,
+        "venue": null,
+        "postponed": false,
+        "cancelled": false,
+        "changedAt": "1970-01-01T00:00:00.000Z"
+      },
+      "teams": {
+        "homeRef": "smartclub:e2e-csa:team:premier:UKZN",
+        "awayRef": "smartclub:e2e-csa:team:premier:WARRIORS"
+      },
+      "result": {
+        "homeScore": "160/3 (20)",
+        "awayScore": "100 all out (17.1)",
+        "summary": "UKZN 1st XI won by 60 runs",
+        "winner": "home",
+        "method": "normal",
+        "noResult": false,
+        "source": "live",
+        "recordedAt": "2026-10-27T21:29:47.161Z",
+        "scoringSide": "home",
+        "captainRef": null,
+        "medicoachMatchUrl": "https://live.e2e.invalid/e2e-csa-ukzn/scorecard/caa6716e-80ab-479a-a502-8420e8942682?tournamentId=e2e-csa-t-613",
+        "medicoachMatchId": "caa6716e-80ab-479a-a502-8420e8942682",
+        "medicoachTournamentId": "e2e-csa-t-613"
+      },
+      "resultClearedAt": null
+    },
+    {
+      "ref": "smartclub:e2e-csa:fixture:PREMIER:e2e-csa-f-dh-0900",
+      "syncStamp": "2026-10-27T21:29:48.836Z",
+      "schedule": {
+        "scheduledTime": "2026-10-25T09:00:00+02:00",
+        "timeTbc": false,
+        "dateTbc": false,
+        "venue": null,
+        "postponed": false,
+        "cancelled": false,
+        "changedAt": "1970-01-01T00:00:00.000Z"
+      },
+      "teams": {
+        "homeRef": "smartclub:e2e-csa:team:premier:DELTA",
+        "awayRef": "smartclub:e2e-csa:team:premier:CRUSADERS"
+      },
+      "result": {
+        "homeScore": "159 all out (19)",
+        "awayScore": "185/5 (20)",
+        "summary": "Crusaders won by 26 runs",
+        "winner": "away",
+        "method": "normal",
+        "noResult": false,
+        "source": "live",
+        "recordedAt": "2026-10-27T21:29:48.836Z",
+        "scoringSide": "away",
+        "captainRef": null,
+        "medicoachMatchUrl": "https://live.e2e.invalid/e2e-csa-ukzn/scorecard/2f6d9c46-5b53-451c-b82c-df9e5862c484?tournamentId=e2e-csa-t-613",
+        "medicoachMatchId": "2f6d9c46-5b53-451c-b82c-df9e5862c484",
+        "medicoachTournamentId": "e2e-csa-t-613"
+      },
+      "resultClearedAt": null
+    },
+    {
+      "ref": "smartclub:e2e-csa:fixture:PREMIER:e2e-csa-f-abandoned",
+      "syncStamp": "2026-10-27T21:29:49.441Z",
+      "schedule": {
+        "scheduledTime": "2026-10-25T09:00:00+02:00",
+        "timeTbc": false,
+        "dateTbc": false,
+        "venue": null,
+        "postponed": false,
+        "cancelled": false,
+        "changedAt": "1970-01-01T00:00:00.000Z"
+      },
+      "teams": {
+        "homeRef": "smartclub:e2e-csa:team:premier:HILLARY",
+        "awayRef": "smartclub:e2e-csa:team:premier:TOTI"
+      },
+      "result": {
+        "homeScore": null,
+        "awayScore": null,
+        "summary": "Abandoned",
+        "winner": "none",
+        "method": "abandoned",
+        "noResult": true,
+        "source": "manual",
+        "recordedAt": "2026-10-27T21:29:49.441Z",
+        "scoringSide": null,
+        "captainRef": null,
+        "medicoachMatchUrl": null
+      },
+      "resultClearedAt": null
+    },
+    {
+      "ref": "smartclub:e2e-csa:fixture:PREMIER:e2e-csa-f-women",
+      "syncStamp": "2026-10-27T21:29:50.330Z",
+      "schedule": {
+        "scheduledTime": "2026-10-18T13:00:00+02:00",
+        "timeTbc": false,
+        "dateTbc": false,
+        "venue": null,
+        "postponed": false,
+        "cancelled": false,
+        "changedAt": "1970-01-01T00:00:00.000Z"
+      },
+      "teams": {
+        "homeRef": "smartclub:e2e-csa:team:premier:WWARRIORS",
+        "awayRef": "smartclub:e2e-csa:team:premier:WCHATSUTD"
+      },
+      "result": {
+        "homeScore": "122 all out (18.5)",
+        "awayScore": "123/3 (16.4)",
+        "summary": "Chatsworth United Womens 1st XI won by 7 wickets (20 balls remaining)",
+        "winner": "away",
+        "method": "normal",
+        "noResult": false,
+        "source": "live",
+        "recordedAt": "2026-10-27T21:29:50.330Z",
+        "scoringSide": "home",
+        "captainRef": null,
+        "medicoachMatchUrl": "https://live.e2e.invalid/e2e-csa-ukzn/scorecard/4277d934-bbfa-4e40-bff1-3c636824b606?tournamentId=e2e-csa-t-618",
+        "medicoachMatchId": "4277d934-bbfa-4e40-bff1-3c636824b606",
+        "medicoachTournamentId": "e2e-csa-t-618"
+      },
+      "resultClearedAt": null
+    }
+  ]
+}
