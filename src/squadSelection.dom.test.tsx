@@ -304,6 +304,34 @@ describe('closed and invalid links', () => {
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
   });
 
+  it('kind wins over the message: kind=transient on generic copy offers "Try again"', async () => {
+    vi.mocked(api.getLinkedSquadRequest).mockRejectedValue(
+      new ApiError(410, 'unavailable', undefined, { kind: 'transient' }),
+    );
+    renderPage();
+    expect(await screen.findByText('This link is temporarily unavailable')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+  });
+
+  it('kind wins over the message: kind=expired reads as expired', async () => {
+    vi.mocked(api.getLinkedSquadRequest).mockRejectedValue(
+      new ApiError(410, 'gone', undefined, { kind: 'expired' }),
+    );
+    renderPage();
+    expect(await screen.findByText('This link has expired')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+  });
+
+  it('kind=closed overrides a message that would regex-match transient', async () => {
+    vi.mocked(api.getLinkedSquadRequest).mockRejectedValue(
+      new ApiError(410, 'temporarily unavailable, expired', undefined, { kind: 'closed' }),
+    );
+    renderPage();
+    expect(await screen.findByText('This squad link is closed')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(api.getLinkedSquadRequest).toHaveBeenCalledTimes(1);
+  });
+
   it('a non-transient 410 offers no retry and never refetches', async () => {
     vi.mocked(api.getLinkedSquadRequest).mockRejectedValue(
       new ApiError(410, 'fixture changed — this squad link is no longer valid'),

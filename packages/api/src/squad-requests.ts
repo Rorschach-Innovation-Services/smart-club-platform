@@ -341,7 +341,12 @@ export const captainCandidateId = (
 
 export type SquadRequestView = Omit<
   SquadRequest,
-  'recipient' | 'recipientContact' | 'chairMemberId' | 'deliveries' | 'selection'
+  | 'recipient'
+  | 'recipientContact'
+  | 'chairMemberId'
+  | 'fixtureMissingAt'
+  | 'deliveries'
+  | 'selection'
 > & {
   recipient: { kind: SquadRequest['recipient']['kind']; name: string; forwardedBy?: unknown };
   deliveries?: Array<Omit<CaptainsReportDelivery, 'messageId'>>;
@@ -364,7 +369,14 @@ export function squadRequestView(
   ids?: { secret: string; tenant: string },
 ): SquadRequestView {
   const { memberId: _m, ...recipient } = r.recipient;
-  const { recipientContact: _rc, chairMemberId: _c, deliveries, selection, ...rest } = r;
+  const {
+    recipientContact: _rc,
+    chairMemberId: _c,
+    fixtureMissingAt: _fm,
+    deliveries,
+    selection,
+    ...rest
+  } = r;
   const idOf = (key: string) =>
     ids ? squadRosterId(ids.secret, ids.tenant, r.id, key) : undefined;
   const captain = selection?.captainKey
@@ -688,15 +700,12 @@ function liveFixture(series: Series | null, fixtureId: string): StoredFixture | 
   );
 }
 
-/** Cancelled, undated (dateTbc) or moved off `matchDate` ⇒ the request no longer stands. */
-export function fixtureChanged(f: StoredFixture | null, matchDate: string): boolean {
-  return !f || f.status === 'cancelled' || f.dateTbc === true || f.date !== matchDate;
-}
-
 /**
  * A request's fixture, judged for voiding. Only a CONFIRMED change voids: cancelled, TBC, or a
  * present date other than `matchDate` ⇒ 'changed'. A missing series / fixture or an absent
- * date is a transient read (a schedule rewrite mid-flight) ⇒ 'unknown': never void on it.
+ * date is a transient read (a schedule rewrite mid-flight) ⇒ 'unknown': never void on it here.
+ * (The sweep alone escalates a fixture absent from a PRESENT series after
+ * `FIXTURE_MISSING_CONFIRM_MS` — see `voidChangedSquadRequests`.)
  */
 export function squadFixtureState(
   f: StoredFixture | null,
@@ -707,6 +716,13 @@ export function squadFixtureState(
   if (typeof f.date !== 'string' || !f.date) return 'unknown';
   return f.date === matchDate ? 'ok' : 'changed';
 }
+
+/**
+ * How long a fixture may stay absent from a successfully read series before the sweep treats
+ * it as a confirmed removal (void + §8 void). At least two sweep intervals, so one mid-rewrite
+ * read never voids.
+ */
+export const FIXTURE_MISSING_CONFIRM_MS = 30 * 60 * 1000;
 
 /** The `voidReason`s the void paths store. Only FIXTURE_CHANGED may ever self-heal. */
 export const SQUAD_VOID_REASONS = {
@@ -957,7 +973,9 @@ export interface SquadRetrySummary {
  * Retry every SQUADOPEN# marker (each run). A retry acts on the marker's STORED target — the
  * fixture and match date it was written for, never "tomorrow" — and gives up `too-old` once
  * the day before the match has passed (match day or later): squad sends happen only on D-1.
- * A fixture that moved or was cancelled drops its marker.
+ * A fixture CONFIRMED moved or cancelled drops its marker; a transient read (missing series /
+ * fixture, absent date) keeps it for a later pass. A gave-up tombstone is only ever deleted by
+ * too-old or the flag being off.
  */
 export async function retryPendingSquadOpens(
   tenant: string,
@@ -983,30 +1001,38 @@ export async function retryPendingSquadOpens(
       out.deferred += markers.length - i;
       break;
     }
-    const series = config ? await repo.getSeries(tenant, m.seriesId) : null;
-    const fixture = liveFixture(series, m.fixtureId);
-    const side = fixture?.home === m.teamId ? 'home' : fixture?.away === m.teamId ? 'away' : null;
-    if (
-      !config ||
-      !squadLinksEnabled(config) ||
-      // too-old: sends happen only on D-1. A match-day send is deliberately not attempted
-      // (the link itself would still work until 23:59:59) — an admin resend covers exceptions.
-      m.matchDate <= today ||
-      !series ||
-      !side ||
-      fixtureChanged(fixture, m.matchDate)
-    ) {
+    // Retirement: flag off / no config, or too-old. These delete even a gave-up tombstone —
+    // too-old is the tombstone's own retirement path. too-old: sends happen only on D-1. A
+    // match-day send is deliberately not attempted (the link itself would still work until
+    // 23:59:59) — an admin resend covers exceptions.
+    if (!config || !squadLinksEnabled(config) || m.matchDate <= today) {
       await repo.deleteSquadOpenMarker(tenant, m.requestId);
       out.dropped++;
       continue;
     }
-    if (m.gaveUpAt) continue; // a tombstone: given up, nothing more is sent
+    // A tombstone: given up, nothing more is sent — and nothing below (a transient read, a
+    // fixture change) may delete it, or the opener would re-arm it with attempts:0.
+    if (m.gaveUpAt) continue;
+    const series = await repo.getSeries(tenant, m.seriesId);
+    const fixture = liveFixture(series, m.fixtureId);
+    const state = squadFixtureState(fixture, m.matchDate);
+    if (state === 'unknown') {
+      // A transient read (missing series / fixture, absent date): keep the marker untouched.
+      out.deferred++;
+      continue;
+    }
+    const side = fixture?.home === m.teamId ? 'home' : fixture?.away === m.teamId ? 'away' : null;
+    if (state === 'changed' || !side) {
+      await repo.deleteSquadOpenMarker(tenant, m.requestId);
+      out.dropped++;
+      continue;
+    }
     out.retried++;
     const sum = zeroSummary();
     await runMarker(
       tenant,
       m.requestId,
-      { tenant, config, series, fixture: fixture!, side, matchDate: m.matchDate },
+      { tenant, config, series: series!, fixture: fixture!, side, matchDate: m.matchDate },
       deps,
       sum,
     );
@@ -1144,8 +1170,11 @@ export async function resendSquadRequest(
  *  - VOID: a live request (match today or later) whose fixture was CONFIRMED cancelled, made
  *    TBC or moved off its date is voided (a move to a future date lets that D-1 trigger reopen
  *    it), and a submitted one queues a §8 `void` so medicoach never prefills a stale squad
- *    under the same fixture id (a reschedule keeps the fixture id). A missing series / fixture
- *    or an absent date is a transient read and never voids (`squadFixtureState`).
+ *    under the same fixture id (a reschedule keeps the fixture id). Transient reads defer: a
+ *    failed series read or an absent date never voids (`squadFixtureState`). A fixture
+ *    persistently ABSENT from a series that read fine is a confirmed removal: the first sweep
+ *    stamps `fixtureMissingAt`, and once that stamp is older than `FIXTURE_MISSING_CONFIRM_MS`
+ *    the request voids like a change. Any sweep that sees the fixture again clears the stamp.
  *  - SELF-HEAL: a request voided for a fixture change (and only that reason — never an admin
  *    void or an expiry) whose fixture again matches its ORIGINAL match date, today or later,
  *    is reopened in place: same recipient + memberId, so links already sent work again; no
@@ -1165,10 +1194,16 @@ export async function voidChangedSquadRequests(
   const today = tenantDate(now());
   const all = await repo.listSquadRequests(tenant);
   const seriesCache = new Map<string, Series | null>();
-  const fixtureOf = async (r: SquadRequest) => {
+  const readOf = async (r: SquadRequest) => {
     if (!seriesCache.has(r.seriesId))
       seriesCache.set(r.seriesId, await repo.getSeries(tenant, r.seriesId));
-    return liveFixture(seriesCache.get(r.seriesId) ?? null, r.fixtureId);
+    const series = seriesCache.get(r.seriesId) ?? null;
+    return { series, fixture: liveFixture(series, r.fixtureId) };
+  };
+  // The fixture is visible again (whatever its state): a pending removal is no longer pending.
+  const clearMissing = async (r: SquadRequest, fixture: StoredFixture | null) => {
+    if (fixture && r.fixtureMissingAt !== undefined)
+      await repo.setSquadFixtureMissingAt(tenant, r, null);
   };
   let voided = 0;
   let reopened = 0;
@@ -1183,7 +1218,9 @@ export async function voidChangedSquadRequests(
     }
     if (r.status === 'void') {
       if (r.voidReason !== SQUAD_VOID_REASONS.fixtureChanged) continue;
-      if (squadFixtureState(await fixtureOf(r), r.matchDate) !== 'ok') continue;
+      const { fixture } = await readOf(r);
+      await clearMissing(r, fixture);
+      if (squadFixtureState(fixture, r.matchDate) !== 'ok') continue;
       const at = now().toISOString();
       const healed = await repo.reopenSquadRequest(tenant, r, {
         reason: SQUAD_VOID_REASONS.fixtureChanged,
@@ -1192,6 +1229,9 @@ export async function voidChangedSquadRequests(
       });
       if (!healed) continue;
       reopened++;
+      // The re-push is stamped with the HEAL time, not the captain's original submittedAt —
+      // DELIBERATELY: a delivered §8 void carries a later submittedAt, so re-pushing the
+      // original instant would answer 'stale' and the heal would never re-apply at medicoach.
       if (healed.status === 'submitted')
         await repo.putPendingSquadSync(tenant, {
           requestId: r.id,
@@ -1202,7 +1242,19 @@ export async function voidChangedSquadRequests(
         });
       continue;
     }
-    if (squadFixtureState(await fixtureOf(r), r.matchDate) !== 'changed') continue;
+    const { series, fixture } = await readOf(r);
+    await clearMissing(r, fixture);
+    let state = squadFixtureState(fixture, r.matchDate);
+    if (series && !fixture) {
+      // Present series, absent fixture: a confirmed removal once it has stayed absent past the
+      // confirmation window. A failed SERIES read (series null) stays pure 'unknown' — no stamp.
+      if (r.fixtureMissingAt === undefined) {
+        await repo.setSquadFixtureMissingAt(tenant, r, now().getTime());
+        continue;
+      }
+      if (now().getTime() - r.fixtureMissingAt > FIXTURE_MISSING_CONFIRM_MS) state = 'changed';
+    }
+    if (state !== 'changed') continue;
     if (await voidSquadRequestForFixtureChange(repo, tenant, r, now().toISOString())) voided++;
   }
   return { voided, reopened, expired };
@@ -1223,6 +1275,13 @@ export class SquadFlowError extends Error {
 }
 
 /**
+ * The machine-readable reason on a link 410 (the JSON body's `kind`): `expired` past
+ * 23:59:59, `transient` for a fixture read that may recover (retry), `closed` for a void /
+ * re-addressed / fixture-changed request.
+ */
+export type SquadLink410Kind = 'expired' | 'transient' | 'closed';
+
+/**
  * A link-safe request lookup. Unlike the captain's report, a SUBMITTED request loads (and
  * stays editable) until the link expires. 404 bad token; 410 expired / void / re-addressed;
  * every load re-reads the fixture — CONFIRMED cancelled, TBC or moved ⇒ the request is voided
@@ -1236,12 +1295,12 @@ export async function loadLinkedSquadRequest(
   secret: string,
 ): Promise<
   | { ok: true; tenant: string; request: SquadRequest; memberId: string; isChairLink: boolean }
-  | { ok: false; status: 404 | 410; error: string }
+  | { ok: false; status: 404 | 410; error: string; kind?: SquadLink410Kind }
 > {
   const check = verifySquadLinkToken(token, secret, nowMs);
   if (!check.ok)
     return check.reason === 'expired'
-      ? { ok: false, status: 410, error: 'This squad link has expired.' }
+      ? { ok: false, status: 410, error: 'This squad link has expired.', kind: 'expired' }
       : { ok: false, status: 404, error: 'not found' };
   const { t: tenant, r: memberId, q } = check.payload;
   const key = parseSquadRequestId(q);
@@ -1251,7 +1310,7 @@ export async function loadLinkedSquadRequest(
   const isCurrent = request.recipient.memberId === memberId;
   const isKeptChairLink = !!request.chairMemberId && request.chairMemberId === memberId;
   if (request.status === 'void' || (!isCurrent && !isKeptChairLink))
-    return { ok: false, status: 410, error: 'this link is no longer valid' };
+    return { ok: false, status: 410, error: 'this link is no longer valid', kind: 'closed' };
   const series = await repo.getSeries(tenant, request.seriesId);
   const state = squadFixtureState(liveFixture(series, request.fixtureId), request.matchDate);
   if (state === 'unknown')
@@ -1259,6 +1318,7 @@ export async function loadLinkedSquadRequest(
       ok: false,
       status: 410,
       error: 'this squad link is temporarily unavailable — please try again shortly',
+      kind: 'transient',
     };
   if (state === 'changed') {
     await voidSquadRequestForFixtureChange(repo, tenant, request, new Date(nowMs).toISOString());
@@ -1266,6 +1326,7 @@ export async function loadLinkedSquadRequest(
       ok: false,
       status: 410,
       error: 'fixture changed — this squad link is no longer valid',
+      kind: 'closed',
     };
   }
   const isChairLink = isKeptChairLink || (isCurrent && request.recipient.kind === 'chair');

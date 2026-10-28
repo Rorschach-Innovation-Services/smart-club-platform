@@ -1949,6 +1949,12 @@ export interface SquadRequest {
   submittedVia?: 'link';
   voidedAt?: string;
   voidReason?: string;
+  /**
+   * Server-only (sweep): epoch ms when the fixture was first seen ABSENT from a successfully
+   * read series. Cleared once the fixture is seen again; past FIXTURE_MISSING_CONFIRM_MS the
+   * sweep treats the removal as confirmed and voids.
+   */
+  fixtureMissingAt?: number;
   /** CAS token: every write stamps a new value; PUT carries the one the client rendered. */
   modified: string;
   deliveries?: CaptainsReportDelivery[];

@@ -22,10 +22,17 @@ const POLL_INTERVAL_MS = 500;
  * refusing" is the normal boot-in-progress state, not a wrong stack — we poll the API until
  * it listens (bounded), THEN probe a known demo club (`ukzn`) with the admin dev-auth +
  * x-tenant headers. Non-200 (e.g. 404 from a plain `dev:local` seed) fails fast with a clear
- * message. If nothing is listening on :3201 at all, do nothing — webServer boots the stack.
+ * message. If nothing is listening on :3201 at all, webServer is booting the stack: skip the
+ * wrong-stack guard, but still wait (bounded) for the web to answer and warm the SPA up — the
+ * warm-up runs on EVERY path. (Under playwright.altports.config.ts the port-remap preload is
+ * active in this process too, so :3201 here reaches that config's :3301.)
  */
 export default async function globalSetup(): Promise<void> {
-  if (!(await isListening(WEB_BASE))) return;
+  if (!(await isListening(WEB_BASE))) {
+    await waitForWeb(WEB_BASE, API_BOOT_TIMEOUT_MS);
+    await warmUpSpa();
+    return;
+  }
 
   const probeUrl = `${API_BASE}/clubs/ukzn`;
   const status = await waitForApi(probeUrl, API_BOOT_TIMEOUT_MS);
@@ -79,6 +86,13 @@ async function waitForApi(url: string, timeoutMs: number): Promise<number | 'unr
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   } while (Date.now() < deadline);
   return 'unreachable';
+}
+
+/** Poll until the web server accepts connections (bounded); warmUpSpa reports what follows. */
+async function waitForWeb(url: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await isListening(url)) && Date.now() < deadline)
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
 }
 
 async function isListening(url: string): Promise<boolean> {

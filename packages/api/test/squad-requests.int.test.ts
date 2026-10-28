@@ -645,7 +645,9 @@ describe('the public link', () => {
     await editFixture((f) => delete f.date);
     let res = await get(token);
     assert.equal(res.status, 410);
-    assert.match(((await res.json()) as { error: string }).error, /temporarily unavailable/);
+    const body410 = (await res.json()) as { error: string; kind?: string };
+    assert.match(body410.error, /temporarily unavailable/);
+    assert.equal(body410.kind, 'transient', 'machine-readable 410 kind');
     assert.equal((await sweep()).voided, 0);
 
     const s = (await repo.getSeries(T, S1))!;
@@ -983,6 +985,90 @@ describe('void sweep and the §8 outbox', () => {
     sum = await sweep(dayAfterMatch(1));
     assert.deepEqual(sum, { voided: 0, reopened: 0, expired: 0 });
   });
+
+  const MIN = 60_000;
+  const removeFixture = async () => {
+    const s = (await repo.getSeries(T, S1))!;
+    const saved = s.fixtures;
+    s.fixtures = [];
+    await repo.putSeries(T, s);
+    return async () => {
+      const back = (await repo.getSeries(T, S1))!;
+      back.fixtures = saved;
+      await repo.putSeries(T, back);
+    };
+  };
+
+  test('fixture removed from a present series: stamps, defers, then voids past the window', async () => {
+    await submitted();
+    await flush(fakeFetch({ applied: true, mappedPlayers: 1, unmappedAsGuest: 0, guests: 1 }));
+    await removeFixture();
+    const at0 = AT_1900;
+    let sum = await squad.voidChangedSquadRequests(T, { repo, now: () => at0 });
+    assert.equal(sum.voided, 0, 'first sighting defers');
+    const stamped = await reqOf('umzinto');
+    assert.equal(stamped.status, 'submitted');
+    assert.equal(stamped.fixtureMissingAt, at0.getTime());
+    assert.equal((await reqOf('african-warriors')).fixtureMissingAt, at0.getTime());
+    assert.equal((await repo.listPendingSquadSync(T)).length, 0, 'no push yet');
+    // Inside the window: still deferred, stamp unchanged (first stamp wins).
+    sum = await squad.voidChangedSquadRequests(T, { repo, now: () => new Date(+at0 + 10 * MIN) });
+    assert.equal(sum.voided, 0);
+    assert.equal((await reqOf('umzinto')).fixtureMissingAt, at0.getTime());
+    // 31 minutes later: a confirmed removal.
+    sum = await squad.voidChangedSquadRequests(T, { repo, now: () => new Date(+at0 + 31 * MIN) });
+    assert.equal(sum.voided, 2);
+    assert.equal((await reqOf('umzinto')).voidReason, 'fixture changed');
+    assert.deepEqual(
+      (await repo.listPendingSquadSync(T)).map((r) => [r.requestId, r.op]),
+      [[`${S1}~f1~umzinto`, 'void']],
+      'the submitted side owes medicoach the §8 void',
+    );
+  });
+
+  test('fixture restored before confirmation: stamp cleared, request untouched', async () => {
+    await submitted();
+    const before = await reqOf('umzinto');
+    const restore = await removeFixture();
+    await squad.voidChangedSquadRequests(T, { repo, now: () => AT_1900 });
+    assert.ok((await reqOf('umzinto')).fixtureMissingAt);
+    await restore();
+    const sum = await squad.voidChangedSquadRequests(T, {
+      repo,
+      now: () => new Date(+AT_1900 + 5 * MIN),
+    });
+    assert.equal(sum.voided, 0);
+    const after = await reqOf('umzinto');
+    assert.equal(after.fixtureMissingAt, undefined, 'cleared once seen again');
+    assert.equal(after.status, 'submitted');
+    assert.equal(after.modified, before.modified, 'the stamp never bumps the CAS token');
+    // A later removal starts a fresh window.
+    await removeFixture();
+    await squad.voidChangedSquadRequests(T, { repo, now: () => new Date(+AT_1900 + 40 * MIN) });
+    assert.equal((await reqOf('umzinto')).status, 'submitted');
+  });
+
+  test('the stamp is never served on the admin / link view', async () => {
+    await submitted();
+    await removeFixture();
+    await squad.voidChangedSquadRequests(T, { repo, now: () => AT_1900 });
+    const view = squad.squadRequestView(await reqOf('umzinto'));
+    assert.equal('fixtureMissingAt' in view, false);
+  });
+
+  test('a failed SERIES read never stamps and never voids', async () => {
+    await submitted();
+    const blind = { ...repo, getSeries: async () => null } as typeof repo;
+    for (const mins of [0, 31, 120])
+      await squad.voidChangedSquadRequests(T, {
+        repo: blind,
+        now: () => new Date(+AT_1900 + mins * MIN),
+      });
+    for (const r of await requests()) {
+      assert.equal(r.fixtureMissingAt, undefined);
+      assert.notEqual(r.status, 'void');
+    }
+  });
 });
 
 describe('SQUADOPEN# retries', () => {
@@ -1110,6 +1196,104 @@ describe('SQUADOPEN# retries', () => {
       assert.equal(m.lastError, 'MessageRejected');
       assert.doesNotMatch(JSON.stringify(m), /@umzinto/);
     }
+  });
+});
+
+describe('SQUADOPEN# retries: transient reads and tombstones', () => {
+  const editF1 = async (edit: (f: Record<string, unknown>) => void) => {
+    const s = (await repo.getSeries(T, S1))!;
+    edit((s.fixtures as Array<Record<string, unknown>>)[0]);
+    await repo.putSeries(T, s);
+  };
+
+  test('a transient blank date / missing fixture / missing series keeps the marker; a later pass sends', async () => {
+    await seed();
+    outcome = () => 'failed';
+    await open();
+    outcome = () => 'sent';
+    const sent = notices.length;
+    await editF1((f) => delete f.date);
+    let r = await squad.retryPendingSquadOpens(T, deps(sastToday(20)));
+    assert.equal(r.dropped, 0);
+    assert.equal(r.deferred, 2);
+    const s = (await repo.getSeries(T, S1))!;
+    const saved = s.fixtures;
+    s.fixtures = [];
+    await repo.putSeries(T, s);
+    r = await squad.retryPendingSquadOpens(T, deps(sastToday(20, 15)));
+    assert.equal(r.dropped, 0);
+    r = await squad.retryPendingSquadOpens(
+      T,
+      deps(sastToday(20, 20), { repo: { ...repo, getSeries: async () => null } }),
+    );
+    assert.equal(r.dropped, 0, 'a missing series is transient too');
+    assert.equal(notices.length, sent, 'nothing sent on a transient read');
+    const markers = await repo.listSquadOpenMarkers(T);
+    assert.equal(markers.length, 2);
+    assert.ok(
+      markers.every((m) => m.attempts === 1),
+      'kept untouched',
+    );
+    s.fixtures = saved;
+    (s.fixtures as Array<Record<string, unknown>>)[0].date = TOMORROW;
+    await repo.putSeries(T, s);
+    r = await squad.retryPendingSquadOpens(T, deps(sastToday(21)));
+    assert.equal(r.done, 2);
+    assert.equal((await repo.listSquadOpenMarkers(T)).length, 0);
+  });
+
+  test('a CONFIRMED move still drops the marker', async () => {
+    await seed();
+    outcome = () => 'failed';
+    await open();
+    await editF1((f) => (f.date = sastDay(5)));
+    const r = await squad.retryPendingSquadOpens(T, deps(sastToday(20)));
+    assert.equal(r.dropped, 2);
+    assert.equal((await repo.listSquadOpenMarkers(T)).length, 0);
+  });
+
+  test('a tombstone survives a blip sweep + retry + opener cycle, never re-sends, dies at too-old', async () => {
+    await seed();
+    outcome = () => 'failed';
+    await open();
+    for (let i = 1; i < squad.SQUAD_OPEN_MAX_ATTEMPTS; i++)
+      await squad.retryPendingSquadOpens(T, deps(sastToday(20)));
+    outcome = () => 'sent';
+    const tomb = await repo.listSquadOpenMarkers(T);
+    assert.ok(tomb.length === 2 && tomb.every((m) => m.gaveUpAt));
+    const sent = notices.length;
+
+    const cycle = async (at: Date) => {
+      await squad.voidChangedSquadRequests(T, { repo, now: () => at });
+      await squad.retryPendingSquadOpens(T, deps(at));
+      await open(at);
+    };
+    await editF1((f) => delete f.date);
+    await cycle(sastToday(20, 10));
+    const s = (await repo.getSeries(T, S1))!;
+    const saved = s.fixtures;
+    s.fixtures = [];
+    await repo.putSeries(T, s);
+    await cycle(sastToday(20, 20));
+    s.fixtures = saved;
+    (s.fixtures as Array<Record<string, unknown>>)[0].date = TOMORROW;
+    await repo.putSeries(T, s);
+    await cycle(sastToday(20, 30));
+    await cycle(sastToday(21));
+
+    const after = await repo.listSquadOpenMarkers(T);
+    assert.equal(after.length, 2, 'the tombstones survive');
+    assert.ok(
+      after.every((m) => m.gaveUpAt && m.attempts === squad.SQUAD_OPEN_MAX_ATTEMPTS),
+      'never re-armed',
+    );
+    assert.equal(notices.length, sent, 'no re-send');
+
+    // too-old (match day): the tombstone's retirement path.
+    const r = await squad.retryPendingSquadOpens(T, deps(new Date(+AT_1900 + DAY)));
+    assert.equal(r.dropped, 2);
+    assert.equal((await repo.listSquadOpenMarkers(T)).length, 0);
+    assert.equal(notices.length, sent);
   });
 });
 

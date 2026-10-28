@@ -449,9 +449,14 @@ export function SquadSelectionLinkPage() {
   const status = query.error instanceof ApiError ? query.error.status : null;
   // A transient fixture read (410 "temporarily unavailable") is NOT a dead link — the
   // sweep self-heals it; don't title it "closed" or the captain gives up.
-  const transient =
-    query.error instanceof ApiError && /temporarily unavailable/i.test(query.error.message);
-  const expired = query.error instanceof ApiError && /expired/i.test(query.error.message);
+  // The server's machine-readable `kind` wins; the message regex is the fallback for an older
+  // server that answers without it.
+  const err410 = query.error instanceof ApiError ? query.error : null;
+  const kind = typeof err410?.details?.kind === 'string' ? err410.details.kind : undefined;
+  const transient = kind
+    ? kind === 'transient'
+    : !!err410 && /temporarily unavailable/i.test(err410.message);
+  const expired = kind ? kind === 'expired' : !!err410 && /expired/i.test(err410.message);
   // The blip self-heals server-side, so poll for it on a modest backoff (bounded) as well as
   // offering a manual retry; the first successful refetch renders the page normally.
   const [blipRetries, setBlipRetries] = useState(0);

@@ -62,6 +62,8 @@ export function fixtureSquadBody(
     fixtureRef: req.fixtureRef,
     side: req.side,
     ...(req.teamRef ? { teamRef: req.teamRef } : {}),
+    // row.submittedAt is trusted as-is: a self-heal re-push is stamped with the heal time on
+    // purpose (the original instant would lose to an already-delivered §8 void as 'stale').
     submittedAt: row.submittedAt,
   };
   if (row.op === 'void') return { ...base, op: 'void', players: [], guests: [] };

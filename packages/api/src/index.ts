@@ -8394,7 +8394,8 @@ async function linkedSquadOr410(c: Context<HonoEnv>) {
     Date.now(),
     captainsReportLinkSecret(),
   );
-  if (!found.ok) throw new HttpError(found.status, found.error);
+  if (!found.ok)
+    throw new HttpError(found.status, found.error, found.kind ? { kind: found.kind } : undefined);
   return found;
 }
 

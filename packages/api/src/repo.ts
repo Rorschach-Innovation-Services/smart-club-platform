@@ -10132,7 +10132,7 @@ export async function reopenSquadRequest(
         TableName: TABLE,
         Key: squadKeyOf(tenant, key),
         UpdateExpression:
-          'SET #s = :st, modified = :m, updatedAt = :at REMOVE voidedAt, voidReason',
+          'SET #s = :st, modified = :m, updatedAt = :at REMOVE voidedAt, voidReason, fixtureMissingAt',
         ConditionExpression:
           'attribute_exists(pk) AND #s = :void AND voidReason = :r AND matchDate = :md',
         ExpressionAttributeNames: { '#s': 'status' },
@@ -10150,6 +10150,35 @@ export async function reopenSquadRequest(
     return stripKeys<SquadRequest>(res.Attributes)!;
   } catch (err) {
     if (isCcf(err)) return null;
+    throw err;
+  }
+}
+
+/**
+ * Stamp (`at` epoch ms, first stamp wins) or clear (`null`) a squad request's
+ * `fixtureMissingAt`. Server-only bookkeeping for the sweep: `modified` is NOT bumped, so a
+ * captain's open tab never 409s on it. A gone row is a no-op.
+ */
+export async function setSquadFixtureMissingAt(
+  tenant: string,
+  key: Pick<SquadRequest, 'seriesId' | 'fixtureId' | 'teamId'>,
+  at: number | null,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: squadKeyOf(tenant, key),
+        UpdateExpression:
+          at === null
+            ? 'REMOVE fixtureMissingAt'
+            : 'SET fixtureMissingAt = if_not_exists(fixtureMissingAt, :at)',
+        ConditionExpression: 'attribute_exists(pk)',
+        ...(at === null ? {} : { ExpressionAttributeValues: { ':at': at } }),
+      }),
+    );
+  } catch (err) {
+    if (isCcf(err)) return;
     throw err;
   }
 }
