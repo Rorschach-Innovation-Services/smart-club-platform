@@ -529,7 +529,7 @@ test('fixture blip: a missing date 410s "temporarily unavailable" without voidin
     const ctx = await browser.newContext();
     const p = await ctx.newPage();
     await p.goto(`/sq/${token}`);
-    await expect(p.getByText('This squad link is closed')).toBeVisible();
+    await expect(p.getByText('This link is temporarily unavailable')).toBeVisible();
     await expect(p.getByText(/temporarily unavailable — please try again shortly/i)).toBeVisible();
     await ctx.close();
     const res = await loadLink(request, token);

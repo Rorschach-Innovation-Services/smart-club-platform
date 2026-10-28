@@ -443,12 +443,18 @@ export function SquadSelectionLinkPage() {
   });
 
   const status = query.error instanceof ApiError ? query.error.status : null;
+  // A transient fixture read (410 "temporarily unavailable") is NOT a dead link — the
+  // sweep self-heals it; don't title it "closed" or the captain gives up.
+  const transient =
+    query.error instanceof ApiError && /temporarily unavailable/i.test(query.error.message);
   let body: ReactNode;
   if (query.isLoading) body = <div className="cr-section-sub">Loading the squad…</div>;
   else if (status === 410)
     body = (
       <div className="cr-done">
-        <div className="cr-done-title">This squad link is closed</div>
+        <div className="cr-done-title">
+          {transient ? 'This link is temporarily unavailable' : 'This squad link is closed'}
+        </div>
         <div className="cr-done-sub">
           {query.error instanceof ApiError && sentenceCase(query.error.message.replace(/\.$/, ''))}.
         </div>
