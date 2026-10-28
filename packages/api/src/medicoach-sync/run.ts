@@ -21,7 +21,7 @@
  * are voided (`voidChangedSquadRequests`) and the §8 squad outbox is flushed
  * (`flushSquadOutbox` — AFTER the schedule push, so a fixture's own create lands first); after
  * the report steps, SQUADOPEN# retries run and tomorrow's fixtures open their squad requests
- * (`openPreMatchSquadRequests`, 18:00 window, deadline-bounded). None fails the run.
+ * (`openPreMatchSquadRequests`, 08:00 SAST squad window, deadline-bounded). None fails the run.
  *
  * Captain's report notices (steps 2–4) go out only from 18:00 SAST (REPORT_NOTICE_HOUR):
  * before that the REPORTOPEN# markers stay queued and reminders stay due. `deadlineMs` (set
@@ -90,9 +90,11 @@ export interface TenantSyncSummary extends SyncRunSummary {
   reportNotices?: { deferred: number; opened: number; notified: number; failed: number };
   /** Plain-language note for "Sync now" when reports were queued for 18:00. */
   reportsMessage?: string;
-  /** Captain squad links: voids, the §8 outbox flush, retries and the evening opener. */
+  /** Captain squad links: voids / self-heals / expiries, the §8 flush, retries and the opener. */
   squads?: {
     voided?: number;
+    reopened?: number;
+    expired?: number;
     push?: SquadFlushSummary;
     retry?: SquadRetrySummary;
     open?: SquadOpenSummary;
@@ -269,7 +271,10 @@ export async function runTenantSync(
   try {
     // Squad requests whose fixture was cancelled / moved: void (+ queue the §8 void) BEFORE
     // the squad flush so the void goes out in this same run.
-    squads.voided = (await voidChangedSquadRequests(tenant, squadDeps)).voided;
+    const swept = await voidChangedSquadRequests(tenant, squadDeps);
+    squads.voided = swept.voided;
+    squads.reopened = swept.reopened;
+    squads.expired = swept.expired;
     squads.push = await flushSquadOutbox(tenant, {
       repo,
       url: deps.url,
@@ -470,6 +475,12 @@ export async function runTenantSync(
     ...(scorecards ? { scorecards } : {}),
     // Only when the feature is on or the outbox/void sweep did something: summaries of
     // tenants without squad links keep their shape.
-    ...(squadLinksEnabled(config) || squads.voided || squads.push?.pending ? { squads } : {}),
+    ...(squadLinksEnabled(config) ||
+    squads.voided ||
+    squads.reopened ||
+    squads.expired ||
+    squads.push?.pending
+      ? { squads }
+      : {}),
   };
 }

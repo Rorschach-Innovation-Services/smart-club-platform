@@ -17,7 +17,7 @@ import {
 } from './helpers';
 
 /**
- * Pre-match captain squad links end to end: a sync run on the evening before a match opens
+ * Pre-match captain squad links end to end: a sync run on the morning of the day before a match opens
  * one squad request per side of tomorrow's fixture (the window is forced open). Neither side
  * has a designated or last captain, so both links go to the chairs. The home chair picks two
  * registered players from the roster, adds a guest past the guard, names a captain and

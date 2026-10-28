@@ -10115,6 +10115,45 @@ export async function voidSquadRequest(
   }
 }
 
+/**
+ * Self-heal: re-open a request voided with `reason` (the fixture-change void) back to `status`,
+ * in place — recipient, memberId, chair link, selection and deliveries untouched, so links
+ * already sent work again. Conditional on it still being void for THAT reason on the SAME match
+ * date (an admin void / expiry / reopen-for-a-new-date never matches). The new row, or null.
+ */
+export async function reopenSquadRequest(
+  tenant: string,
+  key: Pick<SquadRequest, 'seriesId' | 'fixtureId' | 'teamId' | 'matchDate'>,
+  input: { reason: string; status: 'pending' | 'submitted'; at: string },
+): Promise<SquadRequest | null> {
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: squadKeyOf(tenant, key),
+        UpdateExpression:
+          'SET #s = :st, modified = :m, updatedAt = :at REMOVE voidedAt, voidReason',
+        ConditionExpression:
+          'attribute_exists(pk) AND #s = :void AND voidReason = :r AND matchDate = :md',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: {
+          ':st': input.status,
+          ':m': randomUUID(),
+          ':at': input.at,
+          ':void': 'void',
+          ':r': input.reason,
+          ':md': key.matchDate,
+        },
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return stripKeys<SquadRequest>(res.Attributes)!;
+  } catch (err) {
+    if (isCcf(err)) return null;
+    throw err;
+  }
+}
+
 /** Append notice outcomes; `notifiedAt` set the first time a channel went out. */
 export async function recordSquadRequestDeliveries(
   tenant: string,

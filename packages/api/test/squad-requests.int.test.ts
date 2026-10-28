@@ -2,14 +2,16 @@
  * Pre-match captain squad links against dynalite with the REAL repo (and the real app for the
  * public `/squad-link/:token` routes):
  *
- *  - the evening-before opener: flag gate, 18:00 window, tomorrow-only, both sides, idempotent;
+ *  - the D-1 morning opener: flag gate, 08:00 window, tomorrow-only, both sides, idempotent;
  *  - the recipient ladder per TEAM: designation → last captain → chair (minor / no contact
  *    falls through), `tm_` sides never share a last captain, veterans resolve through VETAFFIL#;
  *  - the template gate: WhatsApp only once `squad_selection_due` is registered, email always;
  *  - the link: roster (minors included, names only, veterans expanded), drafts, CAS 409,
  *    submit + re-submit (re-queued), still loadable after submit, 410 once the fixture moved;
- *  - the void hook (+ §8 void push), the outbox flush (pushOutcome, fixture-unmapped retried
- *    then given up), SQUADOPEN# retries on the marker's own target + too-old;
+ *  - the void hook (+ §8 void push; transient fixture reads never void; fixture-change voids
+ *    self-heal; pending-after-match-day settles `expired`), the outbox flush (pushOutcome,
+ *    fixture-unmapped retried then given up, voids retained to +7 days), SQUADOPEN# retries on
+ *    the marker's own target + too-old;
  *  - erasure scrubs TEAMCAPTAIN#/TEAMLASTCAPT# rows and squad-request mentions.
  */
 import { test, before, after, describe, beforeEach } from 'node:test';
@@ -30,7 +32,8 @@ const sastToday = (h: number, m = 0) => {
   const day = new Date(Date.now() + 2 * HOUR).toISOString().slice(0, 10);
   return new Date(Date.parse(`${day}T00:00:00.000Z`) - 2 * HOUR + (h * 60 + m) * 60_000);
 };
-const AT_1400 = sastToday(14);
+const AT_0700 = sastToday(7, 59);
+const AT_0800 = sastToday(8);
 const AT_1900 = sastToday(19);
 const sastDay = (offset: number) =>
   new Date(AT_1900.getTime() + 2 * HOUR + offset * DAY).toISOString().slice(0, 10);
@@ -213,7 +216,7 @@ beforeEach(async () => {
   templateStatus = 'pending';
 });
 
-describe('the evening-before opener', () => {
+describe('the D-1 morning opener', () => {
   test('flag absent (default off) ⇒ nothing opens', async () => {
     await seed({ features: { medicoachSync: true } });
     const sum = await open();
@@ -222,11 +225,28 @@ describe('the evening-before opener', () => {
     assert.equal(notices.length, 0);
   });
 
-  test('before 18:00 SAST nothing is read or sent', async () => {
+  test('before 08:00 SAST nothing is read or sent; from 08:00 the first run delivers', async () => {
     await seed();
-    const sum = await open(AT_1400);
+    const sum = await open(AT_0700);
     assert.equal(sum.windowClosed, true);
     assert.equal((await requests()).length, 0);
+    assert.equal(notices.length, 0);
+    const morning = await open(AT_0800);
+    assert.equal(morning.windowClosed, undefined);
+    assert.equal(morning.opened, 2);
+    assert.equal(notices.length, 2);
+  });
+
+  test('the retry pass is gated on the same 08:00 window', async () => {
+    await seed();
+    outcome = () => 'failed';
+    await open(AT_0800);
+    outcome = () => 'sent';
+    const early = await squad.retryPendingSquadOpens(T, deps(AT_0700));
+    assert.equal(early.deferred, 2);
+    assert.equal(early.done, 0);
+    const late = await squad.retryPendingSquadOpens(T, deps(sastToday(9)));
+    assert.equal(late.done, 2);
   });
 
   test("only tomorrow's fixtures, both sides, chairs by default; a re-run sends nothing", async () => {
@@ -569,6 +589,91 @@ describe('the public link', () => {
     );
   });
 
+  const editFixture = async (edit: (f: Record<string, unknown>) => void) => {
+    const s = (await repo.getSeries(T, S1))!;
+    edit((s.fixtures as Array<Record<string, unknown>>)[0]);
+    await repo.putSeries(T, s);
+  };
+  const sweep = (at: Date = AT_1900) => squad.voidChangedSquadRequests(T, { repo, now: () => at });
+
+  test('blip: the date wiggles away and back ⇒ 410, then the ORIGINAL link works again', async () => {
+    await openWithRoster();
+    const token = tokenOf('umzinto');
+    const first = await json(get(token));
+    await put(token, {
+      expectedModified: first.request.modified,
+      players: [first.roster[0].id],
+      submit: true,
+    });
+    for (const r of await repo.listPendingSquadSync(T))
+      await repo.deletePendingSquadSyncIfUnchanged(T, r.requestId, r.submittedAt);
+    const before = await reqOf('umzinto');
+    const sent = notices.length;
+
+    await editFixture((f) => (f.date = sastDay(8)));
+    assert.equal((await get(token)).status, 410);
+    assert.equal((await reqOf('umzinto')).voidReason, 'fixture changed');
+    await editFixture((f) => (f.date = TOMORROW));
+    assert.equal((await get(token)).status, 410, 'still void until the sweep heals it');
+
+    // Healed on MATCH DAY: recovery, not a new send.
+    const sum = await sweep(new Date(AT_1900.getTime() + DAY));
+    assert.equal(sum.reopened, 1, 'only the side the load voided');
+    const healed = await reqOf('umzinto');
+    assert.equal(healed.status, 'submitted');
+    assert.equal(healed.voidReason, undefined);
+    assert.equal(healed.recipient.memberId, before.recipient.memberId);
+    assert.deepEqual(healed.deliveries, before.deliveries, 'NOTIFY ledger / deliveries untouched');
+    const again = await get(token);
+    assert.equal(again.status, 200);
+    assert.equal((await json(again)).request.status, 'submitted');
+    assert.equal(notices.length, sent, 'no re-notice');
+    const rows = await repo.listPendingSquadSync(T);
+    assert.deepEqual(
+      rows.map((r) => [r.requestId, r.op]),
+      [[`${S1}~f1~umzinto`, 'upsert']],
+      'the submitted squad is re-pushed over the void',
+    );
+  });
+
+  test('a missing fixture or an absent date is transient: 410, never voided', async () => {
+    await openWithRoster();
+    const token = tokenOf('umzinto');
+    assert.equal((await get(token)).status, 200);
+    const saved = (await repo.getSeries(T, S1))!.fixtures;
+
+    await editFixture((f) => delete f.date);
+    let res = await get(token);
+    assert.equal(res.status, 410);
+    assert.match(((await res.json()) as { error: string }).error, /temporarily unavailable/);
+    assert.equal((await sweep()).voided, 0);
+
+    const s = (await repo.getSeries(T, S1))!;
+    s.fixtures = [];
+    await repo.putSeries(T, s);
+    res = await get(token);
+    assert.equal(res.status, 410);
+    assert.equal((await sweep()).voided, 0);
+    for (const r of await requests()) assert.equal(r.status, 'pending');
+    assert.equal((await repo.listPendingSquadSync(T)).length, 0);
+
+    const back = (await repo.getSeries(T, S1))!;
+    back.fixtures = saved;
+    await repo.putSeries(T, back);
+    assert.equal((await get(token)).status, 200, 'the same link works once the read recovers');
+  });
+
+  test('an admin-voided request never self-heals', async () => {
+    await openWithRoster();
+    const token = tokenOf('umzinto');
+    const r = await reqOf('umzinto');
+    assert.equal(await squad.adminVoidSquadRequest(repo, T, r, AT_1900.toISOString()), 'voided');
+    const sum = await sweep();
+    assert.equal(sum.reopened, 0);
+    assert.equal((await reqOf('umzinto')).status, 'void');
+    assert.equal((await get(token)).status, 410);
+  });
+
   test('forward is the chair link only; the forwarded captain gets a fresh link', async () => {
     await openWithRoster();
     const token = tokenOf('umzinto');
@@ -789,6 +894,94 @@ describe('void sweep and the §8 outbox', () => {
     );
     assert.equal(seen[0].op, 'void');
     assert.deepEqual(seen[0].players, []);
+  });
+
+  const dayAfterMatch = (n: number) => new Date(AT_1900.getTime() + (1 + n) * DAY);
+  const flushAt = (f: typeof fetch, at: Date, captured: string[] = []) =>
+    squads.flushSquadOutbox(T, {
+      repo,
+      url: 'http://mc',
+      secret: 's',
+      fetch: f,
+      now: () => at,
+      log: () => {},
+      captureException: (e) => captured.push(e.message),
+    });
+  const ok = { applied: true, mappedPlayers: 0, unmappedAsGuest: 0, guests: 0 };
+
+  async function voidQueued() {
+    await submitted();
+    await flush(fakeFetch({ applied: true, mappedPlayers: 1, unmappedAsGuest: 0, guests: 1 }));
+    const s = (await repo.getSeries(T, S1))!;
+    (s.fixtures as Array<Record<string, unknown>>)[0].status = 'cancelled';
+    await repo.putSeries(T, s);
+    await squad.voidChangedSquadRequests(T, { repo, now: () => AT_1900 });
+    assert.deepEqual(
+      (await repo.listPendingSquadSync(T)).map((r) => r.op),
+      ['void'],
+    );
+  }
+
+  test('an unsent §8 void survives the +1 cutoff and delivers on recovery', async () => {
+    await voidQueued();
+    const captured: string[] = [];
+    const down = fakeFetch(new Error('ECONNREFUSED'));
+    // matchDate+2: an upsert would be dropped here.
+    let sum = await flushAt(down, dayAfterMatch(2), captured);
+    assert.equal(sum.dropped, 0);
+    assert.equal(sum.errors, 1);
+    const seen: Array<Record<string, unknown>> = [];
+    sum = await flushAt(fakeFetch(ok, seen), dayAfterMatch(3), captured);
+    assert.equal(sum.applied, 1);
+    assert.equal(seen[0].op, 'void');
+    assert.equal((await repo.listPendingSquadSync(T)).length, 0);
+    assert.equal(captured.length, 0);
+  });
+
+  test('an unsent §8 void retries through matchDate+7, then is dropped with Sentry', async () => {
+    await voidQueued();
+    const captured: string[] = [];
+    const down = fakeFetch(new Error('ECONNREFUSED'));
+    let sum = await flushAt(down, dayAfterMatch(squads.SQUAD_VOID_RETENTION_DAYS), captured);
+    assert.equal(sum.dropped, 0, 'still retried on matchDate+7');
+    assert.equal(captured.length, 0);
+    sum = await flushAt(down, dayAfterMatch(squads.SQUAD_VOID_RETENTION_DAYS + 1), captured);
+    assert.equal(sum.dropped, 1);
+    assert.equal(sum.sent, 0);
+    assert.equal((await repo.listPendingSquadSync(T)).length, 0);
+    assert.equal(captured.length, 1);
+    assert.match(captured[0], /squad void dropped undelivered/);
+  });
+
+  test('a plain upsert keeps the matchDate+1 drop (no Sentry)', async () => {
+    await submitted();
+    const captured: string[] = [];
+    const down = fakeFetch(new Error('ECONNREFUSED'));
+    let sum = await flushAt(down, dayAfterMatch(1), captured);
+    assert.equal(sum.dropped, 0);
+    sum = await flushAt(down, dayAfterMatch(2), captured);
+    assert.equal(sum.dropped, 1);
+    assert.equal(captured.length, 0);
+  });
+
+  test('pending after match day settles void `expired`; match day stays live; never self-heals', async () => {
+    await submitted(); // umzinto submitted, african-warriors pending
+    const sweep = (at: Date) => squad.voidChangedSquadRequests(T, { repo, now: () => at });
+    const queued = (await repo.listPendingSquadSync(T)).length;
+    const sent = notices.length;
+    let sum = await sweep(dayAfterMatch(0)); // match day
+    assert.equal(sum.expired, 0);
+    assert.equal((await reqOf('african-warriors')).status, 'pending');
+    sum = await sweep(dayAfterMatch(1));
+    assert.equal(sum.expired, 1, 'only the pending side');
+    const aw = await reqOf('african-warriors');
+    assert.equal(aw.status, 'void');
+    assert.equal(aw.voidReason, 'expired');
+    assert.equal((await reqOf('umzinto')).status, 'submitted', 'a submitted squad is left alone');
+    assert.equal((await repo.listPendingSquadSync(T)).length, queued, 'no §8 push');
+    assert.equal(notices.length, sent, 'no notice');
+    sum = await sweep(dayAfterMatch(1));
+    assert.deepEqual(sum, { voided: 0, reopened: 0, expired: 0 });
   });
 });
 

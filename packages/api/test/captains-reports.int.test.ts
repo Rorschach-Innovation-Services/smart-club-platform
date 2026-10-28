@@ -401,6 +401,16 @@ describe('result → reports → notices', () => {
   test('the expiry is judged on SAST days, not UTC (a result at 00:30 SAST counts from that day)', async () => {
     // Match on Sun 27 Sep; the result arrives at 00:30 SAST on Mon 5 Oct (22:30Z on 4 Oct).
     // Received + 3 days = Thu 8 Oct 23:59:59 SAST (21:59:59Z), later than match + 7 days.
+    // Fixed dates need a fixed go-live: the suite's rolling GO_LIVE (today-30d) crosses
+    // 2026-09-27 on 2026-09-28 and silently skips the match as before-go-live.
+    const cfg = (await repo.getTenantConfig('dolphins'))!;
+    await repo.putTenantConfig({
+      ...cfg,
+      integrations: {
+        ...cfg.integrations,
+        medicoach: { ...cfg.integrations?.medicoach, goLiveDate: '2026-09-01' },
+      },
+    });
     const old = (await repo.getSeries('dolphins', 's-planb-premier-men-t20-g1'))!;
     await repo.putSeries('dolphins', {
       ...old,

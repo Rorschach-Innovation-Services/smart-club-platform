@@ -109,6 +109,14 @@ export function setReportNoticeWindowOverride(fn: ((now: Date) => boolean) | und
   windowOverride = fn;
 }
 
+/**
+ * The forced open/closed override, if any. Shared with the squad-link window
+ * (`squadNoticeWindowOpen`), so one e2e/test hook forces every notice window.
+ */
+export function noticeWindowOverride(): ((now: Date) => boolean) | undefined {
+  return windowOverride;
+}
+
 /** The gate every automatic send path checks (honours the test override). */
 export function reportNoticeWindowOpen(now: Date): boolean {
   return (windowOverride ?? isReportNoticeWindowOpen)(now);

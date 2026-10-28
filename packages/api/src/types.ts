@@ -1913,8 +1913,10 @@ export interface SquadSelection {
 /**
  * A pre-match squad request: `SQUADREQ#<seriesId>#<fixtureId>#<teamId>` in the captain's
  * report partition, one per fixture SIDE (team, not club: a multi-team club's `tm_` sides
- * each get one). Opened `pending` the evening before the match, `submitted` (and re-submittable
- * until expiry — squads change late), `void` when the fixture was cancelled or moved.
+ * each get one). Opened `pending` the morning of the day before the match, `submitted` (and
+ * re-submittable until expiry — squads change late), `void` when the fixture was cancelled or
+ * moved (`voidReason` 'fixture changed' — self-heals if it moves back), voided by an admin, or
+ * still pending after match day ('expired').
  */
 export interface SquadRequest {
   /** `<seriesId>~<fixtureId>~<teamId>` */

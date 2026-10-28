@@ -1,6 +1,6 @@
 /* ─── Union office: pre-match squad requests ───
  *
- * Every captain squad link the evening opener sent: status (pending / submitted / void), who
+ * Every captain squad link the D-1 morning opener sent: status (pending / submitted / void), who
  * it went to, whether the notice reached them (the captain's-report notice chips), and what
  * medicoach did with the submitted squad (push outcome). Names only — the API never serves a
  * natural key or contact.
@@ -19,6 +19,14 @@ import { squadMatchLine } from './SquadSelection';
 import { ApiError, getSquadRequests, resendSquadRequest, voidSquadRequest } from './api';
 import { qk } from './query';
 import type { CaptainsReportDelivery, SquadRequestView } from './types';
+
+/** Stored void reasons in plain words (unknown ones shown as stored). */
+const VOID_REASON_LABELS: Record<string, string> = {
+  expired: 'Expired — never submitted',
+  'fixture changed': 'Fixture changed',
+  'voided by admin': 'Voided by admin',
+};
+const voidReasonLabel = (reason: string) => VOID_REASON_LABELS[reason] ?? reason;
 
 type StatusFilter = 'all' | 'pending' | 'submitted' | 'void';
 
@@ -198,7 +206,7 @@ export function AdminSquadRequestsTable({ requests }: { requests: SquadRequestVi
                     <td data-label="Status">
                       <Pill tone={pill.tone}>{pill.label}</Pill>
                       {r.status === 'void' && r.voidReason && (
-                        <div className="ump-sub">{r.voidReason}</div>
+                        <div className="ump-sub">{voidReasonLabel(r.voidReason)}</div>
                       )}
                     </td>
                     <td data-label="Squad">

@@ -14,8 +14,10 @@
  *    stays and its `unmappedAttempts` count advances; after SQUAD_PUSH_MAX_ATTEMPTS unmapped
  *    ANSWERS it is dropped, recorded `gave-up` and reported to Sentry;
  *  - medicoach unreachable / HTTP error / bad body ⇒ the row stays (only `attempts` counted —
- *    transport errors never advance the unmapped bound) and is retried until the day after
- *    the match has passed.
+ *    transport errors never advance the unmapped bound) and is retried: an `upsert` until the
+ *    day after the match has passed; a `void` until SQUAD_VOID_RETENTION_DAYS after it (an
+ *    undelivered void leaves medicoach prefilling a stale squad under a reused fixture id), and
+ *    dropping a still-unsent void is reported to Sentry.
  *
  * PERSONAL DATA: the body carries player refs (hashed ID numbers) and names. Never log a body,
  * a ref or a natural key — ids and counts only.
@@ -38,6 +40,8 @@ type RepoModule = typeof import('../repo.js');
 /** fixture-unmapped ANSWERS (not transport errors) tolerated before a push is given up (Sentry). */
 export const SQUAD_PUSH_MAX_ATTEMPTS = 8;
 const HTTP_TIMEOUT_MS = 20_000;
+/** Days after the match an unsent §8 `void` keeps retrying (upserts: 1). */
+export const SQUAD_VOID_RETENTION_DAYS = 7;
 
 export interface SquadPushDeps {
   url: string;
@@ -177,14 +181,23 @@ export async function flushSquadOutbox(
       ? await repo.getSquadRequest(tenant, key.seriesId, key.fixtureId, key.teamId)
       : null;
     // Gone, or an upsert for a request voided since (the void row replaces it on enqueue),
-    // or a match long past: nothing worth sending.
-    if (
-      !req ||
-      (row.op === 'upsert' && req.status !== 'submitted') ||
-      req.matchDate < addDay(today, -1)
-    ) {
+    // or a match past its retention (upsert: matchDate+1; void: +SQUAD_VOID_RETENTION_DAYS).
+    const retentionDays = row.op === 'void' ? SQUAD_VOID_RETENTION_DAYS : 1;
+    const tooOld = !!req && req.matchDate < addDay(today, -retentionDays);
+    if (!req || (row.op === 'upsert' && req.status !== 'submitted') || tooOld) {
       await repo.deletePendingSquadSyncIfUnchanged(tenant, row.requestId, row.submittedAt);
       out.dropped++;
+      if (row.op === 'void' && tooOld) {
+        // Never delivered: medicoach may still prefill the voided squad under this fixture id.
+        const msg = `squad void dropped undelivered ${SQUAD_VOID_RETENTION_DAYS} days after the match (${row.attempts ?? 0} attempts)`;
+        console.error(`[squad-push] ${tenant} ${row.requestId}: ${msg}`);
+        const capture =
+          deps.captureException ?? (await import('../instrument.js')).Sentry.captureException;
+        capture(new Error(msg), {
+          tags: { tenant, job: 'squad-push' },
+          extra: { requestId: row.requestId, attempts: row.attempts ?? 0 },
+        });
+      }
       continue;
     }
     const at = now().toISOString();

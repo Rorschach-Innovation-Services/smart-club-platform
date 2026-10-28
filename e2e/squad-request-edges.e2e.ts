@@ -449,7 +449,9 @@ test.afterAll(async ({ request }) => {
 
 // ───────────────────────── tests ─────────────────────────
 
-test('window gating: outside the evening window a sync run opens nothing', async ({ request }) => {
+test('window gating: outside the 08:00 squad window a sync run opens nothing', async ({
+  request,
+}) => {
   const S = `s-sqe-win-${RUN}`;
   await seedSeries(request, S, [
     { id: 'f1', date: TOMORROW, time: at('08'), home: 'berea', away: 'chatsworth' },
@@ -498,7 +500,7 @@ test('expired link: the page shows the closed state and a save is refused (410)'
   expect((await adminRow(request, S, 'clares')).status).toBe('pending');
 });
 
-test('fixture rescheduled after send: link 410s and voids, the sweep pushes §8 void, the new evening reopens fresh', async ({
+test('fixture rescheduled after send: link 410s and voids, the sweep pushes §8 void; moved back, the sweep self-heals the same links', async ({
   browser,
   request,
 }) => {
@@ -552,20 +554,24 @@ test('fixture rescheduled after send: link 410s and voids, the sweep pushes §8 
   expect(await pendingSquadSync(S, 'ilembe')).toBeNull();
   expect(await pendingSquadSync(S, 'verulam')).toBeNull();
 
-  // (c) The fixture lands on tomorrow again: that evening's run opens FRESH requests; the
-  // old link stays dead (new recipient id), the new one loads with an empty selection.
+  // (c) The fixture lands back on its ORIGINAL date: the sync run's sweep self-heals both
+  // requests in place (same recipient ids, selection kept, no re-notice) — the links already
+  // sent work again — and re-pushes each submitted squad as a §8 upsert over the void.
+  const upsertsBefore = pushesFor(S).filter((x) => x.op === 'upsert').length;
   await move(TOMORROW);
   await syncNow(request);
   const rows = await adminRows(request, S);
   expect(rows.map((r) => `${r.teamId}:${r.status}`).sort()).toEqual([
-    'ilembe:pending',
-    'verulam:pending',
+    'ilembe:submitted',
+    'verulam:submitted',
   ]);
-  expect(rows.every((r) => !r.selection)).toBe(true);
-  expect((await loadLink(request, homeToken)).status()).toBe(410);
-  const fresh = await loadLink(request, await mintSquadLink(S, 'ilembe'));
-  expect(fresh.ok()).toBeTruthy();
-  expect(((await fresh.json()) as LinkPayload).request.status).toBe('pending');
+  expect(rows.every((r) => !!r.selection)).toBe(true);
+  const healed = await loadLink(request, homeToken);
+  expect(healed.ok(), `healed link → ${healed.status()}`).toBeTruthy();
+  expect(((await healed.json()) as LinkPayload).request.status).toBe('submitted');
+  await expect
+    .poll(() => pushesFor(S).filter((x) => x.op === 'upsert').length)
+    .toBe(upsertsBefore + 2);
 });
 
 test('recipient ladder: designated → last captain (learned from a captain’s report) → chair; a minor designee falls through', async ({

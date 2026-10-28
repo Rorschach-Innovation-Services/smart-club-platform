@@ -48,6 +48,29 @@ describe('squad link token', () => {
     assert.equal(squad.verifySquadLinkToken(`${tok}x`, SECRET, NOW).ok, false);
   });
 
+  test('boundary: valid AT the expiry instant, expired one second later', () => {
+    const tok = squad.signSquadLinkToken({ t: 'd', r: 'm', q: 'q', e: EXP }, SECRET);
+    assert.equal(squad.verifySquadLinkToken(tok, SECRET, EXP * 1000).ok, true);
+    // Millisecond-exact: the instant itself (…:59.000) is the last valid moment.
+    assert.equal(squad.verifySquadLinkToken(tok, SECRET, EXP * 1000 + 1).ok, false);
+    assert.deepEqual(squad.verifySquadLinkToken(tok, SECRET, (EXP + 1) * 1000), {
+      ok: false,
+      reason: 'expired',
+    });
+    assert.equal(squad.squadLinkExpired(EXP * 1000, EXP), false);
+    assert.equal(squad.squadLinkExpired((EXP + 1) * 1000, EXP), true);
+  });
+
+  test('the squad notice window: 08:00–23:59:59 SAST (captain reports keep 18:00)', () => {
+    assert.equal(squad.SQUAD_NOTICE_HOUR, 8);
+    // 08:00 SAST = 06:00 UTC.
+    assert.equal(squad.isSquadNoticeWindowOpen(new Date('2026-10-27T05:59:59.999Z')), false);
+    assert.equal(squad.isSquadNoticeWindowOpen(new Date('2026-10-27T06:00:00.000Z')), true);
+    assert.equal(squad.isSquadNoticeWindowOpen(new Date('2026-10-27T21:59:59.999Z')), true);
+    assert.equal(squad.isSquadNoticeWindowOpen(new Date('2026-10-27T22:00:00.000Z')), false);
+    assert.equal(reports.isReportNoticeWindowOpen(new Date('2026-10-27T06:00:00.000Z')), false);
+  });
+
   test('the link expires 23:59:59 SAST on match day', () => {
     assert.equal(
       new Date(squad.squadLinkExpiry('2026-10-28') * 1000).toISOString(),

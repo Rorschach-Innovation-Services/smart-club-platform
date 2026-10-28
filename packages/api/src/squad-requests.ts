@@ -1,9 +1,10 @@
 /**
  * Pre-match captain squad-selection links (2026-10-27 plan, Group A).
  *
- * The evening before a synced fixture (the 18:00–midnight SAST notice window), each side's
- * recipient gets a link (`/sq/<token>`) to tick the match squad from the club's registered
- * roster. The submission is pushed to medicoach as contract §8 (`medicoach-sync/squads.ts`),
+ * On the morning of the day before a synced fixture (the 08:00–midnight SAST squad notice
+ * window, `SQUAD_NOTICE_HOUR` — earlier than captain's reports' 18:00; no match-day sends),
+ * each side's recipient gets a link (`/sq/<token>`) to tick the match squad from the club's
+ * registered roster. The submission is pushed to medicoach as contract §8 (`medicoach-sync/squads.ts`),
  * where it prefills the scorer's start-scoring squad.
  *
  * Recipient ladder (per TEAM — a multi-team club's `tm_` sides never share a captain):
@@ -20,7 +21,7 @@
  * save carries `expectedModified` (CAS; 409 to a stale tab), and every submit re-queues the
  * idempotent §8 upsert (last `submittedAt` wins at medicoach).
  *
- * Gates: the tenant flag `preMatchSquadLinks` (default off), the notice window, the
+ * Gates: the tenant flag `preMatchSquadLinks` (default off), the squad notice window, the
  * medicoach go-live date — and the caller: these steps run only inside `runTenantSync`, which
  * itself only runs for `medicoachSync` tenants.
  *
@@ -53,8 +54,8 @@ import {
   hasContact,
   liveFixtureVenue,
   MAX_FORWARDS,
+  noticeWindowOverride,
   pastDeadline,
-  reportNoticeWindowOpen,
   resolvePlayerContact,
   sideName,
   type NoticeResult,
@@ -89,6 +90,29 @@ const NAME_MAX = 120;
 
 const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/;
 const DAY_MS = 24 * 3600 * 1000;
+
+/**
+ * Squad links go out from this hour, SAST wall clock, until midnight on the day BEFORE the
+ * match (the first sync at/after 08:00 delivers): the morning gives a captain the whole day to
+ * pick. Match-day sends are deliberately never attempted. Captain's reports keep their own
+ * 18:00 gate (`REPORT_NOTICE_HOUR`). Global, not per tenant — every tenant is South African
+ * (TENANT_UTC_OFFSET_MINUTES, no DST).
+ */
+export const SQUAD_NOTICE_HOUR = 8;
+
+/** True from 08:00:00 to 23:59:59 SAST (pure). */
+export function isSquadNoticeWindowOpen(now: Date): boolean {
+  const local = new Date(now.getTime() + TENANT_UTC_OFFSET_MINUTES * 60_000);
+  return local.getUTCHours() >= SQUAD_NOTICE_HOUR;
+}
+
+/**
+ * The gate the squad opener and the SQUADOPEN# retry pass check. Honours the shared notice
+ * window test override (`setReportNoticeWindowOverride`), so the e2e hook forces it too.
+ */
+export function squadNoticeWindowOpen(now: Date): boolean {
+  return (noticeWindowOverride() ?? isSquadNoticeWindowOpen)(now);
+}
 
 /** The tenant flag (default off). */
 export function squadLinksEnabled(config: TenantConfig | null | undefined): boolean {
@@ -146,6 +170,11 @@ export function signSquadLinkToken(p: SquadLinkPayload, secret: string): string 
   return `${payload}.${b64url(mac(secret, payload))}`;
 }
 
+/** THE expiry comparator (token + resend): valid up to and including `e`, expired after. */
+export function squadLinkExpired(nowMs: number, e: number): boolean {
+  return nowMs / 1000 > e;
+}
+
 export type SquadTokenCheck =
   | { ok: true; payload: SquadLinkPayload }
   | { ok: false; reason: 'invalid' | 'expired' };
@@ -181,11 +210,18 @@ export function verifySquadLinkToken(
     typeof p.e !== 'number'
   )
     return { ok: false, reason: 'invalid' };
-  if (nowMs / 1000 > p.e) return { ok: false, reason: 'expired' };
+  if (squadLinkExpired(nowMs, p.e)) return { ok: false, reason: 'expired' };
   return { ok: true, payload: p };
 }
 
-/** 23:59:59 SAST on the match day, epoch seconds. */
+/**
+ * 23:59:59 SAST on the match day, epoch seconds. The link is valid AT this instant and expired
+ * from the next second on (`squadLinkExpired`).
+ *
+ * SAST tripwire: TENANT_UTC_OFFSET_MINUTES is a single GLOBAL 120 (ADR 0008 — every tenant is
+ * South African). A non-SA tenant would silently get a SAST expiry here; give tenants their
+ * own offset before onboarding one.
+ */
 export function squadLinkExpiry(matchDate: string): number {
   return Math.floor(
     (Date.parse(`${matchDate}T23:59:59Z`) - TENANT_UTC_OFFSET_MINUTES * 60_000) / 1000,
@@ -657,6 +693,28 @@ export function fixtureChanged(f: StoredFixture | null, matchDate: string): bool
   return !f || f.status === 'cancelled' || f.dateTbc === true || f.date !== matchDate;
 }
 
+/**
+ * A request's fixture, judged for voiding. Only a CONFIRMED change voids: cancelled, TBC, or a
+ * present date other than `matchDate` ⇒ 'changed'. A missing series / fixture or an absent
+ * date is a transient read (a schedule rewrite mid-flight) ⇒ 'unknown': never void on it.
+ */
+export function squadFixtureState(
+  f: StoredFixture | null,
+  matchDate: string,
+): 'ok' | 'changed' | 'unknown' {
+  if (!f) return 'unknown';
+  if (f.status === 'cancelled' || f.dateTbc === true) return 'changed';
+  if (typeof f.date !== 'string' || !f.date) return 'unknown';
+  return f.date === matchDate ? 'ok' : 'changed';
+}
+
+/** The `voidReason`s the void paths store. Only FIXTURE_CHANGED may ever self-heal. */
+export const SQUAD_VOID_REASONS = {
+  fixtureChanged: 'fixture changed',
+  admin: 'voided by admin',
+  expired: 'expired',
+} as const;
+
 /** A pending request whose opening notice never went out and is not settled (skipped). */
 export function squadNoticeUnsettled(r: SquadRequest): boolean {
   return (
@@ -771,7 +829,7 @@ export async function openPreMatchSquadRequests(
   const log = deps.log ?? ((line: string) => console.log(line));
   const sum = zeroSummary();
   if (!squadLinksEnabled(config)) return { ...sum, disabled: true };
-  if (!reportNoticeWindowOpen(now())) return { ...sum, windowClosed: true };
+  if (!squadNoticeWindowOpen(now())) return { ...sum, windowClosed: true };
   const goLive = config.integrations?.medicoach?.goLiveDate;
   const today = tenantDate(now());
   const tomorrow = addDays(today, 1);
@@ -890,7 +948,7 @@ export interface SquadRetrySummary {
   done: number;
   failed: number;
   gaveUp: number;
-  /** Dropped because the evening before the match has passed (`too-old`) or it changed. */
+  /** Dropped because the day before the match has passed (`too-old`) or it changed. */
   dropped: number;
   deferred: number;
 }
@@ -898,8 +956,8 @@ export interface SquadRetrySummary {
 /**
  * Retry every SQUADOPEN# marker (each run). A retry acts on the marker's STORED target — the
  * fixture and match date it was written for, never "tomorrow" — and gives up `too-old` once
- * that evening has passed (match day or later), so a fully failed evening never sends dead
- * links the next day. A fixture that moved or was cancelled drops its marker.
+ * the day before the match has passed (match day or later): squad sends happen only on D-1.
+ * A fixture that moved or was cancelled drops its marker.
  */
 export async function retryPendingSquadOpens(
   tenant: string,
@@ -917,7 +975,7 @@ export async function retryPendingSquadOpens(
   };
   const markers = await repo.listSquadOpenMarkers(tenant);
   if (!markers.length) return out;
-  if (!reportNoticeWindowOpen(now())) return { ...out, deferred: markers.length };
+  if (!squadNoticeWindowOpen(now())) return { ...out, deferred: markers.length };
   const config = await repo.getTenantConfig(tenant);
   const today = tenantDate(now());
   for (const [i, m] of markers.entries()) {
@@ -931,7 +989,9 @@ export async function retryPendingSquadOpens(
     if (
       !config ||
       !squadLinksEnabled(config) ||
-      m.matchDate <= today || // too-old: the evening before the match has passed
+      // too-old: sends happen only on D-1. A match-day send is deliberately not attempted
+      // (the link itself would still work until 23:59:59) — an admin resend covers exceptions.
+      m.matchDate <= today ||
       !series ||
       !side ||
       fixtureChanged(fixture, m.matchDate)
@@ -983,7 +1043,7 @@ export async function voidSquadRequestForFixtureChange(
   req: SquadRequest,
   at: string,
 ): Promise<boolean> {
-  const res = await repo.voidSquadRequest(tenant, req, 'fixture changed', at);
+  const res = await repo.voidSquadRequest(tenant, req, SQUAD_VOID_REASONS.fixtureChanged, at);
   if (res === 'voided' && req.status === 'submitted') await enqueueVoidPush(repo, tenant, req, at);
   return res === 'voided';
 }
@@ -999,7 +1059,7 @@ export async function adminVoidSquadRequest(
   req: SquadRequest,
   at: string,
 ): Promise<'voided' | 'none'> {
-  const res = await repo.voidSquadRequest(tenant, req, 'voided by admin', at);
+  const res = await repo.voidSquadRequest(tenant, req, SQUAD_VOID_REASONS.admin, at);
   if (res === 'voided' && req.status === 'submitted') await enqueueVoidPush(repo, tenant, req, at);
   return res;
 }
@@ -1023,7 +1083,7 @@ export async function resendSquadRequest(
     throw new SquadFlowError(409, 'this squad has already been submitted', 'submitted');
   if (request.status === 'void')
     throw new SquadFlowError(409, 'this squad request is void', 'void');
-  if (now().getTime() >= expirySeconds(request) * 1000)
+  if (squadLinkExpired(now().getTime(), expirySeconds(request)))
     throw new SquadFlowError(409, 'this squad link has expired', 'expired');
   const [club, config] = await Promise.all([
     repo.getClub(tenant, request.clubId),
@@ -1080,33 +1140,72 @@ export async function resendSquadRequest(
 }
 
 /**
- * The schedule-change void hook, run every sync (and on every link load): any live request
- * whose fixture was cancelled, made TBC, moved off its date or removed is voided (a move to a
- * future date lets that evening's trigger reopen it), and a submitted one queues a §8 `void`
- * so medicoach never prefills a stale squad under the same fixture id (a reschedule keeps the
- * fixture id). Covers every schedule writer — admin edits, generate, CLIs and medicoach's own
- * inbound changes — in one place.
+ * The schedule-change sweep, run every sync:
+ *  - VOID: a live request (match today or later) whose fixture was CONFIRMED cancelled, made
+ *    TBC or moved off its date is voided (a move to a future date lets that D-1 trigger reopen
+ *    it), and a submitted one queues a §8 `void` so medicoach never prefills a stale squad
+ *    under the same fixture id (a reschedule keeps the fixture id). A missing series / fixture
+ *    or an absent date is a transient read and never voids (`squadFixtureState`).
+ *  - SELF-HEAL: a request voided for a fixture change (and only that reason — never an admin
+ *    void or an expiry) whose fixture again matches its ORIGINAL match date, today or later,
+ *    is reopened in place: same recipient + memberId, so links already sent work again; no
+ *    re-notice (the NOTIFY# ledger is untouched); a submitted one re-queues its §8 upsert.
+ *    Works on match day — this is recovery, not a new send.
+ *  - EXPIRE: a request still `pending` after its match day is settled void `expired` (no §8
+ *    push — nothing was submitted — and no notice). Match day itself stays live.
+ * Covers every schedule writer — admin edits, generate, CLIs and medicoach's own inbound
+ * changes — in one place.
  */
 export async function voidChangedSquadRequests(
   tenant: string,
   deps: Pick<SquadRequestDeps, 'repo' | 'now'>,
-): Promise<{ voided: number }> {
+): Promise<{ voided: number; reopened: number; expired: number }> {
   const { repo } = deps;
   const now = deps.now ?? (() => new Date());
   const today = tenantDate(now());
-  const live = (await repo.listSquadRequests(tenant)).filter(
-    (r) => r.status !== 'void' && r.matchDate >= today,
-  );
+  const all = await repo.listSquadRequests(tenant);
   const seriesCache = new Map<string, Series | null>();
-  let voided = 0;
-  for (const r of live) {
+  const fixtureOf = async (r: SquadRequest) => {
     if (!seriesCache.has(r.seriesId))
       seriesCache.set(r.seriesId, await repo.getSeries(tenant, r.seriesId));
-    const f = liveFixture(seriesCache.get(r.seriesId) ?? null, r.fixtureId);
-    if (!fixtureChanged(f, r.matchDate)) continue;
+    return liveFixture(seriesCache.get(r.seriesId) ?? null, r.fixtureId);
+  };
+  let voided = 0;
+  let reopened = 0;
+  let expired = 0;
+  for (const r of all) {
+    if (r.matchDate < today) {
+      if (r.status !== 'pending') continue;
+      const at = now().toISOString();
+      if ((await repo.voidSquadRequest(tenant, r, SQUAD_VOID_REASONS.expired, at)) === 'voided')
+        expired++;
+      continue;
+    }
+    if (r.status === 'void') {
+      if (r.voidReason !== SQUAD_VOID_REASONS.fixtureChanged) continue;
+      if (squadFixtureState(await fixtureOf(r), r.matchDate) !== 'ok') continue;
+      const at = now().toISOString();
+      const healed = await repo.reopenSquadRequest(tenant, r, {
+        reason: SQUAD_VOID_REASONS.fixtureChanged,
+        status: r.submittedAt ? 'submitted' : 'pending',
+        at,
+      });
+      if (!healed) continue;
+      reopened++;
+      if (healed.status === 'submitted')
+        await repo.putPendingSquadSync(tenant, {
+          requestId: r.id,
+          op: 'upsert',
+          submittedAt: at,
+          enqueuedAt: at,
+          attempts: 0,
+        });
+      continue;
+    }
+    if (squadFixtureState(await fixtureOf(r), r.matchDate) !== 'changed') continue;
     if (await voidSquadRequestForFixtureChange(repo, tenant, r, now().toISOString())) voided++;
   }
-  return { voided };
+  return { voided, reopened, expired };
 }
 
 // ───────────────────────── The link ─────────────────────────
@@ -1126,7 +1225,9 @@ export class SquadFlowError extends Error {
 /**
  * A link-safe request lookup. Unlike the captain's report, a SUBMITTED request loads (and
  * stays editable) until the link expires. 404 bad token; 410 expired / void / re-addressed;
- * every load re-reads the fixture — cancelled, TBC or moved ⇒ the request is voided and 410.
+ * every load re-reads the fixture — CONFIRMED cancelled, TBC or moved ⇒ the request is voided
+ * and 410; a missing series / fixture or absent date (a transient read) ⇒ 410 "temporarily
+ * unavailable" WITHOUT voiding, so the same link works again once the read recovers.
  */
 export async function loadLinkedSquadRequest(
   repo: RepoModule,
@@ -1152,7 +1253,14 @@ export async function loadLinkedSquadRequest(
   if (request.status === 'void' || (!isCurrent && !isKeptChairLink))
     return { ok: false, status: 410, error: 'this link is no longer valid' };
   const series = await repo.getSeries(tenant, request.seriesId);
-  if (fixtureChanged(liveFixture(series, request.fixtureId), request.matchDate)) {
+  const state = squadFixtureState(liveFixture(series, request.fixtureId), request.matchDate);
+  if (state === 'unknown')
+    return {
+      ok: false,
+      status: 410,
+      error: 'this squad link is temporarily unavailable — please try again shortly',
+    };
+  if (state === 'changed') {
     await voidSquadRequestForFixtureChange(repo, tenant, request, new Date(nowMs).toISOString());
     return {
       ok: false,

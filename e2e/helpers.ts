@@ -701,8 +701,9 @@ export async function createReleasedVeteransSeries(
 }
 
 /**
- * Force the captain's-report 18:00 SAST notice window on the LOCAL stack (local/server.ts
- * test hook — never in the Lambda): 'open' / 'closed', or 'real' to follow the clock again.
+ * Force the notice windows (captain's reports' 18:00 and squad links' 08:00 SAST) on the LOCAL
+ * stack (local/server.ts test hook — never in the Lambda): 'open' / 'closed', or 'real' to
+ * follow the clock again.
  */
 export async function setReportNoticeWindow(
   request: APIRequestContext,
