@@ -40,6 +40,8 @@ const LINK_SECRET = 'local-dev-captains-report-link-secret'; // env.ts LOCAL_AUT
 const SQUAD_PUSH_MAX_ATTEMPTS = 8;
 const SQUAD_PATH = '/integrations/smartclub/fixture-squad';
 
+// Convention: a test that pins ANY absolute date must pin ALL its dates (a rolling day crosses
+// a fixed one eventually); against the server's clock, derive dates from now instead.
 const sastDay = (offset: number) =>
   new Date(Date.now() + 2 * 3600 * 1000 + offset * 24 * 3600 * 1000).toISOString().slice(0, 10);
 const TOMORROW = sastDay(1);
@@ -481,15 +483,15 @@ test.afterAll(async ({ request }) => {
 
 // ───────────────────────── tests ─────────────────────────
 
-test('window gating: outside the 08:00 squad window a sync run opens nothing', async ({
+test('window gating: outside the 08:00 squad window a sync run opens nothing; each window gates alone', async ({
   request,
 }) => {
   const S = `s-sqe-win-${RUN}`;
   await seedSeries(request, S, [
     { id: 'f1', date: TOMORROW, time: at('08'), home: 'berea', away: 'chatsworth' },
   ]);
-  // A fixture played today: its captain's reports ride their own (18:00) window, which the
-  // same hook forces. Which hour each window opens at is int-level (real clock, no override).
+  // A fixture played today: its captain's reports ride their own (18:00) window. Which hour
+  // each window opens at is int-level (real clock, no override); here each is forced alone.
   const R = `s-sqe-winrep-${RUN}`;
   await seedSeries(request, R, [
     { id: 'f1', date: TODAY, time: at('07'), home: 'umlazi', away: 'warriors' },
@@ -500,15 +502,35 @@ test('window gating: outside the 08:00 squad window a sync run opens nothing', a
     expect(summary.squads?.open?.windowClosed).toBe(true);
     expect(await adminRows(request, S)).toEqual([]);
     expect(await reportsFor(request, R)).toEqual([]);
+
+    // Reports OPEN, squads CLOSED: the reports open, no squad request does.
+    await setReportNoticeWindow(request, 'open', 'reports');
+    const reportsOnly = await syncNow(request);
+    expect(reportsOnly.squads?.open?.windowClosed).toBe(true);
+    expect((await reportsFor(request, R)).length).toBe(2);
+    expect(await adminRows(request, S)).toEqual([]);
+
+    // The inverse: squads OPEN, reports CLOSED. A fresh today-fixture proves zero new reports.
+    const R2 = `s-sqe-winrep2-${RUN}`;
+    await seedSeries(request, R2, [
+      { id: 'f1', date: TODAY, time: at('07'), home: 'ilembe', away: 'verulam' },
+    ]);
+    await setReportNoticeWindow(request, 'closed', 'reports');
+    await setReportNoticeWindow(request, 'open', 'squads');
+    await syncNow(request);
+    expect((await adminRows(request, S)).map((r) => r.status)).toEqual(['pending', 'pending']);
+    expect(await reportsFor(request, R2)).toEqual([]);
+
+    // Both open: R2's reports now open too — the gate was the only difference.
+    await setReportNoticeWindow(request, 'open');
+    await syncNow(request);
+    expect((await reportsFor(request, R2)).length).toBe(2);
   } finally {
     await setReportNoticeWindow(request, 'open');
   }
-  // The same run inside the window opens both sides — the gate was the only difference.
-  await syncNow(request);
-  expect((await adminRows(request, S)).map((r) => r.status)).toEqual(['pending', 'pending']);
-  expect((await reportsFor(request, R)).length).toBe(2);
-  // Today's fixture never gets a squad request (D-1 only), window open or not.
+  // Today's fixtures never get a squad request (D-1 only), window open or not.
   expect(await adminRows(request, R)).toEqual([]);
+  expect(await adminRows(request, `s-sqe-winrep2-${RUN}`)).toEqual([]);
 });
 
 test('fixture blip: a missing date 410s "temporarily unavailable" without voiding; restored, the same link works', async ({
@@ -531,6 +553,7 @@ test('fixture blip: a missing date 410s "temporarily unavailable" without voidin
     await p.goto(`/sq/${token}`);
     await expect(p.getByText('This link is temporarily unavailable')).toBeVisible();
     await expect(p.getByText(/temporarily unavailable — please try again shortly/i)).toBeVisible();
+    await expect(p.getByRole('button', { name: 'Try again' })).toBeVisible();
     await ctx.close();
     const res = await loadLink(request, token);
     expect(res.status()).toBe(410);
@@ -612,7 +635,7 @@ test('expired: a request still pending after match day settles void "expired"; t
   }
 });
 
-test('expired link: the page shows the closed state and a save is refused (410)', async ({
+test('expired link: the page shows the expired state and a save is refused (410)', async ({
   browser,
   request,
 }) => {
@@ -630,7 +653,7 @@ test('expired link: the page shows the closed state and a save is refused (410)'
   const ctx = await browser.newContext();
   const p = await ctx.newPage();
   await p.goto(`/sq/${expired}`);
-  await expect(p.getByText('This squad link is closed')).toBeVisible();
+  await expect(p.getByText('This link has expired')).toBeVisible();
   await expect(p.getByText('This squad link has expired.')).toBeVisible();
   await ctx.close();
 
@@ -770,7 +793,7 @@ test('recipient ladder: designated → last captain (learned from a captain’s 
       lastName: `SqeMinor${RUN}`,
       idType: 'passport',
       idNumber: `MN${RUN}`.toUpperCase().slice(0, 14),
-      dob: '2013-06-15',
+      dob: `${new Date().getUTCFullYear() - 13}-06-15`, // rolling: a fixed dob ages out of minority
       race: 'African',
       gender: 'Male',
       nationality: 'Zimbabwean',

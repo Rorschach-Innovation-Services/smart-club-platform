@@ -49,11 +49,16 @@ const headers = (auth?: string) => ({
 });
 
 const DAY = 24 * 3600 * 1000;
+// Convention: a test that pins ANY absolute date must pin ALL its dates — a rolling isoDay()
+// eventually crosses a fixed one (the time bombs that broke this suite).
 const isoDay = (offsetDays: number) =>
   new Date(Date.now() + offsetDays * DAY).toISOString().slice(0, 10);
 /** Yesterday: always inside the 7-day window, so the link is live. */
 const MATCH_DATE = isoDay(-1);
-const GO_LIVE = isoDay(-30);
+/** Pinned, not rolling: the example result pages carry a FIXED 2026-10-04 match, which a
+ * rolling today-30d go-live would overtake (from 2026-11-04 every opening test went dark).
+ * Every rolling date here stays after it. */
+const GO_LIVE = '2026-09-01';
 const CAPTAIN_KEY = '0'.repeat(64); // the example's captainRef natural key
 const CAPTAIN_REF = `smartclub:dolphins:player:${CAPTAIN_KEY}`;
 

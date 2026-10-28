@@ -15,6 +15,7 @@ import { mkdirSync, realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { NoticeWindowScope } from '../notice-window.js';
 
 const TABLE = 'SmartClubLocal';
 const DDB_PORT = 4567;
@@ -101,16 +102,17 @@ async function main(): Promise<void> {
   // 4. Serve the Hono app.
   const { serve } = await import('@hono/node-server');
   const { app } = await import('../index.js');
-  const { setReportNoticeWindowOverride } = await import('../captains-reports.js');
+  const { setNoticeWindowOverride } = await import('../notice-window.js');
   serve({
     fetch: (req, ...rest) => {
       const { pathname } = new URL(req.url);
       if (pathname === '/__local/stack')
         return Response.json({ root: STACK_ROOT, pid: process.pid });
       // e2e only: force the notice windows (captain's reports 18:00, squad links 08:00 SAST)
-      // open/closed, or back to the real clock. Lives here (outside the Hono app), so the Lambda never has it.
+      // open/closed, or back to the real clock. Optional `scope` ('all' default | 'reports' |
+      // 'squads') targets one window. Lives here (outside the Hono app), so the Lambda never has it.
       if (pathname === '/__e2e/report-notice-window' && req.method === 'POST')
-        return setReportNoticeWindow(req, setReportNoticeWindowOverride);
+        return setReportNoticeWindow(req, setNoticeWindowOverride);
       return app.fetch(req, ...rest);
     },
     port: API_PORT,
@@ -122,14 +124,19 @@ async function main(): Promise<void> {
 
 async function setReportNoticeWindow(
   req: Request,
-  setOverride: (fn: ((now: Date) => boolean) | undefined) => void,
+  setOverride: (fn: ((now: Date) => boolean) | undefined, scope: NoticeWindowScope) => void,
 ): Promise<Response> {
-  const { mode } = (await req.json().catch(() => ({}))) as { mode?: unknown };
-  if (mode === 'open') setOverride(() => true);
-  else if (mode === 'closed') setOverride(() => false);
-  else if (mode === 'real') setOverride(undefined);
+  const { mode, scope = 'all' } = (await req.json().catch(() => ({}))) as {
+    mode?: unknown;
+    scope?: unknown;
+  };
+  if (scope !== 'all' && scope !== 'reports' && scope !== 'squads')
+    return Response.json({ error: "scope must be 'all', 'reports' or 'squads'" }, { status: 400 });
+  if (mode === 'open') setOverride(() => true, scope);
+  else if (mode === 'closed') setOverride(() => false, scope);
+  else if (mode === 'real') setOverride(undefined, scope);
   else return Response.json({ error: "mode must be 'open', 'closed' or 'real'" }, { status: 400 });
-  return Response.json({ mode });
+  return Response.json({ mode, scope });
 }
 
 main().catch((err) => {

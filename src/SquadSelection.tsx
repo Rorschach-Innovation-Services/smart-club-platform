@@ -32,6 +32,10 @@ import type { LinkedSquadRequest, SquadRequestView, SquadSaveBody } from './type
 const errText = (err: unknown) =>
   err instanceof ApiError ? err.message : 'Something went wrong — try again.';
 
+/** Transient-410 auto-retry: every 15s, at most 10 times (~2.5 min), then manual only. */
+const BLIP_RETRY_MS = 15_000;
+const BLIP_MAX_RETRIES = 10;
+
 const sentenceCase = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 const STALE_NOTE =
@@ -447,17 +451,41 @@ export function SquadSelectionLinkPage() {
   // sweep self-heals it; don't title it "closed" or the captain gives up.
   const transient =
     query.error instanceof ApiError && /temporarily unavailable/i.test(query.error.message);
+  const expired = query.error instanceof ApiError && /expired/i.test(query.error.message);
+  // The blip self-heals server-side, so poll for it on a modest backoff (bounded) as well as
+  // offering a manual retry; the first successful refetch renders the page normally.
+  const [blipRetries, setBlipRetries] = useState(0);
+  const { refetch, errorUpdatedAt } = query;
+  useEffect(() => {
+    if (status !== 410 || !transient || blipRetries >= BLIP_MAX_RETRIES) return;
+    const t = setTimeout(() => {
+      setBlipRetries((n) => n + 1);
+      void refetch();
+    }, BLIP_RETRY_MS);
+    return () => clearTimeout(t);
+  }, [status, transient, blipRetries, errorUpdatedAt, refetch]);
   let body: ReactNode;
   if (query.isLoading) body = <div className="cr-section-sub">Loading the squad…</div>;
   else if (status === 410)
     body = (
       <div className="cr-done">
         <div className="cr-done-title">
-          {transient ? 'This link is temporarily unavailable' : 'This squad link is closed'}
+          {transient
+            ? 'This link is temporarily unavailable'
+            : expired
+              ? 'This link has expired'
+              : 'This squad link is closed'}
         </div>
         <div className="cr-done-sub">
           {query.error instanceof ApiError && sentenceCase(query.error.message.replace(/\.$/, ''))}.
         </div>
+        {transient && (
+          <div className="cr-done-actions">
+            <Btn tone="teal" disabled={query.isFetching} onClick={() => void refetch()}>
+              Try again
+            </Btn>
+          </div>
+        )}
       </div>
     );
   else if (!data && status !== null)

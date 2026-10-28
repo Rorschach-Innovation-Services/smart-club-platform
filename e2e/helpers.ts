@@ -703,15 +703,19 @@ export async function createReleasedVeteransSeries(
 /**
  * Force the notice windows (captain's reports' 18:00 and squad links' 08:00 SAST) on the LOCAL
  * stack (local/server.ts test hook — never in the Lambda): 'open' / 'closed', or 'real' to
- * follow the clock again.
+ * follow the clock again. `scope` targets one window ('reports' | 'squads'); the default 'all'
+ * sets both.
  */
 export async function setReportNoticeWindow(
   request: APIRequestContext,
   mode: 'open' | 'closed' | 'real',
+  scope: 'all' | 'reports' | 'squads' = 'all',
 ): Promise<void> {
-  const res = await request.post(`${API_BASE}/__e2e/report-notice-window`, { data: { mode } });
+  const res = await request.post(`${API_BASE}/__e2e/report-notice-window`, {
+    data: { mode, scope },
+  });
   expect(
     res.ok(),
-    `report-notice-window ${mode} → ${res.status()} ${await res.text()}`,
+    `report-notice-window ${mode} (${scope}) → ${res.status()} ${await res.text()}`,
   ).toBeTruthy();
 }

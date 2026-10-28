@@ -43,6 +43,7 @@ import { hasFeature } from './features.js';
 import { toE164 } from './notify/e164.js';
 import { isWithheld, projectSeriesForClub } from './series-projection.js';
 import { TENANT_UTC_OFFSET_MINUTES, tenantDate } from './tenant-time.js';
+import { noticeWindowOverride, setNoticeWindowOverride } from './notice-window.js';
 import type {
   CaptainsReport,
   CaptainsReportDelivery,
@@ -99,27 +100,18 @@ export function isReportNoticeWindowOpen(now: Date): boolean {
   return local.getUTCHours() >= REPORT_NOTICE_HOUR;
 }
 
-let windowOverride: ((now: Date) => boolean) | undefined;
-
 /**
- * Force the notice window open/closed regardless of the clock. For tests whose dates follow
- * the real clock only; `undefined` restores `isReportNoticeWindowOpen`.
+ * Force EVERY notice window open/closed regardless of the clock. For tests whose dates follow
+ * the real clock only; `undefined` restores the real rules. Per-window control lives in
+ * `notice-window.ts` (`setNoticeWindowOverride(fn, scope)`).
  */
 export function setReportNoticeWindowOverride(fn: ((now: Date) => boolean) | undefined): void {
-  windowOverride = fn;
-}
-
-/**
- * The forced open/closed override, if any. Shared with the squad-link window
- * (`squadNoticeWindowOpen`), so one e2e/test hook forces every notice window.
- */
-export function noticeWindowOverride(): ((now: Date) => boolean) | undefined {
-  return windowOverride;
+  setNoticeWindowOverride(fn, 'all');
 }
 
 /** The gate every automatic send path checks (honours the test override). */
 export function reportNoticeWindowOpen(now: Date): boolean {
-  return (windowOverride ?? isReportNoticeWindowOpen)(now);
+  return (noticeWindowOverride('reports') ?? isReportNoticeWindowOpen)(now);
 }
 
 /** A NOTIFY# claim still `in_progress` after this long is reported to Sentry (never resent). */

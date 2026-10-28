@@ -26,6 +26,9 @@ export default defineConfig({
   reporter: [['list']],
   use: {
     baseURL: 'http://localhost:3201',
+    // A hung navigation fails fast instead of eating the whole test budget (the cold-vite
+    // first load is absorbed by the global-setup warm-up).
+    navigationTimeout: 30_000,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },

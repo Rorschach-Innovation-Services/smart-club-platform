@@ -297,8 +297,56 @@ describe('closed and invalid links', () => {
       new ApiError(410, 'This squad link has expired.'),
     );
     renderPage();
-    expect(await screen.findByText('This squad link is closed')).toBeInTheDocument();
+    expect(await screen.findByText('This link has expired')).toBeInTheDocument();
+    expect(screen.queryByText('This squad link is closed')).toBeNull();
     expect(screen.getByText('This squad link has expired.')).toBeInTheDocument();
+    // A dead link offers no retry.
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+  });
+
+  it('a non-transient 410 offers no retry and never refetches', async () => {
+    vi.mocked(api.getLinkedSquadRequest).mockRejectedValue(
+      new ApiError(410, 'fixture changed — this squad link is no longer valid'),
+    );
+    renderPage();
+    await screen.findByText('This squad link is closed');
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(api.getLinkedSquadRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('a transient 410 offers "Try again"; a successful retry lands the loaded page', async () => {
+    vi.mocked(api.getLinkedSquadRequest)
+      .mockRejectedValueOnce(
+        new ApiError(410, 'this link is temporarily unavailable — try again shortly'),
+      )
+      .mockResolvedValue(payload());
+    renderPage();
+    expect(await screen.findByText('This link is temporarily unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('This squad link is closed')).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('UKZN / Squad selection')).toBeInTheDocument();
+    expect(screen.queryByText('This link is temporarily unavailable')).toBeNull();
+  });
+
+  it('a transient 410 auto-retries on a backoff until the link comes back', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      vi.mocked(api.getLinkedSquadRequest)
+        .mockRejectedValueOnce(new ApiError(410, 'this link is temporarily unavailable'))
+        .mockRejectedValueOnce(new ApiError(410, 'this link is temporarily unavailable'))
+        .mockResolvedValue(payload());
+      renderPage();
+      await screen.findByText('This link is temporarily unavailable');
+      expect(api.getLinkedSquadRequest).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(15_000);
+      await waitFor(() => expect(api.getLinkedSquadRequest).toHaveBeenCalledTimes(2));
+      expect(screen.getByText('This link is temporarily unavailable')).toBeInTheDocument();
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(await screen.findByText('UKZN / Squad selection')).toBeInTheDocument();
+      expect(api.getLinkedSquadRequest).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('404: the link is not valid', async () => {

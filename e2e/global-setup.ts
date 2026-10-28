@@ -38,6 +38,33 @@ export default async function globalSetup(): Promise<void> {
         'its own demo stack, or start it with `npm run dev:local:demo`.',
     );
   }
+  await warmUpSpa();
+}
+
+// A cold vite transforms the SPA's module graph on the first page load, which can eat a whole
+// test's budget. One fetch of the root (plus its entry module, which is what makes vite do the
+// work) here, with retries, moves that cost out of the first test.
+const WARMUP_ATTEMPTS = 10;
+const WARMUP_TIMEOUT_MS = 60_000;
+
+async function warmUpSpa(): Promise<void> {
+  let last = 'no attempt';
+  for (let i = 0; i < WARMUP_ATTEMPTS; i++) {
+    try {
+      const res = await fetch(WEB_BASE, { signal: AbortSignal.timeout(WARMUP_TIMEOUT_MS) });
+      if (res.status === 200) {
+        const html = await res.text();
+        for (const [, src] of html.matchAll(/<script[^>]+type="module"[^>]+src="([^"]+)"/g))
+          await fetch(new URL(src!, WEB_BASE), { signal: AbortSignal.timeout(WARMUP_TIMEOUT_MS) });
+        return;
+      }
+      last = `HTTP ${res.status}`;
+    } catch (err) {
+      last = String(err);
+    }
+    await new Promise((r) => setTimeout(r, 1_000));
+  }
+  throw new Error(`SPA warm-up: GET ${WEB_BASE} never returned 200 (${last}).`);
 }
 
 /** Poll until the API accepts connections (boot in progress), then return the probe status. */

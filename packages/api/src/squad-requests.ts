@@ -54,7 +54,6 @@ import {
   hasContact,
   liveFixtureVenue,
   MAX_FORWARDS,
-  noticeWindowOverride,
   pastDeadline,
   resolvePlayerContact,
   sideName,
@@ -67,6 +66,7 @@ import { refs } from './medicoach-bundle.js';
 import { fixtureSyncRef } from './fixture-identity.js';
 import { seriesMappedForSync } from './medicoach-sync/schedule.js';
 import { toE164 } from './notify/e164.js';
+import { noticeWindowOverride } from './notice-window.js';
 import { WHATSAPP_TEMPLATES } from './notify/whatsapp-templates.js';
 import { isWithheld, projectSeriesForClub } from './series-projection.js';
 import { TENANT_UTC_OFFSET_MINUTES, tenantDate } from './tenant-time.js';
@@ -107,11 +107,11 @@ export function isSquadNoticeWindowOpen(now: Date): boolean {
 }
 
 /**
- * The gate the squad opener and the SQUADOPEN# retry pass check. Honours the shared notice
- * window test override (`setReportNoticeWindowOverride`), so the e2e hook forces it too.
+ * The gate the squad opener and the SQUADOPEN# retry pass check. Honours the squads slot of
+ * the notice-window test override (`notice-window.ts`), so the e2e hook can force it alone.
  */
 export function squadNoticeWindowOpen(now: Date): boolean {
-  return (noticeWindowOverride() ?? isSquadNoticeWindowOpen)(now);
+  return (noticeWindowOverride('squads') ?? isSquadNoticeWindowOpen)(now);
 }
 
 /** The tenant flag (default off). */
