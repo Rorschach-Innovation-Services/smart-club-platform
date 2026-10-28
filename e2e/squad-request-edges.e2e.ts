@@ -14,6 +14,7 @@ import {
   operatorAuth,
   repAuthHeader,
   setReportNoticeWindow,
+  signInAsAdmin,
 } from './helpers';
 
 /**
@@ -170,7 +171,36 @@ async function deleteItem(pk: string, sk: string) {
     new DeleteItemCommand({ TableName: 'SmartClubLocal', Key: { pk: { S: pk }, sk: { S: sk } } }),
   );
 }
+async function updateItem(
+  pk: string,
+  sk: string,
+  expr: string,
+  names: Record<string, string>,
+  values?: Record<string, { S: string }>,
+) {
+  const { UpdateItemCommand } = ddbModule();
+  await ddbClient().send(
+    new UpdateItemCommand({
+      TableName: 'SmartClubLocal',
+      Key: { pk: { S: pk }, sk: { S: sk } },
+      UpdateExpression: expr,
+      ExpressionAttributeNames: names,
+      ...(values ? { ExpressionAttributeValues: values } : {}),
+    }),
+  );
+}
 const CAPREPORT_PK = `TENANT#${TENANT}#CAPREPORT`;
+const SERIES_PK = (seriesId: string) => `TENANT#${TENANT}#SERIES#${seriesId}`;
+/** Set (or, with `null`, REMOVE) the stored date of the series' first fixture, behind the API. */
+async function setStoredFixtureDate(seriesId: string, date: string | null) {
+  await updateItem(
+    SERIES_PK(seriesId),
+    'META',
+    date === null ? 'REMOVE fixtures[0].#d' : 'SET fixtures[0].#d = :d',
+    { '#d': 'date' },
+    date === null ? undefined : { ':d': { S: date } },
+  );
+}
 
 /** Sign a squad link exactly as squad-requests.ts does (test-only). */
 function signSquad(payload: object): string {
@@ -288,6 +318,8 @@ async function syncNow(request: APIRequestContext): Promise<SyncSummary> {
 }
 
 interface AdminSquadRow {
+  id: string;
+  voidReason?: string;
   seriesId: string;
   fixtureId: string;
   teamId: string;
@@ -456,17 +488,128 @@ test('window gating: outside the 08:00 squad window a sync run opens nothing', a
   await seedSeries(request, S, [
     { id: 'f1', date: TOMORROW, time: at('08'), home: 'berea', away: 'chatsworth' },
   ]);
+  // A fixture played today: its captain's reports ride their own (18:00) window, which the
+  // same hook forces. Which hour each window opens at is int-level (real clock, no override).
+  const R = `s-sqe-winrep-${RUN}`;
+  await seedSeries(request, R, [
+    { id: 'f1', date: TODAY, time: at('07'), home: 'umlazi', away: 'warriors' },
+  ]);
   await setReportNoticeWindow(request, 'closed');
   try {
     const summary = await syncNow(request);
     expect(summary.squads?.open?.windowClosed).toBe(true);
     expect(await adminRows(request, S)).toEqual([]);
+    expect(await reportsFor(request, R)).toEqual([]);
   } finally {
     await setReportNoticeWindow(request, 'open');
   }
   // The same run inside the window opens both sides — the gate was the only difference.
   await syncNow(request);
   expect((await adminRows(request, S)).map((r) => r.status)).toEqual(['pending', 'pending']);
+  expect((await reportsFor(request, R)).length).toBe(2);
+  // Today's fixture never gets a squad request (D-1 only), window open or not.
+  expect(await adminRows(request, R)).toEqual([]);
+});
+
+test('fixture blip: a missing date 410s "temporarily unavailable" without voiding; restored, the same link works', async ({
+  browser,
+  request,
+}) => {
+  const S = `s-sqe-blip-${RUN}`;
+  const N = `SqeBlip${RUN}`;
+  await createActivePlayer(request, 'harlequins', { name: N });
+  await seedSeries(request, S, [
+    { id: 'f1', date: TOMORROW, time: at('15'), home: 'harlequins', away: 'umlazi' },
+  ]);
+  await syncNow(request);
+  const token = await mintSquadLink(S, 'harlequins');
+
+  await setStoredFixtureDate(S, null);
+  try {
+    const ctx = await browser.newContext();
+    const p = await ctx.newPage();
+    await p.goto(`/sq/${token}`);
+    await expect(p.getByText('This squad link is closed')).toBeVisible();
+    await expect(p.getByText(/temporarily unavailable — please try again shortly/i)).toBeVisible();
+    await ctx.close();
+    const res = await loadLink(request, token);
+    expect(res.status()).toBe(410);
+    expect(await res.text()).toMatch(/temporarily unavailable/);
+    // Neither the load nor a sync run's sweep voids on a transient read.
+    expect((await adminRow(request, S, 'harlequins')).status).toBe('pending');
+    const during = await syncNow(request);
+    expect(during.squads?.voided ?? 0).toBe(0);
+    expect((await adminRow(request, S, 'harlequins')).status).toBe('pending');
+  } finally {
+    await setStoredFixtureDate(S, TOMORROW);
+  }
+
+  // Restored: the SAME link loads and submits with no sync run in between.
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await p.goto(`/sq/${token}`);
+  await p.getByRole('searchbox', { name: 'Search players' }).fill(N);
+  await p.getByRole('checkbox', { name: `Test ${N}` }).check();
+  await p.getByRole('button', { name: 'Submit squad' }).click();
+  await expect(p.getByLabel('Submitted squad').getByText(`Test ${N}`)).toBeVisible();
+  await ctx.close();
+  expect((await adminRow(request, S, 'harlequins')).status).toBe('submitted');
+  await expect.poll(() => pushesFor(S, 'home').length).toBe(1);
+  expect(pushesFor(S, 'home')[0]).toMatchObject({ op: 'upsert' });
+  expect(pushesFor(S, 'home')[0]!.players.map((x) => x.name)).toEqual([`Test ${N}`]);
+});
+
+test('expired: a request still pending after match day settles void "expired"; the admin page says so and resend is refused', async ({
+  page,
+  request,
+}) => {
+  const S = `s-sqe-stale-${RUN}`;
+  await seedSeries(request, S, [
+    { id: 'f1', date: TOMORROW, time: at('16'), home: 'chatsworth', away: 'clares' },
+  ]);
+  await syncNow(request);
+  const token = await mintSquadLink(S, 'chatsworth');
+  // Backdate the match (fixture + both requests) to yesterday, behind the API: the shape a
+  // request has once its match day passes unsubmitted.
+  await setStoredFixtureDate(S, YESTERDAY);
+  for (const t of ['chatsworth', 'clares'])
+    await updateItem(
+      CAPREPORT_PK,
+      `SQUADREQ#${S}#f1#${t}`,
+      'SET #m = :m',
+      { '#m': 'matchDate' },
+      {
+        ':m': { S: YESTERDAY },
+      },
+    );
+
+  const summary = await syncNow(request);
+  expect(summary.squads?.expired ?? 0).toBeGreaterThanOrEqual(2);
+  const rows = await adminRows(request, S);
+  expect(rows.map((r) => `${r.teamId}:${r.status}:${r.voidReason}`).sort()).toEqual([
+    'chatsworth:void:expired',
+    'clares:void:expired',
+  ]);
+  // Expiry never pushes §8 (nothing was submitted) and the link is dead.
+  expect(pushesFor(S)).toEqual([]);
+  expect((await loadLink(request, token)).status()).toBe(410);
+  const resend = await request.post(`${API_BASE}/admin/squad-requests/${rows[0]!.id}/resend`, {
+    headers: admin(),
+  });
+  expect(resend.ok(), `resend → ${resend.status()}`).toBe(false);
+  // A second run does not self-heal an expiry.
+  await syncNow(request);
+  expect((await adminRows(request, S)).every((r) => r.status === 'void')).toBe(true);
+
+  await signInAsAdmin(page);
+  await page.locator('aside.nav .nav-item', { hasText: 'Squad requests' }).click();
+  const shown = page.getByRole('row', { name: new RegExp(`Squad edges ${S}`) });
+  await expect(shown).toHaveCount(2);
+  for (const row of await shown.all()) {
+    await expect(row.getByText('Expired — never submitted')).toBeVisible();
+    await expect(row.getByRole('button', { name: /^Resend/ })).toBeDisabled();
+    await expect(row.getByRole('button', { name: /^Void/ })).toBeDisabled();
+  }
 });
 
 test('expired link: the page shows the closed state and a save is refused (410)', async ({
@@ -572,6 +715,20 @@ test('fixture rescheduled after send: link 410s and voids, the sweep pushes §8 
   await expect
     .poll(() => pushesFor(S).filter((x) => x.op === 'upsert').length)
     .toBe(upsertsBefore + 2);
+  // The re-push carries each side's ORIGINAL selection (not an empty squad over the void).
+  const repushed = pushesFor(S)
+    .filter((x) => x.op === 'upsert')
+    .slice(upsertsBefore);
+  expect(
+    repushed.map((x) => `${x.side}:${x.players.map((pl) => pl.name).join(',')}`).sort(),
+  ).toEqual([`away:Test ${A}`, `home:Test ${H}`]);
+  // The ORIGINAL browser link is editable again, its selection intact.
+  const ctx2 = await browser.newContext();
+  const p2 = await ctx2.newPage();
+  await p2.goto(`/sq/${homeToken}`);
+  await expect(p2.getByLabel('Submitted squad').getByText(`Test ${H}`)).toBeVisible();
+  await expect(p2.getByRole('button', { name: 'Edit squad' })).toBeEnabled();
+  await ctx2.close();
 });
 
 test('recipient ladder: designated → last captain (learned from a captain’s report) → chair; a minor designee falls through', async ({
