@@ -309,6 +309,21 @@ import {
   type ConsoleStatusFilter,
   loadScorecardConsole,
 } from './captains-reports.js';
+import {
+  adminVoidSquadRequest,
+  forwardSquadRequest,
+  loadLinkedSquadRequest,
+  parseSquadRequestId,
+  resendSquadRequest,
+  saveSquad,
+  squadForwardCandidates,
+  captainCandidates,
+  captainCandidateId,
+  squadLinkPayload,
+  squadRequestView,
+  SquadFlowError,
+} from './squad-requests.js';
+import { flushSquadOutbox } from './medicoach-sync/squads.js';
 import { applyWhatsAppStatuses, parseStatuses } from './notify/whatsapp-status.js';
 import {
   SYNC_SIGNATURE_HEADER,
@@ -8356,6 +8371,234 @@ app.put('/captains-report-link/:token', async (c) => {
     memberId,
   });
   return c.json(await linkPayload(tenant, saved, isChairLink));
+});
+
+/* ─── Pre-match captain squad links (2026-10-27) ───
+   Public `/squad-link/:token` (the `/sq/<token>` page's API). Unlike the captain's report, a
+   SUBMITTED squad stays loadable and editable until the link expires (23:59:59 SAST on match
+   day); every save carries `expectedModified` (409 to a stale tab). The roster is the whole
+   club's active registrations (minors included, names only) behind opaque ids. */
+
+function squadFlowError(err: unknown): never {
+  if (err instanceof SquadFlowError)
+    throw new HttpError(err.status, err.message, err.code ? { code: err.code } : undefined);
+  throw err;
+}
+
+async function linkedSquadOr410(c: Context<HonoEnv>) {
+  c.header('Cache-Control', 'no-store');
+  c.header('Referrer-Policy', 'no-referrer');
+  const found = await loadLinkedSquadRequest(
+    repo,
+    c.req.param('token') ?? '',
+    Date.now(),
+    captainsReportLinkSecret(),
+  );
+  if (!found.ok) throw new HttpError(found.status, found.error);
+  return found;
+}
+
+/** The best-effort post-submit push of ONE squad (the cron drains whatever this misses). */
+const flushSquadNow = (tenant: string, requestId: string) =>
+  flushSquadOutbox(tenant, {
+    repo,
+    url: medicoachSyncUrl(),
+    secret: medicoachSyncSecret(),
+    only: [requestId],
+    timeoutMs: 8_000,
+  });
+
+app.get('/squad-link/:token', async (c) => {
+  const { tenant, request, isChairLink } = await linkedSquadOr410(c);
+  return c.json(
+    await squadLinkPayload(repo, tenant, request, isChairLink, captainsReportLinkSecret()),
+  );
+});
+
+app.put('/squad-link/:token', async (c) => {
+  const { tenant, request, isChairLink } = await linkedSquadOr410(c);
+  const saved = await saveSquad(
+    { repo, flushNow: flushSquadNow },
+    { tenant, request, body: await c.req.json().catch(() => null) },
+  ).catch(squadFlowError);
+  return c.json(
+    await squadLinkPayload(repo, tenant, saved, isChairLink, captainsReportLinkSecret()),
+  );
+});
+
+/** The chair's link only: adult roster players with a contact, names only. */
+app.get('/squad-link/:token/forward-candidates', async (c) => {
+  const { tenant, request, isChairLink } = await linkedSquadOr410(c);
+  if (!isChairLink) throw new HttpError(403, 'only the club chair can send this squad link on');
+  const candidates = await squadForwardCandidates(
+    repo,
+    tenant,
+    request,
+    captainsReportLinkSecret(),
+  );
+  return c.json({
+    candidates: candidates.map(({ id, name }) => ({ id, name })),
+    remaining: Math.max(0, MAX_FORWARDS - (request.forwardCount ?? 0)),
+  });
+});
+
+app.post('/squad-link/:token/forward', async (c) => {
+  const { tenant, request, isChairLink } = await linkedSquadOr410(c);
+  if (!isChairLink) throw new HttpError(403, 'only the club chair can send this squad link on');
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as { candidateId?: unknown };
+  if (typeof body.candidateId !== 'string' || !body.candidateId)
+    throw new HttpError(400, 'candidateId is required');
+  const updated = await forwardSquadRequest(
+    { repo },
+    { tenant, request, candidateId: body.candidateId },
+  ).catch(squadFlowError);
+  return c.json(await squadLinkPayload(repo, tenant, updated, true, captainsReportLinkSecret()));
+});
+
+/** A team id belongs to the club: the club id itself, or one of its named `tm_` sides. */
+function clubOwnsTeam(club: Club, teamId: string): boolean {
+  if (teamId === club.id) return true;
+  return Object.values(club.teamRosters ?? {}).some((roster) =>
+    (roster ?? []).some((t) => t?.id === teamId),
+  );
+}
+
+/** Who the team's captain can be: own active players + veterans affiliates, opaque ids only. */
+app.get('/clubs/:id/teams/:teamId/captain-candidates', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const teamId = c.req.param('teamId');
+  assertClubAccess(ra, id);
+  const club = await repo.getClub(ra.tenant, id);
+  if (!club || !clubOwnsTeam(club, teamId)) throw new HttpError(404, 'team not found');
+  const list = await captainCandidates(repo, ra.tenant, id, teamId, captainsReportLinkSecret());
+  return c.json({
+    candidates: list.map(({ id: cid, name, affiliate }) => ({
+      id: cid,
+      name,
+      ...(affiliate ? { affiliate: true } : {}),
+    })),
+  });
+});
+
+/** The club's designated captain for one team (club members / admins of that club). Never
+ *  the natural key (an ID number): the designee is served under its opaque candidate id. */
+app.get('/clubs/:id/teams/:teamId/captain', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const teamId = c.req.param('teamId');
+  assertClubAccess(ra, id);
+  const club = await repo.getClub(ra.tenant, id);
+  if (!club || !clubOwnsTeam(club, teamId)) throw new HttpError(404, 'team not found');
+  const d = await repo.getTeamCaptain(ra.tenant, id, teamId);
+  if (!d) return c.json({ teamId, captain: null });
+  let p = await repo.getPlayer(ra.tenant, id, d.playerKey);
+  let affiliate = false;
+  if (!p) {
+    const aff = await repo.getVeteransAffiliation(ra.tenant, id, d.playerKey);
+    if (aff) {
+      p = await repo.getPlayer(ra.tenant, aff.primaryClubId, d.playerKey);
+      affiliate = !!p;
+    }
+  }
+  return c.json({
+    teamId,
+    captain: {
+      candidateId: captainCandidateId(captainsReportLinkSecret(), ra.tenant, teamId, d.playerKey),
+      name: p ? `${p.firstName ?? ''} ${p.lastName ?? ''}`.trim() : '',
+      ...(affiliate ? { affiliate: true } : {}),
+      setBy: d.setBy,
+      setAt: d.setAt,
+    },
+  });
+});
+
+/** Set (`{candidateId}`, from captain-candidates) or clear (`{candidateId: null}`). */
+app.put('/clubs/:id/teams/:teamId/captain', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const teamId = c.req.param('teamId');
+  assertClubAccess(ra, id);
+  const club = await repo.getClub(ra.tenant, id);
+  if (!club || !clubOwnsTeam(club, teamId)) throw new HttpError(404, 'team not found');
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as { candidateId?: unknown };
+  if (body.candidateId === null) {
+    await repo.deleteTeamCaptain(ra.tenant, id, teamId);
+    return c.json({ teamId, captain: null });
+  }
+  if (typeof body.candidateId !== 'string' || !body.candidateId)
+    throw new HttpError(400, 'candidateId is required (or null to clear)');
+  const list = await captainCandidates(repo, ra.tenant, id, teamId, captainsReportLinkSecret());
+  const hit = list.find((e) => e.id === body.candidateId);
+  if (!hit) throw new HttpError(400, "that player is not on the club's roster");
+  const d = {
+    clubId: id,
+    teamId,
+    playerKey: hit.key,
+    setBy: ra.email ?? 'portal',
+    setAt: new Date().toISOString(),
+  };
+  await repo.putTeamCaptain(ra.tenant, d);
+  return c.json({
+    teamId,
+    captain: {
+      candidateId: hit.id,
+      name: hit.name,
+      ...(hit.affiliate ? { affiliate: true } : {}),
+      setBy: d.setBy,
+      setAt: d.setAt,
+    },
+  });
+});
+
+/** Admin console: every squad request, filtered by status and match-date range. */
+app.get('/admin/squad-requests', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const status = c.req.query('status');
+  const from = c.req.query('from');
+  const to = c.req.query('to');
+  const rows = (await repo.listSquadRequests(ra.tenant))
+    .filter((r) => (!from || r.matchDate >= from) && (!to || r.matchDate <= to))
+    .filter((r) => !status || r.status === status)
+    .sort((a, b) => b.matchDate.localeCompare(a.matchDate) || a.id.localeCompare(b.id));
+  return c.json(rows.map((r) => squadRequestView(r)));
+});
+
+async function adminSquadRequestOr404(tenant: string, id: string) {
+  const key = parseSquadRequestId(id);
+  const req = key
+    ? await repo.getSquadRequest(tenant, key.seriesId, key.fixtureId, key.teamId)
+    : null;
+  if (!req) throw new HttpError(404, 'squad request not found');
+  return req;
+}
+
+/**
+ * Admin: re-notify a PENDING request's current recipient on a fresh link (older links 410).
+ * 409 once submitted, void or expired. Responds with the request view + the notice outcome.
+ */
+app.post('/admin/squad-requests/:id/resend', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const request = await adminSquadRequestOr404(ra.tenant, c.req.param('id'));
+  const { request: updated, notice } = await resendSquadRequest(
+    { repo },
+    { tenant: ra.tenant, request },
+  ).catch(squadFlowError);
+  return c.json({ request: squadRequestView(updated), notice });
+});
+
+/** Admin: void a request (links 410); a submitted one also queues the §8 `void` push. */
+app.post('/admin/squad-requests/:id/void', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const request = await adminSquadRequestOr404(ra.tenant, c.req.param('id'));
+  if (request.status === 'void') throw new HttpError(409, 'this squad request is already void');
+  const res = await adminVoidSquadRequest(repo, ra.tenant, request, new Date().toISOString());
+  if (res === 'none') throw new HttpError(409, 'this squad request is already void');
+  const after = await adminSquadRequestOr404(ra.tenant, request.id);
+  return c.json({
+    request: squadRequestView(after),
+    voidPushQueued: request.status === 'submitted',
+  });
 });
 
 /* ─── Season runs (ADR 0008) ───

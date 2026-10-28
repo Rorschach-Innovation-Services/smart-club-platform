@@ -123,6 +123,17 @@ import {
   captainsReportsListKey,
   captainsReportCounterKey,
   captainsReportNotifyKey,
+  squadRequestKey,
+  squadRequestsListKey,
+  squadRequestNotifyKey,
+  teamCaptainKey,
+  teamCaptainsListKey,
+  teamLastCaptainKey,
+  teamLastCaptainsListKey,
+  squadOpenKey,
+  squadOpenListKey,
+  pendingSquadSyncKey,
+  pendingSquadSyncListKey,
   whatsappMessageKey,
   captainsReportPartitionPk,
   broadcastPartitionPk,
@@ -178,6 +189,12 @@ import type {
   ResultConfirmation,
   CaptainsReport,
   CaptainsReportDelivery,
+  SquadRequest,
+  SquadSelection,
+  TeamCaptainDesignation,
+  TeamLastCaptain,
+  SquadOpenMarker,
+  PendingSquadSync,
 } from './types.js';
 
 import { tableName } from './env.js';
@@ -3491,7 +3508,37 @@ export async function getWhatsAppMessageRef(wamid: string): Promise<WhatsAppMess
  */
 export type WhatsAppMessageLookup =
   | { kind: 'captains-report'; ref: WhatsAppMessageRef }
+  | { kind: 'squad-request'; ref: SquadWhatsAppMessageRef }
   | { kind: 'broadcast'; tenant: string; runId: string };
+
+/** Which squad request a WhatsApp message id belongs to (kind 'squad-request'). */
+export interface SquadWhatsAppMessageRef {
+  tenant: string;
+  seriesId: string;
+  fixtureId: string;
+  teamId: string;
+}
+
+/** Remember which squad request a WhatsApp message id belongs to (for the status webhook). */
+export async function putSquadWhatsAppMessageRef(
+  wamid: string,
+  ref: SquadWhatsAppMessageRef,
+): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...whatsappMessageKey(wamid),
+        tenant: ref.tenant,
+        seriesId: ref.seriesId,
+        fixtureId: ref.fixtureId,
+        teamId: ref.teamId,
+        kind: 'squad-request',
+        expiresAt: Math.floor(Date.now() / 1000) + WHATSAPP_MESSAGE_TTL_SECONDS,
+      },
+    }),
+  );
+}
 
 export async function getWhatsAppMessageLookup(
   wamid: string,
@@ -3501,6 +3548,10 @@ export async function getWhatsAppMessageLookup(
   const item = res.Item as Record<string, string>;
   if (item.kind === 'broadcast')
     return { kind: 'broadcast', tenant: item.tenant, runId: item.runId };
+  if (item.kind === 'squad-request') {
+    const { tenant, seriesId, fixtureId, teamId } = item;
+    return { kind: 'squad-request', ref: { tenant, seriesId, fixtureId, teamId } };
+  }
   const { tenant, seriesId, fixtureId, clubId } = item;
   return { kind: 'captains-report', ref: { tenant, seriesId, fixtureId, clubId } };
 }
@@ -9753,6 +9804,20 @@ export async function erasePlayerData(
     if (await scrubReportOpenMarkerCaptainRef(tenant, m.ref)) reportOpenMarkers++;
   }
 
+  // ── Squad links: TEAMCAPTAIN#/TEAMLASTCAPT# rows and squad-request mentions ──
+  const squads = await eraseFromSquadRows(
+    tenant,
+    naturalKey,
+    {
+      name: nameHit,
+      contact: (c) =>
+        !!c &&
+        ((!!c.email && emails.has(normEmail(c.email))) ||
+          (!!c.cell && cells.has(normCell(c.cell)))),
+    },
+    at,
+  );
+
   // ── PLAYER# rows last (the re-run anchor) ──
   for (const p of rows) await deletePlayer(tenant, p);
   // Medicoach player sync (ADR 0019): an `erase` tombstone (after the row deletes, whose own
@@ -9771,6 +9836,12 @@ export async function erasePlayerData(
     scorecardsScrubbed,
     reportScorecardFeedbackScrubbed,
     reportOpenMarkers,
+    // Only when non-zero, so older audit rows and callers keep their shape.
+    ...(squads.teamCaptainRows ? { teamCaptainRows: squads.teamCaptainRows } : {}),
+    ...(squads.squadRequestsScrubbed
+      ? { squadRequestsScrubbed: squads.squadRequestsScrubbed }
+      : {}),
+    ...(squads.squadsRepushed ? { squadsRepushed: squads.squadsRepushed } : {}),
   };
   await putPlayerEraseLog(tenant, {
     id: randomUUID(),
@@ -9892,4 +9963,802 @@ export async function reassignClearanceSource(
   const c = await reassignClearanceSourceUnsynced(...args);
   await recordPlayerSyncChange(args[0], c.playerNaturalKey);
   return c;
+}
+
+// ── Pre-match squad requests (captain squad links, 2026-10-27) ──
+// SQUADREQ#, NOTIFY#squadreq#, TEAMCAPTAIN#, TEAMLASTCAPT# live in the captain's-report
+// partition (tenant erasure / cohort clear cover them); SQUADOPEN# and PENDINGSQUADSYNC# in the
+// SYNC partition. Natural keys on these rows are server-only: never served, never logged.
+
+const squadKeyOf = (tenant: string, r: Pick<SquadRequest, 'seriesId' | 'fixtureId' | 'teamId'>) =>
+  squadRequestKey(tenant, r.seriesId, r.fixtureId, r.teamId);
+
+/** A squad write refused: the row changed since the caller read it (CAS) or is not open. */
+export class SquadRequestConflict extends Error {
+  constructor(message = 'the squad changed meanwhile') {
+    super(message);
+    this.name = 'SquadRequestConflict';
+  }
+}
+
+export async function getSquadRequest(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+  teamId: string,
+): Promise<SquadRequest | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: squadRequestKey(tenant, seriesId, fixtureId, teamId) }),
+  );
+  return stripKeys<SquadRequest>(res.Item);
+}
+
+export async function listSquadRequests(tenant: string): Promise<SquadRequest[]> {
+  const { pk, skPrefix } = squadRequestsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<SquadRequest>(i)!);
+}
+
+/** Both sides' squad requests for one fixture (trailing `#` keeps f1 from matching f10). */
+export async function listSquadRequestsForFixture(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+): Promise<SquadRequest[]> {
+  const { pk, skPrefix } = squadRequestsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': `${skPrefix}${seriesId}#${fixtureId}#` },
+  });
+  return items.map((i) => stripKeys<SquadRequest>(i)!);
+}
+
+/** Store a NEW request, or re-open a VOID one. False when a live (pending/submitted) one exists. */
+export async function openSquadRequestIfAbsent(
+  tenant: string,
+  req: SquadRequest,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { ...req, ...squadKeyOf(tenant, req) },
+        ConditionExpression: 'attribute_not_exists(pk) OR #s = :void',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':void': 'void' },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/**
+ * Save a draft selection or submit it, under an `expectedModified` CAS (several live writers:
+ * the chair's kept link, a forwarded captain's link, stale tabs). A submit stamps
+ * `submittedAt` and sets `submitted` (re-submission allowed until expiry). Throws
+ * {@link SquadRequestConflict} when the row moved on or is void.
+ */
+export async function saveSquadSelection(
+  tenant: string,
+  key: Pick<SquadRequest, 'seriesId' | 'fixtureId' | 'teamId'>,
+  input: {
+    selection: SquadSelection;
+    submit: boolean;
+    expectedModified: string;
+    modified: string;
+    at: string;
+  },
+): Promise<SquadRequest> {
+  const sets = ['selection = :sel', 'modified = :m', 'updatedAt = :at'];
+  const values: Record<string, unknown> = {
+    ':sel': input.selection,
+    ':m': input.modified,
+    ':at': input.at,
+    ':em': input.expectedModified,
+    ':void': 'void',
+  };
+  if (input.submit) {
+    sets.push('#s = :submitted', 'submittedAt = :at', 'submittedVia = :via');
+    values[':submitted'] = 'submitted';
+    values[':via'] = 'link';
+  }
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: squadKeyOf(tenant, key),
+        UpdateExpression: `SET ${sets.join(', ')}`,
+        ConditionExpression: 'attribute_exists(pk) AND #s <> :void AND modified = :em',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: values,
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return stripKeys<SquadRequest>(res.Attributes)!;
+  } catch (err) {
+    if (isCcf(err)) throw new SquadRequestConflict();
+    throw err;
+  }
+}
+
+/** Void a live request (fixture cancelled / moved). 'voided' or 'none' (absent / already void). */
+export async function voidSquadRequest(
+  tenant: string,
+  key: Pick<SquadRequest, 'seriesId' | 'fixtureId' | 'teamId'>,
+  reason: string,
+  at = new Date().toISOString(),
+): Promise<'voided' | 'none'> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: squadKeyOf(tenant, key),
+        UpdateExpression:
+          'SET #s = :void, voidedAt = :at, voidReason = :r, modified = :m, updatedAt = :at',
+        ConditionExpression: 'attribute_exists(pk) AND #s <> :void',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':void': 'void', ':at': at, ':r': reason, ':m': randomUUID() },
+      }),
+    );
+    return 'voided';
+  } catch (err) {
+    if (isCcf(err)) return 'none';
+    throw err;
+  }
+}
+
+/** Append notice outcomes; `notifiedAt` set the first time a channel went out. */
+export async function recordSquadRequestDeliveries(
+  tenant: string,
+  key: Pick<SquadRequest, 'seriesId' | 'fixtureId' | 'teamId'>,
+  deliveries: CaptainsReportDelivery[],
+  opts: { notifiedAt?: string } = {},
+): Promise<void> {
+  const sets = [
+    'deliveries = list_append(if_not_exists(deliveries, :empty), :d)',
+    'updatedAt = :at',
+  ];
+  const values: Record<string, unknown> = {
+    ':d': deliveries,
+    ':empty': [],
+    ':at': new Date().toISOString(),
+  };
+  if (opts.notifiedAt) {
+    sets.push('notifiedAt = if_not_exists(notifiedAt, :n)');
+    values[':n'] = opts.notifiedAt;
+  }
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: squadKeyOf(tenant, key),
+        UpdateExpression: `SET ${sets.join(', ')}`,
+        ConditionExpression: 'attribute_exists(pk)',
+        ExpressionAttributeValues: values,
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
+/**
+ * Set Meta's delivery status on one WhatsApp delivery of a squad request (by list position,
+ * only while that position still holds the message id). False when it no longer does.
+ */
+export async function setSquadRequestProviderStatus(
+  tenant: string,
+  key: Pick<SquadRequest, 'seriesId' | 'fixtureId' | 'teamId'>,
+  index: number,
+  messageId: string,
+  update: Pick<CaptainsReportDelivery, 'providerStatus' | 'providerAt' | 'providerError'>,
+): Promise<boolean> {
+  if (!Number.isInteger(index) || index < 0) return false;
+  const p = `deliveries[${index}]`;
+  const sets = [`${p}.providerStatus = :s`, `${p}.providerAt = :pa`];
+  const values: Record<string, unknown> = {
+    ':s': update.providerStatus,
+    ':pa': update.providerAt,
+    ':id': messageId,
+  };
+  if (update.providerError) {
+    sets.push(`${p}.providerError = :pe`);
+    values[':pe'] = update.providerError;
+  }
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: squadKeyOf(tenant, key),
+        UpdateExpression: `SET ${sets.join(', ')}`,
+        ConditionExpression: `attribute_exists(pk) AND ${p}.messageId = :id`,
+        ExpressionAttributeValues: values,
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/**
+ * Admin resend: re-address a PENDING request to a fresh `memberId` (every older link to the
+ * current recipient dies), with the freshly resolved recipient + contact. Conditional on still
+ * pending and still addressed to `expectedMemberId`; throws {@link SquadRequestConflict}.
+ * A recipient with no contact clears `recipientContact` (the chair's comes from the club row).
+ */
+export async function rotateSquadRequestRecipient(
+  tenant: string,
+  key: Pick<SquadRequest, 'seriesId' | 'fixtureId' | 'teamId'>,
+  next: {
+    recipient: SquadRequest['recipient'];
+    recipientContact?: SquadRequest['recipientContact'];
+  },
+  guard: { expectedMemberId: string },
+): Promise<SquadRequest> {
+  const at = new Date().toISOString();
+  const sets = ['recipient = :r', 'modified = :mod', 'updatedAt = :at'];
+  const values: Record<string, unknown> = {
+    ':r': next.recipient,
+    ':mod': randomUUID(),
+    ':at': at,
+    ':pending': 'pending',
+    ':m': guard.expectedMemberId,
+  };
+  if (next.recipientContact) {
+    sets.push('recipientContact = :rc');
+    values[':rc'] = next.recipientContact;
+  }
+  const remove = next.recipientContact ? '' : ' REMOVE recipientContact';
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: squadKeyOf(tenant, key),
+        UpdateExpression: `SET ${sets.join(', ')}${remove}`,
+        ConditionExpression: 'attribute_exists(pk) AND #s = :pending AND recipient.memberId = :m',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: values,
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return stripKeys<SquadRequest>(res.Attributes)!;
+  } catch (err) {
+    if (isCcf(err)) throw new SquadRequestConflict('the squad request changed meanwhile');
+    throw err;
+  }
+}
+
+/** Record medicoach's answer to the latest §8 push (counts + reason only, no refs). */
+export async function recordSquadPushOutcome(
+  tenant: string,
+  key: Pick<SquadRequest, 'seriesId' | 'fixtureId' | 'teamId'>,
+  outcome: NonNullable<SquadRequest['pushOutcome']>,
+): Promise<void> {
+  const sets = ['pushOutcome = :o', 'updatedAt = :at'];
+  const values: Record<string, unknown> = { ':o': outcome, ':at': outcome.at };
+  if (outcome.applied) {
+    sets.push('pushedAt = :at');
+  }
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: squadKeyOf(tenant, key),
+        UpdateExpression: `SET ${sets.join(', ')}`,
+        ConditionExpression: 'attribute_exists(pk)',
+        ExpressionAttributeValues: values,
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
+/**
+ * Re-address a live request to the captain the chair picked (clone of the report forward):
+ * conditional on still addressed to `expectedMemberId`, not void, under `maxForwards`.
+ */
+export async function forwardSquadRequest(
+  tenant: string,
+  key: Pick<SquadRequest, 'seriesId' | 'fixtureId' | 'teamId'>,
+  next: {
+    recipient: SquadRequest['recipient'];
+    chairMemberId?: string;
+    recipientContact: NonNullable<SquadRequest['recipientContact']>;
+  },
+  guard: { expectedMemberId: string; maxForwards: number },
+): Promise<SquadRequest> {
+  const at = new Date().toISOString();
+  const sets = [
+    'recipient = :r',
+    'recipientContact = :rc',
+    'forwardCount = if_not_exists(forwardCount, :zero) + :one',
+    'modified = :mod',
+    'updatedAt = :at',
+  ];
+  const values: Record<string, unknown> = {
+    ':r': next.recipient,
+    ':rc': next.recipientContact,
+    ':zero': 0,
+    ':one': 1,
+    ':mod': randomUUID(),
+    ':at': at,
+    ':void': 'void',
+    ':m': guard.expectedMemberId,
+    ':max': guard.maxForwards,
+  };
+  if (next.chairMemberId) {
+    sets.push('chairMemberId = :cm');
+    values[':cm'] = next.chairMemberId;
+  }
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: squadKeyOf(tenant, key),
+        UpdateExpression: `SET ${sets.join(', ')}`,
+        ConditionExpression:
+          'attribute_exists(pk) AND #s <> :void AND recipient.memberId = :m AND ' +
+          '(attribute_not_exists(forwardCount) OR forwardCount < :max)',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: values,
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return stripKeys<SquadRequest>(res.Attributes)!;
+  } catch (err) {
+    if (isCcf(err)) throw new SquadRequestConflict('the squad request changed meanwhile');
+    throw err;
+  }
+}
+
+// Squad notice ledger — the NOTIFY#capreport# family, cloned.
+
+export async function claimSquadRequestNotify(
+  tenant: string,
+  requestId: string,
+  audience: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: {
+          ...squadRequestNotifyKey(tenant, requestId, audience),
+          status: 'in_progress',
+          startedAt: new Date().toISOString(),
+          expiresAt: Math.floor(Date.now() / 1000) + NOTIFY_LEDGER_TTL_SECONDS,
+        },
+        ConditionExpression: 'attribute_not_exists(pk)',
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+export async function completeSquadRequestNotify(
+  tenant: string,
+  requestId: string,
+  audience: string,
+  results: Array<{ channel: string; status: string; reason?: string }>,
+): Promise<void> {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: squadRequestNotifyKey(tenant, requestId, audience),
+      UpdateExpression: 'SET #s = :done, #res = :r, completedAt = :at',
+      ExpressionAttributeNames: { '#s': 'status', '#res': 'results' },
+      ExpressionAttributeValues: {
+        ':done': 'completed',
+        ':r': results,
+        ':at': new Date().toISOString(),
+      },
+    }),
+  );
+}
+
+export async function releaseSquadRequestNotify(
+  tenant: string,
+  requestId: string,
+  audience: string,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new DeleteCommand({
+        TableName: TABLE,
+        Key: squadRequestNotifyKey(tenant, requestId, audience),
+        ConditionExpression: '#s = :p',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':p': 'in_progress' },
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
+// Team captain designation + last known captain (per TEAM, never shared across a club's teams).
+
+export async function getTeamCaptain(
+  tenant: string,
+  clubId: string,
+  teamId: string,
+): Promise<TeamCaptainDesignation | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: teamCaptainKey(tenant, clubId, teamId) }),
+  );
+  return stripKeys<TeamCaptainDesignation>(res.Item);
+}
+
+export async function putTeamCaptain(tenant: string, d: TeamCaptainDesignation): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...d, ...teamCaptainKey(tenant, d.clubId, d.teamId) },
+    }),
+  );
+}
+
+export async function deleteTeamCaptain(
+  tenant: string,
+  clubId: string,
+  teamId: string,
+): Promise<void> {
+  await ddb.send(
+    new DeleteCommand({ TableName: TABLE, Key: teamCaptainKey(tenant, clubId, teamId) }),
+  );
+}
+
+export async function listTeamCaptains(tenant: string): Promise<TeamCaptainDesignation[]> {
+  const { pk, skPrefix } = teamCaptainsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<TeamCaptainDesignation>(i)!);
+}
+
+export async function getTeamLastCaptain(
+  tenant: string,
+  clubId: string,
+  teamId: string,
+): Promise<TeamLastCaptain | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: teamLastCaptainKey(tenant, clubId, teamId) }),
+  );
+  return stripKeys<TeamLastCaptain>(res.Item);
+}
+
+/** Latest wins (by `seenAt`): an older sighting never overwrites a newer one. */
+export async function putTeamLastCaptain(tenant: string, row: TeamLastCaptain): Promise<void> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { ...row, ...teamLastCaptainKey(tenant, row.clubId, row.teamId) },
+        ConditionExpression: 'attribute_not_exists(pk) OR seenAt <= :s',
+        ExpressionAttributeValues: { ':s': row.seenAt },
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
+export async function listTeamLastCaptains(tenant: string): Promise<TeamLastCaptain[]> {
+  const { pk, skPrefix } = teamLastCaptainsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<TeamLastCaptain>(i)!);
+}
+
+// SQUADOPEN# retry markers.
+
+/**
+ * Create-if-absent: an existing marker (and its attempt count) is never reset — once a marker
+ * exists the retry pass owns that request. Returns false when one was already there.
+ */
+export async function putSquadOpenMarker(tenant: string, m: SquadOpenMarker): Promise<boolean> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { ...m, ...squadOpenKey(tenant, m.requestId) },
+        ConditionExpression: 'attribute_not_exists(pk)',
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/**
+ * A short, PII-free failure note for SQUADOPEN#/PENDINGSQUADSYNC# rows: callers pass an error
+ * name / code or a message they built themselves; anything email- or number-shaped is masked
+ * and the text is capped, so raw provider text can never persist here.
+ */
+function squadFailureNote(error: string): string {
+  return error
+    .replace(/[^\s@]+@[^\s@]+/g, '[redacted]')
+    .replace(/\+?\d[\d\s-]{6,}\d/g, '[redacted]')
+    .slice(0, 120);
+}
+
+export async function listSquadOpenMarkers(tenant: string): Promise<SquadOpenMarker[]> {
+  const { pk, skPrefix } = squadOpenListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<SquadOpenMarker>(i)!);
+}
+
+/**
+ * Park a marker that hit the attempt cap: it stays (gaveUpAt) as a tombstone so the opener's
+ * create-if-absent cannot re-arm the request, and is deleted by the retry pass once too-old.
+ */
+export async function markSquadOpenGaveUp(
+  tenant: string,
+  requestId: string,
+  at: string,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: squadOpenKey(tenant, requestId),
+        UpdateExpression: 'SET gaveUpAt = :at',
+        ConditionExpression: 'attribute_exists(pk)',
+        ExpressionAttributeValues: { ':at': at },
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
+export async function deleteSquadOpenMarker(tenant: string, requestId: string): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: TABLE, Key: squadOpenKey(tenant, requestId) }));
+}
+
+/** One failed attempt; returns the new attempt count (0 = the marker is already gone). */
+export async function markSquadOpenFailed(
+  tenant: string,
+  requestId: string,
+  error: string,
+  at: string,
+): Promise<number> {
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: squadOpenKey(tenant, requestId),
+        UpdateExpression:
+          'SET attempts = if_not_exists(attempts, :zero) + :one, lastError = :e, lastAttemptAt = :at',
+        ConditionExpression: 'attribute_exists(pk)',
+        ExpressionAttributeValues: {
+          ':zero': 0,
+          ':one': 1,
+          ':e': squadFailureNote(error),
+          ':at': at,
+        },
+        ReturnValues: 'UPDATED_NEW',
+      }),
+    );
+    return Number(res.Attributes?.attempts ?? 0);
+  } catch (err) {
+    if (isCcf(err)) return 0;
+    throw err;
+  }
+}
+
+// PENDINGSQUADSYNC# §8 outbox.
+
+/** Queue a push; the newest `submittedAt` wins (an older one never replaces a newer row). */
+export async function putPendingSquadSync(tenant: string, row: PendingSquadSync): Promise<void> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { ...row, ...pendingSquadSyncKey(tenant, row.requestId) },
+        ConditionExpression: 'attribute_not_exists(pk) OR submittedAt <= :s',
+        ExpressionAttributeValues: { ':s': row.submittedAt },
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
+export async function listPendingSquadSync(tenant: string): Promise<PendingSquadSync[]> {
+  const { pk, skPrefix } = pendingSquadSyncListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<PendingSquadSync>(i)!);
+}
+
+/** Delete the row only while it still holds the push that was sent (a re-submit keeps it). */
+export async function deletePendingSquadSyncIfUnchanged(
+  tenant: string,
+  requestId: string,
+  submittedAt: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new DeleteCommand({
+        TableName: TABLE,
+        Key: pendingSquadSyncKey(tenant, requestId),
+        ConditionExpression: 'submittedAt = :s',
+        ExpressionAttributeValues: { ':s': submittedAt },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/**
+ * One failed push. `kind: 'unmapped'` (a `fixture-unmapped` answer) also advances
+ * `unmappedAttempts` — the counter SQUAD_PUSH_MAX_ATTEMPTS bounds; a transport failure
+ * advances only `attempts`. Both counts 0 = the row is already gone.
+ */
+export async function markPendingSquadSyncFailed(
+  tenant: string,
+  requestId: string,
+  error: string,
+  at: string,
+  kind: 'transport' | 'unmapped' = 'transport',
+): Promise<{ attempts: number; unmappedAttempts: number }> {
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: pendingSquadSyncKey(tenant, requestId),
+        UpdateExpression:
+          'SET attempts = if_not_exists(attempts, :zero) + :one, ' +
+          (kind === 'unmapped'
+            ? 'unmappedAttempts = if_not_exists(unmappedAttempts, :zero) + :one, '
+            : '') +
+          'lastError = :e, lastAttemptAt = :at',
+        ConditionExpression: 'attribute_exists(pk)',
+        ExpressionAttributeValues: {
+          ':zero': 0,
+          ':one': 1,
+          ':e': squadFailureNote(error),
+          ':at': at,
+        },
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return {
+      attempts: Number(res.Attributes?.attempts ?? 0),
+      unmappedAttempts: Number(res.Attributes?.unmappedAttempts ?? 0),
+    };
+  } catch (err) {
+    if (isCcf(err)) return { attempts: 0, unmappedAttempts: 0 };
+    throw err;
+  }
+}
+
+/**
+ * Player erasure (erasePlayerData): drop the TEAMCAPTAIN#/TEAMLASTCAPT# rows naming the
+ * person, and strip them from squad requests (selection entry, captain key, recipient name +
+ * contact). Returns the counts.
+ */
+async function eraseFromSquadRows(
+  tenant: string,
+  naturalKey: string,
+  hit: {
+    name: (n: string | undefined) => boolean;
+    contact: (c: SquadRequest['recipientContact']) => boolean;
+  },
+  at: string,
+): Promise<{ teamCaptainRows: number; squadRequestsScrubbed: number; squadsRepushed: number }> {
+  let teamCaptainRows = 0;
+  for (const d of await listTeamCaptains(tenant))
+    if (d.playerKey === naturalKey) {
+      await deleteTeamCaptain(tenant, d.clubId, d.teamId);
+      teamCaptainRows++;
+    }
+  for (const l of await listTeamLastCaptains(tenant))
+    if (l.naturalKey === naturalKey) {
+      await ddb.send(
+        new DeleteCommand({
+          TableName: TABLE,
+          Key: teamLastCaptainKey(tenant, l.clubId, l.teamId),
+        }),
+      );
+      teamCaptainRows++;
+    }
+  let squadRequestsScrubbed = 0;
+  let squadsRepushed = 0;
+  for (const listed of await listSquadRequests(tenant)) {
+    let r: SquadRequest | null = listed;
+    for (let attempt = 0; attempt < 3 && r; attempt++) {
+      const sel = r.selection;
+      const selHit =
+        !!sel && (sel.players.some((p) => p.key === naturalKey) || sel.captainKey === naturalKey);
+      const nameHit = hit.name(r.recipient?.name) || hit.name(r.recipient?.forwardedBy?.name);
+      const contactHit = hit.contact(r.recipientContact) || hit.name(r.recipient?.name);
+      if (!selHit && !nameHit && !(r.recipientContact && contactHit)) break;
+      const next: SquadRequest = {
+        ...r,
+        ...(sel
+          ? {
+              selection: {
+                players: sel.players.filter((p) => p.key !== naturalKey),
+                guests: sel.guests,
+                ...(sel.captainKey && sel.captainKey !== naturalKey
+                  ? { captainKey: sel.captainKey }
+                  : {}),
+              },
+            }
+          : {}),
+        recipient: {
+          ...r.recipient,
+          ...(hit.name(r.recipient?.name) ? { name: ERASED_NAME } : {}),
+          ...(r.recipient.forwardedBy && hit.name(r.recipient.forwardedBy.name)
+            ? { forwardedBy: { ...r.recipient.forwardedBy, name: ERASED_NAME } }
+            : {}),
+        },
+        modified: randomUUID(),
+        updatedAt: at,
+      };
+      if (r.recipientContact && contactHit) delete next.recipientContact;
+      try {
+        await ddb.send(
+          new PutCommand({
+            TableName: TABLE,
+            Item: { ...next, ...squadKeyOf(tenant, r) },
+            ConditionExpression: 'modified = :m',
+            ExpressionAttributeValues: { ':m': r.modified },
+          }),
+        );
+        squadRequestsScrubbed++;
+        // Contract §8: a squad medicoach already holds for a match still ahead gets a rebuilt
+        // upsert (fresh submittedAt, so it strictly supersedes) without the erased player.
+        // Past-expiry squads are left alone — the medicoach player-record erase covers them.
+        if (selHit && r.status === 'submitted' && Date.parse(r.linkExpiresAt) > Date.parse(at)) {
+          await putPendingSquadSync(tenant, {
+            requestId: r.id,
+            op: 'upsert',
+            submittedAt: at,
+            enqueuedAt: at,
+            attempts: 0,
+          });
+          squadsRepushed++;
+        }
+        break;
+      } catch (err) {
+        if (!isCcf(err)) throw err;
+        r = await getSquadRequest(tenant, r.seriesId, r.fixtureId, r.teamId);
+      }
+    }
+  }
+  return { teamCaptainRows, squadRequestsScrubbed, squadsRepushed };
 }

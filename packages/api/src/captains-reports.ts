@@ -122,6 +122,16 @@ export function pastDeadline(deadlineMs: number | undefined): boolean {
   return deadlineMs !== undefined && Date.now() >= deadlineMs;
 }
 
+/**
+ * The tenant kill switch for AUTOMATIC captain's reports (`features.captainsReports`, default
+ * on). Off: no report opens (result hook, match day, retry), no notices and no reminders.
+ * Links already issued keep loading/submitting until they expire, a chair's "Send to captain"
+ * on such a link still works, and the club portal's manual filing is untouched.
+ */
+export function captainsReportsEnabled(config: TenantConfig | null | undefined): boolean {
+  return hasFeature(config, 'captainsReports', true);
+}
+
 const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/;
 const DAY_MS = 24 * 3600 * 1000;
 
@@ -528,7 +538,7 @@ export interface CaptainsReportDeps {
 }
 
 export interface OpenOutcome {
-  skipped?: 'import' | 'no-go-live' | 'before-go-live' | 'too-old' | 'no-fixture';
+  skipped?: 'import' | 'no-go-live' | 'before-go-live' | 'too-old' | 'no-fixture' | 'disabled';
   opened: string[];
   /** Reports whose notice actually reached someone (a channel sent). */
   notified: string[];
@@ -548,7 +558,7 @@ type StoredFixture = Record<string, unknown> & {
 /** "Sun 20 Sep 2026" — the platform formatter, so every surface spells months the same. */
 const fmtDay = (iso: string) => formatWeekdayDayYear(iso);
 
-function sideName(series: Series, teamId: string, club: Club | null): string {
+export function sideName(series: Series, teamId: string, club: Club | null): string {
   return (
     series.participants?.find((p) => p.teamId === teamId)?.name ?? club?.name ?? String(teamId)
   );
@@ -575,9 +585,24 @@ async function resolveCaptain(
   tenant: string,
   clubId: string,
   captainRef: string | null,
-): Promise<{ name: string; email?: string; cell?: string } | null> {
+): Promise<{ name: string; email?: string; cell?: string; naturalKey: string } | null> {
   const naturalKey = playerNaturalKey(captainRef, tenant);
   if (!naturalKey) return null;
+  const contact = await resolvePlayerContact(repo, tenant, clubId, naturalKey);
+  return contact ? { ...contact, naturalKey } : null;
+}
+
+/**
+ * A club's player (by natural key) as a FRESH notify contact, or null: not on the club's
+ * roster (veterans: through the VETAFFIL# record), a minor, or no usable email/cell. Shared by
+ * the captain's report and the squad-link recipient ladder. The key is never logged.
+ */
+export async function resolvePlayerContact(
+  repo: RepoModule,
+  tenant: string,
+  clubId: string,
+  naturalKey: string,
+): Promise<{ name: string; email?: string; cell?: string } | null> {
   let player = await repo.getPlayer(tenant, clubId, naturalKey);
   if (!player) {
     // A veterans side: the player's roster row lives at their PRIMARY club; the veterans club
@@ -652,6 +677,10 @@ export async function openReportsForFixture(
   const out: OpenOutcome = { opened: [], notified: [] };
   const { tenant, seriesId, fixtureId, result, config } = target;
 
+  // Kill switch: nothing opens (and the caller's REPORTOPEN# marker is then dropped, so a
+  // later re-enable never floods old matches).
+  if (!captainsReportsEnabled(config)) return { ...out, skipped: 'disabled' };
+
   const goLive = config.integrations?.medicoach?.goLiveDate;
   if (!goLive) return { ...out, skipped: 'no-go-live' };
 
@@ -704,7 +733,19 @@ export async function openReportsForFixture(
       result && result.scoringSide === s.side
         ? await resolveCaptain(repo, tenant, club.id, result.captainRef)
         : null;
-    const contact = captain ?? chair;
+    if (captain)
+      // The team's last known captain (per TEAM — a multi-team club's sides never share it),
+      // for the squad-link recipient ladder. Natural key + name only; best-effort.
+      await repo
+        .putTeamLastCaptain(tenant, {
+          clubId: club.id,
+          teamId: s.teamId,
+          naturalKey: captain.naturalKey,
+          name: captain.name,
+          seenAt: nowIso,
+        })
+        .catch(() => {});
+    const contact = captain ? contactOnlyNamed(captain) : chair;
     const recipient: CaptainsReportRecipient = {
       kind: captain ? 'captain' : 'chair',
       memberId: randomUUID(),
@@ -743,7 +784,9 @@ export async function openReportsForFixture(
       const toCaptain = existing.recipient.kind === 'captain';
       const captainContact = existing.recipientContact
         ? { name: existing.recipient.name, ...existing.recipientContact }
-        : captain;
+        : captain
+          ? contactOnlyNamed(captain)
+          : null;
       // No captain contact left (e.g. the captain was erased: report contact + marker ref both
       // scrubbed) → the chair gets the notice, as the chair, with the chair's wording.
       const reachCaptain = toCaptain && !!captainContact;
@@ -799,6 +842,8 @@ export interface MatchDayOpenSummary {
   skipped: number;
   /** The 18:00 window was shut: nothing was enumerated. */
   windowClosed?: true;
+  /** The tenant's `captainsReports` kill switch is off: nothing was enumerated. */
+  disabled?: true;
 }
 
 /** YYYY-MM-DD `days` before `date`. */
@@ -837,6 +882,7 @@ export async function openMatchDayReports(
     deferred: 0,
     skipped: 0,
   };
+  if (!captainsReportsEnabled(config)) return { ...sum, disabled: true };
   if (!reportNoticeWindowOpen(now())) return { ...sum, windowClosed: true };
 
   const today = tenantDate(now());
@@ -935,13 +981,20 @@ export function noticeUnsettled(r: CaptainsReport): boolean {
   );
 }
 
-const contactOnly = (c: { email?: string; cell?: string }) => ({
+/** A resolved captain without its natural key (the key never rides on a notice). */
+const contactOnlyNamed = (c: { name: string; email?: string; cell?: string }) => ({
+  name: c.name,
+  ...(c.email ? { email: c.email } : {}),
+  ...(c.cell ? { cell: c.cell } : {}),
+});
+
+export const contactOnly = (c: { email?: string; cell?: string }) => ({
   ...(c.email ? { email: c.email } : {}),
   ...(c.cell ? { cell: c.cell } : {}),
 });
 
 /** A result's outcome as a stored delivery: a dry-run "send" is recorded as not sent. */
-function deliveryOf(
+export function deliveryOf(
   r: NoticeResult,
   purpose: CaptainsReportDelivery['purpose'],
   recipientKind: CaptainsReportDelivery['recipientKind'],
@@ -1267,6 +1320,11 @@ export async function retryPendingReportOpens(
   // never an attempt — it must not count toward REPORT_OPEN_MAX_ATTEMPTS).
   if (!reportNoticeWindowOpen(now())) return { ...out, deferred: markers.length };
   const config = await repo.getTenantConfig(tenant);
+  if (config && !captainsReportsEnabled(config)) {
+    // Kill switch: the queued openings are dropped (never sent later in a burst).
+    for (const m of markers) await repo.deleteReportOpenMarker(tenant, m.ref);
+    return out;
+  }
   for (const [i, m] of markers.entries()) {
     if (pastDeadline(deps.deadlineMs)) {
       out.deferred += markers.length - i;
@@ -1564,7 +1622,7 @@ export async function sendReportReminders(
   });
   if (!due.length) return out;
   const config = await repo.getTenantConfig(tenant);
-  if (!config) return out;
+  if (!config || !captainsReportsEnabled(config)) return out;
   const clubs = new Map<string, Club | null>();
   for (const r of due) {
     if (!clubs.has(r.clubId)) clubs.set(r.clubId, await repo.getClub(tenant, r.clubId));

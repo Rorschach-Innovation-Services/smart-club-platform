@@ -1617,3 +1617,94 @@ export interface PlatformDocViewUrlResponse {
   objectKey?: string;
   size?: number;
 }
+
+/* ─── Pre-match captain squad links (MIRRORS packages/api/src/squad-requests.ts views) ─── */
+
+/** A squad request as the link page / admin console see it: never a natural key or contact. */
+export interface SquadRequestView {
+  id: string;
+  seriesId: string;
+  fixtureId: string;
+  teamId: string;
+  clubId: string;
+  status: 'pending' | 'submitted' | 'void';
+  fixtureRef: string;
+  teamRef?: string;
+  matchDate: string;
+  side: 'home' | 'away';
+  clubName: string;
+  teamName: string;
+  opponentName: string;
+  competition: string;
+  venue?: string;
+  recipient: {
+    kind: 'captain' | 'chair';
+    name: string;
+    forwardedBy?: { name: string; via: 'link' | 'portal'; at: string };
+  };
+  forwardCount?: number;
+  /** Roster ids + names on the link page; names only in the admin console. */
+  selection?: {
+    players: Array<{ id?: string; name: string }>;
+    guests: Array<{ name: string }>;
+    captainId?: string;
+    captainName?: string;
+  };
+  linkExpiresAt: string;
+  submittedAt?: string;
+  submittedVia?: 'link';
+  voidedAt?: string;
+  voidReason?: string;
+  /** CAS token: every save sends back the value it rendered as `expectedModified`. */
+  modified: string;
+  deliveries?: CaptainsReportDelivery[];
+  notifiedAt?: string;
+  pushedAt?: string;
+  pushOutcome?: {
+    at: string;
+    applied: boolean;
+    reason?: 'stale' | 'fixture-unmapped' | 'scoring-started' | 'gave-up';
+    mappedPlayers?: number;
+    unmappedAsGuest?: number;
+    guests?: number;
+  };
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** GET/PUT /squad-link/:token — the request plus the club roster (names + opaque ids). */
+export interface LinkedSquadRequest {
+  request: SquadRequestView;
+  roster: Array<{ id: string; name: string }>;
+  canForward: boolean;
+  forwardsRemaining: number;
+  maxPlayers: number;
+  tenantBranding: { name: string; logoUrl: string; colors: Record<string, string> };
+}
+
+/** PUT /squad-link/:token body. */
+export interface SquadSaveBody {
+  players: string[];
+  guests: Array<{ name: string }>;
+  captainId?: string | null;
+  submit?: boolean;
+  expectedModified: string;
+}
+
+/** GET/PUT /clubs/:id/teams/:teamId/captain */
+export interface TeamCaptainResponse {
+  teamId: string;
+  /** `candidateId` is an opaque id (never the natural key / ID number). */
+  captain: {
+    candidateId: string;
+    name: string;
+    affiliate?: true;
+    setBy: string;
+    setAt: string;
+  } | null;
+}
+
+/** GET /clubs/:id/teams/:teamId/captain-candidates */
+export interface CaptainCandidatesResponse {
+  candidates: Array<{ id: string; name: string; affiliate?: true }>;
+}

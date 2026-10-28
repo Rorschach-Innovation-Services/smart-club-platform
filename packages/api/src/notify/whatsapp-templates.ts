@@ -265,6 +265,34 @@ export const WHATSAPP_TEMPLATES = {
   },
 
   /**
+   * Pre-match squad selection (captain squad links, 2026-10-27): the evening before a synced
+   * fixture, each side's captain (or the club chair) gets a link to tick the match squad from
+   * the club's registered roster. A NEW template is mandatory — a URL button's path is fixed
+   * per template, and this one points at `/sq/{{1}}` (not the report's `/r/`).
+   *
+   * Utility, English, 3 body params, dynamic URL button. Transaction-anchored copy (it names
+   * the fixture and asks for a specific action) so Meta's classifier does not treat it as
+   * Marketing (the ops-digest v1 lesson). `status: 'pending'` until Meta approves it — the
+   * sender throws `WhatsAppTemplatePendingError` and the squad notice skips the WhatsApp leg
+   * (`template-pending`); email covers the gap.
+   */
+  squadSelectionDue: {
+    name: 'squad_selection_due',
+    lang: 'en',
+    paramCount: 3,
+    params: ['recipient name', 'org name', 'match line + date'],
+    bodyText:
+      'Hello {{1}},\n\n' +
+      'Squad selection for your {{2}} fixture {{3}} is now open.\n\n' +
+      'Tap the button below to select your match squad from the registered players. You can change it until the end of match day.',
+    status: 'pending',
+    urlButton: {
+      urlTemplate: 'https://platform.club.medicoach.co.za/sq/{{1}}',
+      suffix: 'signed squad token',
+    },
+  },
+
+  /**
    * Captain's-report ops digest: ONE status line to a union-admin cell (the `OpsDigestCell`
    * secret) after a medicoach sync run that produced report activity — new results, reports
    * opened, notices sent or failed. Body-only Utility template (no button); {{2}} is a

@@ -1,5 +1,6 @@
 /* ─── Club-side views ─── */
 
+import { TeamCaptainsCard } from './TeamCaptains';
 import {
   useState as useStateC,
   useMemo as useMemoC,
@@ -5858,6 +5859,9 @@ export function ClubPlayersView({
             )}
           </tbody>
         </table>
+      </div>
+      <div style={{ marginTop: 16 }}>
+        <TeamCaptainsCard club={club} />
       </div>
       {veteransOn && (
         <VeteransAffiliatesCard affiliates={affiliates} loading={affiliatesQuery.isLoading} />

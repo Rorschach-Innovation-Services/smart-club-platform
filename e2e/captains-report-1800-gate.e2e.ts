@@ -31,6 +31,9 @@ const SYNC_SECRET = 'e2e-medicoach-sync-secret';
 const HOME = 'verulam';
 const AWAY = 'tongaat';
 const SERIES_ID = `s-e2e-capgate-${RUN}`;
+// Run-unique kick-off minute: a reused stack keeps earlier runs' released series, and the
+// release gate refuses the same ground at the same date + time (venue_clash).
+const MIN = String(parseInt(RUN.slice(-4), 36) % 60).padStart(2, '0');
 
 const isoDay = (offset: number) =>
   new Date(Date.now() + offset * 24 * 3600 * 1000).toISOString().slice(0, 10);
@@ -77,7 +80,9 @@ async function seedFixture(request: APIRequestContext) {
         { teamId: HOME, clubId: HOME, name: 'Verulam' },
         { teamId: AWAY, clubId: AWAY, name: 'Tongaat' },
       ],
-      fixtures: [{ id: 'f1', round: 1, date: MATCH_DATE, time: '09:00', home: HOME, away: AWAY }],
+      fixtures: [
+        { id: 'f1', round: 1, date: MATCH_DATE, time: `09:${MIN}`, home: HOME, away: AWAY },
+      ],
     },
   });
   expect(create.ok(), `POST /series → ${create.status()} ${await create.text()}`).toBeTruthy();
@@ -105,7 +110,7 @@ function resultPage() {
         ref: `smartclub:${TENANT}:fixture:${SERIES_ID}:f1`,
         syncStamp: recordedAt,
         schedule: {
-          scheduledTime: `${MATCH_DATE}T09:00:00+02:00`,
+          scheduledTime: `${MATCH_DATE}T09:${MIN}:00+02:00`,
           timeTbc: false,
           dateTbc: false,
           venue: null,

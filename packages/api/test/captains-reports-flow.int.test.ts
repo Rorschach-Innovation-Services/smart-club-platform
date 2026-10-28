@@ -1103,6 +1103,16 @@ describe('POST /integrations/whatsapp/status (forwarded by medicoach, sync-signe
 
 describe('dates in notices', () => {
   test('a September match reads "Sep" (the platform formatter), never "Sept"', async () => {
+    // The match date is FIXED, so go-live must be too: the default GO_LIVE follows the real
+    // clock (today − 30) and overtook 2026-09-20 on 2026-10-20 (skipped: before-go-live).
+    const cfg = (await repo.getTenantConfig('dolphins'))!;
+    await repo.putTenantConfig({
+      ...cfg,
+      integrations: {
+        ...cfg.integrations,
+        medicoach: { ...cfg.integrations?.medicoach, goLiveDate: '2026-09-01' },
+      },
+    } as TenantConfig);
     const s = (await repo.getSeries('dolphins', 's-planb-premier-men-t20-g1'))!;
     await repo.putSeries('dolphins', {
       ...s,

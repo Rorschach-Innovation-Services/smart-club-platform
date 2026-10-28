@@ -744,6 +744,75 @@ export const captainsReportNotifyKey = (tenant: string, reportId: string, audien
   sk: `NOTIFY#capreport#${reportId}#${audience}`,
 });
 
+// ── Pre-match squad requests (captain squad links) ──
+// Same tenant partition as the captain's reports, so tenant erasure and cohort clear (which
+// enumerate the whole partition) cover them; distinct sk prefixes keep every listing apart.
+
+export const squadRequestKey = (
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+  teamId: string,
+) => ({
+  pk: captainsReportPartitionPk(tenant),
+  sk: `SQUADREQ#${seriesId}#${fixtureId}#${teamId}`,
+});
+
+export const squadRequestsListKey = (tenant: string) => ({
+  pk: captainsReportPartitionPk(tenant),
+  skPrefix: 'SQUADREQ#',
+});
+
+/** The squad notice ledger (clone of the report's NOTIFY#capreport# family). */
+export const squadRequestNotifyKey = (tenant: string, requestId: string, audience: string) => ({
+  pk: captainsReportPartitionPk(tenant),
+  sk: `NOTIFY#squadreq#${requestId}#${audience}`,
+});
+
+/** A club's designated captain for one team (club/admin-set). */
+export const teamCaptainKey = (tenant: string, clubId: string, teamId: string) => ({
+  pk: captainsReportPartitionPk(tenant),
+  sk: `TEAMCAPTAIN#${clubId}#${teamId}`,
+});
+
+export const teamCaptainsListKey = (tenant: string) => ({
+  pk: captainsReportPartitionPk(tenant),
+  skPrefix: 'TEAMCAPTAIN#',
+});
+
+/** The team's last known captain (natural key + name; POPIA-approved 2026-10-27). */
+export const teamLastCaptainKey = (tenant: string, clubId: string, teamId: string) => ({
+  pk: captainsReportPartitionPk(tenant),
+  sk: `TEAMLASTCAPT#${clubId}#${teamId}`,
+});
+
+export const teamLastCaptainsListKey = (tenant: string) => ({
+  pk: captainsReportPartitionPk(tenant),
+  skPrefix: 'TEAMLASTCAPT#',
+});
+
+/** A squad request still to open + notify (SYNC partition, like REPORTOPEN#). */
+export const squadOpenKey = (tenant: string, requestId: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `SQUADOPEN#${requestId}`,
+});
+
+export const squadOpenListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  skPrefix: 'SQUADOPEN#',
+});
+
+/** The §8 squad outbox (SYNC partition, like PENDINGSYNC#). */
+export const pendingSquadSyncKey = (tenant: string, requestId: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `PENDINGSQUADSYNC#${requestId}`,
+});
+
+export const pendingSquadSyncListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  skPrefix: 'PENDINGSQUADSYNC#',
+});
+
 /**
  * The WhatsApp status webhook's lookup: Meta posts statuses by message id (wamid) with no
  * tenant, so each captain's-report WhatsApp send writes `WAMSG#<wamid>` → its report. Global

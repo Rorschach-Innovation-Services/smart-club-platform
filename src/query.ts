@@ -46,6 +46,16 @@ export const qk = {
   clubCaptainsReportPrefix: () => ['club-captains-report'],
   // Global: the token names its own tenant.
   linkedCaptainsReport: (token: string) => ['captains-report-link', token],
+  // Global: the token names its own tenant.
+  linkedSquadRequest: (token: string) => ['squad-link', token],
+  squadRequests: () => ['squad-requests', t()],
+  teamCaptain: (clubId: string, teamId: string) => ['team-captain', t(), clubId, teamId],
+  captainCandidates: (clubId: string, teamId: string) => [
+    'captain-candidates',
+    t(),
+    clubId,
+    teamId,
+  ],
   tenantConfig: () => ['tenant-config', t()],
   users: () => ['users', t()],
   players: (clubId: string) => ['players', t(), clubId],

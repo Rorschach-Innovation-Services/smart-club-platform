@@ -55,6 +55,10 @@ export const CHANGES_LIMIT_MAX = 500;
 export const SCHEDULE_PUSH_MAX = 100;
 /** Max players per player push request (contract §4). */
 export const PLAYER_PUSH_MAX = 50;
+/** Contract §8: a captain's pre-match squad for one side of one synced fixture. */
+export const FIXTURE_SQUAD_PATH = '/integrations/smartclub/fixture-squad';
+/** Max selected players, and max guests, per §8 push. */
+export const FIXTURE_SQUAD_MAX = 60;
 
 /* ─────────────────────────── Schemas ─────────────────────────── */
 
@@ -764,3 +768,27 @@ export function parseTeamRef(
   if (!parts[1] || !parts[3] || !parts[4]) return null;
   return { tenant: parts[1], leagueKey: parts[3], teamId: parts[4] };
 }
+
+/* ─────────────────────────── §8 fixture squad ─────────────────────────── */
+
+export interface FixtureSquadPush {
+  version: 1;
+  tenant: string;
+  op?: 'upsert' | 'void';
+  fixtureRef: string;
+  side: 'home' | 'away';
+  teamRef?: string;
+  players: Array<{ ref: string; name: string }>;
+  guests: Array<{ name: string }>;
+  captainRef?: string;
+  submittedAt: string;
+}
+
+export const FixtureSquadResponseSchema = z.object({
+  applied: z.boolean(),
+  mappedPlayers: z.number().int().nonnegative(),
+  unmappedAsGuest: z.number().int().nonnegative(),
+  guests: z.number().int().nonnegative(),
+  reason: z.enum(['stale', 'fixture-unmapped', 'scoring-started']).optional(),
+});
+export type FixtureSquadResponse = z.infer<typeof FixtureSquadResponseSchema>;

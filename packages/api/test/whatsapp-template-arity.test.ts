@@ -19,6 +19,8 @@ const {
   fixtureReminderParams,
   officialAppointedParams,
   captainsReportDueParams,
+  squadSelectionDueParams,
+  sendSquadSelectionDueWhatsApp,
   captainsReportOpsDigestParams,
   sendCaptainsReportOpsDigestWhatsApp,
   urlButtonComponent,
@@ -71,6 +73,14 @@ const BUILDERS = [
   {
     key: 'captainsReportDue' as const,
     params: captainsReportDueParams({
+      recipientName: 'Sanele Mthembu',
+      orgName: 'KZN Dolphins',
+      match: 'Umzinto v African Warriors on Sun 4 Oct 2026',
+    }),
+  },
+  {
+    key: 'squadSelectionDue' as const,
+    params: squadSelectionDueParams({
       recipientName: 'Sanele Mthembu',
       orgName: 'KZN Dolphins',
       match: 'Umzinto v African Warriors on Sun 4 Oct 2026',
@@ -542,5 +552,32 @@ describe('EMCU scorer broadcast templates (VIDEO header, static app buttons; app
     // The gate still refuses them if ever flipped back to pending.
     const pending = { ...WHATSAPP_TEMPLATES.emcuPlayerScoring, status: 'pending' as const };
     assert.throws(() => assertTemplateSendable(pending), WhatsAppTemplatePendingError);
+  });
+});
+
+describe('squad selection template (captain squad links)', () => {
+  const def = WHATSAPP_TEMPLATES.squadSelectionDue;
+
+  test('three body params, the /sq/ URL button, pending until Meta approves', () => {
+    assert.equal(def.name, 'squad_selection_due');
+    assert.equal(def.paramCount, 3);
+    assert.equal(def.status, 'pending');
+    assert.equal(def.urlButton.urlTemplate, 'https://platform.club.medicoach.co.za/sq/{{1}}');
+    for (const p of squadSelectionDueParams({ recipientName: 'A', orgName: 'O', match: 'C' }))
+      assert.doesNotMatch(p.text, /https?:\/\//);
+  });
+
+  test('the sender refuses while the template is pending (never a try-and-fail send)', async () => {
+    await assert.rejects(
+      sendSquadSelectionDueWhatsApp({
+        to: '+27820000000',
+        recipientName: 'A',
+        clubName: 'C',
+        orgName: 'O',
+        match: 'M',
+        token: 't.s',
+      }),
+      WhatsAppTemplatePendingError,
+    );
   });
 });
