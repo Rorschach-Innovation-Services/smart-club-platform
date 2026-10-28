@@ -628,7 +628,7 @@ start-scoring squad (web + mobile). It never writes the fixture row, the match r
 membership or a ref, and it never narrows any roster. Same signing as §2/§4. PERSONAL DATA (refs,
 names): never log payload bodies.
 
-Body:
+Body (examples: `fixture-squad-upsert-request.json`, `fixture-squad-void-request.json`):
 ```ts
 {
   version: 1,
@@ -675,7 +675,8 @@ Rules:
 - 400 for a body that does not match the schema (field paths only), an invalid `submittedAt`, or a
   `teamRef` / `captainRef` of another tenant. 401/503 as for every endpoint.
 
-Response 200:
+Response 200 (examples: `fixture-squad-response-applied.json`, `fixture-squad-response-stale.json`,
+`fixture-squad-response-fixture-unmapped.json`, `fixture-squad-response-scoring-started.json`):
 ```ts
 {
   applied: boolean,
