@@ -1199,6 +1199,100 @@ describe('SQUADOPEN# retries', () => {
   });
 });
 
+describe('opener regressions: latest-attempt settlement, admin voids are final', () => {
+  const marker = (teamId: string) => ({
+    requestId: `${S1}~f1~${teamId}`,
+    seriesId: S1,
+    fixtureId: 'f1',
+    teamId,
+    matchDate: TOMORROW,
+    createdAt: AT_1900.toISOString(),
+    attempts: 1,
+  });
+
+  test('an earlier skipped attempt does not settle a later failed one: the retry renotifies', async () => {
+    await seed();
+    outcome = () => 'failed';
+    await open(); // umzinto's latest attempt (AT_1900) failed; marker kept, claim released
+    const r = await reqOf('umzinto');
+    const earlier = new Date(AT_1900.getTime() - HOUR).toISOString();
+    const delivery = (status: 'skipped' | 'failed', at: string) => ({
+      channel: 'whatsapp' as const,
+      status,
+      at,
+      purpose: 'opened' as const,
+      recipientKind: 'chair' as const,
+    });
+    // An earlier all-skipped attempt, plus a skipped channel inside the latest (failed) attempt.
+    await repo.recordSquadRequestDeliveries(T, r, [delivery('skipped', earlier)]);
+    await repo.recordSquadRequestDeliveries(T, r, [delivery('skipped', AT_1900.toISOString())]);
+    assert.equal(squad.squadNoticeUnsettled(await reqOf('umzinto')), true);
+
+    outcome = () => 'sent';
+    const before = notices.length;
+    const res = await squad.retryPendingSquadOpens(T, deps(sastToday(21)));
+    assert.equal(res.done, 2);
+    assert.ok(
+      notices.slice(before).some((n) => n.channels.length),
+      'the failed notice is sent again',
+    );
+    assert.ok((await reqOf('umzinto')).notifiedAt);
+  });
+
+  test('a latest attempt that is all-skipped settles the notice', async () => {
+    await seed();
+    outcome = () => 'failed';
+    await open();
+    const r = await reqOf('umzinto');
+    await repo.recordSquadRequestDeliveries(T, r, [
+      {
+        channel: 'email',
+        status: 'skipped',
+        at: new Date(AT_1900.getTime() + HOUR).toISOString(),
+        purpose: 'opened',
+        recipientKind: 'chair',
+      },
+    ]);
+    assert.equal(squad.squadNoticeUnsettled(await reqOf('umzinto')), false);
+  });
+
+  test('an admin void survives the sweep, a marker retry and the opener; nothing is sent', async () => {
+    await seed();
+    outcome = () => 'failed';
+    await open(); // markers kept for both sides
+    const r = await reqOf('umzinto');
+    assert.equal(await squad.adminVoidSquadRequest(repo, T, r, AT_1900.toISOString()), 'voided');
+    outcome = () => 'sent';
+    const before = notices.filter((n) => n.requestId === `${S1}~f1~umzinto`).length;
+    await squad.voidChangedSquadRequests(T, { repo, now: () => AT_1900 });
+    await squad.retryPendingSquadOpens(T, deps(sastToday(21)));
+    await repo.putSquadOpenMarker(T, { ...marker('umzinto'), attempts: 0 });
+    await squad.retryPendingSquadOpens(T, deps(sastToday(21, 30)));
+    await open(sastToday(22));
+    const after = await reqOf('umzinto');
+    assert.equal(after.status, 'void');
+    assert.equal(after.voidReason, squad.SQUAD_VOID_REASONS.admin);
+    assert.equal(
+      notices.filter((n) => n.requestId === `${S1}~f1~umzinto`).length,
+      before,
+      'no notice for the admin-voided side',
+    );
+    // The repo guard holds on its own too.
+    assert.equal(await repo.openSquadRequestIfAbsent(T, { ...r, status: 'pending' }), false);
+    assert.equal((await reqOf('umzinto')).status, 'void');
+  });
+
+  test('a fixture-changed void is still reopened by the opener', async () => {
+    await seed();
+    await open();
+    const r = await reqOf('umzinto');
+    assert.ok(await squad.voidSquadRequestForFixtureChange(repo, T, r, AT_1900.toISOString()));
+    const sum = await open(sastToday(20));
+    assert.ok(sum.opened >= 1);
+    assert.equal((await reqOf('umzinto')).status, 'pending');
+  });
+});
+
 describe('SQUADOPEN# retries: transient reads and tombstones', () => {
   const editF1 = async (edit: (f: Record<string, unknown>) => void) => {
     const s = (await repo.getSeries(T, S1))!;

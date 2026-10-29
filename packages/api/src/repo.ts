@@ -813,12 +813,7 @@ export async function appendClubCommEvents(
  * `welcome-broadcast-<email|cell>`).
  */
 export type InviteSendKind =
-  | 'invite'
-  | 'fixtures'
-  | 'staff-invite'
-  | 'fixture-reminder'
-  | 'clearance-reminder'
-  | 'broadcast';
+  'invite' | 'fixtures' | 'staff-invite' | 'fixture-reminder' | 'clearance-reminder' | 'broadcast';
 
 /** Outcome of a duplicate idempotency claim: prior results + whether the first attempt is still running. */
 export interface InviteSendReplay {
@@ -874,8 +869,7 @@ export async function claimInviteSend(
         new GetCommand({ TableName: TABLE, Key: clubInviteKey(tenant, clubId, idempotencyKey) }),
       );
       const item = res.Item as
-        | { status?: string; results?: SendResult[]; kind?: string }
-        | undefined;
+        { status?: string; results?: SendResult[]; kind?: string } | undefined;
       // The invite/fixtures markers share the INVITE# keyspace; `kind` disambiguates them.
       // A key reused across kinds must never replay the wrong send's results — refuse it.
       const priorKind = (item?.kind as InviteSendKind) ?? 'invite';
@@ -10028,9 +10022,11 @@ export async function openSquadRequestIfAbsent(
       new PutCommand({
         TableName: TABLE,
         Item: { ...req, ...squadKeyOf(tenant, req) },
-        ConditionExpression: 'attribute_not_exists(pk) OR #s = :void',
+        // An admin void is final: never overwritten by a reopen.
+        ConditionExpression:
+          'attribute_not_exists(pk) OR (#s = :void AND (attribute_not_exists(voidReason) OR voidReason <> :admin))',
         ExpressionAttributeNames: { '#s': 'status' },
-        ExpressionAttributeValues: { ':void': 'void' },
+        ExpressionAttributeValues: { ':void': 'void', ':admin': 'voided by admin' },
       }),
     );
     return true;

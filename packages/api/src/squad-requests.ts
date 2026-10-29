@@ -176,8 +176,7 @@ export function squadLinkExpired(nowMs: number, e: number): boolean {
 }
 
 export type SquadTokenCheck =
-  | { ok: true; payload: SquadLinkPayload }
-  | { ok: false; reason: 'invalid' | 'expired' };
+  { ok: true; payload: SquadLinkPayload } | { ok: false; reason: 'invalid' | 'expired' };
 
 export function verifySquadLinkToken(
   token: string,
@@ -731,13 +730,19 @@ export const SQUAD_VOID_REASONS = {
   expired: 'expired',
 } as const;
 
-/** A pending request whose opening notice never went out and is not settled (skipped). */
+/**
+ * A pending request whose opening notice never went out and is not settled. Only the LATEST
+ * attempt counts (deliveries of one attempt share `at`): it settles the notice only when every
+ * channel in it was skipped. An earlier skipped attempt must not mask a later failure (whose
+ * NOTIFY# claim was released). No deliveries yet ⇒ unsettled.
+ */
 export function squadNoticeUnsettled(r: SquadRequest): boolean {
-  return (
-    r.status === 'pending' &&
-    !r.notifiedAt &&
-    !(r.deliveries ?? []).some((d) => d.status === 'skipped')
-  );
+  if (r.status !== 'pending' || r.notifiedAt) return false;
+  const deliveries = r.deliveries ?? [];
+  if (!deliveries.length) return true;
+  const latestAt = deliveries.reduce((max, d) => (d.at > max ? d.at : max), deliveries[0].at);
+  const latest = deliveries.filter((d) => d.at === latestAt);
+  return !latest.every((d) => d.status === 'skipped');
 }
 
 interface SideTarget {
@@ -772,6 +777,10 @@ async function openSquadForSide(
   const id = squadRequestId(seriesId, fixture.id, teamId);
   const existing = await repo.getSquadRequest(tenant, seriesId, fixture.id, teamId);
   const chair = chairContactOf(club);
+
+  // An admin void is final: never reopened or re-notified by the opener / retry pass.
+  if (existing?.status === 'void' && existing.voidReason === SQUAD_VOID_REASONS.admin)
+    return { outcome: 'skipped', id };
 
   if (existing && existing.status !== 'void') {
     // A live request: only an opening notice that never settled goes out again (the
