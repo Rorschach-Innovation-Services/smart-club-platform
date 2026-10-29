@@ -55,7 +55,11 @@ import {
   liveFixtureVenue,
   MAX_FORWARDS,
   pastDeadline,
-  resolvePlayerContact,
+  resolveCaptainLadder,
+  retargetReportForSquadCaptain,
+  type ReportNotice,
+  seriesExcludedFromCaptainsReports,
+  seriesExclusionResolver,
   sideName,
   type NoticeResult,
 } from './captains-reports.js';
@@ -72,6 +76,7 @@ import { WHATSAPP_TEMPLATES } from './notify/whatsapp-templates.js';
 import { compareRunsNewestFirst } from './medicoach-export-build.js';
 import { isWithheld, projectSeriesForClub } from './series-projection.js';
 import { TENANT_UTC_OFFSET_MINUTES, tenantDate } from './tenant-time.js';
+import type { CaptainLadderRung } from './types.js';
 import type {
   CaptainsReportDelivery,
   Club,
@@ -512,6 +517,8 @@ export interface SquadRequestDeps {
    * offered only when it is `registered` — never tried-and-failed while Meta reviews it.
    */
   whatsappTemplateStatus?: () => string;
+  /** The captain's-report notice sender for a squad-submit re-target (default: SES + Meta). */
+  sendReportNotice?: (n: ReportNotice) => Promise<NoticeResult[]>;
   /** Sentry capture (default: the Lambda's Sentry); injectable for tests. */
   captureException?: (
     err: Error,
@@ -717,6 +724,11 @@ export interface SquadRecipient {
  * through. The natural key is used for the point-gets only. Legacy unscoped rows are never
  * consulted: they cannot say which of a shared teamId's competitions they belonged to.
  */
+/** Narrow a ladder rung to the squad ladder's (no medicoach / squad-link input ⇒ never those). */
+function squadRungOf(rung: CaptainLadderRung): SquadRecipient['rung'] {
+  return rung === 'designated' || rung === 'last-captain' ? rung : 'chair';
+}
+
 export async function resolveSquadRecipient(
   repo: RepoModule,
   tenant: string,
@@ -724,17 +736,9 @@ export async function resolveSquadRecipient(
   teamId: string,
   scope: string,
 ): Promise<SquadRecipient> {
-  const designated = await repo.getTeamCaptain(tenant, club.id, teamId, scope);
-  if (designated) {
-    const c = await resolvePlayerContact(repo, tenant, club.id, designated.playerKey);
-    if (c) return { kind: 'captain', rung: 'designated', contact: c };
-  }
-  const last = await repo.getTeamLastCaptain(tenant, club.id, teamId, scope);
-  if (last) {
-    const c = await resolvePlayerContact(repo, tenant, club.id, last.naturalKey);
-    if (c) return { kind: 'captain', rung: 'last-captain', contact: c };
-  }
-  return { kind: 'chair', rung: 'chair', contact: chairContactOf(club) };
+  const r = await resolveCaptainLadder(repo, tenant, club, teamId, scope);
+  // Without the medicoach / squad-link inputs only these three rungs can answer.
+  return { kind: r.kind, rung: squadRungOf(r.rung), contact: r.contact };
 }
 
 /**
@@ -959,8 +963,10 @@ export async function openPreMatchSquadRequests(
   const tomorrow = addDays(today, 1);
   if (!goLive || tomorrow < goLive) return sum;
 
+  // The captain's-report series exclusion gates squad-link opens too (issued links still work).
   const all = (await repo.listSeries(tenant)).filter(
-    (s) => projectSeriesForClub(s, today) !== null,
+    (s) =>
+      !seriesExcludedFromCaptainsReports(config, s.name) && projectSeriesForClub(s, today) !== null,
   );
   for (const s of all) {
     const fixtures = ((s.fixtures as StoredFixture[] | undefined) ?? []).filter(
@@ -1099,10 +1105,23 @@ export async function retryPendingSquadOpens(
     dropped: 0,
     deferred: 0,
   };
-  const markers = await repo.listSquadOpenMarkers(tenant);
+  let markers = await repo.listSquadOpenMarkers(tenant);
+  if (!markers.length) return out;
+  const config = await repo.getTenantConfig(tenant);
+  // Per-series exclusion (`captainsReportsExcludedSeriesPrefixes`): an excluded series'
+  // markers (tombstones included) are dropped before any window / deadline deferral, so
+  // re-enabling it never bursts a backlog.
+  const excluded = seriesExclusionResolver(repo, tenant, config);
+  const kept: typeof markers = [];
+  for (const m of markers) {
+    if (await excluded(m.seriesId)) {
+      await repo.deleteSquadOpenMarker(tenant, m.requestId);
+      out.dropped++;
+    } else kept.push(m);
+  }
+  markers = kept;
   if (!markers.length) return out;
   if (!squadNoticeWindowOpen(now())) return { ...out, deferred: markers.length };
-  const config = await repo.getTenantConfig(tenant);
   const today = tenantDate(now());
   for (const [i, m] of markers.entries()) {
     if (pastDeadline(deps.deadlineMs)) {
@@ -1577,6 +1596,37 @@ export async function saveSquad(
         }),
       )
       .catch(() => {});
+  // An already-open pending captain's report for this side follows the submitted captain
+  // (never over a medicoach captain). Best-effort: the submit itself never fails on it.
+  if (cap)
+    await retargetReportForSquadCaptain(
+      {
+        repo,
+        ...(deps.now ? { now: deps.now } : {}),
+        ...(deps.linkSecret ? { linkSecret: deps.linkSecret } : {}),
+        ...(deps.linkBase ? { linkBase: deps.linkBase } : {}),
+        ...(deps.sendReportNotice ? { sendNotice: deps.sendReportNotice } : {}),
+        ...(deps.captureException ? { captureException: deps.captureException } : {}),
+      },
+      tenant,
+      saved,
+    ).catch(async (err) => {
+      console.warn(
+        `[squad-links] ${tenant} ${request.id}: captain's report re-target failed — ${
+          err instanceof Error ? err.name : 'error'
+        }`,
+      );
+      try {
+        const capture =
+          deps.captureException ?? (await import('./instrument.js')).Sentry.captureException;
+        capture(err instanceof Error ? err : new Error("captain's report re-target failed"), {
+          tags: { tenant, requestId: request.id, job: 'squad-links-retarget' },
+          extra: {},
+        });
+      } catch {
+        // Non-fatal: the submit already succeeded.
+      }
+    });
   await repo.putPendingSquadSync(tenant, {
     requestId: request.id,
     op: 'upsert',
