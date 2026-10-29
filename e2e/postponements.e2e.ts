@@ -34,8 +34,11 @@ const SERIES_NAME = `E2E Postpone ${RUN}`;
 const GROUND = ground('postpone');
 const TIME = '10:00';
 
-// A Saturday somewhere in 2028–29, then one week apart for each move.
-const BASE = dayjs('2028-01-01')
+// A Saturday 1–2.7 years ahead of the REAL clock (the API refuses past fixtures/proposals),
+// then one week apart for each move. Rolling, not a fixed year: a fixed future date becomes
+// a past one. Convention: a test that pins any absolute date must pin all its dates.
+const BASE = dayjs()
+  .add(1, 'year')
   .add(Math.floor(Math.random() * 90) * 7, 'day')
   .day(6);
 const iso = (weeks: number) => BASE.add(weeks * 7, 'day').format('YYYY-MM-DD');

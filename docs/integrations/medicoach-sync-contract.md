@@ -5,7 +5,7 @@ This is the source of truth for both repos. Copy the `examples/*.json` files ver
 example with its own zod schema (drift fails CI).
 
 ## Direction & auth
-- Smart club is always the CALLER (§1–7); medicoach never calls smart club except to forward
+- Smart club is always the CALLER (§1–8); medicoach never calls smart club except to forward
   WhatsApp statuses (below).
 - One shared secret: smart club SST secret `MedicoachSyncSecret` == medicoach SST secret `SmartClubSyncSecret`.
   Base URL on smart club: SST secret `MedicoachSyncUrl` (e.g. https://api.medicoach.co.za). Empty secret/url ⇒ the caller
@@ -335,6 +335,21 @@ Medicoach rules:
 - A `changedAt` more than 5 minutes ahead of medicoach's clock is refused with `error`.
 - Every write is audited under the `smartclub-sync` principal.
 
+### Medicoach name lock (2026-10-27)
+A Medicoach Administrator can correct a Smart Club player's full name on the internal Smart Club
+roster page. The correction LOCKS the name on the Medicoach player (`nameLockedAt`):
+- A push never writes a locked player's `name`; every other field (DOB, contacts, teams) still
+  applies. A push whose ONLY difference is the name returns `unchanged` (stamp still written).
+- Dry-run `fieldDiffs` omit `name` for a locked player.
+- Medicoach records the spelling each applied push carries (`smartClubName` on the ref row) and
+  flags the player for review only when Smart Club sends a NEW spelling (different from the one it
+  had when the admin locked). The admin can then accept Smart Club's spelling (which unlocks) or
+  keep theirs.
+- The matcher also checks a locked player's earlier Smart Club spellings, so a new ref carrying the
+  pre-correction spelling + dob links instead of creating a duplicate.
+- No request/response shape changes; Smart Club needs no change. Fixing the spelling in Smart Club
+  too is still encouraged.
+
 ### Removal guards (2026-10-09)
 Medicoach ops also place players on smart-club-mapped sides (competition sides Smart Club does
 not place: women's, senior-men EMCU, 40+ veterans). Those memberships are indistinguishable from
@@ -604,6 +619,73 @@ fixtures and the reason. A match that fails to parse is dropped on its own and c
 of the day still renders. Smart club applies its own thresholds (late start, delay, scorer
 silence, long break, undo count) on top of these facts and flags every player the roster can't
 vouch for.
+
+## 8. POST /integrations/smartclub/fixture-squad
+
+A captain's pre-match squad for ONE side of ONE synced fixture (captain squad-selection links).
+Medicoach stores it on its own per-(fixture, side) row and uses it only to PREFILL the scorer's
+start-scoring squad (web + mobile). It never writes the fixture row, the match row, a player, a
+membership or a ref, and it never narrows any roster. Same signing as §2/§4. PERSONAL DATA (refs,
+names): never log payload bodies.
+
+Body (examples: `fixture-squad-upsert-request.json`, `fixture-squad-void-request.json`):
+```ts
+{
+  version: 1,
+  tenant: string,
+  op?: "upsert" | "void",       // default "upsert"; "void" blanks the side's squad (fixture
+                                //   cancelled / moved). players/guests may be empty for a void.
+  fixtureRef: string,           // fixture ref (see Refs)
+  side: "home" | "away",        // the fixture's side this squad is for
+  teamRef?: string,             // the side's team ref; must belong to `tenant` (else 400). Informational:
+                                //   medicoach takes the side's team from the fixture, not from this.
+  players: Array<{ ref: string, name: string }>,   // selected registered players (≤ 60)
+  guests: Array<{ name: string }>,                 // free-text guests (≤ 60)
+  captainRef?: string,          // one of `players`; must belong to `tenant` (else 400)
+  submittedAt: string,          // ISO-8601 UTC (strict, with offset): when the captain submitted.
+                                //   For a void: when the void was produced.
+}
+```
+
+Rules:
+- **Idempotent upsert keyed (fixture, side)**, last `submittedAt` wins: the incoming instant must
+  be STRICTLY newer than the stored one (compared as instants, not strings; CAS on the stored
+  value, one retry). A replay or an older push answers `applied: false, reason: "stale"` and writes
+  nothing. A void is ordered the same way, and a voided row keeps its `submittedAt`, so an older
+  upsert arriving after the void cannot resurrect the squad.
+- **Unmapped fixture** (`fixtureRef` not mapped, not this tenant's, or its fixture gone) ⇒ 200
+  `applied: false, reason: "fixture-unmapped"`, nothing written. This one is **RETRYABLE**: a
+  submit-triggered push can race ahead of the fixture's own §2 schedule push. The caller keeps the
+  outbox row and retries (bounded). `stale` and `scoring-started` are terminal.
+- **Player refs** resolve through medicoach's ref mapping (the same forward rows §4 writes). A ref
+  that does not resolve — unknown, another tenant's, erased, or still pending — becomes a
+  **name-only guest** (counted in `unmappedAsGuest`). No player, membership or ref is ever written
+  here (§4 stays the single write path). Two refs of one medicoach player collapse to one entry.
+- `captainRef` is recorded only when it resolves to a mapped player in `players`.
+- **Scoring already started** (the fixture has a linked match): the squad is still stored, flagged
+  as received after scoring start, and the answer is `applied: false, reason: "scoring-started"`.
+  The match row is never touched; the prefill no longer matters for that game.
+- Refs are never logged, stored on the squad row, or served to browsers: medicoach stores and
+  serves medicoach player ids + names only.
+- **Player erasure**: smart club re-pushes a rebuilt upsert (fresh `submittedAt`, the erased
+  player absent) for a submitted squad whose match is still ahead; historical squad rows are
+  covered by the §4 player-record erase.
+- Interplay with §7: a prefilled squad means fewer players are added with "add player" after
+  scoring begins, so `addedDuringMatch` shrinks for these fixtures — that is the point.
+- 400 for a body that does not match the schema (field paths only), an invalid `submittedAt`, or a
+  `teamRef` / `captainRef` of another tenant. 401/503 as for every endpoint.
+
+Response 200 (examples: `fixture-squad-response-applied.json`, `fixture-squad-response-stale.json`,
+`fixture-squad-response-fixture-unmapped.json`, `fixture-squad-response-scoring-started.json`):
+```ts
+{
+  applied: boolean,
+  mappedPlayers: number,        // selected players resolved to medicoach players
+  unmappedAsGuest: number,      // selected players stored as name-only guests
+  guests: number,               // free-text guests stored
+  reason?: "stale" | "fixture-unmapped" | "scoring-started",   // only when applied is false
+}
+```
 
 ## WhatsApp status forwarding (medicoach → smart club)
 

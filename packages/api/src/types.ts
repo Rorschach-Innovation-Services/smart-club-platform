@@ -331,7 +331,11 @@ export interface TenantConfig {
    * carries its own default. Known flags: 'whatsappInvites' (default TRUE —
    * shared WABA templates are dolphins-flavored, so new clients launch
    * email-only), 'selfServeBranding' (reserved, default false), 'medicoachSync' (default
-   * false — the medicoach fixture/result sync puller runs for this tenant, ADR 0016).
+   * false — the medicoach fixture/result sync puller runs for this tenant, ADR 0016),
+   * 'captainsReports' (default TRUE — the kill switch for AUTOMATIC captain's reports: off ⇒
+   * no opens, notices or reminders; issued links still work, portal filing untouched),
+   * 'preMatchSquadLinks' (default false — the evening-before captain squad-selection links,
+   * pushed to medicoach as contract §8; runs inside the medicoachSync run only).
    */
   features?: Record<string, boolean>;
   /**
@@ -674,6 +678,12 @@ export interface PlayerErasureCounts {
    * marker kept (its retry then addresses the scoring side's chair instead).
    */
   reportOpenMarkers: number;
+  /** TEAMCAPTAIN#/TEAMLASTCAPT# rows naming the person, deleted. Absent when none. */
+  teamCaptainRows?: number;
+  /** Squad requests that named the person, scrubbed in place. Absent when none. */
+  squadRequestsScrubbed?: number;
+  /** §8 re-upserts queued because the erased player sat in a submitted future-match squad. */
+  squadsRepushed?: number;
 }
 
 /**
@@ -1882,4 +1892,140 @@ export interface CaptainsReport {
   recipientContact?: { email?: string; cell?: string };
   createdAt: string;
   updatedAt: string;
+}
+
+// ── Pre-match captain squad selection (captain squad links, 2026-10-27) ──
+
+export type SquadRequestStatus = 'pending' | 'submitted' | 'void';
+
+/** One selected registered player: an opaque roster key (never served) + the display name. */
+export interface SquadSelectionPlayer {
+  /** The player's natural key (a hashed ID number) — server-only, never served or logged. */
+  key: string;
+  name: string;
+}
+
+export interface SquadSelection {
+  players: SquadSelectionPlayer[];
+  guests: Array<{ name: string }>;
+  /** The natural key of the captain, one of `players`. */
+  captainKey?: string;
+}
+
+/**
+ * A pre-match squad request: `SQUADREQ#<seriesId>#<fixtureId>#<teamId>` in the captain's
+ * report partition, one per fixture SIDE (team, not club: a multi-team club's `tm_` sides
+ * each get one). Opened `pending` the morning of the day before the match, `submitted` (and
+ * re-submittable until expiry — squads change late), `void` when the fixture was cancelled or
+ * moved (`voidReason` 'fixture changed' — self-heals if it moves back), voided by an admin, or
+ * still pending after match day ('expired').
+ */
+export interface SquadRequest {
+  /** `<seriesId>~<fixtureId>~<teamId>` */
+  id: string;
+  seriesId: string;
+  fixtureId: string;
+  teamId: string;
+  clubId: string;
+  status: SquadRequestStatus;
+  fixtureRef: string;
+  /** The side's medicoach team ref, when the series is sync-mapped with a league key. */
+  teamRef?: string;
+  matchDate: string;
+  side: 'home' | 'away';
+  clubName: string;
+  teamName: string;
+  opponentName: string;
+  competition: string;
+  venue?: string;
+  recipient: CaptainsReportRecipient;
+  /** Server-only: the captain recipient's contact (never served or logged). */
+  recipientContact?: { email?: string; cell?: string };
+  /** After "Send to captain": the chair's kept link id. Server-only. */
+  chairMemberId?: string;
+  forwardCount?: number;
+  selection?: SquadSelection;
+  /** 23:59:59 SAST on the match day (ISO). */
+  linkExpiresAt: string;
+  submittedAt?: string;
+  submittedVia?: 'link';
+  voidedAt?: string;
+  voidReason?: string;
+  /**
+   * Server-only (sweep): epoch ms when the fixture was first seen ABSENT from a successfully
+   * read series. Cleared once the fixture is seen again; past FIXTURE_MISSING_CONFIRM_MS the
+   * sweep treats the removal as confirmed and voids.
+   */
+  fixtureMissingAt?: number;
+  /** CAS token: every write stamps a new value; PUT carries the one the client rendered. */
+  modified: string;
+  deliveries?: CaptainsReportDelivery[];
+  notifiedAt?: string;
+  /** When the latest submission (or void) was accepted by medicoach (§8). */
+  pushedAt?: string;
+  pushOutcome?: {
+    at: string;
+    applied: boolean;
+    reason?: 'stale' | 'fixture-unmapped' | 'scoring-started' | 'gave-up';
+    mappedPlayers?: number;
+    unmappedAsGuest?: number;
+    guests?: number;
+  };
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** `TEAMCAPTAIN#<clubId>#<teamId>` — a club's designated captain for one team. */
+export interface TeamCaptainDesignation {
+  clubId: string;
+  teamId: string;
+  /** The player's natural key — server-only, never served. */
+  playerKey: string;
+  setBy: string;
+  setAt: string;
+}
+
+/**
+ * `TEAMLASTCAPT#<clubId>#<teamId>` — the team's most recent known captain (POPIA-approved
+ * 2026-10-27: natural key + name only; contact is re-resolved fresh at send time).
+ */
+export interface TeamLastCaptain {
+  clubId: string;
+  teamId: string;
+  naturalKey: string;
+  name: string;
+  seenAt: string;
+}
+
+/** `SQUADOPEN#<requestId>` — a squad request still to open + notify (the retry queue). */
+export interface SquadOpenMarker {
+  requestId: string;
+  seriesId: string;
+  fixtureId: string;
+  teamId: string;
+  /** The match date the opening targeted (retries act on this, never on "tomorrow"). */
+  matchDate: string;
+  createdAt: string;
+  attempts: number;
+  /** A short sanitised note (error name / built message) — never raw provider text. */
+  lastError?: string;
+  lastAttemptAt?: string;
+  /** Set at the attempt cap: a tombstone (no further sends) until the retry pass drops it. */
+  gaveUpAt?: string;
+}
+
+/** `PENDINGSQUADSYNC#<requestId>` — one §8 push owed to medicoach (latest wins). */
+export interface PendingSquadSync {
+  requestId: string;
+  op: 'upsert' | 'void';
+  /** The submittedAt (or void instant) the push carries. */
+  submittedAt: string;
+  enqueuedAt: string;
+  /** Every failed push (transport errors included). */
+  attempts: number;
+  /** `fixture-unmapped` answers only — the counter SQUAD_PUSH_MAX_ATTEMPTS bounds. */
+  unmappedAttempts?: number;
+  /** A short sanitised note (error name / built message) — never raw provider text. */
+  lastError?: string;
+  lastAttemptAt?: string;
 }

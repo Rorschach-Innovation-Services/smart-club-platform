@@ -554,6 +554,52 @@ export async function sendCaptainsReportDueWhatsApp(
   );
 }
 
+export interface SquadSelectionDueWhatsAppInput {
+  to: string; // already E.164 (see toE164)
+  recipientName: string;
+  clubName: string;
+  /** The union's display name — template {{2}}. */
+  orgName: string;
+  /** "Umzinto v African Warriors on Sun 4 Oct 2026" */
+  match: string;
+  /** The signed squad token — the URL button's dynamic suffix. Never logged. */
+  token: string;
+}
+
+/**
+ * Build the three body params for `squad_selection_due`, in order: {{1}} recipient name
+ * (fallback 'there'), {{2}} the union's display name, {{3}} match line + date. The link rides
+ * in the URL button, never the body.
+ */
+export function squadSelectionDueParams(
+  input: Pick<SquadSelectionDueWhatsAppInput, 'recipientName' | 'orgName' | 'match'>,
+): TemplateParam[] {
+  return [
+    { type: 'text', text: cleanParam(input.recipientName || 'there') },
+    { type: 'text', text: cleanParam(input.orgName) },
+    { type: 'text', text: cleanParam(input.match) },
+  ];
+}
+
+/**
+ * Squad selection link over WhatsApp (URL button with the token as its suffix). Throws
+ * `WhatsAppTemplatePendingError` while the registry entry is not `registered`.
+ */
+export async function sendSquadSelectionDueWhatsApp(
+  input: SquadSelectionDueWhatsAppInput,
+): Promise<{ messageId: string }> {
+  const def = WHATSAPP_TEMPLATES.squadSelectionDue;
+  assertTemplateSendable(def);
+  return sendTemplate(
+    input.to,
+    def.name,
+    def.lang,
+    squadSelectionDueParams(input),
+    `squad selection link for ${input.clubName}`,
+    input.token,
+  );
+}
+
 export interface CaptainsReportOpsDigestWhatsAppInput {
   to: string; // already E.164 (see toE164)
   recipientName: string;

@@ -113,6 +113,8 @@ import { ResyncDialog, isResyncRequired } from './ResyncDialog';
 
 import { CaptainsReportView, CaptainsReportLinkPage } from './CaptainsReport';
 import { AdminCaptainsReportsView } from './AdminCaptainsReports';
+import { SquadSelectionLinkPage } from './SquadSelection';
+import { AdminSquadRequestsView } from './AdminSquadRequests';
 import { AdminMedicoachSyncView } from './AdminMedicoachSync';
 import { erasureSummary } from './PlayerDetailModal';
 import { clearanceRemindToast } from './clearance-remind-copy';
@@ -369,7 +371,11 @@ function AppRoutes() {
   // The captain's-report link page (/r/<token>) is tenant-independent the same way: the token
   // names its tenant, and the page themes itself from that tenant.
   const onVerify =
-    pathname === '/verify' || pathname.startsWith('/verify/') || pathname.startsWith('/r/');
+    pathname === '/verify' ||
+    pathname.startsWith('/verify/') ||
+    pathname.startsWith('/r/') ||
+    // The pre-match squad link (/sq/<token>) likewise names its own tenant.
+    pathname.startsWith('/sq/');
 
   // Tenant branding/config (public). Apply theme as soon as it loads.
   // retry the tenant config: it carries the league/district catalogue the authed app
@@ -398,6 +404,8 @@ function AppRoutes() {
       <Route path="/verify/:serial" element={<VerifyCertificatePage />} />
       {/* Public submit-once captain's report link (the token is the capability). */}
       <Route path="/r/:token" element={<CaptainsReportLinkPage />} />
+      {/* Public pre-match squad link (editable until expiry; the token is the capability). */}
+      <Route path="/sq/:token" element={<SquadSelectionLinkPage />} />
       <Route
         path="/*"
         element={
@@ -1306,6 +1314,9 @@ function Shell({
   const complianceOn = useModule('compliance');
   // Medicoach fixture/result sync (ADR 0016): the admin "Medicoach sync" page.
   const medicoachSyncOn = useFeature('medicoachSync');
+  // Pre-match captain squad links ride the medicoach sync run (default off per tenant).
+  const squadLinksFlag = useFeature('preMatchSquadLinks');
+  const squadLinksOn = medicoachSyncOn && squadLinksFlag;
   const clearancesOn = useModule('clearances');
 
   // ── Derive clubId from URL ──
@@ -2620,6 +2631,15 @@ function Shell({
           },
         ]
       : []),
+    ...(squadLinksOn
+      ? [
+          {
+            v: 'squad_requests',
+            label: 'Squad requests',
+            icon: Icon.Users,
+          },
+        ]
+      : []),
     { v: 'team', label: 'Team & Access', icon: Icon.Users, num: users.length || undefined },
   ].sort((a, b) => a.label.localeCompare(b.label));
 
@@ -3012,6 +3032,7 @@ function Shell({
             onToast={(message, tone) => toastShow(message, tone)}
           />
         );
+      if (view === 'squad_requests' && squadLinksOn) return <AdminSquadRequestsView />;
       if (view === 'captains_reports' && vertical.sport === 'cricket')
         return (
           <AdminCaptainsReportsView

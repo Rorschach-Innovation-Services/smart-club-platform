@@ -10,8 +10,11 @@ import { createHash, createHmac } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { z } from 'zod';
 import {
   ChangesResponseSchema,
+  FixtureSquadResponseSchema,
+  type FixtureSquadPush,
   LiveResponseSchema,
   MEDICOACH_SYNC_VERSION,
   PLAYER_PUSH_MAX,
@@ -36,8 +39,32 @@ const EXAMPLES = path.resolve(
   '../../../docs/integrations/medicoach-sync-examples',
 );
 
+/**
+ * §8 has no runtime request schema here (smart club only BUILDS the push), so the examples are
+ * checked against a strict mirror of `FixtureSquadPush`; the `satisfies` keeps it in step with
+ * the interface.
+ */
+const FixtureSquadPushMirror = z
+  .object({
+    version: z.literal(1),
+    tenant: z.string().min(1),
+    op: z.enum(['upsert', 'void']).optional(),
+    fixtureRef: z.string().min(1),
+    side: z.enum(['home', 'away']),
+    teamRef: z.string().min(1).optional(),
+    players: z.array(z.object({ ref: z.string().min(1), name: z.string() }).strict()),
+    guests: z.array(z.object({ name: z.string() }).strict()),
+    captainRef: z.string().min(1).optional(),
+    submittedAt: z.string().datetime({ offset: true }),
+  })
+  .strict() satisfies z.ZodType<FixtureSquadPush>;
+
 const schemaFor = (file: string) =>
-  file.startsWith('changes-')
+  file.startsWith('fixture-squad-response-')
+    ? FixtureSquadResponseSchema.strict()
+    : file.startsWith('fixture-squad-') && file.endsWith('-request.json')
+      ? FixtureSquadPushMirror
+      : file.startsWith('changes-')
     ? ChangesResponseSchema
     : file === 'schedule-push-request.json' || file === 'schedule-push-create-delete-request.json'
       ? SchedulePushRequestSchema
@@ -57,12 +84,18 @@ const schemaFor = (file: string) =>
 describe('contract examples', () => {
   const files = readdirSync(EXAMPLES).filter((f) => f.endsWith('.json'));
 
-  test('all twelve shared examples are present', () => {
+  test('all eighteen shared examples are present', () => {
     assert.deepEqual(files.sort(), [
       'changes-knockout-reschedule.json',
       'changes-live-result.json',
       'changes-manual-and-cleared.json',
       'changes-result-with-play.json',
+      'fixture-squad-response-applied.json',
+      'fixture-squad-response-fixture-unmapped.json',
+      'fixture-squad-response-scoring-started.json',
+      'fixture-squad-response-stale.json',
+      'fixture-squad-upsert-request.json',
+      'fixture-squad-void-request.json',
       'live-day.json',
       'player-push-request.json',
       'player-push-response.json',
@@ -81,8 +114,9 @@ describe('contract examples', () => {
       assert.ok(schema, `no schema mapped for ${file}`);
       const parsed = schema.parse(raw);
       assert.deepEqual(parsed, raw);
-      // The scorecard response is pinned without a `version` field (contract §3).
-      if (!file.startsWith('scorecard-')) assert.equal(raw.version, MEDICOACH_SYNC_VERSION);
+      // The scorecard (§3) and fixture-squad (§8) responses carry no `version` field.
+      if (!file.startsWith('scorecard-') && !file.startsWith('fixture-squad-response-'))
+        assert.equal(raw.version, MEDICOACH_SYNC_VERSION);
     });
   }
 
@@ -187,7 +221,7 @@ describe('shared contract checksum', () => {
   const DOCS = path.resolve(EXAMPLES, '..');
   const PINNED: Record<string, string> = {
     'medicoach-sync-contract.md':
-      '75d2591280512fd7ed3f145cd1bb2b8d39b0a62ae57e965ab1e0140f5b17de55',
+      'f0fcf3d74b72b729e0dd04fcf8c71e4856207cf67005ec253d66e7314514e950',
     'medicoach-sync-examples/changes-knockout-reschedule.json':
       '7040b5a70f49a4adcefe173659126e383c1d0813c5ab0581748fb6e4e8634aa4',
     'medicoach-sync-examples/changes-live-result.json':
@@ -196,6 +230,18 @@ describe('shared contract checksum', () => {
       'ffcf0b6c4542402fc6a996328740828244b5fcf1ac6977d5aaedd30935e96ac4',
     'medicoach-sync-examples/changes-result-with-play.json':
       'ba73c381b800d6f62013551120b7e990726fbeee2078351fafdf6562e8103ed1',
+    'medicoach-sync-examples/fixture-squad-response-applied.json':
+      '02e3f565ecf307094c5b9358ab76019ed8069730cf6e5534be49daad12831cb1',
+    'medicoach-sync-examples/fixture-squad-response-fixture-unmapped.json':
+      '2dd05c32d8526e2498bb087ef72d06e2f7070b86eeda56f37dd42f93f3044437',
+    'medicoach-sync-examples/fixture-squad-response-scoring-started.json':
+      'ed90f34f277223f7f9c880136687570cf9f099f2f17ef2c45aa74ab3eee23d70',
+    'medicoach-sync-examples/fixture-squad-response-stale.json':
+      '83ef5299f2368d08f0ac90f297ebda7cd05fc76147d490a86d43bf5a5f7a40c4',
+    'medicoach-sync-examples/fixture-squad-upsert-request.json':
+      '4e012137514b41163c93659845764989650c8c5d9317ff1cc941c9d86a30a52a',
+    'medicoach-sync-examples/fixture-squad-void-request.json':
+      '21e96301f7fb7f84af3eefe0c68964c75addfe5ef684bfa711f8165feb08524d',
     'medicoach-sync-examples/live-day.json':
       '751b15452d9754ecfa2cb03a505664a9e32e5f6aed413008f9da1fc4bd8a7b8e',
     'medicoach-sync-examples/player-push-request.json':

@@ -1,5 +1,6 @@
 /* ─── Admin views ─── */
 
+import { TeamCaptainsCard } from './TeamCaptains';
 import {
   useState as useStateA,
   useMemo as useMemoA,
@@ -5731,6 +5732,8 @@ export function AdminClubDetail({
               })}
             </Card>
           )}
+
+          <TeamCaptainsCard club={club} />
 
           {cqiOn && (
             <Card title="CQI breakdown" sub="Per-category contribution to overall score">

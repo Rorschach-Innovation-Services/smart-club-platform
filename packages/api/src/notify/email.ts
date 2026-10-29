@@ -1598,6 +1598,89 @@ export async function sendCaptainsReportDueEmail(
   return { messageId: res.MessageId ?? '' };
 }
 
+// ───────────────────────── Squad selection due ─────────────────────────
+
+export interface SquadSelectionDueEmailInput {
+  to: string;
+  /** Club chair cc'd when the captain is the recipient. */
+  cc?: string;
+  recipientName: string;
+  recipientKind: 'captain' | 'chair';
+  clubName: string;
+  /** "Umzinto v African Warriors" */
+  matchLine: string;
+  /** "Sun 4 Oct 2026" */
+  matchDateText: string;
+  /** When the link stops working, "Sunday, 11 Oct" (23:59 SAST that day). */
+  expiresText: string;
+  /** The squad link. NEVER logged. */
+  link: string;
+  orgName: string;
+  /** The chair who sent the squad link on to this captain. */
+  forwardedBy?: string;
+}
+
+/** Build the squad-selection-due email. Pure — exported so tests can assert the copy. */
+export function squadSelectionDueEmailContent(input: SquadSelectionDueEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { recipientName, recipientKind, clubName, matchLine, matchDateText } = input;
+  const greet = recipientName || 'there';
+  const subject = `Select your squad: ${matchLine} (${matchDateText})`;
+  const lead = input.forwardedBy
+    ? `${input.forwardedBy} asked you to select ${clubName}'s squad for ${matchLine} on ${matchDateText}.`
+    : recipientKind === 'captain'
+      ? `Please select ${clubName}'s squad for ${matchLine} on ${matchDateText} from the club's registered players, so the scorer has the right names.`
+      : `${clubName}'s squad for ${matchLine} on ${matchDateText} is open for selection. Please select it — or use "Send to captain" on the page to pass it to the match captain.`;
+  const terms = `You can change the squad until the link expires ${input.expiresText}.`;
+  const text =
+    `Hi ${greet},\n\n${lead}\n\n` +
+    `Select the squad here (no sign-in needed):\n\n${input.link}\n\n` +
+    `${terms}\n\n` +
+    `Thank you,\nThe ${input.orgName} office`;
+  const e = escapeHtml;
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>Hi ${e(greet)},</p>` +
+    `<p>${e(lead)}</p>` +
+    `<p><a href="${e(input.link)}" style="color:#1D9E75;font-weight:600">Select the squad</a> (no sign-in needed)</p>` +
+    `<p>${e(terms)}</p>` +
+    `<p>Thank you,<br/>The ${e(input.orgName)} office</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+/** Send the squad-selection-due email (the link rides in the body; never logged). */
+export async function sendSquadSelectionDueEmail(
+  input: SquadSelectionDueEmailInput,
+): Promise<{ messageId: string }> {
+  const { subject, text, html } = squadSelectionDueEmailContent(input);
+  if (EMAIL_DRY_RUN) {
+    console.log(
+      `[notify:email dry-run] would send squad selection link to ${input.to}` +
+        `${input.cc ? ` (cc ${input.cc})` : ''} for ${input.clubName}`,
+    );
+    return { messageId: `dry-run-${randomUUID()}` };
+  }
+  const res = await ses!.send(
+    new SendEmailCommand({
+      Source: FROM_EMAIL!,
+      ReplyToAddresses: DEFAULT_REPLY_TO,
+      Destination: { ToAddresses: [input.to], ...(input.cc ? { CcAddresses: [input.cc] } : {}) },
+      Message: {
+        Subject: { Data: subject, Charset: 'UTF-8' },
+        Body: {
+          Html: { Data: html, Charset: 'UTF-8' },
+          Text: { Data: text, Charset: 'UTF-8' },
+        },
+      },
+    }),
+  );
+  return { messageId: res.MessageId ?? '' };
+}
+
 export interface SyncConflictEmailInput {
   to: string;
   orgName: string;

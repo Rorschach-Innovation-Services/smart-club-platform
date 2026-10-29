@@ -13,8 +13,9 @@
  * `entry[].changes[].value.statuses[]`, is accepted too).
  *
  * Matching is by message id (wamid) only, through the `WAMSG#<wamid>` lookup each send
- * writes; the lookup's `kind` says whether it points at a captain's report or a broadcast
- * delivery row (`<tenant>#BCAST#<runId>` / `WA#<wamid>`). An unknown id is acknowledged and ignored (medicoach's own messages, an expired
+ * writes; the lookup's `kind` says whether it points at a captain's report (`captains-report`,
+ * or no `kind` on rows written before the discriminator), a squad request (`squad-request`,
+ * `SQUADREQ#` deliveries) or a broadcast delivery row (`<tenant>#BCAST#<runId>` / `WA#<wamid>`). An unknown id is acknowledged and ignored (medicoach's own messages, an expired
  * lookup) — never an error, so the forwarder never retries it. Statuses only move forward:
  * sent < delivered < read, and failed is final.
  */
@@ -130,7 +131,22 @@ async function applyBroadcastStatus(
   return ok ? 'matched' : 'stale';
 }
 
-/** Apply parsed statuses to the report / broadcast deliveries they belong to. */
+/** Apply one status to a squad request's WhatsApp delivery (never a captain's report). */
+async function applySquadStatus(
+  repo: RepoModule,
+  ref: { tenant: string; seriesId: string; fixtureId: string; teamId: string },
+  s: ParsedStatus,
+): Promise<keyof StatusApplySummary> {
+  const req = await repo.getSquadRequest(ref.tenant, ref.seriesId, ref.fixtureId, ref.teamId);
+  const index = req?.deliveries?.findIndex((d) => d.channel === 'whatsapp' && d.messageId === s.id);
+  if (!req || index === undefined || index < 0) return 'unknown';
+  const update = nextProviderStatus(req.deliveries![index].providerStatus, s);
+  if (!update) return 'stale';
+  const ok = await repo.setSquadRequestProviderStatus(ref.tenant, req, index, s.id, update);
+  return ok ? 'matched' : 'unknown';
+}
+
+/** Apply parsed statuses to the report / squad / broadcast deliveries they belong to. */
 export async function applyWhatsAppStatuses(
   repo: RepoModule,
   statuses: ParsedStatus[],
@@ -140,6 +156,10 @@ export async function applyWhatsAppStatuses(
     const lookup = await repo.getWhatsAppMessageLookup(s.id);
     if (lookup?.kind === 'broadcast') {
       out[await applyBroadcastStatus(repo, lookup, s)]++;
+      continue;
+    }
+    if (lookup?.kind === 'squad-request') {
+      out[await applySquadStatus(repo, lookup.ref, s)]++;
       continue;
     }
     const ref = lookup?.kind === 'captains-report' ? lookup.ref : null;

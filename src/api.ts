@@ -40,6 +40,11 @@ import type {
   CaptainsReportFields,
   ClubCaptainsReportDetail,
   LinkedCaptainsReport,
+  LinkedSquadRequest,
+  SquadRequestView,
+  SquadSaveBody,
+  TeamCaptainResponse,
+  CaptainCandidatesResponse,
   ScorecardConsoleFilter,
   ScorecardConsolePayload,
   SendResult,
@@ -1440,6 +1445,54 @@ export const forwardLinkedCaptainsReport = (token: string, candidateId: string) 
     method: 'POST',
     body: { candidateId },
     auth: false,
+  });
+
+// Pre-match captain squad links (/sq/<token>): no auth, the token is the capability. Unlike the
+// captain's report a submitted squad stays editable until expiry; every PUT carries the
+// `expectedModified` it rendered (409 to a stale tab).
+const squadLinkPath = (token: string) => `/squad-link/${encodeURIComponent(token)}`;
+export const getLinkedSquadRequest = (token: string) =>
+  request<LinkedSquadRequest>(squadLinkPath(token), { auth: false });
+export const putLinkedSquadRequest = (token: string, body: SquadSaveBody) =>
+  request<LinkedSquadRequest>(squadLinkPath(token), { method: 'PUT', body, auth: false });
+/** The chair's link only: who the squad link can be sent on to. */
+export const getSquadForwardCandidates = (token: string) =>
+  request<ForwardCandidates>(`${squadLinkPath(token)}/forward-candidates`, { auth: false });
+export const forwardLinkedSquadRequest = (token: string, candidateId: string) =>
+  request<LinkedSquadRequest>(`${squadLinkPath(token)}/forward`, {
+    method: 'POST',
+    body: { candidateId },
+    auth: false,
+  });
+/** A club team's designated captain (`teamId` = the club id or one of its `tm_` sides). */
+export const getTeamCaptain = (clubId: string, teamId: string) =>
+  request<TeamCaptainResponse>(
+    `/clubs/${encodeURIComponent(clubId)}/teams/${encodeURIComponent(teamId)}/captain`,
+  );
+/** Who the team's captain can be (own players + veterans affiliates; opaque ids only). */
+export const getCaptainCandidates = (clubId: string, teamId: string) =>
+  request<CaptainCandidatesResponse>(
+    `/clubs/${encodeURIComponent(clubId)}/teams/${encodeURIComponent(teamId)}/captain-candidates`,
+  );
+/** Set (`candidateId`) or clear (`null`) the team's designated captain. */
+export const putTeamCaptain = (clubId: string, teamId: string, candidateId: string | null) =>
+  request<TeamCaptainResponse>(
+    `/clubs/${encodeURIComponent(clubId)}/teams/${encodeURIComponent(teamId)}/captain`,
+    { method: 'PUT', body: { candidateId } },
+  );
+/** Union office: every squad request (names only, never keys or contacts). */
+export const getSquadRequests = (query: { status?: string; from?: string; to?: string } = {}) =>
+  request<SquadRequestView[]>('/admin/squad-requests', { query });
+const adminSquadPath = (id: string) => `/admin/squad-requests/${encodeURIComponent(id)}`;
+/** Re-send a PENDING request's notice on a fresh link (older links stop working). */
+export const resendSquadRequest = (id: string) =>
+  request<{ request: SquadRequestView; notice: string }>(`${adminSquadPath(id)}/resend`, {
+    method: 'POST',
+  });
+/** Void a request; a submitted squad is also withdrawn from medicoach. */
+export const voidSquadRequest = (id: string) =>
+  request<{ request: SquadRequestView; voidPushQueued: boolean }>(`${adminSquadPath(id)}/void`, {
+    method: 'POST',
   });
 
 /** Operator console: scorecard answers in captains reports across every tenant. */

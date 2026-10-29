@@ -49,11 +49,16 @@ const headers = (auth?: string) => ({
 });
 
 const DAY = 24 * 3600 * 1000;
+// Convention: a test that pins ANY absolute date must pin ALL its dates — a rolling isoDay()
+// eventually crosses a fixed one (the time bombs that broke this suite).
 const isoDay = (offsetDays: number) =>
   new Date(Date.now() + offsetDays * DAY).toISOString().slice(0, 10);
 /** Yesterday: always inside the 7-day window, so the link is live. */
 const MATCH_DATE = isoDay(-1);
-const GO_LIVE = isoDay(-30);
+/** Pinned, not rolling: the example result pages carry a FIXED 2026-10-04 match, which a
+ * rolling today-30d go-live would overtake (from 2026-11-04 every opening test went dark).
+ * Every rolling date here stays after it. */
+const GO_LIVE = '2026-09-01';
 const CAPTAIN_KEY = '0'.repeat(64); // the example's captainRef natural key
 const CAPTAIN_REF = `smartclub:dolphins:player:${CAPTAIN_KEY}`;
 
@@ -401,6 +406,16 @@ describe('result → reports → notices', () => {
   test('the expiry is judged on SAST days, not UTC (a result at 00:30 SAST counts from that day)', async () => {
     // Match on Sun 27 Sep; the result arrives at 00:30 SAST on Mon 5 Oct (22:30Z on 4 Oct).
     // Received + 3 days = Thu 8 Oct 23:59:59 SAST (21:59:59Z), later than match + 7 days.
+    // Fixed dates need a fixed go-live: the suite's rolling GO_LIVE (today-30d) crosses
+    // 2026-09-27 on 2026-09-28 and silently skips the match as before-go-live.
+    const cfg = (await repo.getTenantConfig('dolphins'))!;
+    await repo.putTenantConfig({
+      ...cfg,
+      integrations: {
+        ...cfg.integrations,
+        medicoach: { ...cfg.integrations?.medicoach, goLiveDate: '2026-09-01' },
+      },
+    });
     const old = (await repo.getSeries('dolphins', 's-planb-premier-men-t20-g1'))!;
     await repo.putSeries('dolphins', {
       ...old,

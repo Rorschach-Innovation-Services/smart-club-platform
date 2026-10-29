@@ -42,6 +42,9 @@ const LINK_SECRET = 'local-dev-captains-report-link-secret'; // env.ts LOCAL_AUT
 const HOME = 'ukzn';
 const AWAY = 'crusaders';
 const SERIES_ID = `s-e2e-capreport-${RUN}`;
+// Run-unique kick-off minute: a reused stack keeps earlier runs' released series, and the
+// release gate refuses the same ground at the same date + time (venue_clash).
+const MIN = String(parseInt(RUN.slice(-4), 36) % 60).padStart(2, '0');
 const UMP_A = `A.Ump${RUN}`;
 const UMP_B = `B.Ump${RUN}`;
 
@@ -98,7 +101,9 @@ async function seedFixture(request: APIRequestContext, umpireIds: string[]) {
         { teamId: HOME, clubId: HOME, name: 'UKZN' },
         { teamId: AWAY, clubId: AWAY, name: 'Crusaders' },
       ],
-      fixtures: [{ id: 'f1', round: 1, date: MATCH_DATE, time: '09:00', home: HOME, away: AWAY }],
+      fixtures: [
+        { id: 'f1', round: 1, date: MATCH_DATE, time: `09:${MIN}`, home: HOME, away: AWAY },
+      ],
     },
   });
   expect(create.ok(), `POST /series → ${create.status()} ${await create.text()}`).toBeTruthy();
@@ -131,7 +136,7 @@ function resultPage() {
         ref: `smartclub:${TENANT}:fixture:${SERIES_ID}:f1`,
         syncStamp: recordedAt,
         schedule: {
-          scheduledTime: `${MATCH_DATE}T09:00:00+02:00`,
+          scheduledTime: `${MATCH_DATE}T09:${MIN}:00+02:00`,
           timeTbc: false,
           dateTbc: false,
           venue: null,
@@ -425,7 +430,10 @@ test("the home club reports a match that isn't in the fixture list", async ({ pa
 test('the union office sees both reports and the umpire averages', async ({ page: browser }) => {
   await signInAsAdmin(browser);
   await browser.locator('aside.nav .nav-item', { hasText: "Captain's reports" }).click();
-  const rows = browser.getByRole('row', { name: /UKZN v Crusaders/ });
+  // Scoped to this run's series (the competition line): a reused stack keeps earlier runs' rows.
+  const rows = browser.getByRole('row', {
+    name: new RegExp(`UKZN v Crusaders.*Captain's report E2E ${RUN}`),
+  });
   await expect(rows).toHaveCount(2);
   // Each row says what happened to its notice, never just who it was "sent to".
   await expect(browser.getByRole('columnheader', { name: 'Notice' })).toBeVisible();
@@ -441,7 +449,7 @@ test('the union office sees both reports and the umpire averages', async ({ page
   await browser.getByRole('button', { name: /^All reports|← All reports/ }).click();
   await browser.getByRole('button', { name: /low ratings/i }).click();
   await browser.setViewportSize({ width: 375, height: 740 });
-  const card = browser.getByRole('row', { name: /UKZN v Crusaders/ }).first();
+  const card = rows.first();
   for (const label of ['Status', 'Ratings', 'Notice']) {
     const cell = card.locator(`td[data-label="${label}"]`);
     const box = await cell.boundingBox();

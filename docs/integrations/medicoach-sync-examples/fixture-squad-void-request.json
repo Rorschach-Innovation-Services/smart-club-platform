@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "tenant": "dolphins",
+  "op": "void",
+  "fixtureRef": "smartclub:dolphins:fixture:s-planb-premier-men-t20-g1:f5",
+  "side": "home",
+  "teamRef": "smartclub:dolphins:team:premier-men-t20:crusaders",
+  "players": [],
+  "guests": [],
+  "submittedAt": "2026-10-24T09:05:00.000Z"
+}
