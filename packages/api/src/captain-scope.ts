@@ -12,6 +12,14 @@
  * designation survives into next season and Premier / Veterans Premier / Premier Women's are
  * distinct. A series with neither falls back to `series:<seriesId>` (deterministic, but
  * per-series: such a designation does not carry over to another series).
+ *
+ * The scope is derived LIVE from the series / run `leagueKey` on every read — it is never
+ * stored on the series. So moving a series to another league (repo.ts `seriesStructureClubIds`,
+ * a `leagueKey` / `seasonRunId` change) silently orphans the designations and last-captain
+ * rows written under the old scope: they stay in the table but are no longer read, and the
+ * club must designate again for the new league. For the same reason a league key must NEVER
+ * be repurposed for a different competition — every row under `league:<key>` would then
+ * answer for the new one.
  */
 import type { Series } from '../../engine/src/types.js';
 
@@ -31,6 +39,21 @@ export async function captainScopeOfSeries(
     const run = await repo.getSeasonRun(tenant, series.seasonRunId);
     key = run?.leagueKey ?? '';
   }
+  return key ? `${LEAGUE}${key}` : `${SERIES}${String(series.id)}`;
+}
+
+/**
+ * The scope of a series given its already-loaded season run (no read). Same rule as
+ * `captainScopeOfSeries`; callers that hold a run list use this to avoid one read per series.
+ */
+export function captainScopeFromRun(
+  series: Pick<Series, 'id'> & { leagueKey?: unknown },
+  run: { leagueKey?: string } | null | undefined,
+): string {
+  const key =
+    typeof series.leagueKey === 'string' && series.leagueKey
+      ? series.leagueKey
+      : (run?.leagueKey ?? '');
   return key ? `${LEAGUE}${key}` : `${SERIES}${String(series.id)}`;
 }
 

@@ -2081,5 +2081,97 @@ describe('captain rows are scoped per competition (shared teamId)', () => {
       assert.equal((await put({ scope: SC2, candidateId: null })).status, 200);
       assert.equal(await repo.getTeamCaptain(T, 'umzinto', 'umzinto', SC2), null);
     });
+
+    test('PUT validates the body shape before any read (bad body on an unknown team is 400)', async () => {
+      await seedApi();
+      const ghost = '/clubs/umzinto/teams/no-such-team/captain';
+      const bad = (body: unknown) =>
+        app.request(ghost, { method: 'PUT', headers: h(), body: JSON.stringify(body) });
+      assert.equal((await bad({ candidateId: 'x' })).status, 400, 'scope missing');
+      assert.equal((await bad({ scope: SC })).status, 400, 'candidateId missing');
+      assert.equal(
+        (await bad({ scope: SC, candidateId: 7 })).status,
+        400,
+        'candidateId not a string',
+      );
+      assert.equal((await bad({ scope: SC, candidateId: '' })).status, 400);
+      // A well-formed body reaches the club read: unknown team ⇒ 404.
+      assert.equal((await bad({ scope: SC, candidateId: null })).status, 404);
+    });
+
+    const run = (id: string, leagueKey: string, createdAt: string) =>
+      ({
+        id,
+        leagueKey,
+        seasonLabel: createdAt.slice(0, 4),
+        structureSnapshot: {},
+        calendarSnapshot: {},
+        stages: [],
+        createdAt,
+        version: 1,
+      }) as never;
+
+    test('only CURRENT competitions: past season runs and finished series are not listed', async () => {
+      await seedApi();
+      await repo.putSeasonRun(T, run('run-old', 'womens', '2025-01-01T00:00:00.000Z'));
+      await repo.putSeasonRun(T, run('run-new', 'womens', '2026-01-01T00:00:00.000Z'));
+      await repo.putSeasonRun(T, run('run-cup-old', 'cup', '2025-01-01T00:00:00.000Z'));
+      await repo.putSeasonRun(T, run('run-cup-new', 'cup', '2026-01-01T00:00:00.000Z'));
+      const base = series([fx('f1', 'umzinto', 'african-warriors')], [P_UMZ, P_AW]) as object;
+      const put2 = (over: Record<string, unknown>) =>
+        repo.putSeries(T, { ...base, leagueKey: undefined, ...over } as unknown as Series);
+      // Current season of `womens`: listed.
+      await put2({ id: 's-w-new', name: 'Womens 2026', seasonRunId: 'run-new' });
+      // Previous season of `cup` (the team is not in this season's cup): never listed.
+      await put2({ id: 's-cup-old', name: 'Cup 2025', seasonRunId: 'run-cup-old' });
+      // A run-less series whose fixtures are all past: finished, not listed.
+      await put2({
+        id: 's-old-friendly',
+        name: 'Old Friendly',
+        startDate: '2025-02-01',
+        fixtures: [fx('f9', 'umzinto', 'african-warriors', { date: '2025-02-01' })],
+      });
+      // A legacy run-less, undated series still counts.
+      await put2({ id: 's-undated', name: 'Undated Cup', startDate: undefined, fixtures: [] });
+      const scopes = (await list()).map((c) => c.scope).sort();
+      assert.deepEqual(
+        scopes,
+        [SC, 'league:vets-premier', 'league:womens', 'series:s-undated'].sort(),
+      );
+      assert.equal((await put({ scope: 'league:cup', candidateId: null })).status, 400);
+      assert.equal((await put({ scope: 'series:s-old-friendly', candidateId: null })).status, 400);
+    });
+
+    test('season runs are loaded once per call (no per-series run read)', async () => {
+      await seedApi();
+      await repo.putSeasonRun(T, run('run-new', 'womens', '2026-01-01T00:00:00.000Z'));
+      const base = series([fx('f1', 'umzinto', 'african-warriors')], [P_UMZ, P_AW]) as object;
+      for (const id of ['s-a', 's-b', 's-c'])
+        await repo.putSeries(T, {
+          ...base,
+          id,
+          name: id,
+          leagueKey: undefined,
+          seasonRunId: 'run-new',
+        } as unknown as Series);
+      let runReads = 0;
+      let runLists = 0;
+      const counted = {
+        ...repo,
+        getSeasonRun: async (...a: Parameters<typeof repo.getSeasonRun>) => {
+          runReads++;
+          return repo.getSeasonRun(...a);
+        },
+        listSeasonRuns: async (...a: Parameters<typeof repo.listSeasonRuns>) => {
+          runLists++;
+          return repo.listSeasonRuns(...a);
+        },
+      } as typeof repo;
+      const comps = await squad.teamCaptainCompetitions(counted, T, 'umzinto', 'umzinto');
+      assert.ok(comps.some((c) => c.scope === 'league:womens'));
+      assert.equal(comps.filter((c) => c.scope === 'league:womens').length, 1, 'deduped by scope');
+      assert.equal(runReads, 0);
+      assert.equal(runLists, 1);
+    });
   });
 });

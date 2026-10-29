@@ -59,7 +59,7 @@ import {
   sideName,
   type NoticeResult,
 } from './captains-reports.js';
-import { captainScopeOfSeries, leagueKeyOfScope } from './captain-scope.js';
+import { captainScopeFromRun, captainScopeOfSeries, leagueKeyOfScope } from './captain-scope.js';
 import { chairContactOf } from './club-contacts.js';
 import { captainsReportLinkBase, captainsReportLinkSecret } from './env.js';
 import { hasFeature } from './features.js';
@@ -69,12 +69,14 @@ import { seriesMappedForSync } from './medicoach-sync/schedule.js';
 import { toE164 } from './notify/e164.js';
 import { noticeWindowOverride } from './notice-window.js';
 import { WHATSAPP_TEMPLATES } from './notify/whatsapp-templates.js';
+import { compareRunsNewestFirst } from './medicoach-export-build.js';
 import { isWithheld, projectSeriesForClub } from './series-projection.js';
 import { TENANT_UTC_OFFSET_MINUTES, tenantDate } from './tenant-time.js';
 import type {
   CaptainsReportDelivery,
   Club,
   PlayerRegistration,
+  SeasonRun,
   Series,
   SquadRequest,
   SquadSelection,
@@ -345,18 +347,52 @@ export interface TeamCaptainCompetition {
   name: string;
 }
 
+/** The last civil date a series plays on: max of `endDate`, fixture dates, `startDate`. */
+function seriesLastDate(series: Series): string | null {
+  let last = '';
+  const take = (d: unknown) => {
+    if (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}/.test(d) && d.slice(0, 10) > last)
+      last = d.slice(0, 10);
+  };
+  take(series.startDate);
+  take(series.endDate);
+  for (const f of (series.fixtures as Array<{ date?: unknown; status?: unknown }> | undefined) ??
+    []) {
+    if (f && f.status !== 'cancelled') take(f.date);
+  }
+  return last || null;
+}
+
 /**
- * The competitions a club team currently plays in, one per captain scope: every RELEASED
- * series of the tenant with the team as a participant (legacy participant-less series count
- * when `teams[]` names it and it is the club's own id). Sorted by name.
+ * The competitions a club team CURRENTLY plays in, one per captain scope. A series counts when:
+ *  - it is released, and the team is a participant (legacy participant-less series count when
+ *    `teams[]` names it and it is the club's own id);
+ *  - it belongs to the CURRENT season: a series produced by a season run counts only when that
+ *    run is the newest run of its league (`compareRunsNewestFirst`, the same "newest run is the
+ *    live stream" rule the medicoach export uses) — older seasons never surface;
+ *  - it is not finished: its last date (endDate / fixture dates / startDate) is today or later
+ *    (tenant civil day). A series with no date at all counts (undated / TBC calendars).
+ * Season runs are read ONCE (one list, alongside the series list) — never one read per series.
+ * Sorted by name.
  */
 export async function teamCaptainCompetitions(
   repo: RepoModule,
   tenant: string,
   clubId: string,
   teamId: string,
+  now: Date = new Date(),
 ): Promise<TeamCaptainCompetition[]> {
-  const [all, config] = await Promise.all([repo.listSeries(tenant), repo.getTenantConfig(tenant)]);
+  const [all, runs, config] = await Promise.all([
+    repo.listSeries(tenant),
+    repo.listSeasonRuns(tenant),
+    repo.getTenantConfig(tenant),
+  ]);
+  const today = tenantDate(now);
+  const runById = new Map(runs.map((r) => [r.id, r]));
+  const newestByLeague = new Map<string, SeasonRun>();
+  for (const r of [...runs].sort(compareRunsNewestFirst)) {
+    if (!newestByLeague.has(r.leagueKey)) newestByLeague.set(r.leagueKey, r);
+  }
   const labels = new Map((config?.leagues ?? []).map((l) => [l.key, l.label]));
   const out = new Map<string, TeamCaptainCompetition>();
   for (const series of all) {
@@ -365,7 +401,11 @@ export async function teamCaptainCompetitions(
       ? series.participants.some((p) => p.teamId === teamId && p.clubId === clubId)
       : teamId === clubId && (series.teams ?? []).includes(teamId);
     if (!plays) continue;
-    const scope = await captainScopeOfSeries(repo, tenant, series);
+    const run = series.seasonRunId ? runById.get(series.seasonRunId) : undefined;
+    if (run && newestByLeague.get(run.leagueKey)?.id !== run.id) continue; // past season
+    const last = seriesLastDate(series);
+    if (last && last < today) continue; // finished
+    const scope = captainScopeFromRun(series, run);
     if (out.has(scope)) continue;
     const key = leagueKeyOfScope(scope);
     out.set(scope, { scope, name: (key && labels.get(key)) || String(series.name ?? scope) });

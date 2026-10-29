@@ -126,6 +126,9 @@ function TeamCaptainRow({ clubId, team }: { clubId: string; team: { id: string; 
     queryKey: qk.teamCaptain(clubId, team.id),
     queryFn: () => getTeamCaptain(clubId, team.id),
   });
+  // Candidates are deliberately TEAM-wide, not per competition: the club's roster (plus the
+  // veterans affiliation expansion server-side) may captain any of the team's sides, so one
+  // list serves every competition picker below; only the designation row is per competition.
   const candidates = useQuery({
     queryKey: qk.captainCandidates(clubId, team.id),
     queryFn: () => getCaptainCandidates(clubId, team.id),

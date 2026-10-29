@@ -8557,14 +8557,17 @@ app.put('/clubs/:id/teams/:teamId/captain', async (c) => {
   const id = c.req.param('id');
   const teamId = c.req.param('teamId');
   assertClubAccess(ra, id);
-  const club = await repo.getClub(ra.tenant, id);
-  if (!club || !clubOwnsTeam(club, teamId)) throw new HttpError(404, 'team not found');
+  // Body shape first: a malformed body is a 400 before any club / series / roster read.
   const body = ((await c.req.json().catch(() => null)) ?? {}) as {
     scope?: unknown;
     candidateId?: unknown;
   };
   if (!isCaptainScope(body.scope)) throw new HttpError(400, 'scope is required');
+  if (body.candidateId !== null && (typeof body.candidateId !== 'string' || !body.candidateId))
+    throw new HttpError(400, 'candidateId is required (or null to clear)');
   const scope = body.scope;
+  const club = await repo.getClub(ra.tenant, id);
+  if (!club || !clubOwnsTeam(club, teamId)) throw new HttpError(404, 'team not found');
   const comps = await teamCaptainCompetitions(repo, ra.tenant, id, teamId);
   const comp = comps.find((x) => x.scope === scope);
   if (!comp) throw new HttpError(400, 'this team does not play in that competition');
@@ -8572,8 +8575,9 @@ app.put('/clubs/:id/teams/:teamId/captain', async (c) => {
     await repo.deleteTeamCaptain(ra.tenant, id, teamId, scope);
     return c.json({ teamId, ...comp, captain: null });
   }
-  if (typeof body.candidateId !== 'string' || !body.candidateId)
-    throw new HttpError(400, 'candidateId is required (or null to clear)');
+  // Candidates are deliberately TEAM-wide, not per competition: the club's roster (plus the
+  // veterans affiliation expansion) is who may captain any of the team's sides; the scope only
+  // decides which competition's designation row is written.
   const list = await captainCandidates(repo, ra.tenant, id, teamId, captainsReportLinkSecret());
   const hit = list.find((e) => e.id === body.candidateId);
   if (!hit) throw new HttpError(400, "that player is not on the club's roster");
