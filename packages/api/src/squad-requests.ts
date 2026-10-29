@@ -55,7 +55,7 @@ import {
   liveFixtureVenue,
   MAX_FORWARDS,
   pastDeadline,
-  resolvePlayerContact,
+  resolveCaptainLadder,
   sideName,
   type NoticeResult,
 } from './captains-reports.js';
@@ -724,17 +724,10 @@ export async function resolveSquadRecipient(
   teamId: string,
   scope: string,
 ): Promise<SquadRecipient> {
-  const designated = await repo.getTeamCaptain(tenant, club.id, teamId, scope);
-  if (designated) {
-    const c = await resolvePlayerContact(repo, tenant, club.id, designated.playerKey);
-    if (c) return { kind: 'captain', rung: 'designated', contact: c };
-  }
-  const last = await repo.getTeamLastCaptain(tenant, club.id, teamId, scope);
-  if (last) {
-    const c = await resolvePlayerContact(repo, tenant, club.id, last.naturalKey);
-    if (c) return { kind: 'captain', rung: 'last-captain', contact: c };
-  }
-  return { kind: 'chair', rung: 'chair', contact: chairContactOf(club) };
+  const r = await resolveCaptainLadder(repo, tenant, club, teamId, scope);
+  // Without the medicoach / squad-link inputs only these three rungs can answer.
+  const rung = r.rung as SquadRecipient['rung'];
+  return { kind: r.kind, rung, contact: r.contact };
 }
 
 /**

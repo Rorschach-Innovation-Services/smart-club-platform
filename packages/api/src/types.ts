@@ -1774,10 +1774,19 @@ export type CaptainsReportStatus = 'pending' | 'submitted' | 'void';
  * bound to it, so re-addressing a report kills the old link. `kind: 'portal'` marks a report
  * a club filed by hand from the portal (no link was sent).
  */
+/** The captain-ladder rung that answered (captains-reports.ts `resolveCaptainLadder`). */
+export type CaptainLadderRung = 'medicoach' | 'squad-link' | 'designated' | 'last-captain' | 'chair';
+
 export interface CaptainsReportRecipient {
   kind: 'captain' | 'chair' | 'portal';
   memberId: string;
   name: string;
+  /**
+   * Which rung of the captain ladder addressed an auto-opened report (see
+   * `resolveCaptainLadder`). Absent on rows opened before the ladder, on portal/manual rows and
+   * on squad requests. Never a natural key.
+   */
+  rung?: CaptainLadderRung;
   /** Set when the chair sent the report on to the match captain ("Send to captain"). */
   forwardedBy?: { name: string; via: 'link' | 'portal'; at: string };
 }

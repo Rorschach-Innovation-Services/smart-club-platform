@@ -54,6 +54,7 @@ import type {
   CaptainsReport,
   CaptainsReportDelivery,
   CaptainsReportDeliveryReason,
+  CaptainLadderRung,
   CaptainsReportRecipient,
   CaptainsReportScorecardAnswer,
   Club,
@@ -422,7 +423,7 @@ export type CaptainsReportView = Omit<
   CaptainsReport,
   'recipient' | 'deadline' | 'chairMemberId' | 'recipientContact' | 'deliveries'
 > & {
-  recipient: Omit<CaptainsReportRecipient, 'memberId'>;
+  recipient: Omit<CaptainsReportRecipient, 'memberId' | 'rung'>;
   deliveries?: Array<Omit<CaptainsReportDelivery, 'messageId'>>;
   venueWithheld?: true;
 };
@@ -469,7 +470,8 @@ function scopedVenue(
 }
 
 export function reportView(r: CaptainsReport, scope?: ReportViewScope): CaptainsReportView {
-  const { memberId: _m, ...recipient } = r.recipient;
+  // The ladder rung is server-only (ops/audit), like the memberId: views stay unchanged.
+  const { memberId: _m, rung: _rung, ...recipient } = r.recipient;
   const {
     deadline: _d,
     chairMemberId: _c,
@@ -726,20 +728,50 @@ function playerNaturalKey(ref: string | null | undefined, tenant: string): strin
 export const hasContact = (c: { email?: string; cell?: string }) =>
   (!!c.email && EMAIL_RE.test(c.email)) || !!toE164(c.cell);
 
+/** A ladder rung that answered with a player: the fresh contact plus the key (never logged). */
+export interface CaptainLadderResult {
+  kind: 'captain' | 'chair';
+  rung: CaptainLadderRung;
+  contact: { name: string; email?: string; cell?: string };
+  /** The answering player's natural key (captain rungs only). Point-gets only; never stored. */
+  naturalKey?: string;
+}
+
 /**
- * The scoring side's match captain as a notify contact, or null (→ the chair). The ref is used
- * for two point-gets and then dropped.
+ * The captain ladder, per side: medicoach scorecard captain (`captainRef`) → the captain picked
+ * on this fixture's SUBMITTED pre-match squad link (`squadCaptainKey`) → the team's designated
+ * captain for the competition `scope` → its last known captain for that scope → the chair.
+ * Every rung re-resolves the player FRESH (`resolvePlayerContact`: roster / veterans
+ * affiliation, minor, no-contact, erasure ⇒ null) and a rejected rung falls through. A null
+ * `scope` (its read failed) skips the two scoped rungs. Shared by the captain's report and the
+ * squad-link recipient (which passes neither of the first two rungs).
  */
-async function resolveCaptain(
+export async function resolveCaptainLadder(
   repo: RepoModule,
   tenant: string,
-  clubId: string,
-  captainRef: string | null,
-): Promise<{ name: string; email?: string; cell?: string; naturalKey: string } | null> {
-  const naturalKey = playerNaturalKey(captainRef, tenant);
-  if (!naturalKey) return null;
-  const contact = await resolvePlayerContact(repo, tenant, clubId, naturalKey);
-  return contact ? { ...contact, naturalKey } : null;
+  club: Club,
+  teamId: string,
+  scope: string | null,
+  opts: { captainRef?: string | null; squadCaptainKey?: string | null } = {},
+): Promise<CaptainLadderResult> {
+  const tryKey = async (naturalKey: string | null | undefined, rung: CaptainLadderRung) => {
+    if (!naturalKey) return null;
+    const contact = await resolvePlayerContact(repo, tenant, club.id, naturalKey);
+    return contact ? { kind: 'captain' as const, rung, contact, naturalKey } : null;
+  };
+  const medicoach = await tryKey(playerNaturalKey(opts.captainRef, tenant), 'medicoach');
+  if (medicoach) return medicoach;
+  const squad = await tryKey(opts.squadCaptainKey, 'squad-link');
+  if (squad) return squad;
+  if (scope !== null) {
+    const designated = await repo.getTeamCaptain(tenant, club.id, teamId, scope);
+    const d = await tryKey(designated?.playerKey, 'designated');
+    if (d) return d;
+    const last = await repo.getTeamLastCaptain(tenant, club.id, teamId, scope);
+    const l = await tryKey(last?.naturalKey, 'last-captain');
+    if (l) return l;
+  }
+  return { kind: 'chair', rung: 'chair', contact: chairContactOf(club) };
 }
 
 /**
@@ -802,7 +834,7 @@ export interface OpenReportsTarget {
   fixtureId: string;
   /** The medicoach fixture ref; match-day opens have none (`fixtureRef` is then omitted). */
   ref?: string;
-  /** null = no result yet: no summary, and both sides go to the chair. */
+  /** null = no result yet: no summary, and no medicoach captain rung. */
   result: SyncResult | null;
   config: TenantConfig;
   /** When the result first arrived (a retry passes its marker's time); default now. */
@@ -815,8 +847,10 @@ export interface OpenReportsTarget {
 
 /**
  * The result-optional core of `openCaptainReports` (no import skip, no summary correction).
- * With `result: null` the captain is unknowable (only a result names the scoring side's
- * captain), so both sides go to the chair; a later result fills the summary in silently.
+ * Each side's recipient comes from `resolveCaptainLadder` (with `result: null` the medicoach
+ * rung is empty, so the squad-link / designated / last captain or the chair answers). An
+ * already-open report keeps its recipient: a later result fills the summary in silently and
+ * never re-addresses or re-notifies it.
  */
 export async function openReportsForFixture(
   target: OpenReportsTarget,
@@ -882,31 +916,42 @@ export async function openReportsForFixture(
       ? sideName(series, other.teamId, clubs.get(other.clubId) ?? null)
       : 'TBC';
     const chair = chairContactOf(club);
+    // The competition scope of this side's captain rows (null = its read failed: the scoped
+    // rungs are skipped, the medicoach / squad-link rungs still answer).
+    const scope = await captainScopeOfSeries(repo, tenant, series).catch(() => null);
+    // A submitted (never a void / pending) squad link for THIS fixture and side.
+    const squadReq = await repo.getSquadRequest(tenant, seriesId, fixtureId, s.teamId);
+    const squadCaptainKey =
+      squadReq?.status === 'submitted' ? (squadReq.selection?.captainKey ?? null) : null;
+    const ladder = await resolveCaptainLadder(repo, tenant, club, s.teamId, scope, {
+      captainRef: result && result.scoringSide === s.side ? result.captainRef : null,
+      squadCaptainKey,
+    });
     const captain =
-      result && result.scoringSide === s.side
-        ? await resolveCaptain(repo, tenant, club.id, result.captainRef)
+      ladder.kind === 'captain' && ladder.naturalKey
+        ? { ...ladder.contact, naturalKey: ladder.naturalKey }
         : null;
-    if (captain)
+    if (captain && ladder.rung === 'medicoach' && scope !== null)
       // The team's last known captain (per TEAM and COMPETITION — a club's sides never share
       // it, even when one teamId plays several leagues), for the squad-link recipient ladder.
-      // Natural key + name only; best-effort (a scope read failure skips the write).
-      await captainScopeOfSeries(repo, tenant, series)
-        .then((scope) =>
-          repo.putTeamLastCaptain(tenant, {
-            clubId: club.id,
-            teamId: s.teamId,
-            scope,
-            naturalKey: captain.naturalKey,
-            name: captain.name,
-            seenAt: nowIso,
-          }),
-        )
+      // Written ONLY from the medicoach scorecard captain (never from a designation or from
+      // itself). Natural key + name only; best-effort.
+      await repo
+        .putTeamLastCaptain(tenant, {
+          clubId: club.id,
+          teamId: s.teamId,
+          scope,
+          naturalKey: captain.naturalKey,
+          name: captain.name,
+          seenAt: nowIso,
+        })
         .catch(() => {});
     const contact = captain ? contactOnlyNamed(captain) : chair;
     const recipient: CaptainsReportRecipient = {
       kind: captain ? 'captain' : 'chair',
       memberId: randomUUID(),
       name: contact.name,
+      rung: captain ? ladder.rung : 'chair',
     };
     const report: CaptainsReport = {
       id: captainsReportId(seriesId, fixtureId, club.id),
