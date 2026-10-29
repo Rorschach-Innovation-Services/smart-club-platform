@@ -27,6 +27,8 @@ const sastToday = (h: number) => {
 const AT_1900 = sastToday(19);
 const TODAY = new Date(AT_1900.getTime() + 2 * HOUR).toISOString().slice(0, 10);
 const GO_LIVE = new Date(AT_1900.getTime() - 30 * DAY).toISOString().slice(0, 10);
+const DEADLINE = new Date(AT_1900.getTime() + 30 * DAY).toISOString().slice(0, 10);
+const RELEASED_AT = new Date(AT_1900.getTime() - 60 * DAY).toISOString();
 const S1 = 's1'; // "EMCU Division 1" (excluded)
 const S2 = 's2'; // "Premier" (not excluded)
 const SECRET = 'kill-switch-secret';
@@ -60,7 +62,7 @@ async function seed(prefixes?: string[]) {
   await repo.putTenantConfig({
     tenant: T,
     branding: { name: 'Dolphins', title: 'Dolphins', logoUrl: '', colors: {}, copy: {} },
-    submissionDeadline: '2026-12-01',
+    submissionDeadline: DEADLINE,
     knownClubs: [],
     features: { medicoachSync: true, ...features },
     integrations: { medicoach: { goLiveDate: GO_LIVE } },
@@ -85,7 +87,7 @@ async function seed(prefixes?: string[]) {
       kind: 'series',
       approved: true,
       released: true,
-      releasedAt: '2026-09-01T00:00:00.000Z',
+      releasedAt: RELEASED_AT,
       version: 1,
     } as unknown as Series);
   await putOne(S1, 'EMCU Division 1', 'a', 'b');
@@ -263,10 +265,20 @@ describe('captainsReportsExcludedSeriesPrefixes', () => {
         headers: { 'x-dev-auth': OPERATOR, 'content-type': 'application/json' },
         body: JSON.stringify(body),
       });
-    for (const bad of ['EMCU', [''], ['  '], [1], Array.from({ length: 21 }, (_, i) => `p${i}`)]) {
+    for (const bad of [
+      'EMCU',
+      [''],
+      ['  '],
+      [1],
+      ['x'.repeat(201)],
+      Array.from({ length: 21 }, (_, i) => `p${i}`),
+    ]) {
       const res = await put({ captainsReportsExcludedSeriesPrefixes: bad });
       assert.equal(res.status, 400, JSON.stringify(bad));
     }
+    // The length limit applies AFTER trimming: 200 chars plus padding is accepted.
+    const padded = await put({ captainsReportsExcludedSeriesPrefixes: [`  ${'x'.repeat(200)}  `] });
+    assert.equal(padded.status, 200);
     const res = await put({ captainsReportsExcludedSeriesPrefixes: [' EMCU '] });
     assert.equal(res.status, 200);
     const json = (await res.json()) as TenantConfig;

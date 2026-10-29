@@ -272,6 +272,8 @@ function seriesExclusionResolver(
     let hit = cache.get(seriesId);
     if (hit === undefined) {
       const series = await repo.getSeries(tenant, seriesId);
+      // A missing series (no name) is deliberately NOT excluded. Failing open is harmless:
+      // openReportsForFixture then finds no fixture and returns no-fixture, so nothing sends.
       hit = seriesExcludedFromCaptainsReports(config, series?.name);
       cache.set(seriesId, hit);
     }

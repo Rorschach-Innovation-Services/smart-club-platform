@@ -345,7 +345,10 @@ export interface TenantConfig {
    * off for it alone (no opens, notices or reminders; queued open markers deleted; issued links
    * and portal filing untouched). Squad links are NOT affected. Used to exclude EMCU's
    * competitions ("EMCU …") inside the `dolphins` tenant. Operator-only: PUT /tenant/config
-   * strips it, only PUT /platform/tenants/:slug writes it (≤ 20 non-empty strings).
+   * strips it, only PUT /platform/tenants/:slug writes it (≤ 20 non-empty strings, each ≤ 200
+   * chars after trimming). Matching is by series NAME, so renaming an excluded series out of
+   * the prefix silently re-enables its reports (its old open markers were already deleted, so
+   * there is no backlog burst).
    */
   captainsReportsExcludedSeriesPrefixes?: string[];
   /**

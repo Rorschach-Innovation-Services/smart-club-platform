@@ -10931,11 +10931,11 @@ app.put('/platform/tenants/:slug', async (c) => {
     if (
       !Array.isArray(v) ||
       v.length > 20 ||
-      !v.every((p) => typeof p === 'string' && p.trim() !== '' && p.length <= 200)
+      !v.every((p) => typeof p === 'string' && p.trim() !== '' && p.trim().length <= 200)
     )
       throw new HttpError(
         400,
-        'captainsReportsExcludedSeriesPrefixes must be an array of at most 20 non-empty strings',
+        'captainsReportsExcludedSeriesPrefixes must be an array of at most 20 non-empty strings of at most 200 characters',
       );
     patch.captainsReportsExcludedSeriesPrefixes = v.map((p: string) => p.trim());
   }
