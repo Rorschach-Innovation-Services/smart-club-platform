@@ -139,7 +139,14 @@ export interface CaptainsReport {
 export interface CaptainsReportDelivery {
   channel: 'email' | 'whatsapp';
   status: 'sent' | 'failed' | 'skipped';
-  reason?: 'no-contact' | 'no-email' | 'no-cell' | 'dry-run' | 'template-pending' | 'send-failed';
+  reason?:
+    | 'no-contact'
+    | 'no-email'
+    | 'no-cell'
+    | 'dry-run'
+    | 'template-pending'
+    | 'send-failed'
+    | 'dead-link-base';
   at: string;
   purpose: 'opened' | 'forwarded' | 'reminder';
   recipientKind: 'captain' | 'chair';
@@ -180,6 +187,8 @@ export interface ScorecardContext {
     winner?: 'home' | 'away' | 'tie' | 'none';
   };
   medicoachMatchUrl?: string;
+  /** A manual result with no usable card: why, and the scoring site's page when known. */
+  scorecardAbsentNote?: { text: string; url?: string };
 }
 /**
  * Operator console: GET /platform/captains-report-scorecards (MIRRORS the API's

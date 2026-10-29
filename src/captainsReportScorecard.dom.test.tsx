@@ -641,3 +641,45 @@ describe('the success card', () => {
     );
   });
 });
+
+describe('the scorecard-absent note', () => {
+  // Copy split (API: scorecardAbsentNoteFor): CSA-flavoured when the result points at a
+  // scored match, else the general sentence; the link only when a url exists.
+  const TEXT = "CSA's published scorecard for this match could not be used.";
+  const GENERAL = 'No scorecard is available for this match.';
+  const render = (ctx: ScorecardContext) =>
+    renderWithProviders(
+      <CaptainsReportForm
+        report={shell()}
+        registry={REGISTRY}
+        onSubmit={vi.fn()}
+        scorecardContext={ctx}
+      />,
+    );
+
+  it('a cardless manual result shows the sentence and ONE scoring-site link', () => {
+    render({
+      result: WITH_CARD.result,
+      medicoachMatchUrl: 'https://medicoach.example/matches/1',
+      scorecardAbsentNote: { text: TEXT, url: 'https://medicoach.example/matches/1' },
+    });
+    const note = within(section()).getByTestId('scorecard-absent-note');
+    expect(note).toHaveTextContent(TEXT);
+    expect(within(section()).getAllByRole('link')).toHaveLength(1);
+    expect(within(note).getByRole('link', { name: /View it on the scoring site/ })).toHaveAttribute(
+      'href',
+      'https://medicoach.example/matches/1',
+    );
+  });
+
+  it('without a url: the sentence, no link', () => {
+    render({ result: WITH_CARD.result, scorecardAbsentNote: { text: GENERAL } });
+    expect(within(section()).getByTestId('scorecard-absent-note')).toHaveTextContent(GENERAL);
+    expect(within(section()).queryByRole('link')).toBeNull();
+  });
+
+  it('a carded report never shows it', () => {
+    render(WITH_CARD);
+    expect(screen.queryByTestId('scorecard-absent-note')).toBeNull();
+  });
+});

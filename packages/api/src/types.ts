@@ -1772,7 +1772,8 @@ export interface CaptainsReportRecipient {
 /**
  * Why a notice channel was not sent: `no-contact` (no email AND no cell on file), `no-email`,
  * `no-cell`, `dry-run` (NOTIFY_DRY_RUN / no provider credentials), `template-pending` (no
- * approved WhatsApp template), `send-failed` (the provider refused or errored).
+ * approved WhatsApp template), `send-failed` (the provider refused or errored), `dead-link-base`
+ * (a prod notice whose link points at localhost: refused, nothing sent).
  */
 export type CaptainsReportDeliveryReason =
   | 'no-contact'
@@ -1780,7 +1781,8 @@ export type CaptainsReportDeliveryReason =
   | 'no-cell'
   | 'dry-run'
   | 'template-pending'
-  | 'send-failed';
+  | 'send-failed'
+  | 'dead-link-base';
 
 /**
  * One channel of one notice about a report (the opening, a chair's forward, the reminder).

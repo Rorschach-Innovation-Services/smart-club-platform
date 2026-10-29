@@ -292,6 +292,7 @@ import {
   forwardReport,
   hasContact,
   loadLinkedReport,
+  reportExpirySeconds,
   MAX_FORWARDS,
   NOTICE_FAILED_ERROR,
   notifyOperatorsOfCorrection,
@@ -8302,7 +8303,16 @@ async function linkedReportOr410(c: Context<HonoEnv>) {
   return found;
 }
 
-async function linkPayload(tenant: string, report: CaptainsReport, isChairLink: boolean) {
+/**
+ * `tokenExpiresAt` is the opened link's own expiry: the page's "Link expires" follows the
+ * token (the capability), never the stored report expiry, which only stops notices.
+ */
+async function linkPayload(
+  tenant: string,
+  report: CaptainsReport,
+  isChairLink: boolean,
+  tokenExpiresAt: number,
+) {
   const [cfg, umpires, views, context] = await Promise.all([
     repo.getTenantConfig(tenant),
     repo.listUmpires(tenant),
@@ -8310,7 +8320,12 @@ async function linkPayload(tenant: string, report: CaptainsReport, isChairLink: 
     attachScorecardContext(repo, tenant, report),
   ]);
   return {
-    report: views[0],
+    // A normal link (token expiry == the stored one) passes the stored value through
+    // untouched; only a re-signed / extended link shows its own.
+    report:
+      reportExpirySeconds(report) === tokenExpiresAt
+        ? views[0]
+        : { ...views[0], linkExpiresAt: new Date(tokenExpiresAt * 1000).toISOString() },
     // The match scorecard to confirm (+ headline result / medicoach link when there is none).
     ...context,
     // "Send to captain" is offered to the CHAIR's link only; a captain's link never gets a
@@ -8330,8 +8345,8 @@ async function linkPayload(tenant: string, report: CaptainsReport, isChairLink: 
 }
 
 app.get('/captains-report-link/:token', async (c) => {
-  const { tenant, report, isChairLink } = await linkedReportOr410(c);
-  return c.json(await linkPayload(tenant, report, isChairLink));
+  const { tenant, report, isChairLink, tokenExpiresAt } = await linkedReportOr410(c);
+  return c.json(await linkPayload(tenant, report, isChairLink, tokenExpiresAt));
 });
 
 /** The chair's link only: the club's eligible players for "Send to captain" (names only). */
@@ -8346,7 +8361,7 @@ app.get('/captains-report-link/:token/forward-candidates', async (c) => {
 });
 
 app.post('/captains-report-link/:token/forward', async (c) => {
-  const { tenant, report, isChairLink } = await linkedReportOr410(c);
+  const { tenant, report, isChairLink, tokenExpiresAt } = await linkedReportOr410(c);
   if (!isChairLink) throw new HttpError(403, 'only the club chair can send this report on');
   const body = ((await c.req.json().catch(() => null)) ?? {}) as { candidateId?: unknown };
   if (typeof body.candidateId !== 'string' || !body.candidateId)
@@ -8355,11 +8370,11 @@ app.post('/captains-report-link/:token/forward', async (c) => {
     { repo },
     { tenant, report, candidateId: body.candidateId, via: 'link' },
   ).catch(flowError);
-  return c.json(await linkPayload(tenant, updated, true));
+  return c.json(await linkPayload(tenant, updated, true, tokenExpiresAt));
 });
 
 app.put('/captains-report-link/:token', async (c) => {
-  const { tenant, report, memberId, isChairLink } = await linkedReportOr410(c);
+  const { tenant, report, memberId, isChairLink, tokenExpiresAt } = await linkedReportOr410(c);
   const { fields, submit } = await reportFieldsFrom(
     tenant,
     report,
@@ -8370,7 +8385,7 @@ app.put('/captains-report-link/:token', async (c) => {
     via: 'link',
     memberId,
   });
-  return c.json(await linkPayload(tenant, saved, isChairLink));
+  return c.json(await linkPayload(tenant, saved, isChairLink, tokenExpiresAt));
 });
 
 /* ─── Pre-match captain squad links (2026-10-27) ───
@@ -9668,6 +9683,8 @@ async function applyTenantConfigPatch(
         ...l,
         competitions: storedByKey.get(l.key)?.competitions,
         setup: storedByKey.get(l.key)?.setup,
+        // Operator-set notice timing (League.captainsReport): same rule as `setup`.
+        captainsReport: storedByKey.get(l.key)?.captainsReport,
       }));
     }
   }
@@ -10129,6 +10146,23 @@ function validateLeagues(
   );
   if (badFlag)
     throw new HttpError(400, `fixturesOnly on league "${badFlag.label}" must be a boolean`);
+  const badReport = (leagues as League[]).find((l) => {
+    const cr = l.captainsReport as unknown;
+    // null = clear it (operator PUT); absent = keep what is stored (see keepStoredCompetitions).
+    if (cr === undefined || cr === null) return false;
+    if (!cr || typeof cr !== 'object' || Array.isArray(cr)) return true;
+    const { deferMatchDayNotices: d, noticeFromHour: h, ...rest } = cr as Record<string, unknown>;
+    return (
+      Object.keys(rest).length > 0 ||
+      (d !== undefined && typeof d !== 'boolean') ||
+      (h !== undefined && !(Number.isInteger(h) && (h as number) >= 0 && (h as number) <= 23))
+    );
+  });
+  if (badReport)
+    throw new HttpError(
+      400,
+      `captainsReport on league "${badReport.label}" must be { deferMatchDayNotices?: boolean, noticeFromHour?: 0–23 }`,
+    );
   if (validDistricts) {
     const bad = (leagues as League[]).find((l) => !validDistricts.has(l.district));
     if (bad)
@@ -10673,6 +10707,31 @@ function keepStoredCompetitions(incoming: League[], stored: League[]): League[] 
 }
 
 /**
+ * The operator PUT sets a league's `captainsReport` (notice timing). A league sent WITHOUT the
+ * field keeps the stored value (a portal tab built before it existed must not wipe it);
+ * `null` clears it, and so does an explicit EMPTY object (`{}`, or only undefined keys): it
+ * carries no override, yet storing it would flip `hasCaptainsReportLeagueOverrides` and put the
+ * tenant in per-league notice mode (extra reads every run) for nothing.
+ */
+function keepStoredCaptainsReport(incoming: League[], stored: League[]): League[] {
+  const storedByKey = new Map(stored.map((l) => [l.key, l.captainsReport]));
+  return incoming.map((l) => {
+    const { captainsReport, ...rest } = l as League & { captainsReport?: unknown };
+    if (captainsReport === null) return rest;
+    if (
+      typeof captainsReport === 'object' &&
+      Object.values(captainsReport as Record<string, unknown>).every((v) => v === undefined)
+    )
+      return rest;
+    if (captainsReport === undefined) {
+      const kept = storedByKey.get(l.key);
+      return kept ? { ...rest, captainsReport: kept } : rest;
+    }
+    return l;
+  });
+}
+
+/**
  * PUT /platform/tenants/:slug — merge-patch branding / features / leagues /
  * districts / submissionDeadline (whitelisted: the operator portal edits nothing
  * else). Shares applyTenantConfigPatch with PUT /tenant/config, so the same
@@ -10744,7 +10803,11 @@ app.put('/platform/tenants/:slug', async (c) => {
   }
   if (body.leagues !== undefined) {
     validateLeagues(body.leagues); // shape 400s must win over the guard's 409
-    patch.leagues = keepStoredCompetitions(body.leagues, (await getCurrent()).leagues ?? []);
+    const storedLeagues = (await getCurrent()).leagues ?? [];
+    patch.leagues = keepStoredCaptainsReport(
+      keepStoredCompetitions(body.leagues, storedLeagues),
+      storedLeagues,
+    );
     // Operator-side delete guard: unlike the tenant admin console, the operator has
     // no view of club registrations, so a write that drops a league key clubs still
     // reference is rejected outright — an orphaned key breaks player registration.

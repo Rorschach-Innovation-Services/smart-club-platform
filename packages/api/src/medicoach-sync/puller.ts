@@ -29,7 +29,8 @@
  * A newly stored result is first marked `REPORTOPEN#<ref>`; the marker is deleted once the
  * hook succeeded, so a report/notify failure is retried by the next run
  * (`retryPendingReportOpens`, up to REPORT_OPEN_MAX_ATTEMPTS) instead of being lost — a
- * replay never re-fires the hook. Before 18:00 SAST (REPORT_NOTICE_HOUR) — or once the run's
+ * replay never re-fires the hook. Before 18:00 SAST (REPORT_NOTICE_HOUR; a league's own
+ * `captainsReport.noticeFromHour` when it has one, judged per fixture) — or once the run's
  * `deadlineMs` has passed — the hook is NOT called and the marker is NOT deleted: the result
  * is stored and its reports wait, queued, for the first run in the window (counted as
  * `reportsDeferred`; a deferral is never an attempt). A notice counts as failed only when it reached nobody
@@ -54,8 +55,9 @@ import { isSlotRef } from '../../../engine/src/formats.js';
 import {
   captainsReportClearedHook,
   captainsReportResultHook,
+  noticeLeagueResolver,
   pastDeadline,
-  reportNoticeWindowOpen,
+  reportNoticeWindowOpenFor,
   type CaptainsReportDeps,
 } from '../captains-reports.js';
 import { hasFeature } from '../features.js';
@@ -378,6 +380,9 @@ export async function runMedicoachSync(
   // per change. Only a slot fill (a separate write path) forces a re-list.
   let pageCache: InboundApplyCache = { config };
   let index: Map<string, FixtureTarget> | null = null;
+  // The notice window is per league (League.captainsReport); one resolver per run memoises
+  // season-run reads, and reads nothing for a tenant without a league override.
+  const noticeLeague = noticeLeagueResolver(repo, tenant, config);
   const loadIndex = async () =>
     (index ??= buildRefIndex(tenant, (pageCache.series ??= await repo.listSeries(tenant))));
   const scheduleRefs: string[] = [];
@@ -498,8 +503,11 @@ export async function runMedicoachSync(
           );
           if (stored) {
             counts.resultsStored++;
-            if (!reportNoticeWindowOpen(now()) || pastDeadline(deps.deadlineMs)) {
-              // Before 18:00 SAST (or out of time): the hook is not called and the marker
+            if (
+              !reportNoticeWindowOpenFor(now(), await noticeLeague.forSeries(target.series)) ||
+              pastDeadline(deps.deadlineMs)
+            ) {
+              // Before 18:00 SAST — or the league's own hour — (or out of time): the hook is not called and the marker
               // stays — it IS the queue. Never thrown: a throw would count as an attempt.
               summary.reportsDeferred = (summary.reportsDeferred ?? 0) + 1;
             } else {
