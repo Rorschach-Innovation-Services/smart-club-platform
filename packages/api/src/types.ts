@@ -1975,10 +1975,14 @@ export interface SquadRequest {
   updatedAt: string;
 }
 
-/** `TEAMCAPTAIN#<clubId>#<teamId>` — a club's designated captain for one team. */
+/**
+ * `TEAMCAPTAIN#<clubId>#<teamId>#<scope>` — a club's designated captain for one team in one
+ * competition (`scope` = `league:<leagueKey>` or `series:<seriesId>`, see captain-scope.ts).
+ */
 export interface TeamCaptainDesignation {
   clubId: string;
   teamId: string;
+  scope: string;
   /** The player's natural key — server-only, never served. */
   playerKey: string;
   setBy: string;
@@ -1986,12 +1990,14 @@ export interface TeamCaptainDesignation {
 }
 
 /**
- * `TEAMLASTCAPT#<clubId>#<teamId>` — the team's most recent known captain (POPIA-approved
- * 2026-10-27: natural key + name only; contact is re-resolved fresh at send time).
+ * `TEAMLASTCAPT#<clubId>#<teamId>#<scope>` — the team's most recent known captain in one
+ * competition (POPIA-approved 2026-10-27: natural key + name only; contact is re-resolved
+ * fresh at send time).
  */
 export interface TeamLastCaptain {
   clubId: string;
   teamId: string;
+  scope: string;
   naturalKey: string;
   name: string;
   seenAt: string;

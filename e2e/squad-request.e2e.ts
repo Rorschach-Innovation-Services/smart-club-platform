@@ -186,8 +186,9 @@ test.afterAll(async ({ request }) => {
   // The submitted squad's captain becomes the team's last captain: left behind, a rerun's
   // opener would address ukzn to that captain instead of the chair.
   for (const c of [HOME, AWAY]) {
-    await deleteItem(CAPREPORT_PK, `TEAMCAPTAIN#${c}#${c}`).catch(() => {});
-    await deleteItem(CAPREPORT_PK, `TEAMLASTCAPT#${c}#${c}`).catch(() => {});
+    // Captain rows are scoped per competition (`league:<leagueKey>`); this spec's is premier.
+    await deleteItem(CAPREPORT_PK, `TEAMCAPTAIN#${c}#${c}#league:premier`).catch(() => {});
+    await deleteItem(CAPREPORT_PK, `TEAMLASTCAPT#${c}#${c}#league:premier`).catch(() => {});
   }
   if (!priorFeatures) return;
   await request.put(`${API_BASE}/platform/tenants/${TENANT}`, {

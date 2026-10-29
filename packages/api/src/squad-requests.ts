@@ -59,6 +59,7 @@ import {
   sideName,
   type NoticeResult,
 } from './captains-reports.js';
+import { captainScopeOfSeries, leagueKeyOfScope } from './captain-scope.js';
 import { chairContactOf } from './club-contacts.js';
 import { captainsReportLinkBase, captainsReportLinkSecret } from './env.js';
 import { hasFeature } from './features.js';
@@ -176,7 +177,8 @@ export function squadLinkExpired(nowMs: number, e: number): boolean {
 }
 
 export type SquadTokenCheck =
-  { ok: true; payload: SquadLinkPayload } | { ok: false; reason: 'invalid' | 'expired' };
+  | { ok: true; payload: SquadLinkPayload }
+  | { ok: false; reason: 'invalid' | 'expired' };
 
 export function verifySquadLinkToken(
   token: string,
@@ -335,6 +337,41 @@ export const captainCandidateId = (
   teamId: string,
   naturalKey: string,
 ) => squadRosterId(secret, tenant, captainScope(teamId), naturalKey);
+
+export interface TeamCaptainCompetition {
+  /** The captain-row scope (`league:<key>` / `series:<id>`). */
+  scope: string;
+  /** Display name: the tenant league's label, else the series name. */
+  name: string;
+}
+
+/**
+ * The competitions a club team currently plays in, one per captain scope: every RELEASED
+ * series of the tenant with the team as a participant (legacy participant-less series count
+ * when `teams[]` names it and it is the club's own id). Sorted by name.
+ */
+export async function teamCaptainCompetitions(
+  repo: RepoModule,
+  tenant: string,
+  clubId: string,
+  teamId: string,
+): Promise<TeamCaptainCompetition[]> {
+  const [all, config] = await Promise.all([repo.listSeries(tenant), repo.getTenantConfig(tenant)]);
+  const labels = new Map((config?.leagues ?? []).map((l) => [l.key, l.label]));
+  const out = new Map<string, TeamCaptainCompetition>();
+  for (const series of all) {
+    if (!series?.released) continue;
+    const plays = series.participants
+      ? series.participants.some((p) => p.teamId === teamId && p.clubId === clubId)
+      : teamId === clubId && (series.teams ?? []).includes(teamId);
+    if (!plays) continue;
+    const scope = await captainScopeOfSeries(repo, tenant, series);
+    if (out.has(scope)) continue;
+    const key = leagueKeyOfScope(scope);
+    out.set(scope, { scope, name: (key && labels.get(key)) || String(series.name ?? scope) });
+  }
+  return [...out.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
 
 // ───────────────────────── Views ─────────────────────────
 
@@ -635,26 +672,42 @@ export interface SquadRecipient {
 }
 
 /**
- * Designated captain → last known captain (per TEAM) → chair. A rung whose player is gone,
- * a minor or has no contact falls through. The natural key is used for the point-gets only.
+ * Designated captain → last known captain (per TEAM and COMPETITION `scope`, see
+ * captain-scope.ts) → chair. A rung whose player is gone, a minor or has no contact falls
+ * through. The natural key is used for the point-gets only. Legacy unscoped rows are never
+ * consulted: they cannot say which of a shared teamId's competitions they belonged to.
  */
 export async function resolveSquadRecipient(
   repo: RepoModule,
   tenant: string,
   club: Club,
   teamId: string,
+  scope: string,
 ): Promise<SquadRecipient> {
-  const designated = await repo.getTeamCaptain(tenant, club.id, teamId);
+  const designated = await repo.getTeamCaptain(tenant, club.id, teamId, scope);
   if (designated) {
     const c = await resolvePlayerContact(repo, tenant, club.id, designated.playerKey);
     if (c) return { kind: 'captain', rung: 'designated', contact: c };
   }
-  const last = await repo.getTeamLastCaptain(tenant, club.id, teamId);
+  const last = await repo.getTeamLastCaptain(tenant, club.id, teamId, scope);
   if (last) {
     const c = await resolvePlayerContact(repo, tenant, club.id, last.naturalKey);
     if (c) return { kind: 'captain', rung: 'last-captain', contact: c };
   }
   return { kind: 'chair', rung: 'chair', contact: chairContactOf(club) };
+}
+
+/**
+ * The captain-row scope of a request's series. A series that is gone still scopes
+ * deterministically (`series:<id>`), so it never falls back to an unscoped row.
+ */
+export async function captainScopeOfSeriesId(
+  repo: RepoModule,
+  tenant: string,
+  seriesId: string,
+): Promise<string> {
+  const series = await repo.getSeries(tenant, seriesId);
+  return captainScopeOfSeries(repo, tenant, series ?? { id: seriesId });
 }
 
 // ───────────────────────── Opening ─────────────────────────
@@ -801,7 +854,13 @@ async function openSquadForSide(
   const otherClubId = byTeam.get(otherTeam)?.clubId ?? otherTeam;
   const otherClub =
     otherTeam && !isSlotRef(otherTeam) ? await repo.getClub(tenant, otherClubId) : null;
-  const recipient = await resolveSquadRecipient(repo, tenant, club, teamId);
+  const recipient = await resolveSquadRecipient(
+    repo,
+    tenant,
+    club,
+    teamId,
+    await captainScopeOfSeries(repo, tenant, series),
+  );
   const venue = isWithheld(series, 'venue') ? '' : (liveFixtureVenue(series, fixture.id) ?? '');
   const leagueKey = typeof series.leagueKey === 'string' ? series.leagueKey : '';
   const nowIso = now().toISOString();
@@ -1133,7 +1192,13 @@ export async function resendSquadRequest(
     kind = 'captain';
     contact = { name: request.recipient.name, ...request.recipientContact };
   } else {
-    const fresh = await resolveSquadRecipient(repo, tenant, club, request.teamId);
+    const fresh = await resolveSquadRecipient(
+      repo,
+      tenant,
+      club,
+      request.teamId,
+      await captainScopeOfSeriesId(repo, tenant, request.seriesId),
+    );
     kind = fresh.kind;
     contact = fresh.contact;
   }
@@ -1460,14 +1525,17 @@ export async function saveSquad(
     ? parsed.selection.players.find((p) => p.key === parsed.selection.captainKey)
     : undefined;
   if (cap)
-    await repo
-      .putTeamLastCaptain(tenant, {
-        clubId: request.clubId,
-        teamId: request.teamId,
-        naturalKey: cap.key,
-        name: cap.name,
-        seenAt: at,
-      })
+    await captainScopeOfSeriesId(repo, tenant, request.seriesId)
+      .then((scope) =>
+        repo.putTeamLastCaptain(tenant, {
+          clubId: request.clubId,
+          teamId: request.teamId,
+          scope,
+          naturalKey: cap.key,
+          name: cap.name,
+          seenAt: at,
+        }),
+      )
       .catch(() => {});
   await repo.putPendingSquadSync(tenant, {
     requestId: request.id,

@@ -41,6 +41,8 @@ const TODAY = sastDay(0);
 const TOMORROW = sastDay(1);
 const GO_LIVE = sastDay(-30);
 const S1 = 's-premier-t20';
+/** The captain-row scope of S1 (leagueKey 'premier'). */
+const SC = 'league:premier';
 const LINK_SECRET = 'local-dev-captains-report-link-secret'; // env.ts's LOCAL_AUTH fallback
 const K = (n: number) => String(n).repeat(64).slice(0, 64);
 
@@ -303,6 +305,7 @@ describe('recipient ladder (per team)', () => {
     await repo.putTeamLastCaptain(T, {
       clubId: 'umzinto',
       teamId: 'umzinto',
+      scope: SC,
       naturalKey: K(2),
       name: 'Lastcap Test',
       seenAt: '2026-10-01T00:00:00.000Z',
@@ -310,6 +313,7 @@ describe('recipient ladder (per team)', () => {
     await repo.putTeamCaptain(T, {
       clubId: 'umzinto',
       teamId: 'umzinto',
+      scope: SC,
       playerKey: K(1),
       setBy: 'rep',
       setAt: '2026-10-01T00:00:00.000Z',
@@ -319,16 +323,18 @@ describe('recipient ladder (per team)', () => {
       T,
       (await repo.getClub(T, 'umzinto'))!,
       'umzinto',
+      SC,
     );
     assert.equal(rec.rung, 'designated');
     assert.equal(rec.contact.name, 'Designee Test');
 
     // The designee becomes a minor: the last captain answers.
-    await repo.deleteTeamCaptain(T, 'umzinto', 'umzinto');
+    await repo.deleteTeamCaptain(T, 'umzinto', 'umzinto', SC);
     await player(K(3), 'umzinto', 'Junior', { isMinor: true });
     await repo.putTeamCaptain(T, {
       clubId: 'umzinto',
       teamId: 'umzinto',
+      scope: SC,
       playerKey: K(3),
       setBy: 'rep',
       setAt: '2026-10-01T00:00:00.000Z',
@@ -338,6 +344,7 @@ describe('recipient ladder (per team)', () => {
       T,
       (await repo.getClub(T, 'umzinto'))!,
       'umzinto',
+      SC,
     );
     assert.equal(rec.rung, 'last-captain');
 
@@ -356,6 +363,7 @@ describe('recipient ladder (per team)', () => {
     await repo.putTeamLastCaptain(T, {
       clubId: 'umzinto',
       teamId: 'umzinto',
+      scope: SC,
       naturalKey: K(4),
       name: 'Kid Test',
       seenAt: '2026-10-01T00:00:00.000Z',
@@ -365,6 +373,7 @@ describe('recipient ladder (per team)', () => {
       T,
       (await repo.getClub(T, 'umzinto'))!,
       'umzinto',
+      SC,
     );
     assert.equal(rec.rung, 'chair');
   });
@@ -383,6 +392,7 @@ describe('recipient ladder (per team)', () => {
     await repo.putTeamLastCaptain(T, {
       clubId: 'umzinto',
       teamId: A,
+      scope: SC,
       naturalKey: K(5),
       name: 'Acap Test',
       seenAt: '2026-10-01T00:00:00.000Z',
@@ -429,10 +439,13 @@ describe('recipient ladder (per team)', () => {
         linkBase: () => 'b',
       },
     );
-    const last = await repo.getTeamLastCaptain(T, 'umzinto', 'umzinto');
+    const last = await repo.getTeamLastCaptain(T, 'umzinto', 'umzinto', SC);
     assert.equal(last?.naturalKey, K(6));
     assert.equal(last?.name, 'Skip Test');
-    assert.equal(await repo.getTeamLastCaptain(T, 'african-warriors', 'african-warriors'), null);
+    assert.equal(
+      await repo.getTeamLastCaptain(T, 'african-warriors', 'african-warriors', SC),
+      null,
+    );
   });
 
   test('veterans: the designee resolves via VETAFFIL#; the roster expands to affiliates', async () => {
@@ -453,6 +466,7 @@ describe('recipient ladder (per team)', () => {
     await repo.putTeamCaptain(T, {
       clubId: 'vets',
       teamId: 'vets',
+      scope: SC,
       playerKey: K(7),
       setBy: 'rep',
       setAt: '2026-10-01T00:00:00.000Z',
@@ -548,7 +562,7 @@ describe('the public link', () => {
     const row1 = (await repo.listPendingSquadSync(T))[0];
     assert.equal(row1.op, 'upsert');
     // The captain is recorded as the team's last captain.
-    assert.equal((await repo.getTeamLastCaptain(T, 'umzinto', 'umzinto'))?.naturalKey, K(1));
+    assert.equal((await repo.getTeamLastCaptain(T, 'umzinto', 'umzinto', SC))?.naturalKey, K(1));
 
     // A submitted squad still loads and can be changed until expiry.
     const reload = await get(token);
@@ -1406,7 +1420,9 @@ describe('admin + designation routes', () => {
   });
 
   type Cand = { id: string; name: string; affiliate?: true };
-  type CapRes = { captain: { candidateId: string; name: string; affiliate?: true } | null };
+  type Captain = { candidateId: string; name: string; affiliate?: true } | null;
+  type CapRes = { scope: string; name: string; captain: Captain };
+  type CapList = { teamId: string; competitions: CapRes[] };
   const candidatesOf = async (auth: string, clubId: string, teamId = clubId) => {
     const res = await app.request(`/clubs/${clubId}/teams/${teamId}/captain-candidates`, {
       headers: h(auth),
@@ -1418,11 +1434,12 @@ describe('admin + designation routes', () => {
       body: res.status === 200 ? (JSON.parse(text) as { candidates: Cand[] }) : null,
     };
   };
-  const putCap = (auth: string, clubId: string, body: unknown, teamId = clubId) =>
+  /** PUT a designation; `scope` defaults to S1's competition unless the body names one. */
+  const putCap = (auth: string, clubId: string, body: object, teamId = clubId) =>
     app.request(`/clubs/${clubId}/teams/${teamId}/captain`, {
       method: 'PUT',
       headers: h(auth),
-      body: JSON.stringify(body),
+      body: JSON.stringify({ scope: SC, ...body }),
     });
 
   test('a club rep sets and clears their team captain by candidate id; another club gets 403', async () => {
@@ -1439,13 +1456,16 @@ describe('admin + designation routes', () => {
     const setText = await set.text();
     assert.ok(!setText.includes(K(1)));
     assert.equal((JSON.parse(setText) as CapRes).captain!.name, 'Cap Test');
-    assert.equal((await repo.getTeamCaptain(T, 'umzinto', 'umzinto'))?.playerKey, K(1));
+    assert.equal((await repo.getTeamCaptain(T, 'umzinto', 'umzinto', SC))?.playerKey, K(1));
     const got = await app.request(path, { headers: h(REP_UMZ) });
     const gotText = await got.text();
     assert.ok(!gotText.includes(K(1)), 'GET serves no natural key');
-    const gotBody = JSON.parse(gotText) as CapRes & { captain: Record<string, unknown> };
-    assert.equal(gotBody.captain!.candidateId, cap.id);
-    assert.equal('playerKey' in gotBody.captain!, false);
+    const gotBody = JSON.parse(gotText) as CapList;
+    assert.equal(gotBody.competitions.length, 1);
+    assert.equal(gotBody.competitions[0].scope, SC);
+    const served = gotBody.competitions[0].captain as Record<string, unknown>;
+    assert.equal(served.candidateId, cap.id);
+    assert.equal('playerKey' in served, false);
     assert.equal((await app.request(path, { headers: h(REP_AW) })).status, 403);
     assert.equal((await candidatesOf(REP_AW, 'umzinto')).status, 403);
     assert.equal((await putCap(REP_AW, 'umzinto', { candidateId: cap.id })).status, 403);
@@ -1462,7 +1482,7 @@ describe('admin + designation routes', () => {
     );
     assert.equal((await candidatesOf(REP_UMZ, 'umzinto', 'tm_other_x_0')).status, 404);
     await putCap(REP_UMZ, 'umzinto', { candidateId: null });
-    assert.equal(await repo.getTeamCaptain(T, 'umzinto', 'umzinto'), null);
+    assert.equal(await repo.getTeamCaptain(T, 'umzinto', 'umzinto', SC), null);
   });
 
   test('veterans: an affiliate is a candidate (no ID number served) and, designated, gets the squad link', async () => {
@@ -1493,9 +1513,9 @@ describe('admin + designation routes', () => {
     const got = await app.request('/clubs/vets/teams/vets/captain', { headers: h(REP_VETS) });
     const gotText = await got.text();
     assert.ok(!gotText.includes(K(7)));
-    const gotBody = JSON.parse(gotText) as CapRes;
-    assert.equal(gotBody.captain!.name, 'Oldie Test');
-    assert.equal(gotBody.captain!.affiliate, true);
+    const gotBody = JSON.parse(gotText) as CapList;
+    assert.equal(gotBody.competitions[0].captain!.name, 'Oldie Test');
+    assert.equal(gotBody.competitions[0].captain!.affiliate, true);
     await open();
     const v = await reqOf('vets');
     assert.equal(v.recipient.kind, 'captain');
@@ -1601,6 +1621,7 @@ describe('admin resend + void', () => {
     await repo.putTeamCaptain(T, {
       clubId: 'umzinto',
       teamId: 'umzinto',
+      scope: SC,
       playerKey: K(1),
       setBy: 'rep',
       setAt: '2026-10-01T00:00:00.000Z',
@@ -1767,6 +1788,7 @@ describe('player erasure', () => {
     await repo.putTeamCaptain(T, {
       clubId: 'umzinto',
       teamId: 'umzinto',
+      scope: SC,
       playerKey: K(1),
       setBy: 'rep',
       setAt: '2026-10-01T00:00:00.000Z',
@@ -1774,6 +1796,7 @@ describe('player erasure', () => {
     await repo.putTeamLastCaptain(T, {
       clubId: 'umzinto',
       teamId: 'umzinto',
+      scope: SC,
       naturalKey: K(1),
       name: 'Gone Test',
       seenAt: '2026-10-01T00:00:00.000Z',
@@ -1784,10 +1807,279 @@ describe('player erasure', () => {
     const counts = await repo.erasePlayerData(T, K(1), { by: 'admin@test' });
     assert.equal(counts?.teamCaptainRows, 2);
     assert.equal(counts?.squadRequestsScrubbed, 1);
-    assert.equal(await repo.getTeamCaptain(T, 'umzinto', 'umzinto'), null);
-    assert.equal(await repo.getTeamLastCaptain(T, 'umzinto', 'umzinto'), null);
+    assert.equal(await repo.getTeamCaptain(T, 'umzinto', 'umzinto', SC), null);
+    assert.equal(await repo.getTeamLastCaptain(T, 'umzinto', 'umzinto', SC), null);
     const after = await reqOf('umzinto');
     assert.equal(after.recipient.name, '[removed]');
     assert.equal(after.recipientContact, undefined);
+  });
+});
+
+/**
+ * Prod bug (2026-10-29): a club's men's, women's and veterans sides can share ONE teamId
+ * across competitions, so captain rows keyed per (club, team) bled across sides. Both row
+ * types are now keyed per (club, team, competition scope).
+ */
+describe('captain rows are scoped per competition (shared teamId)', () => {
+  const S2 = 's-vets-premier';
+  const SC2 = 'league:vets-premier';
+  const AT = AT_1900.toISOString();
+
+  /** S1 (premier) + S2 (vets-premier): the SAME teamId `umzinto` plays both, tomorrow. */
+  async function seedTwoCompetitions(s1Fixtures?: unknown[]) {
+    await seed(s1Fixtures ? { fixtures: s1Fixtures } : {});
+    await repo.putSeries(T, {
+      ...(series([fx('f1', 'umzinto', 'african-warriors')], [P_UMZ, P_AW]) as object),
+      id: S2,
+      name: 'Veterans Premier',
+      leagueKey: 'vets-premier',
+    } as unknown as Series);
+  }
+  const designate = (playerKey: string, scope: string) =>
+    repo.putTeamCaptain(T, {
+      clubId: 'umzinto',
+      teamId: 'umzinto',
+      scope,
+      playerKey,
+      setBy: 'rep',
+      setAt: AT,
+    });
+
+  async function rawPut(item: Record<string, unknown>) {
+    const { DynamoDBClient } = await import('@aws-sdk/client-dynamodb');
+    const { DynamoDBDocumentClient, PutCommand } = await import('@aws-sdk/lib-dynamodb');
+    const doc = DynamoDBDocumentClient.from(
+      new DynamoDBClient({
+        endpoint: process.env.DYNAMO_ENDPOINT,
+        region: 'localhost',
+        credentials: { accessKeyId: 'local', secretAccessKey: 'local' },
+      }),
+    );
+    await doc.send(new PutCommand({ TableName: TABLE, Item: item }));
+  }
+  /** Legacy unscoped rows as written before the fix (no `scope`, no `#<scope>` sk suffix). */
+  async function putLegacyRows(naturalKey: string, name: string) {
+    const { captainsReportPartitionPk } = await import('../src/keys.js');
+    const pk = captainsReportPartitionPk(T);
+    await rawPut({
+      pk,
+      sk: 'TEAMCAPTAIN#umzinto#umzinto',
+      clubId: 'umzinto',
+      teamId: 'umzinto',
+      playerKey: naturalKey,
+      setBy: 'rep',
+      setAt: AT,
+    });
+    await rawPut({
+      pk,
+      sk: 'TEAMLASTCAPT#umzinto#umzinto',
+      clubId: 'umzinto',
+      teamId: 'umzinto',
+      naturalKey,
+      name,
+      seenAt: AT,
+    });
+  }
+
+  test('each competition’s squad request goes to its OWN designated captain', async () => {
+    await seedTwoCompetitions();
+    await player(K(1), 'umzinto', 'Mens');
+    await player(K(2), 'umzinto', 'Vets');
+    await designate(K(1), SC);
+    await designate(K(2), SC2);
+    await open();
+    const premier = (await repo.getSquadRequest(T, S1, 'f1', 'umzinto'))!;
+    const vets = (await repo.getSquadRequest(T, S2, 'f1', 'umzinto'))!;
+    assert.equal(premier.recipient.kind, 'captain');
+    assert.equal(premier.recipient.name, 'Mens Test');
+    assert.equal(vets.recipient.kind, 'captain');
+    assert.equal(vets.recipient.name, 'Vets Test', 'the veterans captain never gets the mens link');
+  });
+
+  test('a designation in one competition is not used for the other', async () => {
+    await seedTwoCompetitions();
+    await player(K(1), 'umzinto', 'Mens');
+    await designate(K(1), SC);
+    await open();
+    assert.equal((await repo.getSquadRequest(T, S1, 'f1', 'umzinto'))!.recipient.kind, 'captain');
+    assert.equal((await repo.getSquadRequest(T, S2, 'f1', 'umzinto'))!.recipient.kind, 'chair');
+  });
+
+  test("a captain's report last captain in competition A is not used for competition B", async () => {
+    // S1's fixture is today (the report); S2's is tomorrow (the squad request).
+    await seedTwoCompetitions([fx('f1', 'umzinto', 'african-warriors', { date: TODAY })]);
+    await player(K(6), 'umzinto', 'Skip');
+    await reports.openCaptainReports(
+      {
+        tenant: T,
+        seriesId: S1,
+        fixtureId: 'f1',
+        ref: `smartclub:${T}:fixture:${S1}:f1`,
+        result: {
+          homeScore: '1',
+          awayScore: '0',
+          summary: 's',
+          winner: 'home',
+          method: 'normal',
+          noResult: false,
+          source: 'live',
+          recordedAt: AT,
+          scoringSide: 'home',
+          captainRef: `smartclub:${T}:player:${K(6)}`,
+          medicoachMatchUrl: null,
+        },
+        config: await cfg(),
+      },
+      {
+        repo,
+        now: () => AT_1900,
+        sendNotice: async () => [],
+        linkSecret: () => 's',
+        linkBase: () => 'b',
+      },
+    );
+    assert.equal((await repo.getTeamLastCaptain(T, 'umzinto', 'umzinto', SC))?.naturalKey, K(6));
+    assert.equal(await repo.getTeamLastCaptain(T, 'umzinto', 'umzinto', SC2), null);
+    await open();
+    assert.equal((await repo.getSquadRequest(T, S2, 'f1', 'umzinto'))!.recipient.kind, 'chair');
+  });
+
+  test('legacy unscoped rows are never read', async () => {
+    await seed();
+    await player(K(1), 'umzinto', 'Legacy');
+    await putLegacyRows(K(1), 'Legacy Test');
+    const rec = await squad.resolveSquadRecipient(
+      repo,
+      T,
+      (await repo.getClub(T, 'umzinto'))!,
+      'umzinto',
+      SC,
+    );
+    assert.equal(rec.rung, 'chair');
+    await open();
+    assert.equal((await reqOf('umzinto')).recipient.kind, 'chair');
+  });
+
+  test('erasure scrubs scoped AND legacy unscoped rows', async () => {
+    await seed();
+    await player(K(1), 'umzinto', 'Gone');
+    await putLegacyRows(K(1), 'Gone Test');
+    await designate(K(1), SC);
+    await repo.putTeamLastCaptain(T, {
+      clubId: 'umzinto',
+      teamId: 'umzinto',
+      scope: SC2,
+      naturalKey: K(1),
+      name: 'Gone Test',
+      seenAt: AT,
+    });
+    const counts = await repo.erasePlayerData(T, K(1), { by: 'admin@test' });
+    assert.equal(counts?.teamCaptainRows, 4);
+    assert.equal((await repo.listTeamCaptains(T)).length, 0);
+    assert.equal((await repo.listTeamLastCaptains(T)).length, 0);
+  });
+
+  test('a teamId that is a prefix of another never matches its rows', async () => {
+    await seed();
+    await player(K(1), 'umzinto', 'Long');
+    await repo.putTeamCaptain(T, {
+      clubId: 'umzinto',
+      teamId: 'umzinto-b',
+      scope: SC,
+      playerKey: K(1),
+      setBy: 'rep',
+      setAt: AT,
+    });
+    assert.equal(await repo.getTeamCaptain(T, 'umzinto', 'umzinto', SC), null);
+  });
+
+  test('the scope: leagueKey, else the season run’s, else the series id', async () => {
+    const { captainScopeOfSeries } = await import('../src/captain-scope.js');
+    const runs = {
+      getSeasonRun: async (_t: string, id: string) =>
+        (id === 'run-1' ? { leagueKey: 'womens-premier' } : null) as never,
+    };
+    assert.equal(await captainScopeOfSeries(runs, T, { id: 's', leagueKey: 'premier' }), SC);
+    assert.equal(
+      await captainScopeOfSeries(runs, T, { id: 's', seasonRunId: 'run-1' }),
+      'league:womens-premier',
+    );
+    assert.equal(await captainScopeOfSeries(runs, T, { id: 's', seasonRunId: 'gone' }), 'series:s');
+    assert.equal(await captainScopeOfSeries(runs, T, { id: 's' }), 'series:s');
+  });
+
+  describe('admin API', () => {
+    const devAuth = (email: string, memberships: unknown) =>
+      Buffer.from(JSON.stringify({ sub: 'u', email, memberships })).toString('base64');
+    const REP = devAuth('rep@umzinto.test', [{ tenantId: T, role: 'rep', clubIds: ['umzinto'] }]);
+    const REP_AW = devAuth('rep@aw.test', [
+      { tenantId: T, role: 'rep', clubIds: ['african-warriors'] },
+    ]);
+    const h = (auth = REP) => ({
+      'x-tenant': T,
+      'x-dev-auth': auth,
+      'content-type': 'application/json',
+    });
+    const path = '/clubs/umzinto/teams/umzinto/captain';
+    type Comp = { scope: string; name: string; captain: { name: string } | null };
+    const list = async () =>
+      ((await (await app.request(path, { headers: h() })).json()) as { competitions: Comp[] })
+        .competitions;
+    const put = (body: unknown, auth = REP) =>
+      app.request(path, { method: 'PUT', headers: h(auth), body: JSON.stringify(body) });
+
+    async function seedApi() {
+      await seedTwoCompetitions();
+      // An unreleased series the team is in is not a competition it currently plays.
+      await repo.putSeries(T, {
+        ...(series([], [P_UMZ, P_AW]) as object),
+        id: 's-draft',
+        name: 'Draft League',
+        leagueKey: 'draft',
+        released: false,
+      } as unknown as Series);
+      const config = await cfg();
+      await repo.putTenantConfig({
+        ...config,
+        leagues: [
+          { key: 'premier', label: 'Premier League', group: 'g', district: 'All districts' },
+          { key: 'vets-premier', label: 'Veterans Premier', group: 'g', district: 'All districts' },
+        ],
+      } as TenantConfig);
+      await player(K(1), 'umzinto', 'Mens');
+    }
+
+    test('GET lists one entry per competition, labelled by the league', async () => {
+      await seedApi();
+      assert.deepEqual(await list(), [
+        { scope: SC, name: 'Premier League', captain: null },
+        { scope: SC2, name: 'Veterans Premier', captain: null },
+      ]);
+    });
+
+    test('PUT sets one competition only; foreign / missing scope is 400; other club 403', async () => {
+      await seedApi();
+      const cands = (await (
+        await app.request('/clubs/umzinto/teams/umzinto/captain-candidates', { headers: h() })
+      ).json()) as { candidates: Array<{ id: string; name: string }> };
+      const cap = cands.candidates.find((c) => c.name === 'Mens Test')!;
+      const set = await put({ scope: SC2, candidateId: cap.id });
+      assert.equal(set.status, 200);
+      const setText = await set.text();
+      assert.ok(!setText.includes(K(1)), 'no natural key served');
+      assert.equal((JSON.parse(setText) as Comp).name, 'Veterans Premier');
+      const comps = await list();
+      assert.equal(comps.find((c) => c.scope === SC)!.captain, null);
+      assert.equal(comps.find((c) => c.scope === SC2)!.captain!.name, 'Mens Test');
+
+      assert.equal((await put({ scope: 'league:draft', candidateId: cap.id })).status, 400);
+      assert.equal((await put({ scope: 'league:juniors', candidateId: cap.id })).status, 400);
+      assert.equal((await put({ candidateId: cap.id })).status, 400);
+      assert.equal((await put({ scope: SC2, candidateId: cap.id }, REP_AW)).status, 403);
+      assert.equal(await repo.getTeamCaptain(T, 'umzinto', 'umzinto', 'league:draft'), null);
+
+      assert.equal((await put({ scope: SC2, candidateId: null })).status, 200);
+      assert.equal(await repo.getTeamCaptain(T, 'umzinto', 'umzinto', SC2), null);
+    });
   });
 });

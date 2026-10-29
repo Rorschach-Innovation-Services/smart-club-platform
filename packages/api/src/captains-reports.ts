@@ -37,6 +37,7 @@ import {
 import { isSlotRef } from '../../engine/src/formats.js';
 import { formatSastWeekdayDay, formatWeekdayDayYear } from '../../../src/dates.js';
 import { orgCopy } from './branding.js';
+import { captainScopeOfSeries } from './captain-scope.js';
 import { chairContactOf } from './club-contacts.js';
 import {
   captainsReportLinkBase,
@@ -842,16 +843,20 @@ export async function openReportsForFixture(
         ? await resolveCaptain(repo, tenant, club.id, result.captainRef)
         : null;
     if (captain)
-      // The team's last known captain (per TEAM — a multi-team club's sides never share it),
-      // for the squad-link recipient ladder. Natural key + name only; best-effort.
-      await repo
-        .putTeamLastCaptain(tenant, {
-          clubId: club.id,
-          teamId: s.teamId,
-          naturalKey: captain.naturalKey,
-          name: captain.name,
-          seenAt: nowIso,
-        })
+      // The team's last known captain (per TEAM and COMPETITION — a club's sides never share
+      // it, even when one teamId plays several leagues), for the squad-link recipient ladder.
+      // Natural key + name only; best-effort (a scope read failure skips the write).
+      await captainScopeOfSeries(repo, tenant, series)
+        .then((scope) =>
+          repo.putTeamLastCaptain(tenant, {
+            clubId: club.id,
+            teamId: s.teamId,
+            scope,
+            naturalKey: captain.naturalKey,
+            name: captain.name,
+            seenAt: nowIso,
+          }),
+        )
         .catch(() => {});
     const contact = captain ? contactOnlyNamed(captain) : chair;
     const recipient: CaptainsReportRecipient = {

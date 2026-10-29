@@ -813,7 +813,12 @@ export async function appendClubCommEvents(
  * `welcome-broadcast-<email|cell>`).
  */
 export type InviteSendKind =
-  'invite' | 'fixtures' | 'staff-invite' | 'fixture-reminder' | 'clearance-reminder' | 'broadcast';
+  | 'invite'
+  | 'fixtures'
+  | 'staff-invite'
+  | 'fixture-reminder'
+  | 'clearance-reminder'
+  | 'broadcast';
 
 /** Outcome of a duplicate idempotency claim: prior results + whether the first attempt is still running. */
 export interface InviteSendReplay {
@@ -869,7 +874,8 @@ export async function claimInviteSend(
         new GetCommand({ TableName: TABLE, Key: clubInviteKey(tenant, clubId, idempotencyKey) }),
       );
       const item = res.Item as
-        { status?: string; results?: SendResult[]; kind?: string } | undefined;
+        | { status?: string; results?: SendResult[]; kind?: string }
+        | undefined;
       // The invite/fixtures markers share the INVITE# keyspace; `kind` disambiguates them.
       // A key reused across kinds must never replay the wrong send's results — refuse it.
       const priorKind = (item?.kind as InviteSendKind) ?? 'invite';
@@ -10454,24 +10460,31 @@ export async function releaseSquadRequestNotify(
   }
 }
 
-// Team captain designation + last known captain (per TEAM, never shared across a club's teams).
+// Team captain designation + last known captain (per TEAM and COMPETITION scope — never
+// shared across a club's teams, nor across the competitions one teamId plays in).
+
+/** Stored rows carry their raw sk so erasure can delete legacy unscoped rows too. */
+type WithSk<T> = T & { sk: string };
 
 export async function getTeamCaptain(
   tenant: string,
   clubId: string,
   teamId: string,
+  scope: string,
 ): Promise<TeamCaptainDesignation | null> {
   const res = await ddb.send(
-    new GetCommand({ TableName: TABLE, Key: teamCaptainKey(tenant, clubId, teamId) }),
+    new GetCommand({ TableName: TABLE, Key: teamCaptainKey(tenant, clubId, teamId, scope) }),
   );
   return stripKeys<TeamCaptainDesignation>(res.Item);
 }
 
+/** Ops-callable: `putTeamCaptain(tenant, { clubId, teamId, scope, playerKey, setBy, setAt })`. */
 export async function putTeamCaptain(tenant: string, d: TeamCaptainDesignation): Promise<void> {
+  if (!d.scope) throw new Error('putTeamCaptain: scope is required');
   await ddb.send(
     new PutCommand({
       TableName: TABLE,
-      Item: { ...d, ...teamCaptainKey(tenant, d.clubId, d.teamId) },
+      Item: { ...d, ...teamCaptainKey(tenant, d.clubId, d.teamId, d.scope) },
     }),
   );
 }
@@ -10480,40 +10493,46 @@ export async function deleteTeamCaptain(
   tenant: string,
   clubId: string,
   teamId: string,
+  scope: string,
 ): Promise<void> {
   await ddb.send(
-    new DeleteCommand({ TableName: TABLE, Key: teamCaptainKey(tenant, clubId, teamId) }),
+    new DeleteCommand({ TableName: TABLE, Key: teamCaptainKey(tenant, clubId, teamId, scope) }),
   );
 }
 
-export async function listTeamCaptains(tenant: string): Promise<TeamCaptainDesignation[]> {
+/** Every TEAMCAPTAIN# row, legacy unscoped ones included (each with its raw sk). */
+export async function listTeamCaptains(
+  tenant: string,
+): Promise<WithSk<Partial<TeamCaptainDesignation>>[]> {
   const { pk, skPrefix } = teamCaptainsListKey(tenant);
   const items = await queryAll({
     TableName: TABLE,
     KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
     ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
   });
-  return items.map((i) => stripKeys<TeamCaptainDesignation>(i)!);
+  return items.map((i) => ({ ...stripKeys<TeamCaptainDesignation>(i)!, sk: String(i.sk) }));
 }
 
 export async function getTeamLastCaptain(
   tenant: string,
   clubId: string,
   teamId: string,
+  scope: string,
 ): Promise<TeamLastCaptain | null> {
   const res = await ddb.send(
-    new GetCommand({ TableName: TABLE, Key: teamLastCaptainKey(tenant, clubId, teamId) }),
+    new GetCommand({ TableName: TABLE, Key: teamLastCaptainKey(tenant, clubId, teamId, scope) }),
   );
   return stripKeys<TeamLastCaptain>(res.Item);
 }
 
 /** Latest wins (by `seenAt`): an older sighting never overwrites a newer one. */
 export async function putTeamLastCaptain(tenant: string, row: TeamLastCaptain): Promise<void> {
+  if (!row.scope) throw new Error('putTeamLastCaptain: scope is required');
   try {
     await ddb.send(
       new PutCommand({
         TableName: TABLE,
-        Item: { ...row, ...teamLastCaptainKey(tenant, row.clubId, row.teamId) },
+        Item: { ...row, ...teamLastCaptainKey(tenant, row.clubId, row.teamId, row.scope) },
         ConditionExpression: 'attribute_not_exists(pk) OR seenAt <= :s',
         ExpressionAttributeValues: { ':s': row.seenAt },
       }),
@@ -10523,14 +10542,17 @@ export async function putTeamLastCaptain(tenant: string, row: TeamLastCaptain): 
   }
 }
 
-export async function listTeamLastCaptains(tenant: string): Promise<TeamLastCaptain[]> {
+/** Every TEAMLASTCAPT# row, legacy unscoped ones included (each with its raw sk). */
+export async function listTeamLastCaptains(
+  tenant: string,
+): Promise<WithSk<Partial<TeamLastCaptain>>[]> {
   const { pk, skPrefix } = teamLastCaptainsListKey(tenant);
   const items = await queryAll({
     TableName: TABLE,
     KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
     ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
   });
-  return items.map((i) => stripKeys<TeamLastCaptain>(i)!);
+  return items.map((i) => ({ ...stripKeys<TeamLastCaptain>(i)!, sk: String(i.sk) }));
 }
 
 // SQUADOPEN# retry markers.
@@ -10744,19 +10766,16 @@ async function eraseFromSquadRows(
   at: string,
 ): Promise<{ teamCaptainRows: number; squadRequestsScrubbed: number; squadsRepushed: number }> {
   let teamCaptainRows = 0;
+  // Deleted by the row's RAW sk, so legacy unscoped rows (no `scope`) are scrubbed too.
+  const pk = captainsReportPartitionPk(tenant);
   for (const d of await listTeamCaptains(tenant))
     if (d.playerKey === naturalKey) {
-      await deleteTeamCaptain(tenant, d.clubId, d.teamId);
+      await ddb.send(new DeleteCommand({ TableName: TABLE, Key: { pk, sk: d.sk } }));
       teamCaptainRows++;
     }
   for (const l of await listTeamLastCaptains(tenant))
     if (l.naturalKey === naturalKey) {
-      await ddb.send(
-        new DeleteCommand({
-          TableName: TABLE,
-          Key: teamLastCaptainKey(tenant, l.clubId, l.teamId),
-        }),
-      );
+      await ddb.send(new DeleteCommand({ TableName: TABLE, Key: { pk, sk: l.sk } }));
       teamCaptainRows++;
     }
   let squadRequestsScrubbed = 0;
