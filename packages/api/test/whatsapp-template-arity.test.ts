@@ -558,25 +558,28 @@ describe('EMCU scorer broadcast templates (VIDEO header, static app buttons; app
 describe('squad selection template (captain squad links)', () => {
   const def = WHATSAPP_TEMPLATES.squadSelectionDue;
 
-  test('three body params, the /sq/ URL button, pending until Meta approves', () => {
+  test('three body params, the /sq/ URL button, registered (Meta approved)', () => {
     assert.equal(def.name, 'squad_selection_due');
     assert.equal(def.paramCount, 3);
-    assert.equal(def.status, 'pending');
+    assert.equal(def.status, 'registered');
     assert.equal(def.urlButton.urlTemplate, 'https://platform.club.medicoach.co.za/sq/{{1}}');
     for (const p of squadSelectionDueParams({ recipientName: 'A', orgName: 'O', match: 'C' }))
       assert.doesNotMatch(p.text, /https?:\/\//);
   });
 
-  test('the sender refuses while the template is pending (never a try-and-fail send)', async () => {
-    await assert.rejects(
-      sendSquadSelectionDueWhatsApp({
-        to: '+27820000000',
-        recipientName: 'A',
-        clubName: 'C',
-        orgName: 'O',
-        match: 'M',
-        token: 't.s',
-      }),
+  test('the sender passes the gate now it is registered (dry-run)', async () => {
+    const sent = await sendSquadSelectionDueWhatsApp({
+      to: '+27820000000',
+      recipientName: 'A',
+      clubName: 'C',
+      orgName: 'O',
+      match: 'M',
+      token: 't.s',
+    });
+    assert.match(sent.messageId, /^dry-run-/);
+    // The gate still refuses it if ever flipped back to pending.
+    assert.throws(
+      () => assertTemplateSendable({ ...def, status: 'pending' as const }),
       WhatsAppTemplatePendingError,
     );
   });

@@ -333,11 +333,21 @@ export interface TenantConfig {
    * email-only), 'selfServeBranding' (reserved, default false), 'medicoachSync' (default
    * false — the medicoach fixture/result sync puller runs for this tenant, ADR 0016),
    * 'captainsReports' (default TRUE — the kill switch for AUTOMATIC captain's reports: off ⇒
-   * no opens, notices or reminders; issued links still work, portal filing untouched),
+   * no opens, notices or reminders; issued links still work, portal filing untouched; see
+   * `captainsReportsExcludedSeriesPrefixes` for the per-series exclusion),
    * 'preMatchSquadLinks' (default false — the evening-before captain squad-selection links,
    * pushed to medicoach as contract §8; runs inside the medicoachSync run only).
    */
   features?: Record<string, boolean>;
+  /**
+   * Per-series exclusion from AUTOMATIC captain's reports: a series whose name starts with any
+   * of these prefixes (trimmed, case-insensitive) behaves as if `features.captainsReports` were
+   * off for it alone (no opens, notices or reminders; queued open markers deleted; issued links
+   * and portal filing untouched). Squad links are NOT affected. Used to exclude EMCU's
+   * competitions ("EMCU …") inside the `dolphins` tenant. Operator-only: PUT /tenant/config
+   * strips it, only PUT /platform/tenants/:slug writes it (≤ 20 non-empty strings).
+   */
+  captainsReportsExcludedSeriesPrefixes?: string[];
   /**
    * Third-party integration settings. Operator-only (ADR 0006): PUT /tenant/config strips
    * it, only PUT /platform/tenants/:slug writes it.

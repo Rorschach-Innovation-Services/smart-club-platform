@@ -272,9 +272,9 @@ export const WHATSAPP_TEMPLATES = {
    *
    * Utility, English, 3 body params, dynamic URL button. Transaction-anchored copy (it names
    * the fixture and asks for a specific action) so Meta's classifier does not treat it as
-   * Marketing (the ops-digest v1 lesson). `status: 'pending'` until Meta approves it — the
-   * sender throws `WhatsAppTemplatePendingError` and the squad notice skips the WhatsApp leg
-   * (`template-pending`); email covers the gap.
+   * Marketing (the ops-digest v1 lesson). Meta approved it 2026-10-29 (Utility, English), so it
+   * is `registered`; while it was `pending` the sender threw `WhatsAppTemplatePendingError` and
+   * the squad notice skipped the WhatsApp leg (`template-pending`), email covering the gap.
    */
   squadSelectionDue: {
     name: 'squad_selection_due',
@@ -285,7 +285,7 @@ export const WHATSAPP_TEMPLATES = {
       'Hello {{1}},\n\n' +
       'Squad selection for your {{2}} fixture {{3}} is now open.\n\n' +
       'Tap the button below to select your match squad from the registered players. You can change it until the end of match day.',
-    status: 'pending',
+    status: 'registered',
     urlButton: {
       urlTemplate: 'https://platform.club.medicoach.co.za/sq/{{1}}',
       suffix: 'signed squad token',

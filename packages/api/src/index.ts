@@ -10240,6 +10240,8 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   delete (patch as { clearanceCertTemplate?: unknown }).clearanceCertTemplate;
   delete (patch as { orgContact?: unknown }).orgContact;
   delete (patch as { fixtureReminders?: unknown }).fixtureReminders;
+  delete (patch as { captainsReportsExcludedSeriesPrefixes?: unknown })
+    .captainsReportsExcludedSeriesPrefixes;
   delete (patch as { transferWindows?: unknown }).transferWindows;
   delete (patch as { sport?: unknown }).sport;
   delete (patch as { seasonLabel?: unknown }).seasonLabel;
@@ -10922,6 +10924,20 @@ app.put('/platform/tenants/:slug', async (c) => {
   // Whole-key write (the card sends the full object); normalised: leadDays deduped + sorted.
   if (body.fixtureReminders !== undefined) {
     patch.fixtureReminders = validateFixtureReminders(body.fixtureReminders);
+  }
+  // Whole-key write; [] clears. Prefixes are trimmed (matching is case-insensitive at read).
+  if (body.captainsReportsExcludedSeriesPrefixes !== undefined) {
+    const v: unknown = body.captainsReportsExcludedSeriesPrefixes;
+    if (
+      !Array.isArray(v) ||
+      v.length > 20 ||
+      !v.every((p) => typeof p === 'string' && p.trim() !== '' && p.length <= 200)
+    )
+      throw new HttpError(
+        400,
+        'captainsReportsExcludedSeriesPrefixes must be an array of at most 20 non-empty strings',
+      );
+    patch.captainsReportsExcludedSeriesPrefixes = v.map((p: string) => p.trim());
   }
   // Player sync switched on by this save (ADR 0019) — probed for team coverage after the write.
   let playerSyncSwitchedOn = false;
