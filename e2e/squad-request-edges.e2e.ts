@@ -47,6 +47,9 @@ const sastDay = (offset: number) =>
 const TOMORROW = sastDay(1);
 const TODAY = sastDay(0);
 const YESTERDAY = sastDay(-1);
+const IN_A_MONTH = sastDay(30);
+/** The captain-row scope of every series this spec seeds (`leagueKey: 'premier'`). */
+const SCOPE = 'league:premier';
 // Run-unique kick-off minutes: a reused stack keeps earlier runs' released series, and the
 // release gate refuses the same ground at the same date + time (venue_clash).
 const MIN = String(parseInt(RUN.slice(-4), 36) % 60).padStart(2, '0');
@@ -471,8 +474,8 @@ test.afterAll(async ({ request }) => {
   await setReportNoticeWindow(request, 'real');
   await stopStub();
   for (const c of LADDER_CLUBS) {
-    await deleteItem(CAPREPORT_PK, `TEAMCAPTAIN#${c}#${c}`).catch(() => {});
-    await deleteItem(CAPREPORT_PK, `TEAMLASTCAPT#${c}#${c}`).catch(() => {});
+    await deleteItem(CAPREPORT_PK, `TEAMCAPTAIN#${c}#${c}#${SCOPE}`).catch(() => {});
+    await deleteItem(CAPREPORT_PK, `TEAMLASTCAPT#${c}#${c}#${SCOPE}`).catch(() => {});
   }
   if (!priorFeatures) return;
   await request.put(`${API_BASE}/platform/tenants/${TENANT}`, {
@@ -776,12 +779,18 @@ test('recipient ladder: designated → last captain (learned from a captain’s 
     return { id: hit!.id, text };
   };
 
+  // Captains are designated per competition, and only for one the team plays in: a released
+  // premier series far in the future (never opened) puts phoenix + spartan in `league:premier`
+  // before the squad series below exists.
+  await seedSeries(request, `s-sqe-anchor-${RUN}`, [
+    { id: 'f1', date: IN_A_MONTH, time: at('10'), home: 'phoenix', away: 'spartan' },
+  ]);
   // Designate phoenix's captain through the portal API (the club's own rep).
   const desCand = await candidateId('phoenix', `SqeDes${RUN}`);
   expect(desCand.text).not.toContain(designee.naturalKey);
   const des = await request.put(`${API_BASE}/clubs/phoenix/teams/phoenix/captain`, {
     headers: apiHeaders(repAuthHeader('phoenix')),
-    data: { candidateId: desCand.id },
+    data: { scope: SCOPE, candidateId: desCand.id },
   });
   expect(des.ok(), `designate → ${des.status()} ${await des.text()}`).toBeTruthy();
 
@@ -815,7 +824,7 @@ test('recipient ladder: designated → last captain (learned from a captain’s 
   expect(minor.isMinor).toBe(true);
   const desMinor = await request.put(`${API_BASE}/clubs/spartan/teams/spartan/captain`, {
     headers: apiHeaders(repAuthHeader('spartan')),
-    data: { candidateId: (await candidateId('spartan', `SqeMinor${RUN}`)).id },
+    data: { scope: SCOPE, candidateId: (await candidateId('spartan', `SqeMinor${RUN}`)).id },
   });
   expect(desMinor.ok(), `designate minor → ${desMinor.status()}`).toBeTruthy();
 
@@ -1101,7 +1110,7 @@ test('isolation: a token for another tenant or request does not load; another cl
     (
       await request.put(`${API_BASE}/clubs/phoenix/teams/phoenix/captain`, {
         headers: asBerea,
-        data: { candidateId: null },
+        data: { scope: SCOPE, candidateId: null },
       })
     ).status(),
   ).toBe(403);
@@ -1109,7 +1118,7 @@ test('isolation: a token for another tenant or request does not load; another cl
     (
       await request.put(`${API_BASE}/clubs/berea/teams/chatsworth/captain`, {
         headers: asBerea,
-        data: { candidateId: null },
+        data: { scope: SCOPE, candidateId: null },
       })
     ).status(),
   ).toBe(404);

@@ -320,10 +320,12 @@ import {
   squadForwardCandidates,
   captainCandidates,
   captainCandidateId,
+  teamCaptainCompetitions,
   squadLinkPayload,
   squadRequestView,
   SquadFlowError,
 } from './squad-requests.js';
+import { isCaptainScope } from './captain-scope.js';
 import { flushSquadOutbox } from './medicoach-sync/squads.js';
 import { applyWhatsAppStatuses, parseStatuses } from './notify/whatsapp-status.js';
 import {
@@ -8497,8 +8499,37 @@ app.get('/clubs/:id/teams/:teamId/captain-candidates', async (c) => {
   });
 });
 
-/** The club's designated captain for one team (club members / admins of that club). Never
- *  the natural key (an ID number): the designee is served under its opaque candidate id. */
+/** The served view of one designation: opaque candidate id + display name, never the key. */
+async function teamCaptainView(
+  tenant: string,
+  clubId: string,
+  teamId: string,
+  d: { playerKey: string; setBy: string; setAt: string },
+) {
+  let p = await repo.getPlayer(tenant, clubId, d.playerKey);
+  let affiliate = false;
+  if (!p) {
+    const aff = await repo.getVeteransAffiliation(tenant, clubId, d.playerKey);
+    if (aff) {
+      p = await repo.getPlayer(tenant, aff.primaryClubId, d.playerKey);
+      affiliate = !!p;
+    }
+  }
+  return {
+    candidateId: captainCandidateId(captainsReportLinkSecret(), tenant, teamId, d.playerKey),
+    name: p ? `${p.firstName ?? ''} ${p.lastName ?? ''}`.trim() : '',
+    ...(affiliate ? { affiliate: true } : {}),
+    setBy: d.setBy,
+    setAt: d.setAt,
+  };
+}
+
+/**
+ * The club's designated captains for one team — ONE PER COMPETITION the team currently plays
+ * in (a teamId can be shared by a club's men's, women's and veterans sides, so a single
+ * designation would bleed across them). Club members / admins of that club. Never the
+ * natural key (an ID number): each designee is served under its opaque candidate id.
+ */
 app.get('/clubs/:id/teams/:teamId/captain', async (c) => {
   const ra = c.get('requestAuth')!;
   const id = c.req.param('id');
@@ -8506,50 +8537,54 @@ app.get('/clubs/:id/teams/:teamId/captain', async (c) => {
   assertClubAccess(ra, id);
   const club = await repo.getClub(ra.tenant, id);
   if (!club || !clubOwnsTeam(club, teamId)) throw new HttpError(404, 'team not found');
-  const d = await repo.getTeamCaptain(ra.tenant, id, teamId);
-  if (!d) return c.json({ teamId, captain: null });
-  let p = await repo.getPlayer(ra.tenant, id, d.playerKey);
-  let affiliate = false;
-  if (!p) {
-    const aff = await repo.getVeteransAffiliation(ra.tenant, id, d.playerKey);
-    if (aff) {
-      p = await repo.getPlayer(ra.tenant, aff.primaryClubId, d.playerKey);
-      affiliate = !!p;
-    }
-  }
-  return c.json({
-    teamId,
-    captain: {
-      candidateId: captainCandidateId(captainsReportLinkSecret(), ra.tenant, teamId, d.playerKey),
-      name: p ? `${p.firstName ?? ''} ${p.lastName ?? ''}`.trim() : '',
-      ...(affiliate ? { affiliate: true } : {}),
-      setBy: d.setBy,
-      setAt: d.setAt,
-    },
-  });
+  const comps = await teamCaptainCompetitions(repo, ra.tenant, id, teamId);
+  const competitions = await Promise.all(
+    comps.map(async (comp) => {
+      const d = await repo.getTeamCaptain(ra.tenant, id, teamId, comp.scope);
+      return { ...comp, captain: d ? await teamCaptainView(ra.tenant, id, teamId, d) : null };
+    }),
+  );
+  return c.json({ teamId, competitions });
 });
 
-/** Set (`{candidateId}`, from captain-candidates) or clear (`{candidateId: null}`). */
+/**
+ * Set (`{scope, candidateId}`, candidate from captain-candidates) or clear
+ * (`{scope, candidateId: null}`) the captain for one competition of the team. 400 when
+ * `scope` is not a competition the team currently plays in.
+ */
 app.put('/clubs/:id/teams/:teamId/captain', async (c) => {
   const ra = c.get('requestAuth')!;
   const id = c.req.param('id');
   const teamId = c.req.param('teamId');
   assertClubAccess(ra, id);
+  // Body shape first: a malformed body is a 400 before any club / series / roster read.
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as {
+    scope?: unknown;
+    candidateId?: unknown;
+  };
+  if (!isCaptainScope(body.scope)) throw new HttpError(400, 'scope is required');
+  if (body.candidateId !== null && (typeof body.candidateId !== 'string' || !body.candidateId))
+    throw new HttpError(400, 'candidateId is required (or null to clear)');
+  const scope = body.scope;
   const club = await repo.getClub(ra.tenant, id);
   if (!club || !clubOwnsTeam(club, teamId)) throw new HttpError(404, 'team not found');
-  const body = ((await c.req.json().catch(() => null)) ?? {}) as { candidateId?: unknown };
+  const comps = await teamCaptainCompetitions(repo, ra.tenant, id, teamId);
+  const comp = comps.find((x) => x.scope === scope);
+  if (!comp) throw new HttpError(400, 'this team does not play in that competition');
   if (body.candidateId === null) {
-    await repo.deleteTeamCaptain(ra.tenant, id, teamId);
-    return c.json({ teamId, captain: null });
+    await repo.deleteTeamCaptain(ra.tenant, id, teamId, scope);
+    return c.json({ teamId, ...comp, captain: null });
   }
-  if (typeof body.candidateId !== 'string' || !body.candidateId)
-    throw new HttpError(400, 'candidateId is required (or null to clear)');
+  // Candidates are deliberately TEAM-wide, not per competition: the club's roster (plus the
+  // veterans affiliation expansion) is who may captain any of the team's sides; the scope only
+  // decides which competition's designation row is written.
   const list = await captainCandidates(repo, ra.tenant, id, teamId, captainsReportLinkSecret());
   const hit = list.find((e) => e.id === body.candidateId);
   if (!hit) throw new HttpError(400, "that player is not on the club's roster");
   const d = {
     clubId: id,
     teamId,
+    scope,
     playerKey: hit.key,
     setBy: ra.email ?? 'portal',
     setAt: new Date().toISOString(),
@@ -8557,6 +8592,7 @@ app.put('/clubs/:id/teams/:teamId/captain', async (c) => {
   await repo.putTeamCaptain(ra.tenant, d);
   return c.json({
     teamId,
+    ...comp,
     captain: {
       candidateId: hit.id,
       name: hit.name,

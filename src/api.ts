@@ -43,6 +43,7 @@ import type {
   LinkedSquadRequest,
   SquadRequestView,
   SquadSaveBody,
+  TeamCaptainPutResponse,
   TeamCaptainResponse,
   CaptainCandidatesResponse,
   ScorecardConsoleFilter,
@@ -1464,7 +1465,8 @@ export const forwardLinkedSquadRequest = (token: string, candidateId: string) =>
     body: { candidateId },
     auth: false,
   });
-/** A club team's designated captain (`teamId` = the club id or one of its `tm_` sides). */
+/** A club team's designated captains, one per competition it plays in (`teamId` = the club
+ *  id or one of its `tm_` sides). */
 export const getTeamCaptain = (clubId: string, teamId: string) =>
   request<TeamCaptainResponse>(
     `/clubs/${encodeURIComponent(clubId)}/teams/${encodeURIComponent(teamId)}/captain`,
@@ -1474,11 +1476,16 @@ export const getCaptainCandidates = (clubId: string, teamId: string) =>
   request<CaptainCandidatesResponse>(
     `/clubs/${encodeURIComponent(clubId)}/teams/${encodeURIComponent(teamId)}/captain-candidates`,
   );
-/** Set (`candidateId`) or clear (`null`) the team's designated captain. */
-export const putTeamCaptain = (clubId: string, teamId: string, candidateId: string | null) =>
-  request<TeamCaptainResponse>(
+/** Set (`candidateId`) or clear (`null`) the team's designated captain in one competition. */
+export const putTeamCaptain = (
+  clubId: string,
+  teamId: string,
+  scope: string,
+  candidateId: string | null,
+) =>
+  request<TeamCaptainPutResponse>(
     `/clubs/${encodeURIComponent(clubId)}/teams/${encodeURIComponent(teamId)}/captain`,
-    { method: 'PUT', body: { candidateId } },
+    { method: 'PUT', body: { scope, candidateId } },
   );
 /** Union office: every squad request (names only, never keys or contacts). */
 export const getSquadRequests = (query: { status?: string; from?: string; to?: string } = {}) =>

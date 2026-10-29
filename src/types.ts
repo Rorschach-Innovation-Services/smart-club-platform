@@ -1700,17 +1700,35 @@ export interface SquadSaveBody {
   expectedModified: string;
 }
 
-/** GET/PUT /clubs/:id/teams/:teamId/captain */
+/** A designated captain as served: `candidateId` is opaque (never the natural key / ID number). */
+export interface TeamCaptainView {
+  candidateId: string;
+  name: string;
+  affiliate?: true;
+  setBy: string;
+  setAt: string;
+}
+
+/**
+ * One competition a club team currently plays in, with its designated captain. Captains are
+ * per team AND competition: a club's men's, women's and veterans sides can share one teamId.
+ * `scope` is the opaque competition key the PUT takes back.
+ */
+export interface TeamCaptainCompetition {
+  scope: string;
+  name: string;
+  captain: TeamCaptainView | null;
+}
+
+/** GET /clubs/:id/teams/:teamId/captain */
 export interface TeamCaptainResponse {
   teamId: string;
-  /** `candidateId` is an opaque id (never the natural key / ID number). */
-  captain: {
-    candidateId: string;
-    name: string;
-    affiliate?: true;
-    setBy: string;
-    setAt: string;
-  } | null;
+  competitions: TeamCaptainCompetition[];
+}
+
+/** PUT /clubs/:id/teams/:teamId/captain — the one competition that changed. */
+export interface TeamCaptainPutResponse extends TeamCaptainCompetition {
+  teamId: string;
 }
 
 /** GET /clubs/:id/teams/:teamId/captain-candidates */

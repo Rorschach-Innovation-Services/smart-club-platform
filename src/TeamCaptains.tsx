@@ -1,8 +1,10 @@
 /* ─── Team captain designation (pre-match squad links) ───
  *
  * The squad link goes to a team's DESIGNATED captain first (then its last known captain, then
- * the chair). One picker per side the club fields: the club itself for a single-side league,
- * each named `tm_` side for a league with several. Backed by the club's roster plus its veterans affiliates; a change
+ * the chair). One picker per side the club fields AND per competition that side plays in: the
+ * club itself for a single-side league, each named `tm_` side for a league with several — and
+ * because a club's men's, women's and veterans sides can share one team id, each competition
+ * gets its own captain. Backed by the club's roster plus its veterans affiliates; a change
  * saves at once (GET/PUT /clubs/:id/teams/:teamId/captain). Shown in the admin club detail and
  * the club portal's player roster.
  */
@@ -12,6 +14,7 @@ import { Card } from './atoms';
 import { useFeature } from './branding';
 import { ApiError, getCaptainCandidates, getTeamCaptain, putTeamCaptain } from './api';
 import { qk } from './query';
+import type { TeamCaptainCompetition, TeamCaptainResponse } from './types';
 
 interface ClubTeamsShape {
   id: string;
@@ -40,53 +43,72 @@ export function clubTeams(club: ClubTeamsShape): Array<{ id: string; name: strin
   return [...out].map(([id, name]) => ({ id, name }));
 }
 
-function TeamCaptainRow({ clubId, team }: { clubId: string; team: { id: string; name: string } }) {
+type Candidate = { id: string; name: string; affiliate?: true };
+
+const candidateLabel = (p: { name: string; affiliate?: true }) =>
+  p.affiliate ? `${p.name} (affiliate)` : p.name;
+
+function CompetitionCaptainPicker({
+  clubId,
+  team,
+  competition,
+  candidates,
+  candidatesLoading,
+}: {
+  clubId: string;
+  team: { id: string; name: string };
+  competition: TeamCaptainCompetition;
+  candidates: Candidate[];
+  candidatesLoading: boolean;
+}) {
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const key = qk.teamCaptain(clubId, team.id);
-  const query = useQuery({ queryKey: key, queryFn: () => getTeamCaptain(clubId, team.id) });
-  const candidates = useQuery({
-    queryKey: qk.captainCandidates(clubId, team.id),
-    queryFn: () => getCaptainCandidates(clubId, team.id),
-  });
   const save = useMutation({
-    mutationFn: (candidateId: string | null) => putTeamCaptain(clubId, team.id, candidateId),
+    mutationFn: (candidateId: string | null) =>
+      putTeamCaptain(clubId, team.id, competition.scope, candidateId),
     onSuccess: (res) => {
       setError(null);
-      qc.setQueryData(key, res);
+      qc.setQueryData<TeamCaptainResponse>(key, (prev) =>
+        prev
+          ? {
+              ...prev,
+              competitions: prev.competitions.map((c) =>
+                c.scope === res.scope ? { ...c, captain: res.captain } : c,
+              ),
+            }
+          : prev,
+      );
     },
     onError: (err) =>
       setError(err instanceof ApiError ? err.message : 'Could not save the captain'),
   });
-  const list = candidates.data?.candidates ?? [];
-  const current = query.data?.captain?.candidateId ?? '';
-  const listed = list.some((p) => p.id === current);
-  const label = (p: { name: string; affiliate?: true }) =>
-    p.affiliate ? `${p.name} (affiliate)` : p.name;
+  const current = competition.captain?.candidateId ?? '';
+  const listed = candidates.some((p) => p.id === current);
+  const id = `cap-${team.id}-${competition.scope}`;
+  const title = `${team.name} — ${competition.name}`;
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-      <label style={{ minWidth: 160, fontWeight: 600 }} htmlFor={`cap-${team.id}`}>
-        {team.name}
+      <label style={{ minWidth: 160, fontWeight: 600 }} htmlFor={id}>
+        {title}
       </label>
       <select
-        id={`cap-${team.id}`}
+        id={id}
         className="field-select"
-        aria-label={`Team captain — ${team.name}`}
+        aria-label={`Team captain — ${title}`}
         value={current}
-        disabled={query.isLoading || candidates.isLoading || save.isPending}
+        disabled={candidatesLoading || save.isPending}
         onChange={(e) => save.mutate(e.target.value || null)}
       >
         <option value="">No captain set</option>
         {current && !listed && (
           <option value={current}>
-            {query.data?.captain
-              ? label(query.data.captain) || 'Current captain'
-              : 'Current captain'}
+            {(competition.captain && candidateLabel(competition.captain)) || 'Current captain'}
           </option>
         )}
-        {list.map((p) => (
+        {candidates.map((p) => (
           <option key={p.id} value={p.id}>
-            {label(p)}
+            {candidateLabel(p)}
           </option>
         ))}
       </select>
@@ -99,7 +121,44 @@ function TeamCaptainRow({ clubId, team }: { clubId: string; team: { id: string; 
   );
 }
 
-/** "Team captain" per side: who the pre-match squad link goes to first. Candidates are the
+function TeamCaptainRow({ clubId, team }: { clubId: string; team: { id: string; name: string } }) {
+  const query = useQuery({
+    queryKey: qk.teamCaptain(clubId, team.id),
+    queryFn: () => getTeamCaptain(clubId, team.id),
+  });
+  // Candidates are deliberately TEAM-wide, not per competition: the club's roster (plus the
+  // veterans affiliation expansion server-side) may captain any of the team's sides, so one
+  // list serves every competition picker below; only the designation row is per competition.
+  const candidates = useQuery({
+    queryKey: qk.captainCandidates(clubId, team.id),
+    queryFn: () => getCaptainCandidates(clubId, team.id),
+  });
+  if (query.isLoading) return <div style={{ color: 'var(--muted)' }}>{team.name}: loading…</div>;
+  const competitions = query.data?.competitions ?? [];
+  if (!competitions.length)
+    return (
+      <div style={{ color: 'var(--muted)' }}>
+        {team.name}: not in a released competition yet — a captain can be set once its fixtures are
+        released.
+      </div>
+    );
+  return (
+    <>
+      {competitions.map((c) => (
+        <CompetitionCaptainPicker
+          key={c.scope}
+          clubId={clubId}
+          team={team}
+          competition={c}
+          candidates={candidates.data?.candidates ?? []}
+          candidatesLoading={candidates.isLoading}
+        />
+      ))}
+    </>
+  );
+}
+
+/** "Team captain" per side and competition: who the pre-match squad link goes to first. Candidates are the
  *  club's active players plus its veterans affiliates, served under opaque ids (never an ID
  *  number). */
 export function TeamCaptainsCard({ club }: { club: ClubTeamsShape }) {

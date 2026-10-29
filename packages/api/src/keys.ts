@@ -769,10 +769,15 @@ export const squadRequestNotifyKey = (tenant: string, requestId: string, audienc
   sk: `NOTIFY#squadreq#${requestId}#${audience}`,
 });
 
-/** A club's designated captain for one team (club/admin-set). */
-export const teamCaptainKey = (tenant: string, clubId: string, teamId: string) => ({
+/**
+ * A club's designated captain for one team IN ONE COMPETITION (club/admin-set). Scoped by
+ * competition because a club's sides can share one teamId across leagues (captain-scope.ts).
+ * Legacy unscoped `TEAMCAPTAIN#<club>#<team>` rows are never read (ambiguous by
+ * construction); erasure still scrubs them via the prefix list.
+ */
+export const teamCaptainKey = (tenant: string, clubId: string, teamId: string, scope: string) => ({
   pk: captainsReportPartitionPk(tenant),
-  sk: `TEAMCAPTAIN#${clubId}#${teamId}`,
+  sk: `TEAMCAPTAIN#${clubId}#${teamId}#${scope}`,
 });
 
 export const teamCaptainsListKey = (tenant: string) => ({
@@ -780,10 +785,18 @@ export const teamCaptainsListKey = (tenant: string) => ({
   skPrefix: 'TEAMCAPTAIN#',
 });
 
-/** The team's last known captain (natural key + name; POPIA-approved 2026-10-27). */
-export const teamLastCaptainKey = (tenant: string, clubId: string, teamId: string) => ({
+/**
+ * The team's last known captain in one competition (natural key + name; POPIA-approved
+ * 2026-10-27). Same competition scoping and legacy rule as {@link teamCaptainKey}.
+ */
+export const teamLastCaptainKey = (
+  tenant: string,
+  clubId: string,
+  teamId: string,
+  scope: string,
+) => ({
   pk: captainsReportPartitionPk(tenant),
-  sk: `TEAMLASTCAPT#${clubId}#${teamId}`,
+  sk: `TEAMLASTCAPT#${clubId}#${teamId}#${scope}`,
 });
 
 export const teamLastCaptainsListKey = (tenant: string) => ({
