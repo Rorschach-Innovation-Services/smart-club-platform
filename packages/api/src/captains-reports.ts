@@ -60,6 +60,7 @@ import type {
   Club,
   League,
   Series,
+  SquadRequest,
   StoredFixtureResult,
   StoredFixtureScorecard,
   TenantConfig,
@@ -775,6 +776,124 @@ export async function resolveCaptainLadder(
   return { kind: 'chair', rung: 'chair', contact: chairContactOf(club) };
 }
 
+const RUNG_RANK: Record<CaptainLadderRung, number> = {
+  chair: 0,
+  'last-captain': 1,
+  designated: 2,
+  'squad-link': 3,
+  medicoach: 4,
+};
+
+/** The ladder rung a stored report was addressed from; null = never re-targeted. */
+function currentRungOf(r: CaptainsReport): CaptainLadderRung | null {
+  // A chair's "Send to captain" is an explicit human choice: never overridden.
+  if (r.recipient.forwardedBy) return null;
+  if (r.recipient.rung) return r.recipient.rung;
+  // Rows opened before the ladder: a captain recipient could only come from medicoach.
+  if (r.recipient.kind === 'captain') return 'medicoach';
+  return r.recipient.kind === 'chair' ? 'chair' : null;
+}
+
+const normText = (v: string | undefined) => (v ?? '').trim().toLowerCase();
+const samePerson = (
+  a: { name: string; email?: string; cell?: string },
+  b: { name: string; email?: string; cell?: string },
+) =>
+  normText(a.name) === normText(b.name) &&
+  normText(a.email) === normText(b.email) &&
+  (toE164(a.cell) ?? '') === (toE164(b.cell) ?? '');
+
+/**
+ * Re-target a still-PENDING auto report when a medicoach or squad-link captain now wins the
+ * ladder: only to an equal or higher rung than the one it was addressed from, only to a
+ * DIFFERENT person (same contact ⇒ no-op), never a forwarded or portal report. The re-address
+ * rotates the memberId (the previous recipient's link — chair's included — stops working; a
+ * kept chair link from an earlier forward is untouched), so the NOTIFY# audience is new and
+ * the new captain is notified exactly once. Conditional on the memberId the caller read: a
+ * concurrent change returns null (nothing sent). Returns the updated report, or null.
+ */
+async function retargetPendingReport(
+  repo: RepoModule,
+  tenant: string,
+  existing: CaptainsReport,
+  ladder: CaptainLadderResult,
+  chair: { name: string; email?: string; cell?: string },
+): Promise<CaptainsReport | null> {
+  if (existing.status !== 'pending' || existing.source !== 'auto') return null;
+  if (ladder.kind !== 'captain' || (ladder.rung !== 'medicoach' && ladder.rung !== 'squad-link'))
+    return null;
+  const cur = currentRungOf(existing);
+  if (cur === null || RUNG_RANK[ladder.rung] < RUNG_RANK[cur]) return null;
+  const current =
+    existing.recipient.kind === 'captain'
+      ? { name: existing.recipient.name, ...existing.recipientContact }
+      : chair;
+  if (samePerson(current, ladder.contact)) return null;
+  try {
+    return await repo.readdressCaptainsReport(
+      tenant,
+      existing,
+      {
+        recipient: {
+          kind: 'captain',
+          memberId: randomUUID(),
+          name: ladder.contact.name,
+          rung: ladder.rung,
+        },
+        recipientContact: contactOnly(ladder.contact),
+        captainName: ladder.contact.name,
+      },
+      { expectedMemberId: existing.recipient.memberId },
+    );
+  } catch (err) {
+    if (err instanceof repo.CaptainsReportForwardConflict) return null;
+    throw err;
+  }
+}
+
+/**
+ * After a squad-link SUBMIT: if the fixture side's captain's report is already open and still
+ * pending, let the submitted captain take it over (`retargetPendingReport`; never over a
+ * medicoach-sourced report). Gated like an opening: kill switch, series exclusion and the
+ * series' notice window (shut ⇒ nothing now; a later result for the fixture re-runs the
+ * ladder and re-targets then). Best-effort for the caller.
+ */
+export async function retargetReportForSquadCaptain(
+  deps: CaptainsReportDeps,
+  tenant: string,
+  req: Pick<SquadRequest, 'seriesId' | 'fixtureId' | 'clubId' | 'teamId' | 'status' | 'selection'>,
+): Promise<'retargeted' | 'none' | 'window-closed'> {
+  const { repo } = deps;
+  const now = deps.now ?? (() => new Date());
+  const captainKey = req.status === 'submitted' ? req.selection?.captainKey : undefined;
+  if (!captainKey) return 'none';
+  const report = await repo.getCaptainsReport(tenant, req.seriesId, req.fixtureId, req.clubId);
+  if (!report || report.status !== 'pending' || report.source !== 'auto') return 'none';
+  const config = await repo.getTenantConfig(tenant);
+  if (!config || !captainsReportsEnabled(config)) return 'none';
+  const series = await repo.getSeries(tenant, req.seriesId);
+  if (!series || seriesExcludedFromCaptainsReports(config, series.name)) return 'none';
+  const league = hasCaptainsReportLeagueOverrides(config)
+    ? await noticeLeagueResolver(repo, tenant, config).forSeries(series)
+    : undefined;
+  if (!reportNoticeWindowOpenFor(now(), league)) return 'window-closed';
+  const club = await repo.getClub(tenant, req.clubId);
+  if (!club) return 'none';
+  const chair = chairContactOf(club);
+  const scope = await captainScopeOfSeries(repo, tenant, series).catch(() => null);
+  const ladder = await resolveCaptainLadder(repo, tenant, club, req.teamId, scope, {
+    squadCaptainKey: captainKey,
+  });
+  const retargeted = await retargetPendingReport(repo, tenant, report, ladder, chair);
+  if (!retargeted) return 'none';
+  await notifyRecipient(deps, tenant, config, retargeted, {
+    contact: ladder.contact,
+    ccChair: chair,
+    purpose: 'opened',
+  });
+  return 'retargeted';
+}
+
 /**
  * A club's player (by natural key) as a FRESH notify contact, or null: not on the club's
  * roster (veterans: through the VETAFFIL# record), a minor, or no usable email/cell. Shared by
@@ -850,8 +969,9 @@ export interface OpenReportsTarget {
  * The result-optional core of `openCaptainReports` (no import skip, no summary correction).
  * Each side's recipient comes from `resolveCaptainLadder` (with `result: null` the medicoach
  * rung is empty, so the squad-link / designated / last captain or the chair answers). An
- * already-open report keeps its recipient: a later result fills the summary in silently and
- * never re-addresses or re-notifies it.
+ * already-open PENDING auto report keeps its recipient unless a medicoach / squad-link captain
+ * now wins the ladder over it (`retargetPendingReport`): then it is re-addressed and that
+ * captain notified once. Otherwise a later result fills the summary in silently.
  */
 export async function openReportsForFixture(
   target: OpenReportsTarget,
@@ -984,6 +1104,20 @@ export async function openReportsForFixture(
       // NOTIFY# ledger claim makes this a no-op when the first send was already claimed.
       const existing = await repo.getCaptainsReport(tenant, seriesId, fixtureId, club.id);
       if (!existing || existing.status !== 'pending' || existing.source !== 'auto') continue;
+      // A newly winning medicoach / squad-link captain takes over a still-pending report
+      // (fresh memberId: the old link dies; new NOTIFY# audience: notified once).
+      const retargeted = await retargetPendingReport(repo, tenant, existing, ladder, chair);
+      if (retargeted) {
+        const sent = await notifyRecipient(deps, tenant, config, retargeted, {
+          contact: ladder.contact,
+          ccChair: chair,
+          purpose: 'opened',
+        });
+        if (sent === 'sent') out.notified.push(retargeted.id);
+        else if (sent === 'failed') failedNotices.push(retargeted.id);
+        else if (sent === 'deferred') (out.deferred ??= []).push(retargeted.id);
+        continue;
+      }
       const toCaptain = existing.recipient.kind === 'captain';
       const captainContact = existing.recipientContact
         ? { name: existing.recipient.name, ...existing.recipientContact }

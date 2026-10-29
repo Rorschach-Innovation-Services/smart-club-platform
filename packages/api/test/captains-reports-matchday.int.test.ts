@@ -323,20 +323,29 @@ describe('no-result match-day open', () => {
     assert.equal(notices.length, 2, 're-runs send nothing');
   });
 
-  test('a later result fills the summary in, notifies nobody, keeps the chair recipient', async () => {
+  test('a later result fills the summary in; its medicoach captain takes over the scoring side once', async () => {
     await seed();
     await seedCaptain();
     await open();
     const before = await reportsOf();
     await resultEvent('f3', result(), sastToday(19));
     const afterRs = await reportsOf();
-    assert.equal(notices.length, 2, 'no second notice');
+    assert.equal(notices.length, 3, 'only the re-targeted captain is notified');
+    assert.equal(notices[2].recipientKind, 'captain');
     for (const r of afterRs) {
       assert.equal(r.resultSummary, 'Umzinto won by 23 runs');
-      assert.equal(r.recipient.kind, 'chair');
       const was = before.find((b) => b.id === r.id)!;
-      assert.equal(r.recipient.memberId, was.recipient.memberId, 'recipient unchanged');
+      if (r.side === 'home') {
+        assert.equal(r.recipient.kind, 'captain');
+        assert.equal(r.recipient.rung, 'medicoach');
+        assert.notEqual(r.recipient.memberId, was.recipient.memberId, 'old link rotated out');
+      } else {
+        assert.equal(r.recipient.kind, 'chair');
+        assert.equal(r.recipient.memberId, was.recipient.memberId, 'recipient unchanged');
+      }
     }
+    await resultEvent('f3', result(), sastToday(20));
+    assert.equal(notices.length, 3, 'a re-run is a no-op');
   });
 });
 

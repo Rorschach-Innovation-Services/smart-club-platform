@@ -295,17 +295,171 @@ describe("captain's report recipient ladder", () => {
     assert.equal(r.recipient.rung, 'chair');
     assert.equal(r.recipient.name, 'Umzinto CC Chair');
   });
+});
 
-  test('an open report keeps its recipient when the result arrives later (no re-notify)', async () => {
+describe('re-targeting an already-open pending report', () => {
+  const SECRET = 'ladder-test-secret';
+  const tokenOf = (r: import('../src/types.js').CaptainsReport) =>
+    reports.reportLink(T, r, SECRET, 'https://x.test').token;
+  const linkOk = async (token: string) =>
+    (await reports.loadLinkedReport(repo, token, NOW.getTime(), SECRET)).ok;
+  const reportDeps = () => ({
+    repo,
+    now: () => NOW,
+    linkSecret: () => SECRET,
+    log: () => {},
+    sendNotice: async (n: import('../src/captains-reports.js').ReportNotice) => {
+      notices.push(n);
+      return n.channels.map((channel) => ({ channel, status: 'sent' as const }));
+    },
+  });
+
+  test('designated open, then a result with a different medicoach captain ⇒ re-targeted once', async () => {
     await designate('umzinto', 'umzinto', SC1, K(3));
     await openFor(S1, null);
     const before = await reportOf('umzinto');
     assert.equal(before.recipient.rung, 'designated');
+    const oldToken = tokenOf(before);
+    assert.equal(await linkOk(oldToken), true);
+    const sent = notices.length;
+
+    await openFor(S1, result(K(1)));
+    const after1 = await reportOf('umzinto');
+    assert.equal(after1.recipient.rung, 'medicoach');
+    assert.equal(after1.recipient.name, 'Medi Test');
+    assert.equal(after1.captainName, 'Medi Test');
+    assert.notEqual(after1.recipient.memberId, before.recipient.memberId);
+    assert.equal(await linkOk(oldToken), false, 'the old link is dead');
+    assert.equal(await linkOk(tokenOf(after1)), true);
+    const fresh = notices.slice(sent);
+    assert.equal(fresh.length, 1, 'the new captain is notified once');
+    assert.equal(fresh[0].to.name, 'Medi Test');
+    assert.equal(fresh[0].recipientKind, 'captain');
+
+    await openFor(S1, result(K(1)));
+    assert.equal(notices.length, sent + 1, 'a re-run is a no-op');
+    assert.equal((await reportOf('umzinto')).recipient.memberId, after1.recipient.memberId);
+  });
+
+  test('the same person winning a higher rung ⇒ no re-target, no message', async () => {
+    await designate('umzinto', 'umzinto', SC1, K(1));
+    await openFor(S1, null);
+    const before = await reportOf('umzinto');
     const sent = notices.length;
     await openFor(S1, result(K(1)));
-    const afterR = await reportOf('umzinto');
-    assert.equal(afterR.recipient.memberId, before.recipient.memberId);
-    assert.equal(afterR.recipient.rung, 'designated');
+    const after1 = await reportOf('umzinto');
+    assert.equal(after1.recipient.memberId, before.recipient.memberId);
+    assert.equal(after1.recipient.rung, 'designated');
     assert.equal(notices.length, sent);
+  });
+
+  test('a submitted report is never re-targeted', async () => {
+    await designate('umzinto', 'umzinto', SC1, K(3));
+    await openFor(S1, null);
+    const r = await reportOf('umzinto');
+    const { DynamoDBClient, UpdateItemCommand, ScanCommand } =
+      await import('@aws-sdk/client-dynamodb');
+    const c = new DynamoDBClient({
+      endpoint: process.env.DYNAMO_ENDPOINT,
+      region: 'localhost',
+      credentials: { accessKeyId: 'local', secretAccessKey: 'local' },
+    });
+    const item = ((await c.send(new ScanCommand({ TableName: TABLE }))).Items ?? []).find(
+      (i) => i.id?.S === r.id && i.status?.S === 'pending',
+    )!;
+    await c.send(
+      new UpdateItemCommand({
+        TableName: TABLE,
+        Key: { pk: item.pk, sk: item.sk },
+        UpdateExpression: 'SET #s = :s',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':s': { S: 'submitted' } },
+      }),
+    );
+    const sent = notices.length;
+    await openFor(S1, result(K(1)));
+    const after1 = await reportOf('umzinto');
+    assert.equal(after1.status, 'submitted');
+    assert.equal(after1.recipient.memberId, r.recipient.memberId);
+    assert.equal(notices.length, sent);
+  });
+
+  test('a squad submit re-targets a designated / last-captain / chair report, never a medicoach one', async () => {
+    for (const [prep, rung] of [
+      [() => designate('umzinto', 'umzinto', SC1, K(3)), 'designated'],
+      [() => lastCaptain('umzinto', 'umzinto', SC1, K(4)), 'last-captain'],
+      [async () => {}, 'chair'],
+    ] as const) {
+      await resetTable();
+      await seed();
+      await player(K(2), 'umzinto', 'Squad');
+      await player(K(3), 'umzinto', 'Desig');
+      await player(K(4), 'umzinto', 'Lastcap');
+      await prep();
+      await openFor(S1, null);
+      const before = await reportOf('umzinto');
+      assert.equal(before.recipient.rung, rung);
+      await squadRequest('umzinto', K(2), 'submitted');
+      const sent = notices.length;
+      const req = (await repo.getSquadRequest(T, S1, 'f1', 'umzinto'))!;
+      assert.equal(
+        await reports.retargetReportForSquadCaptain(reportDeps(), T, req),
+        'retargeted',
+        rung,
+      );
+      const after1 = await reportOf('umzinto');
+      assert.equal(after1.recipient.rung, 'squad-link');
+      assert.equal(after1.recipient.name, 'Squad Test');
+      assert.equal(notices.length, sent + 1);
+      assert.equal(await reports.retargetReportForSquadCaptain(reportDeps(), T, req), 'none');
+      assert.equal(notices.length, sent + 1, 'idempotent');
+    }
+
+    await resetTable();
+    await seed();
+    await player(K(1), 'umzinto', 'Medi');
+    await player(K(2), 'umzinto', 'Squad');
+    await openFor(S1, result(K(1)));
+    const med = await reportOf('umzinto');
+    assert.equal(med.recipient.rung, 'medicoach');
+    await squadRequest('umzinto', K(2), 'submitted');
+    const sent = notices.length;
+    const req = (await repo.getSquadRequest(T, S1, 'f1', 'umzinto'))!;
+    assert.equal(await reports.retargetReportForSquadCaptain(reportDeps(), T, req), 'none');
+    assert.equal((await reportOf('umzinto')).recipient.memberId, med.recipient.memberId);
+    assert.equal(notices.length, sent);
+  });
+
+  test('saveSquad submit wires the re-target (pending squad request submitted via the flow)', async () => {
+    await designate('umzinto', 'umzinto', SC1, K(3));
+    await openFor(S1, null);
+    await squadRequest('umzinto', K(2), 'pending');
+    const squad = await import('../src/squad-requests.js');
+    const r = (await repo.getSquadRequest(T, S1, 'f1', 'umzinto'))!;
+    const roster = await squad.squadRoster(repo, T, r, SECRET);
+    const pick = roster.find((e) => e.name.startsWith('Squad'))!;
+    const sent = notices.length;
+    await squad.saveSquad(
+      {
+        repo,
+        now: () => NOW,
+        linkSecret: () => SECRET,
+        sendReportNotice: reportDeps().sendNotice,
+      },
+      {
+        tenant: T,
+        request: r,
+        body: {
+          expectedModified: r.modified,
+          players: [pick.id],
+          captainId: pick.id,
+          submit: true,
+        },
+      },
+    );
+    const after1 = await reportOf('umzinto');
+    assert.equal(after1.recipient.rung, 'squad-link');
+    assert.equal(after1.recipient.name, 'Squad Test');
+    assert.equal(notices.length, sent + 1);
   });
 });

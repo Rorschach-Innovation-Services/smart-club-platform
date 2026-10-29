@@ -56,6 +56,8 @@ import {
   MAX_FORWARDS,
   pastDeadline,
   resolveCaptainLadder,
+  retargetReportForSquadCaptain,
+  type ReportNotice,
   seriesExcludedFromCaptainsReports,
   seriesExclusionResolver,
   sideName,
@@ -514,6 +516,8 @@ export interface SquadRequestDeps {
    * offered only when it is `registered` — never tried-and-failed while Meta reviews it.
    */
   whatsappTemplateStatus?: () => string;
+  /** The captain's-report notice sender for a squad-submit re-target (default: SES + Meta). */
+  sendReportNotice?: (n: ReportNotice) => Promise<NoticeResult[]>;
   /** Sentry capture (default: the Lambda's Sentry); injectable for tests. */
   captureException?: (
     err: Error,
@@ -1587,6 +1591,26 @@ export async function saveSquad(
         }),
       )
       .catch(() => {});
+  // An already-open pending captain's report for this side follows the submitted captain
+  // (never over a medicoach captain). Best-effort: the submit itself never fails on it.
+  if (cap)
+    await retargetReportForSquadCaptain(
+      {
+        repo,
+        ...(deps.now ? { now: deps.now } : {}),
+        ...(deps.linkSecret ? { linkSecret: deps.linkSecret } : {}),
+        ...(deps.linkBase ? { linkBase: deps.linkBase } : {}),
+        ...(deps.sendReportNotice ? { sendNotice: deps.sendReportNotice } : {}),
+      },
+      tenant,
+      saved,
+    ).catch((err) =>
+      console.warn(
+        `[squad-links] ${tenant} ${request.id}: captain's report re-target failed — ${
+          err instanceof Error ? err.name : 'error'
+        }`,
+      ),
+    );
   await repo.putPendingSquadSync(tenant, {
     requestId: request.id,
     op: 'upsert',
