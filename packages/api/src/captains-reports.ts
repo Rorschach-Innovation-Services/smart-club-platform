@@ -240,6 +240,47 @@ export function captainsReportsEnabled(config: TenantConfig | null | undefined):
   return hasFeature(config, 'captainsReports', true);
 }
 
+/**
+ * The per-series companion to the kill switch (`captainsReportsExcludedSeriesPrefixes`): a
+ * series whose name starts with any listed prefix (trimmed, case-insensitive) is treated
+ * exactly as if `captainsReports` were off for it alone — no opens, notices or reminders, and
+ * its queued REPORTOPEN# markers are dropped. Lets one competition inside a shared tenant
+ * (EMCU inside `dolphins`) opt out. Issued links and portal filing are untouched.
+ */
+export function seriesExcludedFromCaptainsReports(
+  config: TenantConfig | null | undefined,
+  seriesName: string | null | undefined,
+): boolean {
+  const prefixes = config?.captainsReportsExcludedSeriesPrefixes;
+  if (!prefixes?.length || typeof seriesName !== 'string') return false;
+  const name = seriesName.trim().toLowerCase();
+  return prefixes.some((p) => {
+    const prefix = typeof p === 'string' ? p.trim().toLowerCase() : '';
+    return prefix !== '' && name.startsWith(prefix);
+  });
+}
+
+/** Memoised series-name lookup for the exclusion check (one read per series per run). */
+function seriesExclusionResolver(
+  repo: CaptainsReportDeps['repo'],
+  tenant: string,
+  config: TenantConfig | null | undefined,
+) {
+  const cache = new Map<string, boolean>();
+  return async (seriesId: string): Promise<boolean> => {
+    if (!config?.captainsReportsExcludedSeriesPrefixes?.length) return false;
+    let hit = cache.get(seriesId);
+    if (hit === undefined) {
+      const series = await repo.getSeries(tenant, seriesId);
+      // A missing series (no name) is deliberately NOT excluded. Failing open is harmless:
+      // openReportsForFixture then finds no fixture and returns no-fixture, so nothing sends.
+      hit = seriesExcludedFromCaptainsReports(config, series?.name);
+      cache.set(seriesId, hit);
+    }
+    return hit;
+  };
+}
+
 const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/;
 const DAY_MS = 24 * 3600 * 1000;
 
@@ -796,6 +837,9 @@ export async function openReportsForFixture(
   const fixture = (series?.fixtures as StoredFixture[] | undefined)?.find(
     (f) => f?.id === fixtureId,
   );
+  // Per-series kill switch: same outcome as the tenant one (the marker is dropped).
+  if (series && seriesExcludedFromCaptainsReports(config, series.name))
+    return { ...out, skipped: 'disabled' };
   if (!series || !fixture?.date) return { ...out, skipped: 'no-fixture' };
   const matchDate = fixture.date;
   if (matchDate < goLive) return { ...out, skipped: 'before-go-live' };
@@ -1022,7 +1066,10 @@ export async function openMatchDayReports(
   // One gsi1 query (no scans). Released + activated only — the projection's gate; reports
   // open from the STORED series (the core withholds the venue itself).
   const series = (await repo.listSeries(tenant)).filter(
-    (s) => (!onlySeries || onlySeries.has(s.id)) && projectSeriesForClub(s, today) !== null,
+    (s) =>
+      (!onlySeries || onlySeries.has(s.id)) &&
+      !seriesExcludedFromCaptainsReports(config, s.name) &&
+      projectSeriesForClub(s, today) !== null,
   );
   // The core's own outcome hook belongs to the sync run's result tally; match-day counts are
   // kept apart (they are not result-driven).
@@ -1483,7 +1530,7 @@ export async function retryPendingReportOpens(
   const { repo } = deps;
   const now = deps.now ?? (() => new Date());
   const out: ReportRetrySummary = { retried: 0, done: 0, failed: 0, gaveUp: 0, deferred: 0 };
-  const markers = await repo.listReportOpenMarkers(tenant);
+  let markers = await repo.listReportOpenMarkers(tenant);
   if (!markers.length) return out;
   // Before 18:00 SAST nothing is sent: every marker stays queued, untouched (a deferral is
   // never an attempt — it must not count toward REPORT_OPEN_MAX_ATTEMPTS). A league with its
@@ -1495,6 +1542,16 @@ export async function retryPendingReportOpens(
     for (const m of markers) await repo.deleteReportOpenMarker(tenant, m.ref);
     return out;
   }
+  // Per-series kill switch: an excluded series' markers are dropped the same way, before any
+  // window/deadline deferral (so re-enabling it never bursts a backlog).
+  const excluded = seriesExclusionResolver(repo, tenant, config);
+  const kept: typeof markers = [];
+  for (const m of markers) {
+    if (await excluded(m.seriesId)) await repo.deleteReportOpenMarker(tenant, m.ref);
+    else kept.push(m);
+  }
+  if (kept.length !== markers.length) markers = kept;
+  if (!markers.length) return out;
   const perLeague = hasCaptainsReportLeagueOverrides(config);
   if (!perLeague && !reportNoticeWindowOpen(now())) return { ...out, deferred: markers.length };
   const leagueOf = noticeLeagueResolver(repo, tenant, config);
@@ -1822,8 +1879,11 @@ export async function sendReportReminders(
   if (!config || !captainsReportsEnabled(config)) return out;
   const perLeague = hasCaptainsReportLeagueOverrides(config);
   const leagueOf = noticeLeagueResolver(repo, tenant, config);
+  const excluded = seriesExclusionResolver(repo, tenant, config);
   const clubs = new Map<string, Club | null>();
   for (const r of due) {
+    // Per-series kill switch: an excluded series gets no reminders.
+    if (await excluded(r.seriesId)) continue;
     // Not yet this report's league's hour: it stays due for a later run.
     if (perLeague && !reportNoticeWindowOpenFor(now(), await leagueOf.forSeriesId(r.seriesId)))
       continue;
