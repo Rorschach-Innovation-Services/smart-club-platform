@@ -2175,3 +2175,57 @@ describe('captain rows are scoped per competition (shared teamId)', () => {
     });
   });
 });
+
+describe('series exclusion (captainsReportsExcludedSeriesPrefixes)', () => {
+  const S_EX = 's-emcu-div1';
+  async function seedExcluded() {
+    await seed();
+    await repo.putTenantConfig({
+      ...(await cfg()),
+      captainsReportsExcludedSeriesPrefixes: ['EMCU'],
+    } as TenantConfig);
+    await repo.putSeries(T, {
+      ...series([fx('f1', 'umzinto', 'african-warriors')], [P_UMZ, P_AW]),
+      id: S_EX,
+      name: 'EMCU Division 1',
+    } as Series);
+  }
+
+  test('an excluded series opens no squad request and sends nothing; the other is unchanged', async () => {
+    await seedExcluded();
+    const sum = await open(AT_0800);
+    assert.equal(sum.opened, 2);
+    const rs = await requests();
+    assert.ok(rs.every((r) => r.seriesId === S1));
+    assert.equal(rs.length, 2);
+    assert.equal(notices.length, 2);
+    assert.ok(notices.every((n) => !n.requestId.startsWith(S_EX)));
+    assert.equal((await repo.listSquadOpenMarkers(T)).filter((m) => m.seriesId === S_EX).length, 0);
+  });
+
+  test('retry: an excluded series marker is deleted unsent (even before 08:00); the other drains', async () => {
+    await seedExcluded();
+    for (const seriesId of [S_EX, S1])
+      await repo.putSquadOpenMarker(T, {
+        requestId: squad.squadRequestId(seriesId, 'f1', 'umzinto'),
+        seriesId,
+        fixtureId: 'f1',
+        teamId: 'umzinto',
+        matchDate: TOMORROW,
+        createdAt: AT_0700.toISOString(),
+        attempts: 0,
+      });
+    const early = await squad.retryPendingSquadOpens(T, deps(AT_0700));
+    assert.equal(early.dropped, 1);
+    assert.equal(early.deferred, 1);
+    assert.deepEqual(
+      (await repo.listSquadOpenMarkers(T)).map((m) => m.seriesId),
+      [S1],
+    );
+    const late = await squad.retryPendingSquadOpens(T, deps(AT_0800));
+    assert.equal(late.done, 1);
+    assert.equal(notices.length, 1);
+    assert.equal(notices[0].requestId, `${S1}~f1~umzinto`);
+    assert.equal(await repo.getSquadRequest(T, S_EX, 'f1', 'umzinto'), null);
+  });
+});

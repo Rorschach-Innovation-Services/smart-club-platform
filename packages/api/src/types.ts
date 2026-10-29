@@ -340,10 +340,11 @@ export interface TenantConfig {
    */
   features?: Record<string, boolean>;
   /**
-   * Per-series exclusion from AUTOMATIC captain's reports: a series whose name starts with any
-   * of these prefixes (trimmed, case-insensitive) behaves as if `features.captainsReports` were
-   * off for it alone (no opens, notices or reminders; queued open markers deleted; issued links
-   * and portal filing untouched). Squad links are NOT affected. Used to exclude EMCU's
+   * Per-series exclusion from AUTOMATIC captain's reports AND pre-match squad links (the name
+   * is historical): a series whose name starts with any of these prefixes (trimmed,
+   * case-insensitive) behaves as if `features.captainsReports` were off for it alone (no
+   * report opens, notices or reminders; no squad-request opens; queued REPORTOPEN# and
+   * SQUADOPEN# markers deleted; issued links of either kind and portal filing untouched). Used to exclude EMCU's
    * competitions ("EMCU …") inside the `dolphins` tenant. Operator-only: PUT /tenant/config
    * strips it, only PUT /platform/tenants/:slug writes it (≤ 20 non-empty strings, each ≤ 200
    * chars after trimming). Matching is by series NAME, so renaming an excluded series out of

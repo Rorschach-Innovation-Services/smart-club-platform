@@ -246,7 +246,8 @@ export function captainsReportsEnabled(config: TenantConfig | null | undefined):
  * The per-series companion to the kill switch (`captainsReportsExcludedSeriesPrefixes`): a
  * series whose name starts with any listed prefix (trimmed, case-insensitive) is treated
  * exactly as if `captainsReports` were off for it alone — no opens, notices or reminders, and
- * its queued REPORTOPEN# markers are dropped. Lets one competition inside a shared tenant
+ * its queued REPORTOPEN# markers are dropped. Squad links honour it too (squad-requests.ts:
+ * no opens, SQUADOPEN# markers dropped). Lets one competition inside a shared tenant
  * (EMCU inside `dolphins`) opt out. Issued links and portal filing are untouched.
  */
 export function seriesExcludedFromCaptainsReports(
@@ -263,7 +264,7 @@ export function seriesExcludedFromCaptainsReports(
 }
 
 /** Memoised series-name lookup for the exclusion check (one read per series per run). */
-function seriesExclusionResolver(
+export function seriesExclusionResolver(
   repo: CaptainsReportDeps['repo'],
   tenant: string,
   config: TenantConfig | null | undefined,

@@ -56,6 +56,8 @@ import {
   MAX_FORWARDS,
   pastDeadline,
   resolveCaptainLadder,
+  seriesExcludedFromCaptainsReports,
+  seriesExclusionResolver,
   sideName,
   type NoticeResult,
 } from './captains-reports.js';
@@ -952,8 +954,10 @@ export async function openPreMatchSquadRequests(
   const tomorrow = addDays(today, 1);
   if (!goLive || tomorrow < goLive) return sum;
 
+  // The captain's-report series exclusion gates squad-link opens too (issued links still work).
   const all = (await repo.listSeries(tenant)).filter(
-    (s) => projectSeriesForClub(s, today) !== null,
+    (s) =>
+      !seriesExcludedFromCaptainsReports(config, s.name) && projectSeriesForClub(s, today) !== null,
   );
   for (const s of all) {
     const fixtures = ((s.fixtures as StoredFixture[] | undefined) ?? []).filter(
@@ -1092,10 +1096,23 @@ export async function retryPendingSquadOpens(
     dropped: 0,
     deferred: 0,
   };
-  const markers = await repo.listSquadOpenMarkers(tenant);
+  let markers = await repo.listSquadOpenMarkers(tenant);
+  if (!markers.length) return out;
+  const config = await repo.getTenantConfig(tenant);
+  // Per-series exclusion (`captainsReportsExcludedSeriesPrefixes`): an excluded series'
+  // markers (tombstones included) are dropped before any window / deadline deferral, so
+  // re-enabling it never bursts a backlog.
+  const excluded = seriesExclusionResolver(repo, tenant, config);
+  const kept: typeof markers = [];
+  for (const m of markers) {
+    if (await excluded(m.seriesId)) {
+      await repo.deleteSquadOpenMarker(tenant, m.requestId);
+      out.dropped++;
+    } else kept.push(m);
+  }
+  markers = kept;
   if (!markers.length) return out;
   if (!squadNoticeWindowOpen(now())) return { ...out, deferred: markers.length };
-  const config = await repo.getTenantConfig(tenant);
   const today = tenantDate(now());
   for (const [i, m] of markers.entries()) {
     if (pastDeadline(deps.deadlineMs)) {

@@ -88,7 +88,12 @@ async function seed() {
   await repo.putSeries(T, series(S2, 'vets'));
 }
 
-async function player(nk: string, clubId: string, first: string, over: Record<string, unknown> = {}) {
+async function player(
+  nk: string,
+  clubId: string,
+  first: string,
+  over: Record<string, unknown> = {},
+) {
   await repo.createPlayer(T, {
     naturalKey: nk,
     clubId,
