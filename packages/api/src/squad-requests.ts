@@ -76,6 +76,7 @@ import { WHATSAPP_TEMPLATES } from './notify/whatsapp-templates.js';
 import { compareRunsNewestFirst } from './medicoach-export-build.js';
 import { isWithheld, projectSeriesForClub } from './series-projection.js';
 import { TENANT_UTC_OFFSET_MINUTES, tenantDate } from './tenant-time.js';
+import type { CaptainLadderRung } from './types.js';
 import type {
   CaptainsReportDelivery,
   Club,
@@ -723,6 +724,11 @@ export interface SquadRecipient {
  * through. The natural key is used for the point-gets only. Legacy unscoped rows are never
  * consulted: they cannot say which of a shared teamId's competitions they belonged to.
  */
+/** Narrow a ladder rung to the squad ladder's (no medicoach / squad-link input ⇒ never those). */
+function squadRungOf(rung: CaptainLadderRung): SquadRecipient['rung'] {
+  return rung === 'designated' || rung === 'last-captain' ? rung : 'chair';
+}
+
 export async function resolveSquadRecipient(
   repo: RepoModule,
   tenant: string,
@@ -732,8 +738,7 @@ export async function resolveSquadRecipient(
 ): Promise<SquadRecipient> {
   const r = await resolveCaptainLadder(repo, tenant, club, teamId, scope);
   // Without the medicoach / squad-link inputs only these three rungs can answer.
-  const rung = r.rung as SquadRecipient['rung'];
-  return { kind: r.kind, rung, contact: r.contact };
+  return { kind: r.kind, rung: squadRungOf(r.rung), contact: r.contact };
 }
 
 /**
@@ -1601,16 +1606,27 @@ export async function saveSquad(
         ...(deps.linkSecret ? { linkSecret: deps.linkSecret } : {}),
         ...(deps.linkBase ? { linkBase: deps.linkBase } : {}),
         ...(deps.sendReportNotice ? { sendNotice: deps.sendReportNotice } : {}),
+        ...(deps.captureException ? { captureException: deps.captureException } : {}),
       },
       tenant,
       saved,
-    ).catch((err) =>
+    ).catch(async (err) => {
       console.warn(
         `[squad-links] ${tenant} ${request.id}: captain's report re-target failed — ${
           err instanceof Error ? err.name : 'error'
         }`,
-      ),
-    );
+      );
+      try {
+        const capture =
+          deps.captureException ?? (await import('./instrument.js')).Sentry.captureException;
+        capture(err instanceof Error ? err : new Error("captain's report re-target failed"), {
+          tags: { tenant, requestId: request.id, job: 'squad-links-retarget' },
+          extra: {},
+        });
+      } catch {
+        // Non-fatal: the submit already succeeded.
+      }
+    });
   await repo.putPendingSquadSync(tenant, {
     requestId: request.id,
     op: 'upsert',

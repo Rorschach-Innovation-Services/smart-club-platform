@@ -689,6 +689,11 @@ export interface CaptainsReportDeps {
    * next run. Unset = no deadline.
    */
   deadlineMs?: number;
+  /** Sentry capture (default: the Lambda's Sentry); injectable for tests. */
+  captureException?: (
+    err: Error,
+    ctx: { tags: Record<string, string>; extra: Record<string, unknown> },
+  ) => void;
 }
 
 export interface OpenOutcome {
@@ -810,7 +815,13 @@ const samePerson = (
  * rotates the memberId (the previous recipient's link — chair's included — stops working; a
  * kept chair link from an earlier forward is untouched), so the NOTIFY# audience is new and
  * the new captain is notified exactly once. Conditional on the memberId the caller read: a
- * concurrent change returns null (nothing sent). Returns the updated report, or null.
+ * concurrent change returns 'conflict' (nothing written or sent): the caller re-reads and
+ * retries once. Returns the updated report, null (nothing to do) or 'conflict'.
+ *
+ * By design a re-target can rotate a chair's link out mid-fill (the chair was the recipient
+ * and a captain now wins): the chair's draft link 410s; the portal still lets the chair file.
+ * A squad RE-submission that flips the captain (A → B → A) re-targets and notifies each time —
+ * bounded by human action (each flip is a captain's submit), not by a loop.
  */
 async function retargetPendingReport(
   repo: RepoModule,
@@ -818,7 +829,7 @@ async function retargetPendingReport(
   existing: CaptainsReport,
   ladder: CaptainLadderResult,
   chair: { name: string; email?: string; cell?: string },
-): Promise<CaptainsReport | null> {
+): Promise<CaptainsReport | null | 'conflict'> {
   if (existing.status !== 'pending' || existing.source !== 'auto') return null;
   if (ladder.kind !== 'captain' || (ladder.rung !== 'medicoach' && ladder.rung !== 'squad-link'))
     return null;
@@ -846,8 +857,76 @@ async function retargetPendingReport(
       { expectedMemberId: existing.recipient.memberId },
     );
   } catch (err) {
-    if (err instanceof repo.CaptainsReportForwardConflict) return null;
+    if (err instanceof repo.CaptainsReportForwardConflict) return 'conflict';
     throw err;
+  }
+}
+
+/**
+ * `retargetPendingReport` with ONE bounded retry on a concurrent change (re-read, re-judge).
+ * `report` is the freshest row read (null = gone or no longer pending/auto). A second
+ * conflict is returned as 'conflict' for the caller to fail loudly (never notify off a stale
+ * memberId).
+ */
+async function retargetWithRetry(
+  repo: RepoModule,
+  tenant: string,
+  existing: CaptainsReport,
+  ladder: CaptainLadderResult,
+  chair: { name: string; email?: string; cell?: string },
+): Promise<{ report: CaptainsReport | null; retargeted: boolean } | 'conflict'> {
+  let cur: CaptainsReport | null = existing;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await retargetPendingReport(repo, tenant, cur, ladder, chair);
+    if (res !== 'conflict')
+      return res ? { report: res, retargeted: true } : { report: cur, retargeted: false };
+    cur = await repo.getCaptainsReport(tenant, cur.seriesId, cur.fixtureId, cur.clubId);
+    if (!cur || cur.status !== 'pending' || cur.source !== 'auto')
+      return { report: null, retargeted: false };
+  }
+  return 'conflict';
+}
+
+/**
+ * A squad-submit re-target whose notice did not go out (failed / deferred / conflict): queue a
+ * REPORTOPEN# retry for the fixture (the existing retry drains it: the ladder re-runs, finds
+ * the same captain, and the stored-recipient notify resends under the released claim) and tell
+ * Sentry. Only possible when the fixture has a stored result (the retry re-reads it; without
+ * one it would drop the marker) — otherwise Sentry alone. An existing marker is left as is (it
+ * may carry the result's captain ref). No natural key is logged.
+ */
+async function queueRetargetRetry(
+  deps: CaptainsReportDeps,
+  tenant: string,
+  report: Pick<CaptainsReport, 'id' | 'seriesId' | 'fixtureId' | 'fixtureRef'>,
+  reason: string,
+): Promise<void> {
+  const { repo } = deps;
+  const now = deps.now ?? (() => new Date());
+  let queued = false;
+  try {
+    const stored = await repo.getFixtureResult(tenant, report.seriesId, report.fixtureId);
+    const ref = report.fixtureRef ?? stored?.ref;
+    if (stored && !stored.cleared && stored.recordedAt && ref) {
+      const markers = await repo.listReportOpenMarkers(tenant);
+      if (!markers.some((m) => m.ref === ref))
+        await repo.putReportOpenMarker(tenant, {
+          ref,
+          seriesId: report.seriesId,
+          fixtureId: report.fixtureId,
+          recordedAt: stored.recordedAt,
+          createdAt: now().toISOString(),
+          attempts: 0,
+        });
+      queued = true;
+    }
+  } finally {
+    const capture =
+      deps.captureException ?? (await import('./instrument.js')).Sentry.captureException;
+    capture(new Error(`captain's report re-target notice not delivered (${reason})`), {
+      tags: { tenant, job: 'captains-report-retarget' },
+      extra: { reportId: report.id, retryQueued: queued },
+    });
   }
 }
 
@@ -884,13 +963,19 @@ export async function retargetReportForSquadCaptain(
   const ladder = await resolveCaptainLadder(repo, tenant, club, req.teamId, scope, {
     squadCaptainKey: captainKey,
   });
-  const retargeted = await retargetPendingReport(repo, tenant, report, ladder, chair);
-  if (!retargeted) return 'none';
-  await notifyRecipient(deps, tenant, config, retargeted, {
+  const res = await retargetWithRetry(repo, tenant, report, ladder, chair);
+  if (res === 'conflict') {
+    await queueRetargetRetry(deps, tenant, report, 'conflict');
+    return 'none';
+  }
+  if (!res.retargeted || !res.report) return 'none';
+  const sent = await notifyRecipient(deps, tenant, config, res.report, {
     contact: ladder.contact,
     ccChair: chair,
     purpose: 'opened',
   });
+  if (sent !== 'sent' && sent !== 'undelivered' && sent !== 'already')
+    await queueRetargetRetry(deps, tenant, res.report, sent);
   return 'retargeted';
 }
 
@@ -1026,6 +1111,9 @@ export async function openReportsForFixture(
 
   const nowIso = now().toISOString();
   const failedNotices: string[] = [];
+  // The competition scope of this series' captain rows, once (null = its read failed: the
+  // scoped rungs are skipped, the medicoach / squad-link rungs still answer).
+  const scope = await captainScopeOfSeries(repo, tenant, series).catch(() => null);
   for (const s of sides) {
     if (!s) continue;
     // A side left out still names the opponent, so it is filtered here, not above.
@@ -1037,9 +1125,10 @@ export async function openReportsForFixture(
       ? sideName(series, other.teamId, clubs.get(other.clubId) ?? null)
       : 'TBC';
     const chair = chairContactOf(club);
-    // The competition scope of this side's captain rows (null = its read failed: the scoped
-    // rungs are skipped, the medicoach / squad-link rungs still answer).
-    const scope = await captainScopeOfSeries(repo, tenant, series).catch(() => null);
+    // A side whose report is already SUBMITTED (or portal-filed) cannot change recipient: skip
+    // the ladder reads (a VOID row still goes through — it is re-opened with a new recipient).
+    const prior = await repo.getCaptainsReport(tenant, seriesId, fixtureId, club.id);
+    if (prior && (prior.status === 'submitted' || prior.source !== 'auto')) continue;
     // A submitted (never a void / pending) squad link for THIS fixture and side.
     const squadReq = await repo.getSquadRequest(tenant, seriesId, fixtureId, s.teamId);
     const squadCaptainKey =
@@ -1102,11 +1191,20 @@ export async function openReportsForFixture(
     if (!(await repo.openCaptainsReportIfAbsent(tenant, report))) {
       // Already open. A retry (REPORTOPEN#) after a failed notify must still notify — the
       // NOTIFY# ledger claim makes this a no-op when the first send was already claimed.
-      const existing = await repo.getCaptainsReport(tenant, seriesId, fixtureId, club.id);
-      if (!existing || existing.status !== 'pending' || existing.source !== 'auto') continue;
+      const read = await repo.getCaptainsReport(tenant, seriesId, fixtureId, club.id);
+      if (!read || read.status !== 'pending' || read.source !== 'auto') continue;
       // A newly winning medicoach / squad-link captain takes over a still-pending report
-      // (fresh memberId: the old link dies; new NOTIFY# audience: notified once).
-      const retargeted = await retargetPendingReport(repo, tenant, existing, ladder, chair);
+      // (fresh memberId: the old link dies; new NOTIFY# audience: notified once). A concurrent
+      // change is re-read and retried once; a second conflict fails this side (the REPORTOPEN#
+      // marker stays) — never a notify off the stale memberId.
+      const res = await retargetWithRetry(repo, tenant, read, ladder, chair);
+      if (res === 'conflict') {
+        failedNotices.push(read.id);
+        continue;
+      }
+      if (!res.report) continue;
+      const existing = res.report;
+      const retargeted = res.retargeted ? existing : null;
       if (retargeted) {
         const sent = await notifyRecipient(deps, tenant, config, retargeted, {
           contact: ladder.contact,

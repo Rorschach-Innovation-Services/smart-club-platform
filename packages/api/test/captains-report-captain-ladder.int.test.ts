@@ -152,7 +152,7 @@ const result = (captainKey: string | null): SyncResult =>
   }) as unknown as SyncResult;
 
 const notices: Array<{ reportId: string; to: { name: string }; recipientKind: string }> = [];
-async function openFor(seriesId: string, res: SyncResult | null) {
+async function openFor(seriesId: string, res: SyncResult | null, r: typeof repo = repo) {
   return reports.openReportsForFixture(
     {
       tenant: T,
@@ -163,7 +163,7 @@ async function openFor(seriesId: string, res: SyncResult | null) {
       receivedAt: NOW,
     },
     {
-      repo,
+      repo: r,
       now: () => NOW,
       log: () => {},
       sendNotice: async (n) => {
@@ -462,4 +462,252 @@ describe('re-targeting an already-open pending report', () => {
     assert.equal(after1.recipient.name, 'Squad Test');
     assert.equal(notices.length, sent + 1);
   });
+
+  const setStatus = async (reportId: string, status: string) => {
+    const { DynamoDBClient, UpdateItemCommand, ScanCommand } =
+      await import('@aws-sdk/client-dynamodb');
+    const c = new DynamoDBClient({
+      endpoint: process.env.DYNAMO_ENDPOINT,
+      region: 'localhost',
+      credentials: { accessKeyId: 'local', secretAccessKey: 'local' },
+    });
+    const item = ((await c.send(new ScanCommand({ TableName: TABLE }))).Items ?? []).find(
+      (i) => i.id?.S === reportId && i.status?.S === 'pending',
+    )!;
+    await c.send(
+      new UpdateItemCommand({
+        TableName: TABLE,
+        Key: { pk: item.pk, sk: item.sk },
+        UpdateExpression: 'SET #s = :s',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':s': { S: status } },
+      }),
+    );
+  };
+  const linkStatus = async (token: string) => {
+    const r = await reports.loadLinkedReport(repo, token, NOW.getTime(), SECRET);
+    return r.ok ? 200 : r.status;
+  };
+  const captured: Array<{ message: string; tags: Record<string, string> }> = [];
+  const capture = (err: Error, ctx: { tags: Record<string, string> }) => {
+    captured.push({ message: err.message, tags: ctx.tags });
+  };
+
+  test('a concurrent change mid re-target is re-read and retried once: medicoach still wins, notified once', async () => {
+    await designate('umzinto', 'umzinto', SC1, K(3));
+    await openFor(S1, null);
+    const before = await reportOf('umzinto');
+    const oldToken = tokenOf(before);
+    let raced = false;
+    const racy = {
+      ...repo,
+      readdressCaptainsReport: async (...a: Parameters<typeof repo.readdressCaptainsReport>) => {
+        if (!raced) {
+          raced = true;
+          await repo.readdressCaptainsReport(
+            a[0],
+            a[1],
+            {
+              recipient: {
+                kind: 'chair',
+                memberId: 'raced',
+                name: 'Umzinto CC Chair',
+                rung: 'chair',
+              },
+            },
+            a[3],
+          );
+        }
+        return repo.readdressCaptainsReport(...a);
+      },
+    } as typeof repo;
+    const sent = notices.length;
+    await openFor(S1, result(K(1)), racy);
+    const after1 = await reportOf('umzinto');
+    assert.equal(raced, true);
+    assert.equal(after1.recipient.rung, 'medicoach');
+    assert.notEqual(after1.recipient.memberId, 'raced');
+    assert.equal(notices.length, sent + 1);
+    assert.equal(notices[sent].to.name, 'Medi Test');
+    assert.equal(await linkStatus(oldToken), 410, 'the old memberId link is 410');
+  });
+
+  test('a second conflict fails loudly (marker kept for retry) and notifies nobody', async () => {
+    await designate('umzinto', 'umzinto', SC1, K(3));
+    await openFor(S1, null);
+    let n = 0;
+    const racy = {
+      ...repo,
+      readdressCaptainsReport: async (...a: Parameters<typeof repo.readdressCaptainsReport>) => {
+        await repo.readdressCaptainsReport(
+          a[0],
+          a[1],
+          { recipient: { kind: 'chair', memberId: `raced-${n++}`, name: 'c', rung: 'chair' } },
+          a[3],
+        );
+        return repo.readdressCaptainsReport(...a);
+      },
+    } as typeof repo;
+    const sent = notices.length;
+    await assert.rejects(openFor(S1, result(K(1)), racy));
+    assert.equal(notices.length, sent);
+    assert.equal((await reportOf('umzinto')).recipient.rung, 'chair');
+  });
+
+  test('a chair-forwarded report is never re-targeted', async () => {
+    await openFor(S1, null);
+    const r = await reportOf('umzinto');
+    await repo.forwardCaptainsReport(
+      T,
+      r,
+      {
+        recipient: {
+          kind: 'captain',
+          memberId: 'fw',
+          name: 'Lastcap Test',
+          forwardedBy: { name: 'Chair', via: 'portal', at: SEEN },
+        },
+        chairMemberId: r.recipient.memberId,
+        recipientContact: { email: 'lastcap@x.test' },
+        captainName: 'Lastcap Test',
+      },
+      { expectedMemberId: r.recipient.memberId, maxForwards: 3 },
+    );
+    const sent = notices.length;
+    await openFor(S1, result(K(1)));
+    await squadRequest('umzinto', K(2), 'submitted');
+    const req = (await repo.getSquadRequest(T, S1, 'f1', 'umzinto'))!;
+    assert.equal(await reports.retargetReportForSquadCaptain(reportDeps(), T, req), 'none');
+    const after1 = await reportOf('umzinto');
+    assert.equal(after1.recipient.memberId, 'fw');
+    assert.equal(after1.recipient.name, 'Lastcap Test');
+    // (The forwarded captain's own unclaimed notice may go out; never Medi / Squad.)
+    assert.ok(notices.slice(sent).every((n) => n.to.name === 'Lastcap Test'));
+  });
+
+  test('a void report is not re-targeted by a squad submit', async () => {
+    await openFor(S1, null);
+    const r = await reportOf('umzinto');
+    await setStatus(r.id, 'void');
+    await squadRequest('umzinto', K(2), 'submitted');
+    const req = (await repo.getSquadRequest(T, S1, 'f1', 'umzinto'))!;
+    const sent = notices.length;
+    assert.equal(await reports.retargetReportForSquadCaptain(reportDeps(), T, req), 'none');
+    assert.equal((await reportOf('umzinto')).recipient.memberId, r.recipient.memberId);
+    assert.equal(notices.length, sent);
+  });
+
+  test('a squad-submit re-target outside the notice window returns window-closed and sends nothing', async () => {
+    await openFor(S1, null);
+    const r = await reportOf('umzinto');
+    await squadRequest('umzinto', K(2), 'submitted');
+    const req = (await repo.getSquadRequest(T, S1, 'f1', 'umzinto'))!;
+    const sent = notices.length;
+    reports.setReportNoticeWindowOverride(() => false);
+    try {
+      assert.equal(
+        await reports.retargetReportForSquadCaptain(reportDeps(), T, req),
+        'window-closed',
+      );
+    } finally {
+      reports.setReportNoticeWindowOverride(undefined);
+    }
+    assert.equal((await reportOf('umzinto')).recipient.memberId, r.recipient.memberId);
+    assert.equal(notices.length, sent);
+  });
+
+  test('a failed re-target notice queues a REPORTOPEN# retry (stored result) and tells Sentry', async () => {
+    captured.length = 0;
+    await openFor(S1, null);
+    const ref = `smartclub:${T}:fixture:${S1}:f1`;
+    await repo.putFixtureResultIfNewer(T, {
+      seriesId: S1,
+      fixtureId: 'f1',
+      ref,
+      orderAt: SEEN,
+      recordedAt: SEEN,
+      summary: 'Umzinto won',
+      storedAt: SEEN,
+    } as never);
+    await squadRequest('umzinto', K(2), 'submitted');
+    const req = (await repo.getSquadRequest(T, S1, 'f1', 'umzinto'))!;
+    const failing = {
+      ...reportDeps(),
+      captureException: capture,
+      sendNotice: async (n: import('../src/captains-reports.js').ReportNotice) =>
+        n.channels.map((channel) => ({ channel, status: 'failed' as const })),
+    };
+    assert.equal(await reports.retargetReportForSquadCaptain(failing, T, req), 'retargeted');
+    const markers = await repo.listReportOpenMarkers(T);
+    assert.equal(markers.length, 1);
+    assert.equal(markers[0].ref, ref);
+    assert.equal(markers[0].captainRef, undefined, 'no player ref is written');
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].tags.tenant, T);
+    // The retry drains it: same captain, so the stored recipient is notified under the released claim.
+    const sent = notices.length;
+    const out = await reports.retryPendingReportOpens(T, {
+      ...reportDeps(),
+      captureException: capture,
+    });
+    assert.equal(out.done, 1);
+    assert.equal(notices.length, sent + 1);
+    assert.equal(notices[sent].to.name, 'Squad Test');
+    assert.equal((await repo.listReportOpenMarkers(T)).length, 0);
+  });
+
+  test('without a stored result a failed re-target notice is reported to Sentry only', async () => {
+    captured.length = 0;
+    await openFor(S1, null);
+    await squadRequest('umzinto', K(2), 'submitted');
+    const req = (await repo.getSquadRequest(T, S1, 'f1', 'umzinto'))!;
+    const failing = {
+      ...reportDeps(),
+      captureException: capture,
+      sendNotice: async (n: import('../src/captains-reports.js').ReportNotice) =>
+        n.channels.map((channel) => ({ channel, status: 'failed' as const })),
+    };
+    await reports.retargetReportForSquadCaptain(failing, T, req);
+    assert.equal((await repo.listReportOpenMarkers(T)).length, 0);
+    assert.equal(captured.length, 1);
+  });
+
+  for (const [label, over] of [
+    ['series exclusion', { captainsReportsExcludedSeriesPrefixes: ['s-premier'] }],
+    ['kill switch', { features: { medicoachSync: true, captainsReports: false } }],
+  ] as const)
+    test(`the ${label} blocks the saveSquad re-target`, async () => {
+      await designate('umzinto', 'umzinto', SC1, K(3));
+      await openFor(S1, null);
+      const before = await reportOf('umzinto');
+      await repo.putTenantConfig({ ...(await repo.getTenantConfig(T))!, ...over } as TenantConfig);
+      await squadRequest('umzinto', K(2), 'pending');
+      const squad = await import('../src/squad-requests.js');
+      const r = (await repo.getSquadRequest(T, S1, 'f1', 'umzinto'))!;
+      const roster = await squad.squadRoster(repo, T, r, SECRET);
+      const pick = roster.find((e) => e.name.startsWith('Squad'))!;
+      const sent = notices.length;
+      await squad.saveSquad(
+        {
+          repo,
+          now: () => NOW,
+          linkSecret: () => SECRET,
+          sendReportNotice: reportDeps().sendNotice,
+        },
+        {
+          tenant: T,
+          request: r,
+          body: {
+            expectedModified: r.modified,
+            players: [pick.id],
+            captainId: pick.id,
+            submit: true,
+          },
+        },
+      );
+      const after1 = await reportOf('umzinto');
+      assert.equal(after1.recipient.memberId, before.recipient.memberId);
+      assert.equal(after1.recipient.rung, 'designated');
+      assert.equal(notices.length, sent);
+    });
 });
