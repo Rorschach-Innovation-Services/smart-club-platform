@@ -38,6 +38,27 @@ export interface League {
    * via the operator wizard/SetupLeagueDialog.
    */
   setup?: { structureId: string; calendarId: string };
+  /**
+   * Captain's report notice timing for this league (packages/api/src/captains-reports.ts).
+   * Absent ⇒ the default: card-less match-day opens and every notice from 18:00 SAST.
+   *  - `deferMatchDayNotices`: no card-less match-day open — the report opens when the result
+   *    lands (e.g. CSA-scraped premier results early Monday). Bounded: a fixture still without
+   *    a stored result after the following Monday 12:00 SAST is opened card-less anyway.
+   *  - `noticeFromHour`: the SAST hour (0–23) this league's notices may go out from, until
+   *    midnight. Absent ⇒ REPORT_NOTICE_HOUR (18). NOT guarded: set WITHOUT
+   *    `deferMatchDayNotices` it also moves the card-less match-day opens to that hour ON the
+   *    match day (before the result). Set both, as premier does.
+   *  - The fallback only looks back DEFERRED_FALLBACK_LOOKBACK_DAYS (7): if both the scrape and
+   *    the sync are down past that, the fixture's card-less fallback is lost.
+   * Operator-set: a tenant-admin leagues PUT keeps the STORED value (like `setup`); the
+   * operator PUT treats `null` or an empty `{}` as "no override" (cleared).
+   * Ops: a broken link base (prod notices refused as `dead-link-base`) fails each opening, and
+   * after REPORT_OPEN_MAX_ATTEMPTS (5 ≈ 75 min of 15-minute syncs) the REPORTOPEN# marker is
+   * given up (Sentry). Fix the link base, then recover with
+   * packages/api/scripts/resend-captains-report-notices.ts. Failed reminders are not spent:
+   * the next in-window run retries them.
+   */
+  captainsReport?: { deferMatchDayNotices?: boolean; noticeFromHour?: number };
 }
 
 /* ─── SEASON CALENDAR (ADR 0008) ───

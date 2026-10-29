@@ -38,7 +38,12 @@ import { isSlotRef } from '../../engine/src/formats.js';
 import { formatSastWeekdayDay, formatWeekdayDayYear } from '../../../src/dates.js';
 import { orgCopy } from './branding.js';
 import { chairContactOf } from './club-contacts.js';
-import { captainsReportLinkBase, captainsReportLinkSecret } from './env.js';
+import {
+  captainsReportLinkBase,
+  captainsReportLinkSecret,
+  isLoopbackLinkHost,
+  sstStage,
+} from './env.js';
 import { hasFeature } from './features.js';
 import { toE164 } from './notify/e164.js';
 import { isWithheld, projectSeriesForClub } from './series-projection.js';
@@ -50,6 +55,7 @@ import type {
   CaptainsReportRecipient,
   CaptainsReportScorecardAnswer,
   Club,
+  League,
   Series,
   StoredFixtureResult,
   StoredFixtureScorecard,
@@ -113,6 +119,107 @@ export function setReportNoticeWindowOverride(fn: ((now: Date) => boolean) | und
 export function reportNoticeWindowOpen(now: Date): boolean {
   return (windowOverride ?? isReportNoticeWindowOpen)(now);
 }
+
+/**
+ * The notice window for one league (pure): from its `captainsReport.noticeFromHour` (SAST) to
+ * midnight. A league without the override — or no league — is exactly
+ * `isReportNoticeWindowOpen` (18:00).
+ */
+export function isReportNoticeWindowOpenFor(now: Date, league?: League | null): boolean {
+  const hour = league?.captainsReport?.noticeFromHour;
+  if (typeof hour !== 'number') return isReportNoticeWindowOpen(now);
+  const local = new Date(now.getTime() + TENANT_UTC_OFFSET_MINUTES * 60_000);
+  return local.getUTCHours() >= hour;
+}
+
+/** Per-league gate every automatic send path checks (honours the test override). */
+export function reportNoticeWindowOpenFor(now: Date, league?: League | null): boolean {
+  return windowOverride ? windowOverride(now) : isReportNoticeWindowOpenFor(now, league);
+}
+
+/** True when any league of the tenant carries a captain's-report timing override. */
+export function hasCaptainsReportLeagueOverrides(config: TenantConfig | null | undefined): boolean {
+  return (config?.leagues ?? []).some((l) => !!l?.captainsReport);
+}
+
+/**
+ * Resolves a series (or series id) to its tenant league for notice timing:
+ * `series.leagueKey`, else its season run's `leagueKey` → `config.leagues`. Memoises series
+ * and season-run reads for its lifetime (one per run). A tenant with no league override never
+ * reads anything (every item then uses the default window).
+ */
+export function noticeLeagueResolver(
+  repo: Pick<RepoModule, 'getSeries' | 'getSeasonRun'>,
+  tenant: string,
+  config: TenantConfig | null | undefined,
+) {
+  const active = hasCaptainsReportLeagueOverrides(config);
+  const leagues = new Map((config?.leagues ?? []).map((l) => [l.key, l]));
+  const seriesById = new Map<string, Promise<Series | null>>();
+  const runLeague = new Map<string, Promise<string | undefined>>();
+  // A failed read falls back to the default (18:00) window — never aborts the caller's loop.
+  // The failure is not cached as a rejection; it is logged and reported once per item.
+  // Awaited (not fire-and-forget): a Lambda frozen right after the run would drop the capture.
+  const resolveFailed = async (err: unknown, what: string): Promise<undefined> => {
+    console.warn(
+      `[captains-report] ${tenant}: league lookup for ${what} failed — default window used (${
+        err instanceof Error ? err.message : 'error'
+      })`,
+    );
+    try {
+      const { Sentry } = await import('./instrument.js');
+      Sentry.captureException(err, { tags: { tenant, job: 'captains-report-league' } });
+    } catch {
+      // Visibility only: never affects the caller's window.
+    }
+    return undefined;
+  };
+  const forSeries = async (series: Series | null | undefined): Promise<League | undefined> => {
+    if (!active || !series) return undefined;
+    let key = (series as { leagueKey?: unknown }).leagueKey;
+    const runId = series.seasonRunId;
+    if ((typeof key !== 'string' || !key) && runId) {
+      if (!runLeague.has(runId))
+        runLeague.set(
+          runId,
+          repo.getSeasonRun(tenant, runId).then(
+            (r) => r?.leagueKey ?? undefined,
+            (err) => resolveFailed(err, `season run ${runId}`),
+          ),
+        );
+      key = await runLeague.get(runId);
+    }
+    return typeof key === 'string' ? leagues.get(key) : undefined;
+  };
+  return {
+    forSeries,
+    async forSeriesId(seriesId: string): Promise<League | undefined> {
+      if (!active) return undefined;
+      if (!seriesById.has(seriesId))
+        seriesById.set(
+          seriesId,
+          repo
+            .getSeries(tenant, seriesId)
+            .catch(async (err) => (await resolveFailed(err, `series ${seriesId}`)) ?? null),
+        );
+      return forSeries(await seriesById.get(seriesId));
+    },
+  };
+}
+
+/**
+ * When a deferred league's fixture played on `matchDate` falls back to a card-less open: the
+ * first Monday strictly after it, 12:00 SAST (epoch ms).
+ */
+export function deferredFallbackAt(matchDate: string): number {
+  const d = Date.parse(`${matchDate}T00:00:00Z`);
+  const dow = new Date(d).getUTCDay();
+  const days = (1 - dow + 7) % 7 || 7;
+  return d + days * DAY_MS + 12 * 3600_000 - TENANT_UTC_OFFSET_MINUTES * 60_000;
+}
+
+/** How far back (days) the match-day opener looks for a deferred league's unresulted fixtures. */
+export const DEFERRED_FALLBACK_LOOKBACK_DAYS = 7;
 
 /** A NOTIFY# claim still `in_progress` after this long is reported to Sentry (never resent). */
 export const STUCK_CLAIM_MS = 10 * 60_000;
@@ -799,6 +906,11 @@ export interface MatchDayOpenSummary {
   skipped: number;
   /** The 18:00 window was shut: nothing was enumerated. */
   windowClosed?: true;
+  /**
+   * Fixtures of a `deferMatchDayNotices` league held back for their result (before the
+   * Monday-noon fallback). Only present when a tenant league carries the override.
+   */
+  held?: number;
 }
 
 /** YYYY-MM-DD `days` before `date`. */
@@ -808,7 +920,9 @@ const daysBefore = (date: string, days: number) =>
 /**
  * Open the reports of every fixture PLAYED on the target dates (default today and the
  * MATCH_DAY_LOOKBACK_DAYS before it, SAST), result or not. Runs inside the 18:00 notice window
- * only; a shut window returns at once without reading anything (`windowClosed`).
+ * only. For a tenant with no league override, a shut window returns at once without reading
+ * anything (`windowClosed`); with an override, the series are listed and each is judged against
+ * its own league's window (`windowClosed` when none was open).
  *
  * A side that already has a report row of ANY status is left alone: `openCaptainsReportIfAbsent`
  * succeeds on a VOID row, so re-walking it would resurrect a report withdrawn by a cleared
@@ -819,6 +933,13 @@ const daysBefore = (date: string, days: number) =>
  *
  * Idempotency is open-if-absent + the NOTIFY# ledger; no marker of its own. A later result
  * fills the summary in (the corrected-summary loop) and notifies nobody again.
+ *
+ * Per-league timing (`League.captainsReport`): each series is walked only inside ITS league's
+ * window. A `deferMatchDayNotices` league gets no card-less match-day open — its report opens
+ * when the result lands — except as a bounded fallback: a fixture of the last
+ * DEFERRED_FALLBACK_LOOKBACK_DAYS still without a stored result once the following Monday
+ * 12:00 SAST has passed opens card-less anyway (scrape failed, match abandoned). A tenant with
+ * no league override takes exactly the old path.
  */
 export async function openMatchDayReports(
   tenant: string,
@@ -837,12 +958,18 @@ export async function openMatchDayReports(
     deferred: 0,
     skipped: 0,
   };
-  if (!reportNoticeWindowOpen(now())) return { ...sum, windowClosed: true };
+  const perLeague = hasCaptainsReportLeagueOverrides(config);
+  if (!perLeague && !reportNoticeWindowOpen(now())) return { ...sum, windowClosed: true };
 
   const today = tenantDate(now());
   const dates = new Set(
     opts?.targetDates ??
       Array.from({ length: MATCH_DAY_LOOKBACK_DAYS + 1 }, (_, i) => daysBefore(today, i)),
+  );
+  // A deferred league's fallback looks further back (its Monday-noon is up to a week out).
+  const deferredDates = new Set(
+    opts?.targetDates ??
+      Array.from({ length: DEFERRED_FALLBACK_LOOKBACK_DAYS + 1 }, (_, i) => daysBefore(today, i)),
   );
   const onlySeries = opts?.seriesIds ? new Set(opts.seriesIds) : null;
   // One gsi1 query (no scans). Released + activated only — the projection's gate; reports
@@ -853,11 +980,31 @@ export async function openMatchDayReports(
   // The core's own outcome hook belongs to the sync run's result tally; match-day counts are
   // kept apart (they are not result-driven).
   const { onOpenOutcome: _ignored, ...coreDeps } = deps;
+  const leagueOf = noticeLeagueResolver(repo, tenant, config);
+  let anyWindowOpen = !perLeague;
+  if (perLeague) sum.held = 0;
 
   for (const s of series) {
+    const league = perLeague ? await leagueOf.forSeries(s) : undefined;
+    if (perLeague) {
+      // Each series is walked only inside its own league's window.
+      if (!reportNoticeWindowOpenFor(now(), league)) continue;
+      anyWindowOpen = true;
+    }
+    const deferred = league?.captainsReport?.deferMatchDayNotices === true;
     const byTeam = new Map((s.participants ?? []).map((p) => [p.teamId, p]));
     for (const f of (s.fixtures as StoredFixture[] | undefined) ?? []) {
-      if (!f?.id || !f.date || !dates.has(f.date)) continue;
+      if (!f?.id || !f.date || !(deferred ? deferredDates : dates).has(f.date)) continue;
+      if (deferred) {
+        // Held for the result (which opens the report itself) until the Monday-noon
+        // fallback; past it, only a fixture with no stored result opens card-less.
+        if (now().getTime() < deferredFallbackAt(f.date)) {
+          if (dates.has(f.date)) sum.held = (sum.held ?? 0) + 1;
+          continue;
+        }
+        const stored = await repo.getFixtureResult(tenant, s.id, f.id);
+        if (stored && !stored.cleared) continue;
+      }
       sum.fixtures++;
       // Undated postponement keeps its old date + dateTbc; a rescheduled one keeps status
       // 'postponed' with the NEW date — so status 'postponed' alone is not a skip.
@@ -915,6 +1062,7 @@ export async function openMatchDayReports(
       }
     }
   }
+  if (!anyWindowOpen) return { ...sum, windowClosed: true };
   if (sum.opened + sum.notified + sum.failed + sum.deferred)
     log(
       `[captains-report] ${tenant}: match-day fixtures=${sum.fixtures} opened=${sum.opened} notified=${sum.notified} failed=${sum.failed} deferred=${sum.deferred} skipped=${sum.skipped}`,
@@ -1062,7 +1210,9 @@ async function notifyRecipient(
   const failed = !delivered && deliveries.some((d) => d.status === 'failed');
   await repo.recordCaptainsReportDeliveries(tenant, report, deliveries, {
     ...(delivered ? { notifiedAt: at } : {}),
-    ...(reminder ? { reminderSentAt: at } : {}),
+    // An all-failed reminder (e.g. `dead-link-base`) must not spend the report's one reminder:
+    // no stamp, claim released below, so the next in-window run sends it.
+    ...(reminder && !failed ? { reminderSentAt: at } : {}),
   });
   for (const d of deliveries)
     if (d.channel === 'whatsapp' && d.status === 'sent' && d.messageId)
@@ -1072,7 +1222,7 @@ async function notifyRecipient(
         fixtureId: report.fixtureId,
         clubId: report.clubId,
       });
-  if (failed && !reminder) {
+  if (failed) {
     await repo.releaseCaptainsReportNotify(tenant, report.id, audience);
     return 'failed';
   }
@@ -1137,7 +1287,23 @@ export function setDefaultReportNoticeSender(
  * sent (`no-email`, `no-cell`, `template-pending`, `send-failed`); a dry-run send returns a
  * `dry-run-` message id, which the caller records as not sent.
  */
-export async function sendReportNotice(n: ReportNotice): Promise<NoticeResult[]> {
+export async function sendReportNotice(
+  n: ReportNotice,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<NoticeResult[]> {
+  // A prod notice must never carry a dead link: `captainsReportLinkBase()` silently falls back
+  // to localhost when its env is unset (two real sends went out that way). Refuse loudly on
+  // every channel, sending nothing. Other stages are unchanged (local dev links are fine).
+  if (sstStage(env) === 'prod' && isLoopbackLinkHost(n.url)) {
+    console.error(
+      `[captains-report] ${n.tenant} ${n.reportId}: refusing prod notice — link base is ${new URL(n.url).origin}`,
+    );
+    return n.channels.map((channel) => ({
+      channel,
+      status: 'failed' as const,
+      reason: 'dead-link-base' as const,
+    }));
+  }
   const { sendCaptainsReportDueEmail } = await import('./notify/email.js');
   const { sendCaptainsReportDueWhatsApp, WhatsAppTemplatePendingError } =
     await import('./notify/whatsapp.js');
@@ -1257,6 +1423,8 @@ export interface ReportRetrySummary {
 export async function retryPendingReportOpens(
   tenant: string,
   deps: CaptainsReportDeps,
+  /** The tenant config when the caller already holds it (saves a read); else read here. */
+  opts?: { config?: TenantConfig | null },
 ): Promise<ReportRetrySummary> {
   const { repo } = deps;
   const now = deps.now ?? (() => new Date());
@@ -1264,13 +1432,20 @@ export async function retryPendingReportOpens(
   const markers = await repo.listReportOpenMarkers(tenant);
   if (!markers.length) return out;
   // Before 18:00 SAST nothing is sent: every marker stays queued, untouched (a deferral is
-  // never an attempt — it must not count toward REPORT_OPEN_MAX_ATTEMPTS).
-  if (!reportNoticeWindowOpen(now())) return { ...out, deferred: markers.length };
-  const config = await repo.getTenantConfig(tenant);
+  // never an attempt — it must not count toward REPORT_OPEN_MAX_ATTEMPTS). A league with its
+  // own `noticeFromHour` is judged per marker: a mixed batch drains only the open leagues.
+  const config = opts?.config !== undefined ? opts.config : await repo.getTenantConfig(tenant);
+  const perLeague = hasCaptainsReportLeagueOverrides(config);
+  if (!perLeague && !reportNoticeWindowOpen(now())) return { ...out, deferred: markers.length };
+  const leagueOf = noticeLeagueResolver(repo, tenant, config);
   for (const [i, m] of markers.entries()) {
     if (pastDeadline(deps.deadlineMs)) {
       out.deferred += markers.length - i;
       break;
+    }
+    if (perLeague && !reportNoticeWindowOpenFor(now(), await leagueOf.forSeriesId(m.seriesId))) {
+      out.deferred++;
+      continue;
     }
     const stored = await repo.getFixtureResult(tenant, m.seriesId, m.fixtureId);
     if (
@@ -1348,7 +1523,19 @@ export async function loadLinkedReport(
   nowMs: number,
   secret: string,
 ): Promise<
-  | { ok: true; tenant: string; report: CaptainsReport; memberId: string; isChairLink: boolean }
+  | {
+      ok: true;
+      tenant: string;
+      report: CaptainsReport;
+      memberId: string;
+      isChairLink: boolean;
+      /**
+       * The TOKEN's expiry (epoch seconds). The token is the capability: access and submit
+       * gate on it alone, and the link page shows it. The stored `linkExpiresAt` only drives
+       * when notices/reminders stop, so a re-signed (extended) link outlives it.
+       */
+      tokenExpiresAt: number;
+    }
   | { ok: false; status: 404 | 410; error: string }
 > {
   const check = verifyReportLinkToken(token, secret, nowMs);
@@ -1361,7 +1548,7 @@ export async function loadLinkedReport(
             'This link has expired. Your club chair can still file the report from the club portal.',
         }
       : { ok: false, status: 404, error: 'not found' };
-  const { t: tenant, r: reportId, m: memberId } = check.payload;
+  const { t: tenant, r: reportId, m: memberId, e: tokenExpiresAt } = check.payload;
   const key = parseCaptainsReportId(reportId);
   if (!key) return { ok: false, status: 404, error: 'not found' };
   const report = await repo.getCaptainsReport(tenant, key.seriesId, key.fixtureId, key.clubId);
@@ -1374,7 +1561,7 @@ export async function loadLinkedReport(
   if (report.status === 'void' || (!isCurrent && !isKeptChairLink))
     return { ok: false, status: 410, error: 'this link is no longer valid' };
   const isChairLink = isKeptChairLink || (isCurrent && report.recipient.kind === 'chair');
-  return { ok: true, tenant, report, memberId, isChairLink };
+  return { ok: true, tenant, report, memberId, isChairLink, tokenExpiresAt };
 }
 
 // ───────────────────────── "Send to captain" ─────────────────────────
@@ -1548,13 +1735,21 @@ export interface ReminderSummary {
 export async function sendReportReminders(
   tenant: string,
   deps: CaptainsReportDeps,
+  /** The tenant config when the caller already holds it (saves a read); else read here. */
+  opts?: { config?: TenantConfig | null },
 ): Promise<ReminderSummary> {
   const { repo } = deps;
   const now = deps.now ?? (() => new Date());
   const out: ReminderSummary = { due: 0, sent: 0, undelivered: 0 };
   // Reminders follow the 18:00 SAST rule too: before it nothing is read or sent, and due
   // reminders stay due (the window runs to midnight, so none is lost to the gate alone).
-  if (!reportNoticeWindowOpen(now())) return out;
+  // A league with its own `noticeFromHour` is judged per report.
+  const defaultOpen = reportNoticeWindowOpen(now());
+  let config: TenantConfig | null | undefined = opts?.config;
+  if (!defaultOpen) {
+    if (config === undefined) config = await repo.getTenantConfig(tenant);
+    if (!hasCaptainsReportLeagueOverrides(config)) return out;
+  }
   const nowMs = now().getTime();
   const due = (await repo.listCaptainsReports(tenant)).filter((r) => {
     if (r.status !== 'pending' || r.reminderSentAt) return false;
@@ -1563,10 +1758,15 @@ export async function sendReportReminders(
     return nowMs < exp && nowMs >= exp - REMINDER_LEAD_DAYS * DAY_MS;
   });
   if (!due.length) return out;
-  const config = await repo.getTenantConfig(tenant);
+  if (config === undefined) config = await repo.getTenantConfig(tenant);
   if (!config) return out;
+  const perLeague = hasCaptainsReportLeagueOverrides(config);
+  const leagueOf = noticeLeagueResolver(repo, tenant, config);
   const clubs = new Map<string, Club | null>();
   for (const r of due) {
+    // Not yet this report's league's hour: it stays due for a later run.
+    if (perLeague && !reportNoticeWindowOpenFor(now(), await leagueOf.forSeriesId(r.seriesId)))
+      continue;
     if (!clubs.has(r.clubId)) clubs.set(r.clubId, await repo.getClub(tenant, r.clubId));
     const club = clubs.get(r.clubId);
     if (!club) continue;
@@ -1716,6 +1916,40 @@ export interface ScorecardContext {
   };
   /** Medicoach's own match page (http(s) only). */
   medicoachMatchUrl?: string;
+  /**
+   * A MANUAL result with no available card (CSA's published card could not be used): why
+   * there is no scorecard, plus the scoring site's page when the result carries one. Never
+   * present alongside an available card.
+   */
+  scorecardAbsentNote?: { text: string; url?: string };
+}
+
+/**
+ * The scorecard-absent note's copy. CSA-flavoured only when the result points at a scored match
+ * (a `medicoachMatchId` or a match url — the CSA scrape path); otherwise the general sentence,
+ * which asserts nothing about CSA. "View it on the scoring site." is rendered as the link, and
+ * only when a url exists.
+ */
+export const SCORECARD_ABSENT_NOTE_CSA_TEXT =
+  "CSA's published scorecard for this match could not be used.";
+export const SCORECARD_ABSENT_NOTE_GENERAL_TEXT = 'No scorecard is available for this match.';
+
+/**
+ * Whether a manual, card-less result gets the note (and which copy). Never for a no-result
+ * (abandoned / washout: `noResult` or `winner: 'none'`) — there is no card to explain.
+ */
+function scorecardAbsentNoteFor(
+  live: StoredFixtureResult,
+  card: StoredFixtureScorecard | null | undefined,
+): ScorecardContext['scorecardAbsentNote'] {
+  if (live.resultSource !== 'manual' || card?.available) return undefined;
+  if (live.noResult || live.winner === 'none') return undefined;
+  const url = httpUrlOrNull(live.medicoachMatchUrl);
+  const csa = !!live.medicoachMatchId || !!url;
+  return {
+    text: csa ? SCORECARD_ABSENT_NOTE_CSA_TEXT : SCORECARD_ABSENT_NOTE_GENERAL_TEXT,
+    ...(url ? { url } : {}),
+  };
 }
 
 /**
@@ -1743,6 +1977,7 @@ export async function attachScorecardContext(
     : card?.sourceUrl
       ? httpUrlOrNull(card.sourceUrl)
       : null;
+  const absentNote = live ? scorecardAbsentNoteFor(live, card) : undefined;
   return {
     ...(card?.available
       ? {
@@ -1764,6 +1999,7 @@ export async function attachScorecardContext(
         }
       : {}),
     ...(url ? { medicoachMatchUrl: url } : {}),
+    ...(absentNote ? { scorecardAbsentNote: absentNote } : {}),
   };
 }
 

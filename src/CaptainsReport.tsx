@@ -632,7 +632,8 @@ function MatchScorecardSection({
 }) {
   const headId = useId();
   const card = context?.scorecard;
-  if (!card && !context?.result && !context?.medicoachMatchUrl) return null;
+  if (!card && !context?.result && !context?.medicoachMatchUrl && !context?.scorecardAbsentNote)
+    return null;
   const home = report.side === 'home' ? report.clubName : report.opponentName;
   const away = report.side === 'home' ? report.opponentName : report.clubName;
   const team = (side: 'home' | 'away', name: string) =>
@@ -698,14 +699,42 @@ function MatchScorecardSection({
           <ScorecardAnswer value={value} onChange={onChange} disabled={disabled} />
         </>
       ) : (
-        <HeadlineResult
-          match={{
-            homeTeamName: home,
-            awayTeamName: away,
-            result: context?.result,
-            medicoachMatchUrl: context?.medicoachMatchUrl,
-          }}
-        />
+        <>
+          <HeadlineResult
+            match={{
+              homeTeamName: home,
+              awayTeamName: away,
+              result: context?.result,
+              // The absent-card note carries the link itself.
+              medicoachMatchUrl: context?.scorecardAbsentNote
+                ? undefined
+                : context?.medicoachMatchUrl,
+            }}
+          />
+          {context?.scorecardAbsentNote && (
+            <div
+              className="cr-section-sub"
+              style={{ marginTop: 6 }}
+              data-testid="scorecard-absent-note"
+            >
+              {context.scorecardAbsentNote.text}
+              {context.scorecardAbsentNote.url && (
+                <>
+                  {' '}
+                  <a
+                    className="sc-external"
+                    href={context.scorecardAbsentNote.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    View it on the scoring site.
+                    <Icon.Arrow />
+                  </a>
+                </>
+              )}
+            </div>
+          )}
+        </>
       )}
     </div>
   );

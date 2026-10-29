@@ -18,8 +18,8 @@
  * publish a card after the result (scoring finished later), so the stub is re-checked by the
  * sweep at most every SCORECARD_UNAVAILABLE_RECHECK_MS for SCORECARD_UNAVAILABLE_WINDOW_MS
  * after the first `available: false` (the stub's `fetchedAt`; `lastCheckedAt` moves), then
- * flipped terminal. 404 → a terminal stub (`available: false, terminal: true`) straight away,
- * so the sweep stops asking. A 404 or
+ * flipped terminal. 404 → the same non-terminal stub (re-checked on the same cadence and
+ * window): a 404 can be transient, e.g. a result that arrives before its match row. A 404 or
  * `available: false` NEVER replaces an available card already stored for the same match: the
  * card is kept and only its `lastCheckedAt` moves. Anything else (network, 5xx, 401, a body
  * that fails the schema) → logged, nothing written, and the next sweep retries. Never throws.
@@ -129,7 +129,10 @@ export async function fetchAndStoreScorecard(
       await deps.repo.putFixtureScorecard(tenant, stub);
     };
     if (res.status === 404) {
-      await storeNoCard({ ...base, available: false, terminal: true });
+      // Not terminal: a 404 can be transient (a result that precedes its match row, an
+      // override later cleared), so it gets the same bounded re-check window as
+      // `available: false` rather than being stuck without a card forever.
+      await storeNoCard({ ...base, available: false });
       return 'not-found';
     }
     if (!res.ok) {

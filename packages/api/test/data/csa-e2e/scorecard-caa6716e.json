@@ -1,0 +1,441 @@
+{
+  "available": true,
+  "matchId": "caa6716e-80ab-479a-a502-8420e8942682",
+  "matchState": "UKZN 1st XI won by 60 runs",
+  "innings": [
+    {
+      "battingTeamName": "UKZN 1st XI",
+      "totalRuns": 160,
+      "wickets": 3,
+      "overs": "20.0",
+      "extras": {
+        "byes": 0,
+        "legByes": 0,
+        "wides": 13,
+        "noBalls": 4,
+        "penalties": 0,
+        "total": 17
+      },
+      "batters": [
+        {
+          "order": 1,
+          "name": "Thamsanqa Khumalo",
+          "runs": 22,
+          "ballsFaced": 17,
+          "fours": 3,
+          "sixes": 0,
+          "strikeRate": 129.41,
+          "howOut": "b Sakhelephi Khumalo",
+          "dismissal": "bowled"
+        },
+        {
+          "order": 2,
+          "name": "Zaahid Mahomed",
+          "runs": 47,
+          "ballsFaced": 45,
+          "fours": 2,
+          "sixes": 1,
+          "strikeRate": 104.44,
+          "howOut": "c Andile Simelane b Luyanda Gasa",
+          "dismissal": "caught"
+        },
+        {
+          "order": 3,
+          "name": "Kaeden Mcallister",
+          "runs": 22,
+          "ballsFaced": 23,
+          "fours": 1,
+          "sixes": 1,
+          "strikeRate": 95.65,
+          "howOut": "c †Mhlengi Ndaba b Tawanda Mawire",
+          "dismissal": "caught"
+        },
+        {
+          "order": 4,
+          "name": "Shahzaad Perumal",
+          "runs": 47,
+          "ballsFaced": 30,
+          "fours": 2,
+          "sixes": 3,
+          "strikeRate": 156.67,
+          "howOut": "not out"
+        },
+        {
+          "order": 5,
+          "name": "Otsile Ntsele",
+          "runs": 5,
+          "ballsFaced": 9,
+          "fours": 0,
+          "sixes": 0,
+          "strikeRate": 55.56,
+          "howOut": "not out"
+        }
+      ],
+      "bowlers": [
+        {
+          "order": 1,
+          "name": "Luyanda Gasa",
+          "overs": "4.0",
+          "maidens": 0,
+          "runsConceded": 27,
+          "wickets": 1,
+          "economy": 6.75,
+          "wides": 4,
+          "noBalls": 0
+        },
+        {
+          "order": 2,
+          "name": "Andile Simelane",
+          "overs": "4.0",
+          "maidens": 0,
+          "runsConceded": 46,
+          "wickets": 0,
+          "economy": 11.5,
+          "wides": 4,
+          "noBalls": 4
+        },
+        {
+          "order": 3,
+          "name": "Sakhelephi Khumalo",
+          "overs": "4.0",
+          "maidens": 0,
+          "runsConceded": 15,
+          "wickets": 1,
+          "economy": 3.75,
+          "wides": 0,
+          "noBalls": 0
+        },
+        {
+          "order": 4,
+          "name": "Tawanda Mawire",
+          "overs": "4.0",
+          "maidens": 0,
+          "runsConceded": 29,
+          "wickets": 1,
+          "economy": 7.25,
+          "wides": 4,
+          "noBalls": 0
+        },
+        {
+          "order": 5,
+          "name": "Sabelo Shangase",
+          "overs": "2.0",
+          "maidens": 0,
+          "runsConceded": 14,
+          "wickets": 0,
+          "economy": 7,
+          "wides": 1,
+          "noBalls": 0
+        },
+        {
+          "order": 6,
+          "name": "Owais Kader",
+          "overs": "2.0",
+          "maidens": 0,
+          "runsConceded": 29,
+          "wickets": 0,
+          "economy": 14.5,
+          "wides": 0,
+          "noBalls": 0
+        }
+      ],
+      "fallOfWickets": [
+        {
+          "wicket": 1,
+          "runs": 49,
+          "overs": "5.2",
+          "batterName": "Thamsanqa Khumalo"
+        },
+        {
+          "wicket": 2,
+          "runs": 81,
+          "overs": "10.5",
+          "batterName": "Kaeden Mcallister"
+        },
+        {
+          "wicket": 3,
+          "runs": 140,
+          "overs": "16.5",
+          "batterName": "Zaahid Mahomed"
+        }
+      ]
+    },
+    {
+      "battingTeamName": "African Warriors CC 1st XI",
+      "totalRuns": 100,
+      "wickets": 10,
+      "overs": "17.1",
+      "extras": {
+        "byes": 4,
+        "legByes": 0,
+        "wides": 10,
+        "noBalls": 2,
+        "penalties": 0,
+        "total": 16
+      },
+      "batters": [
+        {
+          "order": 1,
+          "name": "Lungelo Dlamini",
+          "runs": 2,
+          "ballsFaced": 10,
+          "fours": 0,
+          "sixes": 0,
+          "strikeRate": 20,
+          "howOut": "c Kamran Naraidu b Akhil Maharaj",
+          "dismissal": "caught"
+        },
+        {
+          "order": 2,
+          "name": "Mhlengi Ndaba",
+          "runs": 2,
+          "ballsFaced": 4,
+          "fours": 0,
+          "sixes": 0,
+          "strikeRate": 50,
+          "howOut": "b Akhil Maharaj",
+          "dismissal": "bowled"
+        },
+        {
+          "order": 3,
+          "name": "Andile Simelane",
+          "runs": 16,
+          "ballsFaced": 12,
+          "fours": 2,
+          "sixes": 1,
+          "strikeRate": 133.33,
+          "howOut": "c Zaahid Mahomed b Akhil Maharaj",
+          "dismissal": "caught"
+        },
+        {
+          "order": 4,
+          "name": "Sbonelo Phewa",
+          "runs": 46,
+          "ballsFaced": 41,
+          "fours": 4,
+          "sixes": 2,
+          "strikeRate": 112.2,
+          "howOut": "b Dhilan Naraidu",
+          "dismissal": "bowled"
+        },
+        {
+          "order": 5,
+          "name": "Tawanda Mawire",
+          "runs": 10,
+          "ballsFaced": 15,
+          "fours": 1,
+          "sixes": 0,
+          "strikeRate": 66.67,
+          "howOut": "b Sinakhokonke Mfeka",
+          "dismissal": "bowled"
+        },
+        {
+          "order": 6,
+          "name": "Sbusiso Phewa",
+          "runs": 3,
+          "ballsFaced": 6,
+          "fours": 0,
+          "sixes": 0,
+          "strikeRate": 50,
+          "howOut": "run out (Otsile Ntsele)",
+          "dismissal": "run out"
+        },
+        {
+          "order": 7,
+          "name": "Sakhelephi Khumalo",
+          "runs": 0,
+          "ballsFaced": 3,
+          "fours": 0,
+          "sixes": 0,
+          "strikeRate": 0,
+          "howOut": "lbw b Dhilan Naraidu",
+          "dismissal": "lbw"
+        },
+        {
+          "order": 8,
+          "name": "Vuyo Myeza",
+          "runs": 5,
+          "ballsFaced": 8,
+          "fours": 0,
+          "sixes": 0,
+          "strikeRate": 62.5,
+          "howOut": "run out (Shahzaad Perumal/Kaeden Mcallister)",
+          "dismissal": "run out"
+        },
+        {
+          "order": 9,
+          "name": "Owais Kader",
+          "runs": 0,
+          "ballsFaced": 1,
+          "fours": 0,
+          "sixes": 0,
+          "strikeRate": 0,
+          "howOut": "lbw b Dhilan Naraidu",
+          "dismissal": "lbw"
+        },
+        {
+          "order": 10,
+          "name": "Sabelo Shangase",
+          "runs": 0,
+          "ballsFaced": 3,
+          "fours": 0,
+          "sixes": 0,
+          "strikeRate": 0,
+          "howOut": "c †Kaeden Mcallister b Zaahid Mahomed",
+          "dismissal": "caught"
+        },
+        {
+          "order": 11,
+          "name": "Luyanda Gasa",
+          "runs": 0,
+          "ballsFaced": 0,
+          "fours": 0,
+          "sixes": 0,
+          "strikeRate": 0,
+          "howOut": "not out"
+        }
+      ],
+      "bowlers": [
+        {
+          "order": 1,
+          "name": "Akhil Maharaj",
+          "overs": "3.0",
+          "maidens": 0,
+          "runsConceded": 22,
+          "wickets": 3,
+          "economy": 7.33,
+          "wides": 0,
+          "noBalls": 0
+        },
+        {
+          "order": 2,
+          "name": "Zedan Mahomed",
+          "overs": "2.0",
+          "maidens": 0,
+          "runsConceded": 6,
+          "wickets": 0,
+          "economy": 3,
+          "wides": 4,
+          "noBalls": 0
+        },
+        {
+          "order": 3,
+          "name": "Conner Wilson",
+          "overs": "2.0",
+          "maidens": 0,
+          "runsConceded": 6,
+          "wickets": 0,
+          "economy": 3,
+          "wides": 1,
+          "noBalls": 0
+        },
+        {
+          "order": 4,
+          "name": "Sinakhokonke Mfeka",
+          "overs": "2.0",
+          "maidens": 0,
+          "runsConceded": 21,
+          "wickets": 1,
+          "economy": 10.5,
+          "wides": 2,
+          "noBalls": 0
+        },
+        {
+          "order": 5,
+          "name": "Kamran Naraidu",
+          "overs": "4.0",
+          "maidens": 0,
+          "runsConceded": 27,
+          "wickets": 0,
+          "economy": 6.75,
+          "wides": 1,
+          "noBalls": 2
+        },
+        {
+          "order": 6,
+          "name": "Dhilan Naraidu",
+          "overs": "4.0",
+          "maidens": 0,
+          "runsConceded": 14,
+          "wickets": 3,
+          "economy": 3.5,
+          "wides": 2,
+          "noBalls": 0
+        },
+        {
+          "order": 7,
+          "name": "Zaahid Mahomed",
+          "overs": "0.1",
+          "maidens": 0,
+          "runsConceded": 0,
+          "wickets": 1,
+          "economy": 0,
+          "wides": 0,
+          "noBalls": 0
+        }
+      ],
+      "fallOfWickets": [
+        {
+          "wicket": 1,
+          "runs": 3,
+          "overs": "0.6",
+          "batterName": "Mhlengi Ndaba"
+        },
+        {
+          "wicket": 2,
+          "runs": 7,
+          "overs": "2.5",
+          "batterName": "Lungelo Dlamini"
+        },
+        {
+          "wicket": 3,
+          "runs": 24,
+          "overs": "4.4",
+          "batterName": "Andile Simelane"
+        },
+        {
+          "wicket": 4,
+          "runs": 55,
+          "overs": "8.6",
+          "batterName": "Tawanda Mawire"
+        },
+        {
+          "wicket": 5,
+          "runs": 72,
+          "overs": "12.1",
+          "batterName": "Sbusiso Phewa"
+        },
+        {
+          "wicket": 6,
+          "runs": 75,
+          "overs": "12.6",
+          "batterName": "Sakhelephi Khumalo"
+        },
+        {
+          "wicket": 7,
+          "runs": 95,
+          "overs": "16.1",
+          "batterName": "Sbonelo Phewa"
+        },
+        {
+          "wicket": 8,
+          "runs": 95,
+          "overs": "16.2",
+          "batterName": "Owais Kader"
+        },
+        {
+          "wicket": 9,
+          "runs": 100,
+          "overs": "16.5",
+          "batterName": "Vuyo Myeza"
+        },
+        {
+          "wicket": 10,
+          "runs": 100,
+          "overs": "17.1",
+          "batterName": "Sabelo Shangase"
+        }
+      ]
+    }
+  ]
+}

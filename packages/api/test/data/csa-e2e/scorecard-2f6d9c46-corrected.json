@@ -1,0 +1,464 @@
+{
+  "available": true,
+  "matchId": "2f6d9c46-5b53-451c-b82c-df9e5862c484",
+  "matchState": "Crusaders won by 26 runs",
+  "innings": [
+    {
+      "battingTeamName": "Crusaders",
+      "totalRuns": 185,
+      "wickets": 5,
+      "overs": "20.0",
+      "extras": {
+        "byes": 1,
+        "legByes": 3,
+        "wides": 3,
+        "noBalls": 2,
+        "penalties": 0,
+        "total": 9
+      },
+      "batters": [
+        {
+          "order": 1,
+          "name": "Jordan Grobbelaar",
+          "runs": 21,
+          "ballsFaced": 20,
+          "fours": 3,
+          "sixes": 0,
+          "strikeRate": 105,
+          "howOut": "c Yastri Naidoo b Gareth Lonie",
+          "dismissal": "caught"
+        },
+        {
+          "order": 2,
+          "name": "Jason Wagener",
+          "runs": 27,
+          "ballsFaced": 23,
+          "fours": 4,
+          "sixes": 1,
+          "strikeRate": 117.39,
+          "howOut": "c Zakariya Paruk b Tim Saulez",
+          "dismissal": "caught"
+        },
+        {
+          "order": 3,
+          "name": "Wesley Watson",
+          "runs": 39,
+          "ballsFaced": 24,
+          "fours": 5,
+          "sixes": 2,
+          "strikeRate": 162.5,
+          "howOut": "b Mahmedtahir Motala",
+          "dismissal": "bowled"
+        },
+        {
+          "order": 4,
+          "name": "Gomolemo Phiri",
+          "runs": 2,
+          "ballsFaced": 4,
+          "fours": 0,
+          "sixes": 0,
+          "strikeRate": 50,
+          "howOut": "b Mahmedtahir Motala",
+          "dismissal": "bowled"
+        },
+        {
+          "order": 5,
+          "name": "Dylan Douglas Hulett",
+          "runs": 34,
+          "ballsFaced": 20,
+          "fours": 2,
+          "sixes": 3,
+          "strikeRate": 170,
+          "howOut": "not out"
+        },
+        {
+          "order": 6,
+          "name": "Robert Frylinck",
+          "runs": 29,
+          "ballsFaced": 19,
+          "fours": 2,
+          "sixes": 2,
+          "strikeRate": 152.63,
+          "howOut": "c Gareth Lonie b Zakariya Paruk",
+          "dismissal": "caught"
+        },
+        {
+          "order": 7,
+          "name": "Ettiene Du Toit",
+          "runs": 24,
+          "ballsFaced": 12,
+          "fours": 1,
+          "sixes": 3,
+          "strikeRate": 200,
+          "howOut": "not out"
+        }
+      ],
+      "bowlers": [
+        {
+          "order": 1,
+          "name": "Thula Ngcobo",
+          "overs": "4.0",
+          "maidens": 0,
+          "runsConceded": 34,
+          "wickets": 0,
+          "economy": 8.5,
+          "wides": 2,
+          "noBalls": 1
+        },
+        {
+          "order": 2,
+          "name": "Zakariya Paruk",
+          "overs": "3.0",
+          "maidens": 0,
+          "runsConceded": 35,
+          "wickets": 1,
+          "economy": 11.67,
+          "wides": 0,
+          "noBalls": 1
+        },
+        {
+          "order": 3,
+          "name": "Tim Saulez",
+          "overs": "2.0",
+          "maidens": 0,
+          "runsConceded": 21,
+          "wickets": 1,
+          "economy": 10.5,
+          "wides": 1,
+          "noBalls": 0
+        },
+        {
+          "order": 4,
+          "name": "Gareth Lonie",
+          "overs": "3.0",
+          "maidens": 0,
+          "runsConceded": 26,
+          "wickets": 1,
+          "economy": 8.67,
+          "wides": 0,
+          "noBalls": 0
+        },
+        {
+          "order": 5,
+          "name": "Josh Henry",
+          "overs": "4.0",
+          "maidens": 0,
+          "runsConceded": 39,
+          "wickets": 0,
+          "economy": 9.75,
+          "wides": 0,
+          "noBalls": 0
+        },
+        {
+          "order": 6,
+          "name": "Mahmedtahir Motala",
+          "overs": "4.0",
+          "maidens": 0,
+          "runsConceded": 26,
+          "wickets": 2,
+          "economy": 6.5,
+          "wides": 0,
+          "noBalls": 0
+        }
+      ],
+      "fallOfWickets": [
+        {
+          "wicket": 1,
+          "runs": 47,
+          "overs": "5.4",
+          "batterName": "Jason Wagener"
+        },
+        {
+          "wicket": 2,
+          "runs": 79,
+          "overs": "9.2",
+          "batterName": "Jordan Grobbelaar"
+        },
+        {
+          "wicket": 3,
+          "runs": 86,
+          "overs": "10.3",
+          "batterName": "Gomolemo Phiri"
+        },
+        {
+          "wicket": 4,
+          "runs": 103,
+          "overs": "12.3",
+          "batterName": "Wesley Watson"
+        },
+        {
+          "wicket": 5,
+          "runs": 137,
+          "overs": "16.5",
+          "batterName": "Robert Frylinck"
+        }
+      ]
+    },
+    {
+      "battingTeamName": "Delta CC 1st XI",
+      "totalRuns": 159,
+      "wickets": 10,
+      "overs": "19.0",
+      "extras": {
+        "byes": 0,
+        "legByes": 0,
+        "wides": 7,
+        "noBalls": 0,
+        "penalties": 0,
+        "total": 7
+      },
+      "batters": [
+        {
+          "order": 1,
+          "name": "Ravi Reddy",
+          "runs": 0,
+          "ballsFaced": 5,
+          "fours": 0,
+          "sixes": 0,
+          "strikeRate": 0,
+          "howOut": "c †Jason Wagener b Zakhele Qwabe",
+          "dismissal": "caught"
+        },
+        {
+          "order": 2,
+          "name": "Yastri Naidoo",
+          "runs": 1,
+          "ballsFaced": 8,
+          "fours": 0,
+          "sixes": 0,
+          "strikeRate": 12.5,
+          "howOut": "c †Jason Wagener b Zakhele Qwabe",
+          "dismissal": "caught"
+        },
+        {
+          "order": 3,
+          "name": "Kyle Northend",
+          "runs": 1,
+          "ballsFaced": 5,
+          "fours": 0,
+          "sixes": 0,
+          "strikeRate": 20,
+          "howOut": "b Callum Watson",
+          "dismissal": "bowled"
+        },
+        {
+          "order": 4,
+          "name": "Gareth Lonie",
+          "runs": 54,
+          "ballsFaced": 27,
+          "fours": 5,
+          "sixes": 3,
+          "strikeRate": 200,
+          "howOut": "c Callum Watson b Jordan Grobbelaar",
+          "dismissal": "caught"
+        },
+        {
+          "order": 5,
+          "name": "Zakariya Paruk",
+          "runs": 9,
+          "ballsFaced": 6,
+          "fours": 2,
+          "sixes": 0,
+          "strikeRate": 150,
+          "howOut": "c †Jason Wagener b Zakhele Qwabe",
+          "dismissal": "caught"
+        },
+        {
+          "order": 6,
+          "name": "Tim Saulez",
+          "runs": 72,
+          "ballsFaced": 46,
+          "fours": 7,
+          "sixes": 3,
+          "strikeRate": 156.52,
+          "howOut": "c Jordan Grobbelaar b Robert Frylinck",
+          "dismissal": "caught"
+        },
+        {
+          "order": 7,
+          "name": "Camdon Riley",
+          "runs": 5,
+          "ballsFaced": 7,
+          "fours": 0,
+          "sixes": 0,
+          "strikeRate": 71.43,
+          "howOut": "c Gomolemo Phiri b Robert Frylinck",
+          "dismissal": "caught"
+        },
+        {
+          "order": 8,
+          "name": "Cohen Naidoo",
+          "runs": 0,
+          "ballsFaced": 1,
+          "fours": 0,
+          "sixes": 0,
+          "strikeRate": 0,
+          "howOut": "lbw b Robert Frylinck",
+          "dismissal": "lbw"
+        },
+        {
+          "order": 9,
+          "name": "Mahmedtahir Motala",
+          "runs": 7,
+          "ballsFaced": 3,
+          "fours": 0,
+          "sixes": 1,
+          "strikeRate": 233.33,
+          "howOut": "c Wesley Watson b Zakhele Qwabe",
+          "dismissal": "caught"
+        },
+        {
+          "order": 10,
+          "name": "Josh Henry",
+          "runs": 2,
+          "ballsFaced": 5,
+          "fours": 0,
+          "sixes": 0,
+          "strikeRate": 40,
+          "howOut": "c Blake Johnson b Zakhele Qwabe",
+          "dismissal": "caught"
+        },
+        {
+          "order": 11,
+          "name": "Thula Ngcobo",
+          "runs": 1,
+          "ballsFaced": 1,
+          "fours": 0,
+          "sixes": 0,
+          "strikeRate": 100,
+          "howOut": "not out"
+        }
+      ],
+      "bowlers": [
+        {
+          "order": 1,
+          "name": "Zakhele Qwabe",
+          "overs": "4.0",
+          "maidens": 0,
+          "runsConceded": 24,
+          "wickets": 5,
+          "economy": 6,
+          "wides": 5,
+          "noBalls": 0
+        },
+        {
+          "order": 2,
+          "name": "Callum Watson",
+          "overs": "3.0",
+          "maidens": 0,
+          "runsConceded": 33,
+          "wickets": 1,
+          "economy": 11,
+          "wides": 2,
+          "noBalls": 0
+        },
+        {
+          "order": 3,
+          "name": "Robert Frylinck",
+          "overs": "3.0",
+          "maidens": 0,
+          "runsConceded": 25,
+          "wickets": 3,
+          "economy": 8.33,
+          "wides": 0,
+          "noBalls": 0
+        },
+        {
+          "order": 4,
+          "name": "Blake Johnson",
+          "overs": "4.0",
+          "maidens": 0,
+          "runsConceded": 26,
+          "wickets": 0,
+          "economy": 6.5,
+          "wides": 0,
+          "noBalls": 0
+        },
+        {
+          "order": 5,
+          "name": "Samkelo Gasa",
+          "overs": "3.0",
+          "maidens": 0,
+          "runsConceded": 31,
+          "wickets": 0,
+          "economy": 10.33,
+          "wides": 0,
+          "noBalls": 0
+        },
+        {
+          "order": 6,
+          "name": "Jordan Grobbelaar",
+          "overs": "2.0",
+          "maidens": 0,
+          "runsConceded": 20,
+          "wickets": 1,
+          "economy": 10,
+          "wides": 0,
+          "noBalls": 0
+        }
+      ],
+      "fallOfWickets": [
+        {
+          "wicket": 1,
+          "runs": 0,
+          "overs": "0.5",
+          "batterName": "Ravi Reddy"
+        },
+        {
+          "wicket": 2,
+          "runs": 7,
+          "overs": "2.2",
+          "batterName": "Yastri Naidoo"
+        },
+        {
+          "wicket": 3,
+          "runs": 10,
+          "overs": "3.2",
+          "batterName": "Kyle Northend"
+        },
+        {
+          "wicket": 4,
+          "runs": 23,
+          "overs": "4.3",
+          "batterName": "Zakariya Paruk"
+        },
+        {
+          "wicket": 5,
+          "runs": 123,
+          "overs": "13.6",
+          "batterName": "Gareth Lonie"
+        },
+        {
+          "wicket": 6,
+          "runs": 149,
+          "overs": "17.1",
+          "batterName": "Camdon Riley"
+        },
+        {
+          "wicket": 7,
+          "runs": 149,
+          "overs": "17.2",
+          "batterName": "Cohen Naidoo"
+        },
+        {
+          "wicket": 8,
+          "runs": 150,
+          "overs": "17.4",
+          "batterName": "Tim Saulez"
+        },
+        {
+          "wicket": 9,
+          "runs": 158,
+          "overs": "18.4",
+          "batterName": "Mahmedtahir Motala"
+        },
+        {
+          "wicket": 10,
+          "runs": 159,
+          "overs": "18.6",
+          "batterName": "Josh Henry"
+        }
+      ]
+    }
+  ]
+}

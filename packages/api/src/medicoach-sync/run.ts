@@ -231,12 +231,16 @@ export async function runTenantSync(
   };
   const noticeCount = (v: 'sent' | 'failed') => [...notice.values()].filter((x) => x === v).length;
   const retryReports = () =>
-    retryPendingReportOpens(tenant, {
-      repo,
-      ...(deps.now ? { now: deps.now } : {}),
-      ...captainsReports,
-      ...(deps.deadlineMs !== undefined ? { deadlineMs: deps.deadlineMs } : {}),
-    });
+    retryPendingReportOpens(
+      tenant,
+      {
+        repo,
+        ...(deps.now ? { now: deps.now } : {}),
+        ...captainsReports,
+        ...(deps.deadlineMs !== undefined ? { deadlineMs: deps.deadlineMs } : {}),
+      },
+      { config },
+    );
   const now = () => (deps.now ?? (() => new Date()))().toISOString();
   // Best-effort: losing the health stamp must never mask the run's own outcome.
   const stamp = (patch: Parameters<typeof repo.putSyncHealth>[1]) =>
@@ -301,12 +305,16 @@ export async function runTenantSync(
   );
   let reminders: ReminderSummary | undefined;
   try {
-    reminders = await sendReportReminders(tenant, {
-      repo,
-      ...(deps.now ? { now: deps.now } : {}),
-      ...(deps.captainsReports ?? {}),
-      ...(deps.deadlineMs !== undefined ? { deadlineMs: deps.deadlineMs } : {}),
-    });
+    reminders = await sendReportReminders(
+      tenant,
+      {
+        repo,
+        ...(deps.now ? { now: deps.now } : {}),
+        ...(deps.captainsReports ?? {}),
+        ...(deps.deadlineMs !== undefined ? { deadlineMs: deps.deadlineMs } : {}),
+      },
+      { config },
+    );
   } catch (err) {
     // A reminder failure never fails the sync run; the next run tries again.
     console.error(
