@@ -21,9 +21,15 @@
  * Officials get the REAL kick-off time and ground, even when the series withholds them from clubs:
  * ADR 0011 is a club-facing gate, and an umpire must know where and when to turn up.
  *
- * WhatsApp goes out only when the `whatsappInvites` feature is on AND the `official_appointed`
- * registry entry is "registered" (same gate as `reminderChannels` in fixture-reminders.ts). Email
- * always goes out. NOTIFY_DRY_RUN is honoured by the senders themselves.
+ * WhatsApp goes out only when the `whatsappInvites` feature is on AND an appointment template is
+ * "registered" (same gate as `reminderChannels` in fixture-reminders.ts). The template is
+ * `official_appointed_v2` (carries the contact line) once ITS registry entry is "registered",
+ * else v1 — flipping the registry status + redeploy is the switch (no runtime Meta probe).
+ * Email always goes out. NOTIFY_DRY_RUN is honoured by the senders themselves.
+ *
+ * Venue: explicit fixture venue, else the home side's ground (playingVenue, venue-clash.ts —
+ * NOT reminder-fixtures.ts, which pulls ExcelJS). Contact line: officialsContactLineFor —
+ * the tenant's line for umpires/referees, the Medicoach default for scorers.
  *
  * Deliberately does NOT import index.ts (it would drag the whole Hono app into this bundle).
  */
@@ -40,6 +46,8 @@ import {
 import { resolveTeam } from '../teams.js';
 import { hasFeature } from '../features.js';
 import { orgCopy } from '../branding.js';
+import { playingVenue } from '../venue-clash.js';
+import { officialsContactLineFor } from '../officials-contact.js';
 import type { Channel, Club, Scorer, Series, TenantConfig, Umpire } from '../types.js';
 
 /** Failed sends before a row is marked `exhausted` (≈50 minutes of 5-minute retries). */
@@ -63,8 +71,9 @@ type NoticeRepo = Pick<
 export interface OfficialNoticesDeps {
   repo: NoticeRepo;
   send: typeof sendOfficialAppointedNotice;
-  /** The `official_appointed` template's registry status (the WhatsApp runtime gate). */
-  whatsappTemplateStatus: WhatsAppTemplateDefinition['status'];
+  /** Registry statuses of `official_appointed` (v1) and `official_appointed_v2`: the WhatsApp
+   * runtime gate (either registered) and the template choice (v2 when registered). */
+  officialTemplate: OfficialTemplateStatus;
   attemptCap: number;
   captureException: (err: unknown, tags: Record<string, string>) => void;
   log: (message: string, data?: Record<string, unknown>) => void;
@@ -88,24 +97,38 @@ export interface OfficialNoticesSummary {
   dryRun: boolean;
 }
 
+export interface OfficialTemplateStatus {
+  v1Status: WhatsAppTemplateDefinition['status'];
+  v2Status: WhatsAppTemplateDefinition['status'];
+}
+
 const defaultDeps = (): OfficialNoticesDeps => ({
   repo: repoModule,
   send: sendOfficialAppointedNotice,
-  // Widened from the `as const` literal so the comparison below is a real runtime check.
-  whatsappTemplateStatus: WHATSAPP_TEMPLATES.officialAppointed
-    .status as WhatsAppTemplateDefinition['status'],
+  // Widened from the `as const` literals so the comparisons below are real runtime checks.
+  officialTemplate: {
+    v1Status: WHATSAPP_TEMPLATES.officialAppointed.status as WhatsAppTemplateDefinition['status'],
+    v2Status: WHATSAPP_TEMPLATES.officialAppointedV2.status as WhatsAppTemplateDefinition['status'],
+  },
   attemptCap: ATTEMPT_CAP,
   captureException: (err, tags) => Sentry.captureException(err, { tags }),
   log: (message, data) => console.log(JSON.stringify({ msg: message, ...data })),
 });
 
-/** Email always; WhatsApp only with the feature on and the template registered. */
+/** The WhatsApp template to send: v2 once registered, else v1. */
+export function officialWhatsAppTemplate(t: OfficialTemplateStatus): 'v1' | 'v2' {
+  return t.v2Status === 'registered' ? 'v2' : 'v1';
+}
+
+/** Email always; WhatsApp only with the feature on and an appointment template registered. */
 export function officialNoticeChannels(
   cfg: TenantConfig,
-  whatsappTemplateStatus: WhatsAppTemplateDefinition['status'],
+  officialTemplate: OfficialTemplateStatus,
 ): Channel[] {
   const channels: Channel[] = ['email'];
-  if (hasFeature(cfg, 'whatsappInvites', true) && whatsappTemplateStatus === 'registered') {
+  const registered =
+    officialTemplate.v1Status === 'registered' || officialTemplate.v2Status === 'registered';
+  if (hasFeature(cfg, 'whatsappInvites', true) && registered) {
     channels.push('whatsapp');
   }
   return channels;
@@ -146,7 +169,8 @@ export async function runOfficialNotices(
       const queued = await repo.listQueuedOfficialsNotify(tenant);
       if (queued.length === 0) continue;
       summary.tenants++;
-      const channels = officialNoticeChannels(cfg, deps.whatsappTemplateStatus);
+      const channels = officialNoticeChannels(cfg, deps.officialTemplate);
+      const whatsappTemplate = officialWhatsAppTemplate(deps.officialTemplate);
       const orgName = orgCopy(cfg).name;
       // Loaded once per tenant, only when there is work.
       const [clubs, umpires, scorers] = await Promise.all([
@@ -193,8 +217,9 @@ export async function runOfficialNotices(
           row.role === 'scorer' ? scorersById.get(row.umpireId) : umpiresById.get(row.umpireId);
         const home = resolveTeam(series, fixture.home ?? '', clubsById);
         const away = resolveTeam(series, fixture.away ?? '', clubsById);
-        // Real time/venue even when withheld from clubs (ADR 0011 is club-facing only).
-        const venue = fixture.venueOverride?.trim() || fixture.venueName || undefined;
+        // Real time/venue even when withheld from clubs (ADR 0011 is club-facing only). No
+        // explicit venue ⇒ the home side's ground (junk placeholders ignored), else "venue TBC".
+        const venue = playingVenue(series, fixture, clubsById) || undefined;
         // Umpires stand in pairs: name the other one so they can coordinate.
         const co =
           row.role === 'umpire'
@@ -218,6 +243,8 @@ export async function runOfficialNotices(
           ...(fixture.time ? { time: fixture.time } : {}),
           ...(venue ? { venue } : {}),
           ...(coOfficialName ? { coOfficialName } : {}),
+          contactLine: officialsContactLineFor(cfg, row.role),
+          whatsappTemplate,
           channels,
         });
         if (results.some((r) => r.status === 'sent')) {

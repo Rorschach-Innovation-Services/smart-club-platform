@@ -18,6 +18,7 @@ const {
   clearanceTemplateFor,
   fixtureReminderParams,
   officialAppointedParams,
+  officialAppointedV2Params,
   captainsReportDueParams,
   squadSelectionDueParams,
   sendSquadSelectionDueWhatsApp,
@@ -120,6 +121,17 @@ const BUILDERS = [
       orgName: 'KZN Cricket Union',
       matchLine: 'Umzinto CC v African Warriors · Premier League',
       whenWhere: 'Sat 2026-11-15, 09:00 at Kingsmead',
+    }),
+  },
+  {
+    key: 'officialAppointedV2' as const,
+    params: officialAppointedV2Params({
+      officialName: 'Andile Ngubane',
+      roleLabel: 'umpire',
+      orgName: 'Titans Cricket',
+      matchLine: 'Umzinto CC v African Warriors · Premier League',
+      whenWhere: 'Sat 2026-11-15, 09:00 at Kingsmead',
+      contactLine: 'Titans umpire - 083 709 2976',
     }),
   },
   {

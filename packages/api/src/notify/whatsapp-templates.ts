@@ -42,7 +42,8 @@
  * `status` is documentation, not a runtime gate — nothing here can verify Meta's
  * state, and the send path fails open (attempts the send) for every entry. The exceptions
  * are `fixtureReminder` (the FixtureReminders cron skips WhatsApp until it is
- * "registered"), `officialAppointed` (the OfficialNotices cron's WhatsApp gate), `captainsReportDue` / `captainsReportOpsDigest` (their senders skip the
+ * "registered"), `officialAppointed` / `officialAppointedV2` (the OfficialNotices cron's WhatsApp gate and
+ * template choice), `captainsReportDue` / `captainsReportOpsDigest` (their senders skip the
  * channel as template-pending until it is "registered"), `clearancePendingV2` (the
  * ClearanceReminders cron's WhatsApp gate), the three `dolphins*` welcome-broadcast entries and
  * the two `emcu*` scorer-broadcast entries (their senders throw until "registered") — see those
@@ -226,6 +227,26 @@ export const WHATSAPP_TEMPLATES = {
       'You have been appointed as {{2}} for the following {{3}} fixture:\n\n' +
       '{{4}}\n{{5}}\n\n' +
       'If you are unavailable for this appointment, please contact info@medicoach.co.za as soon as possible.',
+    status: 'registered',
+  },
+
+  /**
+   * v2 of `officialAppointed`: identical body except the closing line names the tenant's contact
+   * ({{6}}: TenantConfig.officialsContactLine for umpires/referees, the Medicoach default for
+   * scorers) instead of the hard-coded info@medicoach.co.za. Approved/Active in Meta since
+   * 30 Oct 2026 (template id 945372075104939) — the cron sends v2 from the deploy carrying this
+   * status; v1 stays registered in Meta as a fallback. No runtime Meta probe.
+   */
+  officialAppointedV2: {
+    name: 'official_appointed_v2',
+    lang: 'en',
+    paramCount: 6,
+    params: ['official name', 'role', 'org name', 'match line', 'when and where', 'contact line'],
+    bodyText:
+      'Hello {{1}},\n\n' +
+      'You have been appointed as {{2}} for the following {{3}} fixture:\n\n' +
+      '{{4}}\n{{5}}\n\n' +
+      'If you are unavailable for this appointment, please contact {{6}} as soon as possible.',
     status: 'registered',
   },
 

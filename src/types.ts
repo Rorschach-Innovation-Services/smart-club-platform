@@ -469,6 +469,17 @@ export interface TenantConfig {
    */
   fixtureReminders?: FixtureRemindersConfig;
   /**
+   * Closing contact line of umpire/referee appointment notices (e.g. "Titans umpire - 083 709
+   * 2976"). Absent/empty ⇒ DEFAULT_OFFICIALS_CONTACT_LINE; scorer notices always use the default.
+   * Operator-only: PUT /tenant/config strips it, only PUT /platform/tenants/:slug writes it.
+   */
+  officialsContactLine?: string;
+  /**
+   * Extra recipients (lower-cased, deduped, ≤10) of captain's-report scorecard-correction emails,
+   * on top of the platform operators. Operator-only, like `officialsContactLine`.
+   */
+  scorecardCorrectionRecipients?: string[];
+  /**
    * Transfer windows (inclusive YYYY-MM-DD ranges). Absent or empty ⇒ no restriction.
    * Operator-only to write; served on GET /tenant and GET /tenant/config.
    */

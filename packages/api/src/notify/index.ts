@@ -1125,9 +1125,14 @@ export async function sendOfficialAppointedNotice(args: {
   venue?: string;
   /** The fixture's other umpire (umpire notices only). */
   coOfficialName?: string;
+  /** Closing contact line (officialsContactLineFor — scorers always get the default). */
+  contactLine: string;
+  /** WhatsApp template the cron picked: 'v2' (carries contactLine) once registered, else 'v1'. */
+  whatsappTemplate: 'v1' | 'v2';
   channels: Channel[];
 }): Promise<{ results: SendResult[] }> {
   const { official, roleLabel, orgName, seriesName, fixtureLabel, dateLabel, channels } = args;
+  const { contactLine } = args;
   const time = args.time?.trim() || undefined;
   const venue = args.venue?.trim() || undefined;
   const coOfficialName = args.coOfficialName?.trim() || undefined;
@@ -1162,6 +1167,7 @@ export async function sendOfficialAppointedNotice(args: {
           ...(time ? { time } : {}),
           ...(venue ? { venue } : {}),
           ...(coOfficialName ? { coOfficialName } : {}),
+          contactLine,
         }),
         roleLabel,
       );
@@ -1190,6 +1196,8 @@ export async function sendOfficialAppointedNotice(args: {
         orgName,
         matchLine: `${fixtureLabel} · ${seriesName}`,
         whenWhere,
+        contactLine,
+        template: args.whatsappTemplate,
       });
       return { channel: 'whatsapp', status: 'sent', to: e164, messageId };
     } catch (err) {

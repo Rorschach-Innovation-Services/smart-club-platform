@@ -48,6 +48,7 @@ import {
 import { hasFeature } from './features.js';
 import { toE164 } from './notify/e164.js';
 import { isWithheld, projectSeriesForClub } from './series-projection.js';
+import { playingVenue } from './venue-clash.js';
 import { TENANT_UTC_OFFSET_MINUTES, tenantDate } from './tenant-time.js';
 import { noticeWindowOverride, setNoticeWindowOverride } from './notice-window.js';
 import type {
@@ -433,16 +434,19 @@ export type CaptainsReportView = Omit<
 /** Series id of a report for a match that is not in the fixture list. */
 export const UNLISTED_SERIES_ID = 'unlisted';
 
-/** A fixture's venue as the console shows it: override, allocated venue, else home ground. */
-export function liveFixtureVenue(series: Series, fixtureId: string): string | undefined {
+/** A fixture's venue as the console shows it — delegates to venue-clash's `playingVenue`:
+ * override, allocated venue, else the home side's ground (participant venue, then the home
+ * club's ground when `clubsById` carries it), junk placeholders ("TBC") ignored. */
+export function liveFixtureVenue(
+  series: Series,
+  fixtureId: string,
+  clubsById: Map<string, Club> = new Map(),
+): string | undefined {
   const fixture = (series.fixtures as StoredFixture[] | undefined)?.find(
     (f) => f?.id === fixtureId,
   );
   if (!fixture) return undefined;
-  const home = fixture.home
-    ? series.participants?.find((p) => p.teamId === fixture.home)?.venue
-    : undefined;
-  return fixture.venueOverride || fixture.venueName || home || undefined;
+  return playingVenue(series, fixture, clubsById) || undefined;
 }
 
 /**
@@ -1097,10 +1101,6 @@ export async function openReportsForFixture(
     name: u.name,
   }));
   const byTeam = new Map((series.participants ?? []).map((p) => [p.teamId, p]));
-  // A series withholding its venue (ADR 0011) keeps it off the report: the link and the club
-  // portal re-read the live series, so the reveal shows it later.
-  const venue = isWithheld(series, 'venue') ? '' : (liveFixtureVenue(series, fixtureId) ?? '');
-
   const clubs = new Map<string, Club | null>();
   const sides = (['home', 'away'] as const).map((side) => {
     const teamId = fixture[side];
@@ -1108,6 +1108,12 @@ export async function openReportsForFixture(
     return { side, teamId, clubId: byTeam.get(teamId)?.clubId ?? teamId };
   });
   for (const s of sides) if (s) clubs.set(s.clubId, await repo.getClub(tenant, s.clubId));
+  // A series withholding its venue (ADR 0011) keeps it off the report: the link and the club
+  // portal re-read the live series, so the reveal shows it later.
+  const loadedClubs = new Map([...clubs].filter((e): e is [string, Club] => !!e[1]));
+  const venue = isWithheld(series, 'venue')
+    ? ''
+    : (liveFixtureVenue(series, fixtureId, loadedClubs) ?? '');
 
   const nowIso = now().toISOString();
   const failedNotices: string[] = [];
@@ -2246,8 +2252,11 @@ export function setDefaultScorecardCorrectionSender(
 }
 
 /**
- * Email every platform operator about a scorecard correction request. Best-effort: the caller
- * never fails the submit on it; failures are counted and logged (no address, no feedback).
+ * Email every platform operator about a scorecard correction request, plus the tenant's
+ * `extraRecipients` (TenantConfig.scorecardCorrectionRecipients) — lower-cased and deduped
+ * against the operators. Extras get the notice WITHOUT `consoleLink` (they can't open the
+ * operator console). Best-effort: the caller never fails the submit on it; failures are counted
+ * and logged per address (no address, no feedback).
  */
 export async function notifyOperatorsOfCorrection(
   deps: {
@@ -2256,19 +2265,34 @@ export async function notifyOperatorsOfCorrection(
     log?: (line: string) => void;
   },
   input: Omit<ScorecardCorrectionNotice, 'to'>,
+  extraRecipients: readonly string[] = [],
 ): Promise<{ sent: number; failed: number }> {
   const { listOperatorEmails } = await import('./notify/operator-emails.js');
   const log = deps.log ?? ((l: string) => console.warn(l));
   const send = deps.send ?? defaultCorrectionSender;
   const out = { sent: 0, failed: 0 };
-  for (const to of await listOperatorEmails({ repo: deps.repo })) {
+  const operators = await listOperatorEmails({ repo: deps.repo });
+  const seen = new Set(operators);
+  const extras: string[] = [];
+  for (const raw of extraRecipients) {
+    const email = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+    if (!email || seen.has(email)) continue;
+    seen.add(email);
+    extras.push(email);
+  }
+  const { consoleLink: _link, ...withoutConsole } = input;
+  const recipients = [
+    ...operators.map((to) => ({ to, notice: { ...input, to }, kind: 'an operator' })),
+    ...extras.map((to) => ({ to, notice: { ...withoutConsole, to }, kind: 'a tenant recipient' })),
+  ];
+  for (const { notice, kind } of recipients) {
     try {
-      await send({ ...input, to });
+      await send(notice);
       out.sent++;
     } catch (err) {
       out.failed++;
       log(
-        `[scorecard-correction] correction notice ${input.ref}: an operator email failed — ${
+        `[scorecard-correction] correction notice ${input.ref}: ${kind} email failed — ${
           err instanceof Error ? err.name : 'error'
         }`,
       );

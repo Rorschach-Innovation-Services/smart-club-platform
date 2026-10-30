@@ -1435,6 +1435,8 @@ export interface OfficialAppointedEmailInput {
   venue?: string;
   /** The fixture's other umpire, when two are allocated. */
   coOfficialName?: string;
+  /** Who to call if unavailable (officialsContactLineFor: tenant line, or the Medicoach default). */
+  contactLine: string;
 }
 
 /** The appointment notice to one umpire/referee/scorer for one fixture. */
@@ -1454,7 +1456,7 @@ export function officialAppointedEmailContent(input: OfficialAppointedEmailInput
     ['Venue', input.venue || 'venue to be confirmed'],
     ...(input.coOfficialName ? [['Fellow umpire', input.coOfficialName] as [string, string]] : []),
   ];
-  const outro = `If you are unavailable for this appointment, please contact ${MEDICOACH_SUPPORT_EMAIL} as soon as possible.`;
+  const outro = `If you are unavailable for this appointment, please contact ${input.contactLine} as soon as possible.`;
   const text =
     `Hello ${greetName},\n\n` +
     `${intro}\n\n` +

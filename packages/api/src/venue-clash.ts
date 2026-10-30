@@ -144,6 +144,30 @@ function effectiveGround(
   return own && !JUNK_GROUND.test(own) ? own : undefined;
 }
 
+/** The venue fields a fixture can carry (structural, so any stored/live fixture shape fits). */
+interface VenueFields {
+  home?: string;
+  venueName?: string;
+  venueOverride?: string;
+}
+
+/** What patch-fixtures' guard compares: venueOverride || venueName, trimmed. */
+export const explicitVenue = (f: VenueFields) =>
+  (f.venueOverride ?? '').trim() || (f.venueName ?? '').trim();
+
+/** The ground the fixture plays at for display/compare: explicit, else the home side's
+ * (participant venue, then the home club's ground), junk placeholders ("TBC", "n/a") ignored.
+ * Dep-free so light bundles (the OfficialNotices cron) can share it with reminder-fixtures. */
+export function playingVenue(s: Series, f: VenueFields, clubsById: Map<string, Club>): string {
+  const explicit = explicitVenue(f);
+  if (explicit) return explicit;
+  const p = (s.participants ?? []).find((x) => x.teamId === f.home);
+  if (p?.venue?.trim() && !JUNK_GROUND.test(p.venue.trim())) return p.venue.trim();
+  const clubId = p?.clubId ?? f.home;
+  const own = clubId ? clubsById.get(clubId)?.ground?.venue?.trim() : undefined;
+  return own && !JUNK_GROUND.test(own) ? own : '';
+}
+
 /** Registry-aware ledger resolver: registry grounds share a row by venue id and book
  * against their surface count; unknown names stay strict at one surface. */
 export function registryResolver(

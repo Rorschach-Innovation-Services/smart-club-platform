@@ -99,6 +99,8 @@ import {
 import {
   captainsReportLinkBase,
   captainsReportLinkSecret,
+  isLoopbackLinkHost,
+  sstStage,
   medicoachResolveTimeoutMs,
   medicoachSyncDryRun,
   medicoachSyncSecret,
@@ -293,6 +295,7 @@ import {
   hasContact,
   loadLinkedReport,
   reportExpirySeconds,
+  reportLink,
   MAX_FORWARDS,
   NOTICE_FAILED_ERROR,
   notifyOperatorsOfCorrection,
@@ -324,6 +327,9 @@ import {
   squadLinkPayload,
   squadRequestView,
   SquadFlowError,
+  squadLink,
+  squadLinkExpired,
+  expirySeconds as squadExpirySeconds,
 } from './squad-requests.js';
 import { isCaptainScope } from './captain-scope.js';
 import { flushSquadOutbox } from './medicoach-sync/squads.js';
@@ -367,6 +373,10 @@ import { purgePlayerCertificates as purgePlayerCertificatesShared } from './play
 import { activeVerifyKeys, certSigner, type VerifyKey } from './certificates/signer.js';
 import { validateCertTemplate, validateOrgContact } from './certificates/config.js';
 import { validateFixtureReminders } from './fixture-reminders-config.js';
+import {
+  validateOfficialsContactLine,
+  validateScorecardCorrectionRecipients,
+} from './notices-config.js';
 import { TENANT_UTC_OFFSET_MINUTES, tenantDate } from './tenant-time.js';
 import {
   RegistrationClosedError,
@@ -8037,7 +8047,8 @@ async function writeReport(
 }
 
 /**
- * A submitted report asked for a scorecard correction: email the platform operators.
+ * A submitted report asked for a scorecard correction: email the platform operators and the
+ * tenant's `scorecardCorrectionRecipients`.
  * Best-effort — never fails the submit (the answer is stored either way); logs ids only.
  */
 async function notifyScorecardCorrection(tenant: string, saved: CaptainsReport): Promise<void> {
@@ -8053,6 +8064,7 @@ async function notifyScorecardCorrection(tenant: string, saved: CaptainsReport):
         feedback: saved.scorecard?.feedback ?? '',
         consoleLink: `${captainsReportLinkBase()}/platform`,
       },
+      cfg?.scorecardCorrectionRecipients ?? [],
     );
   } catch (err) {
     console.warn(
@@ -8337,6 +8349,44 @@ app.get('/captains-reports/contact-gaps', requireAdmin, async (c) => {
     .map((club) => ({ id: club.id, name: club.name }))
     .sort((a, b) => a.name.localeCompare(b.name));
   return c.json({ enabled: true, clubs });
+});
+
+/**
+ * A prod copy-link must never hand out a dead link: `captainsReportLinkBase()` falls back to
+ * localhost when its env is unset (same guard as the notice sender). Other stages are fine.
+ */
+function assertLiveLinkBase(url: string) {
+  if (sstStage() === 'prod' && isLoopbackLinkHost(url))
+    throw new HttpError(503, 'the link base is not configured on this stage');
+}
+
+/**
+ * Admin: the current recipient's fillable link for a report, signed on demand (links are
+ * stateless HMAC tokens, never stored). Signs for the stored `recipient.memberId` — the same
+ * member the notice flow signed for. 409 once void, submitted or expired. A copied link is a
+ * bearer credential, so every call is audit-logged (never the token) and never cached.
+ */
+app.get('/captains-reports/:id/link', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const key = parseCaptainsReportId(c.req.param('id'));
+  const report = key
+    ? await repo.getCaptainsReport(ra.tenant, key.seriesId, key.fixtureId, key.clubId)
+    : null;
+  if (!report) throw new HttpError(404, 'report not found');
+  if (report.status === 'void') throw new HttpError(409, 'this report is void');
+  if (report.status === 'submitted')
+    throw new HttpError(409, 'this report has already been submitted');
+  if (Date.now() >= reportExpirySeconds(report) * 1000)
+    throw new HttpError(409, 'this report link has expired');
+  const { url } = reportLink(
+    ra.tenant,
+    report,
+    captainsReportLinkSecret(),
+    captainsReportLinkBase(),
+  );
+  assertLiveLinkBase(url);
+  console.info(`[captains-report] ${ra.tenant} ${report.id}: link copied by ${ra.email}`);
+  return c.json({ url }, 200, { 'Cache-Control': 'no-store' });
 });
 
 /**
@@ -8726,6 +8776,30 @@ app.post('/admin/squad-requests/:id/resend', requireAdmin, async (c) => {
     { tenant: ra.tenant, request },
   ).catch(squadFlowError);
   return c.json({ request: squadRequestView(updated), notice });
+});
+
+/**
+ * Admin: a PENDING request's current link, signed on demand for the current recipient (dies
+ * on the next Resend, which rotates the recipient). 409 once submitted, void or expired.
+ * Audit-logged (never the token) and never cached.
+ */
+app.get('/admin/squad-requests/:id/link', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const request = await adminSquadRequestOr404(ra.tenant, c.req.param('id'));
+  if (request.status === 'submitted')
+    throw new HttpError(409, 'this squad has already been submitted');
+  if (request.status === 'void') throw new HttpError(409, 'this squad request is void');
+  if (squadLinkExpired(Date.now(), squadExpirySeconds(request)))
+    throw new HttpError(409, 'this squad link has expired');
+  const { url } = squadLink(
+    ra.tenant,
+    request,
+    captainsReportLinkSecret(),
+    captainsReportLinkBase(),
+  );
+  assertLiveLinkBase(url);
+  console.info(`[squad-request] ${ra.tenant} ${request.id}: link copied by ${ra.email}`);
+  return c.json({ url }, 200, { 'Cache-Control': 'no-store' });
 });
 
 /** Admin: void a request (links 410); a submitted one also queues the §8 `void` push. */
@@ -10365,6 +10439,8 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   delete (patch as { clearanceCertTemplate?: unknown }).clearanceCertTemplate;
   delete (patch as { orgContact?: unknown }).orgContact;
   delete (patch as { fixtureReminders?: unknown }).fixtureReminders;
+  delete (patch as { officialsContactLine?: unknown }).officialsContactLine;
+  delete (patch as { scorecardCorrectionRecipients?: unknown }).scorecardCorrectionRecipients;
   delete (patch as { captainsReportsExcludedSeriesPrefixes?: unknown })
     .captainsReportsExcludedSeriesPrefixes;
   delete (patch as { transferWindows?: unknown }).transferWindows;
@@ -11049,6 +11125,16 @@ app.put('/platform/tenants/:slug', async (c) => {
   // Whole-key write (the card sends the full object); normalised: leadDays deduped + sorted.
   if (body.fixtureReminders !== undefined) {
     patch.fixtureReminders = validateFixtureReminders(body.fixtureReminders);
+  }
+  // Notice settings: '' clears the contact line (notices fall back to the Medicoach default);
+  // recipients are a whole-key write (lower-cased + deduped), [] clears.
+  if (body.officialsContactLine !== undefined) {
+    patch.officialsContactLine = validateOfficialsContactLine(body.officialsContactLine);
+  }
+  if (body.scorecardCorrectionRecipients !== undefined) {
+    patch.scorecardCorrectionRecipients = validateScorecardCorrectionRecipients(
+      body.scorecardCorrectionRecipients,
+    );
   }
   // Whole-key write; [] clears. Prefixes are trimmed (matching is case-insensitive at read).
   if (body.captainsReportsExcludedSeriesPrefixes !== undefined) {

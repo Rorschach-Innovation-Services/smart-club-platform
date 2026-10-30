@@ -550,6 +550,7 @@ describe('officialAppointedEmailContent', () => {
     seriesName: 'Premier League',
     fixtureLabel: 'Umzinto CC v African Warriors',
     dateLabel: 'Sat 2026-11-15',
+    contactLine: 'Medicoach - 066 344 6443',
   };
 
   test('names the role, org, fixture, date, time and venue', () => {
@@ -568,10 +569,12 @@ describe('officialAppointedEmailContent', () => {
     assert.ok(text.includes('  Venue: Kingsmead'));
     assert.ok(
       text.includes(
-        'If you are unavailable for this appointment, please contact info@medicoach.co.za as soon as possible.',
+        'If you are unavailable for this appointment, please contact Medicoach - 066 344 6443 as soon as possible.',
       ),
     );
+    assert.ok(!text.includes('info@medicoach.co.za'));
     assert.ok(html.includes('<strong>Venue:</strong> Kingsmead'));
+    assert.ok(html.includes('please contact Medicoach - 066 344 6443 as soon as possible.'));
   });
 
   test('referee wording, and to-be-confirmed fallbacks for a missing time/venue', () => {

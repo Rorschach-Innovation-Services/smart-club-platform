@@ -305,6 +305,48 @@ Sentry).
 Scope: replaced or removed officials get NO cancellation notice (deliberate). A swapped-out umpire
 who was already notified is not told; their ledger row is simply deleted.
 
+### `official_appointed_v2` (per-tenant contact line) — LIVE
+
+**Approved/Active in Meta since 30 Oct 2026** (template id 945372075104939, Utility, `en`);
+the registry entry is `'registered'`, so any deploy carrying it sends v2. v1 stays registered
+in Meta as a fallback.
+
+v2 is v1 with a sixth param: the closing line names the tenant's contact instead of the
+hard-coded `info@medicoach.co.za`. `{{6}}` is the tenant's **Umpire & referee notice contact
+line** (operator portal → tenant → Notices card, `TenantConfig.officialsContactLine`) for umpires
+and referees, and always `Medicoach - 066 344 6443` for scorers (and for tenants with no line
+set). Email uses the same line.
+
+**Runtime switch (how it shipped):** while the registry entry was `'pending'` the cron kept
+sending v1 (5 params, no contact line); flipping the status to `'registered'` + deploy IS the
+switch — there is no runtime Meta probe (same flow as `club_clearance_pending_v2`, 7 Oct 2026).
+
+Submission steps as performed (WhatsApp Manager on the medicoach WABA), kept for the next
+template of this shape:
+
+1. Create template → Category **Utility** → name `official_appointed_v2` → Language English (`en`).
+2. Body only (no header, footer or buttons). Paste exactly:
+
+   ```
+   Hello {{1}},
+
+   You have been appointed as {{2}} for the following {{3}} fixture:
+
+   {{4}}
+   {{5}}
+
+   If you are unavailable for this appointment, please contact {{6}} as soon as possible.
+   ```
+
+3. Samples: `{{1}}` `Andile Ngubane` · `{{2}}` `umpire` · `{{3}}` `Titans Cricket` ·
+   `{{4}}` `Umzinto CC v African Warriors · Premier League` · `{{5}}` `Sat 15 Nov 2026, 09:00 at
+Kingsmead` · `{{6}}` `Titans umpire - 083 709 2976`.
+4. Submit. If Meta edits the copy during creation, update `bodyText` in
+   `packages/api/src/notify/whatsapp-templates.ts` to mirror the approved copy verbatim (keep the
+   six placeholders in order — the arity test enforces it).
+5. After approval: set `officialAppointedV2.status` to `'registered'` (note the date + template id
+   in the entry's comment), deploy dev → prod. v1 can stay registered in Meta as a fallback.
+
 ---
 
 ## Retired — `club_clearance_pending` (v1)

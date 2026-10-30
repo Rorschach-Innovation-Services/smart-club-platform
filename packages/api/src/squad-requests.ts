@@ -236,7 +236,7 @@ export function squadLinkExpiry(matchDate: string): number {
   );
 }
 
-const expirySeconds = (r: Pick<SquadRequest, 'linkExpiresAt' | 'matchDate'>) => {
+export const expirySeconds = (r: Pick<SquadRequest, 'linkExpiresAt' | 'matchDate'>) => {
   const ms = Date.parse(r.linkExpiresAt);
   return Number.isFinite(ms) ? Math.floor(ms / 1000) : squadLinkExpiry(r.matchDate);
 };
@@ -905,7 +905,11 @@ async function openSquadForSide(
     teamId,
     await captainScopeOfSeries(repo, tenant, series),
   );
-  const venue = isWithheld(series, 'venue') ? '' : (liveFixtureVenue(series, fixture.id) ?? '');
+  const sideClubs = new Map<string, Club>([[club.id, club]]);
+  if (otherClub) sideClubs.set(otherClub.id, otherClub);
+  const venue = isWithheld(series, 'venue')
+    ? ''
+    : (liveFixtureVenue(series, fixture.id, sideClubs) ?? '');
   const leagueKey = typeof series.leagueKey === 'string' ? series.leagueKey : '';
   const nowIso = now().toISOString();
   const req: SquadRequest = {

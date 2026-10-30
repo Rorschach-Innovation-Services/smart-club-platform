@@ -398,6 +398,17 @@ export interface TenantConfig {
    */
   fixtureReminders?: FixtureRemindersConfig;
   /**
+   * Closing contact line of umpire/referee appointment notices (e.g. "Titans umpire - 083 709
+   * 2976"). Absent/empty ⇒ DEFAULT_OFFICIALS_CONTACT_LINE; scorer notices always use the default.
+   * Operator-only: PUT /tenant/config strips it, only PUT /platform/tenants/:slug writes it.
+   */
+  officialsContactLine?: string;
+  /**
+   * Extra recipients (lower-cased, deduped, ≤10) of captain's-report scorecard-correction emails,
+   * on top of the platform operators. Operator-only, like `officialsContactLine`.
+   */
+  scorecardCorrectionRecipients?: string[];
+  /**
    * Transfer windows: inclusive tenant wall-clock date ranges (ADR 0008) in which players may be
    * registered or transferred. Absent OR empty ⇒ no restriction (an empty list must never lock a
    * tenant out). Outside every window every registration path 409s (RegistrationClosedError —
@@ -1776,7 +1787,12 @@ export type CaptainsReportStatus = 'pending' | 'submitted' | 'void';
  * a club filed by hand from the portal (no link was sent).
  */
 /** The captain-ladder rung that answered (captains-reports.ts `resolveCaptainLadder`). */
-export type CaptainLadderRung = 'medicoach' | 'squad-link' | 'designated' | 'last-captain' | 'chair';
+export type CaptainLadderRung =
+  | 'medicoach'
+  | 'squad-link'
+  | 'designated'
+  | 'last-captain'
+  | 'chair';
 
 export interface CaptainsReportRecipient {
   kind: 'captain' | 'chair' | 'portal';

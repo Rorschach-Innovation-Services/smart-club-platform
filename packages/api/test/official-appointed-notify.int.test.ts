@@ -411,9 +411,95 @@ describe('drain (cron)', () => {
   test('WhatsApp joins once the template is registered', async () => {
     await repo.putSeries(TENANT, series('s-wa', [fx('f1')]));
     await appoint('s-wa', 'f1', { umpires: ['u-b-tyali'] });
-    const { sends } = await run({ whatsappTemplateStatus: 'registered' });
+    const { sends } = await run({
+      officialTemplate: { v1Status: 'registered', v2Status: 'pending' },
+    });
     const s = sends.find((x) => x.seriesName === 'Series s-wa')!;
     assert.deepEqual(s.channels, ['email', 'whatsapp']);
+  });
+
+  test('WhatsApp uses v2 (the registry default since 30 Oct 2026); v1 while v2 is pending', async () => {
+    await repo.putSeries(TENANT, series('s-wa-v', [fx('f1'), fx('f2')]));
+    await appoint('s-wa-v', 'f1', { umpires: ['u-b-tyali'] });
+    const v2 = await run();
+    const a = v2.sends.find((x) => x.seriesName === 'Series s-wa-v')!;
+    assert.equal(a.whatsappTemplate, 'v2', 'official_appointed_v2 is registered in the registry');
+    assert.deepEqual(a.channels, ['email', 'whatsapp']);
+    await appoint('s-wa-v', 'f2', { umpires: ['u-b-tyali'] });
+    const v1 = await run({ officialTemplate: { v1Status: 'registered', v2Status: 'pending' } });
+    const b = v1.sends.find((x) => x.seriesName === 'Series s-wa-v')!;
+    assert.equal(b.whatsappTemplate, 'v1');
+    assert.deepEqual(b.channels, ['email', 'whatsapp']);
+    // Neither registered ⇒ email only.
+    assert.deepEqual(
+      cron.officialNoticeChannels({ tenant: TENANT } as TenantConfig, {
+        v1Status: 'pending',
+        v2Status: 'pending',
+      }),
+      ['email'],
+    );
+  });
+
+  test('no explicit venue ⇒ the home side ground; junk grounds and no ground ⇒ venue TBC', async () => {
+    await repo.putClub(TENANT, {
+      id: 'ground-club',
+      name: 'Ground Club',
+      ground: { venue: 'Ground Club Oval' },
+    } as never);
+    await repo.putClub(TENANT, {
+      id: 'junk-club',
+      name: 'Junk Club',
+      ground: { venue: 'TBC' },
+    } as never);
+    const venueParticipants = [
+      ...participants,
+      { teamId: 'ground-club', clubId: 'ground-club', name: 'Ground Club' },
+      { teamId: 'junk-club', clubId: 'junk-club', name: 'Junk Club' },
+      {
+        teamId: 'team-venue',
+        clubId: 'junk-club',
+        name: 'Junk Club 2nd',
+        venue: 'Team Venue Park',
+      },
+    ];
+    await repo.putSeries(
+      TENANT,
+      series(
+        's-venue',
+        [
+          fx('f1', { home: 'ground-club', venueName: undefined }),
+          fx('f2', { home: 'junk-club', venueName: undefined }),
+          fx('f3', { home: 'home-club', venueName: undefined }),
+          fx('f4', { home: 'team-venue', venueName: undefined }),
+          fx('f5', {
+            home: 'ground-club',
+            away: 'other-club',
+            venueName: '',
+            venueOverride: 'Override Ground',
+          }),
+        ],
+        { participants: venueParticipants } as Partial<Series>,
+      ),
+    );
+    for (const f of ['f1', 'f2', 'f3', 'f4', 'f5']) {
+      await appoint('s-venue', f, { umpires: ['u-a-ngubane'] });
+    }
+    const { sends } = await run();
+    const mine = sends.filter((s) => s.seriesName === 'Series s-venue');
+    const venueOf = (label: string) => {
+      const hit = mine.filter((s) => s.fixtureLabel === label);
+      assert.equal(hit.length, 1, label);
+      return hit[0].venue;
+    };
+    assert.equal(venueOf('Ground Club v Away Club'), 'Ground Club Oval', 'home club ground');
+    assert.equal(venueOf('Junk Club 2nd v Away Club'), 'Team Venue Park', 'participant venue');
+    assert.equal(venueOf('Ground Club v Other Club'), 'Override Ground', 'explicit wins');
+    assert.equal(venueOf('Junk Club v Away Club'), undefined, 'junk "TBC" ground ignored');
+    assert.equal(venueOf('Home Club v Away Club'), undefined, 'no ground anywhere');
+    assert.equal(
+      notify.officialWhenWhere({ dateLabel: 'Sun 2026-11-15', time: '09:00' }),
+      'Sun 2026-11-15, 09:00 at venue TBC',
+    );
   });
 
   test('a no-contact row stays queued (no attempt counted) and sends once contacts are added', async () => {
@@ -493,6 +579,45 @@ describe('drain (cron)', () => {
     // Exhausted rows are no longer drained.
     const fourth = await run();
     assert.equal(fourth.sends.filter((s) => s.seriesName === 'Series s-fail').length, 0);
+  });
+
+  test('contact line: the Medicoach default, then the tenant line for umpires/referees', async () => {
+    const { DEFAULT_OFFICIALS_CONTACT_LINE } = await import('../src/notices-config.js');
+    assert.equal(DEFAULT_OFFICIALS_CONTACT_LINE, 'Medicoach - 066 344 6443');
+    await repo.putSeries(TENANT, series('s-cl', [fx('f1'), fx('f2')]));
+    await appoint('s-cl', 'f1', { umpires: ['u-a-ngubane'], referee: { umpireId: 'u-c-ref' } });
+    const first = await run();
+    const defaults = first.sends.filter((s) => s.seriesName === 'Series s-cl');
+    assert.equal(defaults.length, 2);
+    assert.ok(defaults.every((s) => s.contactLine === DEFAULT_OFFICIALS_CONTACT_LINE));
+    const { text } = (await import('../src/notify/email.js')).officialAppointedEmailContent({
+      officialName: 'A',
+      roleLabel: 'umpire',
+      orgName: 'O',
+      seriesName: 'S',
+      fixtureLabel: 'X v Y',
+      dateLabel: 'Sun 2026-11-15',
+      contactLine: defaults[0].contactLine,
+    });
+    assert.ok(
+      text.includes(
+        'If you are unavailable for this appointment, please contact Medicoach - 066 344 6443 as soon as possible.',
+      ),
+    );
+
+    const cfg = (await repo.getTenantConfig(TENANT))!;
+    await repo.putTenantConfig({ ...cfg, officialsContactLine: 'Titans umpire - 083 709 2976' });
+    try {
+      await appoint('s-cl', 'f2', { umpires: ['u-a-ngubane'], referee: { umpireId: 'u-c-ref' } });
+      const second = await run();
+      const tenantLine = second.sends.filter((s) => s.seriesName === 'Series s-cl');
+      assert.deepEqual(tenantLine.map((s) => `${s.roleLabel}:${s.contactLine}`).sort(), [
+        'referee:Titans umpire - 083 709 2976',
+        'umpire:Titans umpire - 083 709 2976',
+      ]);
+    } finally {
+      await repo.putTenantConfig(cfg);
+    }
   });
 
   test('deleting the series sweeps its ledger rows', async () => {
@@ -612,6 +737,27 @@ describe('scorer notices', () => {
     assert.equal(rows.find((r) => r.role === 'scorer')?.status, 'completed');
     const again = await run();
     assert.ok(!again.sends.some((s) => s.seriesName === 'Series s-sc' && s.roleLabel === 'scorer'));
+  });
+
+  test('scorer notices keep the Medicoach default even when the tenant sets a line', async () => {
+    const cfg = (await repo.getTenantConfig(TENANT))!;
+    await repo.putTenantConfig({ ...cfg, officialsContactLine: 'Titans umpire - 083 709 2976' });
+    try {
+      await repo.putSeries(TENANT, series('s-sc-cl', [fx('f1')]));
+      await appoint('s-sc-cl', 'f1', { umpires: ['u-a-ngubane'], scorers: [scorerA] });
+      const { sends } = await run();
+      const mine = sends.filter((s) => s.seriesName === 'Series s-sc-cl');
+      assert.equal(
+        mine.find((s) => s.roleLabel === 'scorer')?.contactLine,
+        'Medicoach - 066 344 6443',
+      );
+      assert.equal(
+        mine.find((s) => s.roleLabel === 'umpire')?.contactLine,
+        'Titans umpire - 083 709 2976',
+      );
+    } finally {
+      await repo.putTenantConfig(cfg);
+    }
   });
 
   test('a scorer removed before the drain is dropped as stale without sending', async () => {

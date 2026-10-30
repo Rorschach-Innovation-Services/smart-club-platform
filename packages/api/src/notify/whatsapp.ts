@@ -457,13 +457,17 @@ export async function sendFixtureReminderWhatsApp(
 export interface OfficialAppointedWhatsAppInput {
   to: string; // already E.164 (see toE164)
   officialName: string;
-  /** 'umpire' | 'referee'. */
+  /** 'umpire' | 'referee' | 'scorer'. */
   roleLabel: string;
   orgName: string;
   /** "Umzinto CC v African Warriors · Premier League". */
   matchLine: string;
   /** "Sat 2026-11-15, 09:00 at Kingsmead". */
   whenWhere: string;
+  /** Closing contact line — only carried by v2 ({{6}}); v1 hard-codes info@medicoach.co.za. */
+  contactLine: string;
+  /** Which registry entry to send: 'v2' once `officialAppointedV2` is registered, else 'v1'. */
+  template: 'v1' | 'v2';
 }
 
 /**
@@ -486,21 +490,35 @@ export function officialAppointedParams(
   ];
 }
 
+/** The six params for `official_appointed_v2`: v1's five plus {{6}} the contact line. */
+export function officialAppointedV2Params(
+  input: Pick<
+    OfficialAppointedWhatsAppInput,
+    'officialName' | 'roleLabel' | 'orgName' | 'matchLine' | 'whenWhere' | 'contactLine'
+  >,
+): TemplateParam[] {
+  return [...officialAppointedParams(input), { type: 'text', text: cleanParam(input.contactLine) }];
+}
+
 /**
- * Appointment notice to an umpire/referee. Uses the `officialAppointed` registry entry and
- * throws `WhatsAppTemplatePendingError` until it is "registered" (the OfficialNotices cron
- * already skips the channel before then).
+ * Appointment notice to an umpire/referee/scorer. Sends `officialAppointedV2` (with the contact
+ * line) when the caller picked 'v2', else `officialAppointed` (no contact param). Throws
+ * `WhatsAppTemplatePendingError` until the chosen entry is "registered" (the OfficialNotices
+ * cron already only picks a registered one).
  */
 export async function sendOfficialAppointedWhatsApp(
   input: OfficialAppointedWhatsAppInput,
 ): Promise<{ messageId: string }> {
-  const def = WHATSAPP_TEMPLATES.officialAppointed;
+  const def =
+    input.template === 'v2'
+      ? WHATSAPP_TEMPLATES.officialAppointedV2
+      : WHATSAPP_TEMPLATES.officialAppointed;
   assertTemplateSendable(def);
   return sendTemplate(
     input.to,
     def.name,
     def.lang,
-    officialAppointedParams(input),
+    input.template === 'v2' ? officialAppointedV2Params(input) : officialAppointedParams(input),
     `appointment notice for ${input.officialName || 'an official'} (${input.roleLabel})`,
   );
 }

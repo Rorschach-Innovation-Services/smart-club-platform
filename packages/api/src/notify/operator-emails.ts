@@ -4,9 +4,9 @@
  * admin-emails.ts, which excludes operators: notices meant for the internal team (e.g. a chair's
  * scorecard correction request) go here and never to tenant admins. Kept free of the Hono app.
  */
-type OperatorEmailRepo = Pick<typeof import('../repo.js'), 'listOperators'>;
+import { EMAIL_RE } from '../officials-contact.js';
 
-const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/;
+type OperatorEmailRepo = Pick<typeof import('../repo.js'), 'listOperators'>;
 
 /** Every operator's address — lower-cased, deduped, rows without a usable email left out. */
 export async function listOperatorEmails(deps: { repo: OperatorEmailRepo }): Promise<string[]> {

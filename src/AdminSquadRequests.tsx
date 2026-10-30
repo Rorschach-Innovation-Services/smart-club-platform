@@ -8,7 +8,8 @@
  * Two row actions: Resend (a PENDING, unexpired request — a fresh link goes to the current
  * recipient and older links stop working) and Void (anything not already void, after a
  * confirm; a submitted squad is also withdrawn from medicoach). A request also voids itself
- * when its fixture is cancelled or moved.
+ * when its fixture is cancelled or moved. Copy link (same rule as Resend) puts the current
+ * recipient's link on the clipboard for sharing by hand; it dies on the next Resend.
  */
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -16,7 +17,14 @@ import { Btn, Modal, ModalCancelBtn, Pill } from './atoms';
 import { chipFor } from './AdminCaptainsReports';
 import { fmtDate } from './CaptainsReport';
 import { squadMatchLine } from './SquadSelection';
-import { ApiError, getSquadRequests, resendSquadRequest, voidSquadRequest } from './api';
+import {
+  ApiError,
+  getSquadRequestLink,
+  getSquadRequests,
+  resendSquadRequest,
+  voidSquadRequest,
+} from './api';
+import { useCopyLink } from './copyLink';
 import { qk } from './query';
 import type { CaptainsReportDelivery, SquadRequestView } from './types';
 
@@ -83,6 +91,14 @@ export function canResend(r: SquadRequestView, nowMs = Date.now()): boolean {
   return r.status === 'pending' && Date.parse(r.linkExpiresAt) > nowMs;
 }
 
+/** Why Copy link is disabled (null = it is not): the same checks as `canResend`. */
+export function copyLinkBlockedReason(r: SquadRequestView, nowMs = Date.now()): string | null {
+  if (r.status === 'void') return 'Unavailable: this request is void';
+  if (r.status !== 'pending') return 'Unavailable: the squad was already submitted';
+  if (!(Date.parse(r.linkExpiresAt) > nowMs)) return 'Unavailable: the link has expired';
+  return null;
+}
+
 export function AdminSquadRequestsTable({ requests }: { requests: SquadRequestView[] }) {
   const qc = useQueryClient();
   const [status, setStatus] = useState<StatusFilter>('all');
@@ -117,6 +133,10 @@ export function AdminSquadRequestsTable({ requests }: { requests: SquadRequestVi
     },
   });
   const busy = resend.isPending || voidIt.isPending;
+  const copyLink = useCopyLink(
+    getSquadRequestLink,
+    'It stops working if the request is resent or voided.',
+  );
   const list = useMemo(
     () => requests.filter((r) => status === 'all' || r.status === status),
     [requests, status],
@@ -230,6 +250,18 @@ export function AdminSquadRequestsTable({ requests }: { requests: SquadRequestVi
                         </Btn>
                         <Btn
                           size="sm"
+                          disabled={busy || copyLink.busyId === r.id || !canResend(r)}
+                          aria-label={`Copy link — ${squadMatchLine(r)}`}
+                          title={
+                            copyLinkBlockedReason(r) ??
+                            'Copy the current link to share by hand (a resend replaces it)'
+                          }
+                          onClick={() => copyLink.copy(r.id)}
+                        >
+                          Copy link
+                        </Btn>
+                        <Btn
+                          size="sm"
                           disabled={busy || r.status === 'void'}
                           aria-label={`Void — ${squadMatchLine(r)}`}
                           onClick={() => setVoiding(r)}
@@ -245,6 +277,7 @@ export function AdminSquadRequestsTable({ requests }: { requests: SquadRequestVi
           </table>
         </div>
       )}
+      {copyLink.node}
       {voiding && (
         <Modal
           eyebrow="Squad requests"
