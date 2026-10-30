@@ -108,6 +108,7 @@ import {
 import { AdminPostponements, postponementAttentionCount } from './club-postponements';
 import { Onboarding } from './onboarding';
 import { AdminUmpiresView, mergeErrorMessage } from './umpires';
+import { AdminScorersView, scorerMergeErrorMessage } from './scorers';
 import { UmpireAppointmentsUpload } from './UmpireAppointmentsUpload';
 import { ResyncDialog, isResyncRequired } from './ResyncDialog';
 
@@ -1488,6 +1489,23 @@ function Shell({
       return x;
     });
   }
+  function patchScorer(id: string, body: Partial<Scorer>) {
+    return withToast(() => api.patchScorer(id, body), 'Could not save the scorer', {
+      invalidate: [qk.scorers()],
+    }).then(() => {
+      invalidate(qk.scorers());
+    });
+  }
+  function mergeScorer(sourceId: string, targetId: string) {
+    return withToast(() => api.mergeScorer(sourceId, targetId), 'Could not merge the scorers', {
+      errorMessage: scorerMergeErrorMessage,
+      invalidate: [qk.scorers(), qk.series()],
+    }).then((res) => {
+      toastShow(`Merged — ${res.repointed} appointment(s) moved to ${res.target.displayName}`);
+      invalidate(qk.scorers());
+      invalidate(qk.series());
+    });
+  }
   // Result confirmation: errors are the caller's (a 409 result_changed is shown in place,
   // with the newer result, not as a generic toast).
   function confirmResult(seriesId: string, fixtureId: string, recordedAt: string) {
@@ -1514,7 +1532,9 @@ function Shell({
     });
   }
   function patchUmpire(id: string, body: Partial<Umpire>) {
-    return withToast(() => api.patchUmpire(id, body), 'Could not save the umpire').then(() => {
+    return withToast(() => api.patchUmpire(id, body), 'Could not save the umpire', {
+      invalidate: [qk.umpires()],
+    }).then(() => {
       invalidate(qk.umpires());
       invalidate(qk.series());
     });
@@ -2584,6 +2604,12 @@ function Shell({
             num: allUmpires.filter((u) => u.active).length || undefined,
           },
           {
+            v: 'scorers',
+            label: 'Scorers',
+            icon: Icon.Doc,
+            num: allScorers.filter((s) => s.active).length || undefined,
+          },
+          {
             v: 'captains_reports',
             label: "Captain's reports",
             icon: Icon.Form,
@@ -3005,6 +3031,18 @@ function Shell({
             onMerge={mergeUmpire}
             onUpload={() => gotoAdminView('umpire_upload')}
             reports={allCaptainsReports}
+          />
+        );
+      if (view === 'scorers' && vertical.sport === 'cricket')
+        return (
+          <AdminScorersView
+            scorers={allScorers}
+            allSeries={allSeries}
+            clubs={clubs}
+            loading={scorersQuery.isLoading}
+            onCreate={createScorer}
+            onPatch={patchScorer}
+            onMerge={mergeScorer}
           />
         );
       if (view === 'umpire_upload' && vertical.sport === 'cricket')

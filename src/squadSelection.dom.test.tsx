@@ -1,6 +1,6 @@
 /**
  * The public pre-match squad page (/sq/<token>): roster-first selection, the guest guard
- * (only reachable when the search finds nobody, behind a confirm step), draft/submit with the
+ * (offered for any search, beside the results, behind a confirm step), draft/submit with the
  * `expectedModified` CAS, a submitted squad that stays EDITABLE, the 409 stale reload, and the
  * closed / invalid link states. Rendered for real through the app's providers; only the HTTP
  * client is stubbed.
@@ -88,22 +88,37 @@ beforeEach(() => {
 });
 
 describe('the guest guard', () => {
-  it('is not reachable while the search matches a roster player', async () => {
+  it('is hidden with no search, and offered beside the results for any search', async () => {
     vi.mocked(api.getLinkedSquadRequest).mockResolvedValue(payload());
     renderPage();
     await screen.findByText('UKZN / Squad selection');
-    expect(screen.queryByRole('button', { name: /Add as guest/ })).toBeNull();
-    await userEvent.type(search(), 'Keshav');
+    expect(screen.queryByRole('button', { name: /as a guest|as guest/ })).toBeNull();
+    // A typo still finds the registered player, and the guest action sits alongside.
+    await userEvent.type(search(), 'Keshav Pilay');
     expect(screen.getByRole('checkbox', { name: 'Keshav Pillay' })).toBeInTheDocument();
     expect(screen.queryByRole('checkbox', { name: 'Ayanda Mkhize' })).toBeNull();
-    expect(screen.queryByRole('button', { name: /Add as guest/ })).toBeNull();
-    // A partial match still matches: no guest path.
-    await userEvent.clear(search());
-    await userEvent.type(search(), 'pil');
-    expect(screen.queryByRole('button', { name: /Add as guest/ })).toBeNull();
+    expect(
+      screen.getByRole('button', { name: 'Not one of these? Add “Keshav Pilay” as a guest' }),
+    ).toBeInTheDocument();
   });
 
-  it('opens only when nobody matches, and asks before adding', async () => {
+  it('adding a guest beside matches still asks first', async () => {
+    vi.mocked(api.getLinkedSquadRequest).mockResolvedValue(payload());
+    renderPage();
+    await screen.findByText('UKZN / Squad selection');
+    await userEvent.type(search(), 'pillai');
+    expect(screen.getByRole('checkbox', { name: 'Keshav Pillay' })).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Not one of these? Add “pillai” as a guest' }),
+    );
+    const ask = screen.getByRole('alertdialog', { name: 'Add pillai as a guest' });
+    await userEvent.click(within(ask).getByRole('button', { name: 'Add guest' }));
+    const squad = screen.getByLabelText('Selected squad');
+    expect(within(squad).getByText('pillai')).toBeInTheDocument();
+    expect(within(squad).getByText('(guest)')).toBeInTheDocument();
+  });
+
+  it('with no match, says so and asks before adding', async () => {
     vi.mocked(api.getLinkedSquadRequest).mockResolvedValue(payload());
     renderPage();
     await screen.findByText('UKZN / Squad selection');
@@ -127,6 +142,23 @@ describe('the guest guard', () => {
     // Guests are removable.
     await userEvent.click(within(squad).getByRole('button', { name: 'Remove guest Thabo Zulu' }));
     expect(within(squad).queryByText('Thabo Zulu')).toBeNull();
+  });
+
+  it('lets the captain correct the guest name before adding, and requires one', async () => {
+    vi.mocked(api.getLinkedSquadRequest).mockResolvedValue(payload());
+    renderPage();
+    await screen.findByText('UKZN / Squad selection');
+    await userEvent.type(search(), 'thabo zul');
+    await userEvent.click(screen.getByRole('button', { name: 'Not finding them? Add as guest' }));
+    const ask = screen.getByRole('alertdialog', { name: 'Add thabo zul as a guest' });
+    const name = within(ask).getByRole('textbox', { name: 'Guest name' });
+    expect(name).toHaveValue('thabo zul');
+    await userEvent.clear(name);
+    expect(within(ask).getByRole('button', { name: 'Add guest' })).toBeDisabled();
+    await userEvent.type(name, '  Thabo   Zulu ');
+    await userEvent.click(within(ask).getByRole('button', { name: 'Add guest' }));
+    const squad = screen.getByLabelText('Selected squad');
+    expect(within(squad).getByText('Thabo Zulu')).toBeInTheDocument();
   });
 });
 

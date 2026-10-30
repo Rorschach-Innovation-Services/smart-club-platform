@@ -12,6 +12,7 @@
  *
  * No React, no network: the wizard imports these, and intake-match.test.ts pins them.
  */
+import { editDistance } from './fuzzyMatch';
 import type { RequiredDoc } from './types';
 
 /** A club as the matcher needs to see it (the operator overview projection is a superset). */
@@ -115,20 +116,6 @@ export function buildClubIndex(clubs: MatchClub[]): ClubIndex {
     byId.set(c.id, c);
   }
   return { clubs, byNorm, byId };
-}
-
-/** Levenshtein distance, capped — only used to rescue near-miss spellings. */
-function editDistance(a: string, b: string, cap: number): number {
-  if (Math.abs(a.length - b.length) > cap) return cap + 1;
-  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
-  for (let i = 1; i <= a.length; i++) {
-    const cur = [i];
-    for (let j = 1; j <= b.length; j++) {
-      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
-    }
-    prev = cur;
-  }
-  return prev[b.length];
 }
 
 /**

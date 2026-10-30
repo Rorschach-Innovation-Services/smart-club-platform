@@ -225,8 +225,8 @@ describe('UmpireCell', () => {
     expect(onSaveScorers).toHaveBeenCalledWith('s1', 'f1', ['sc-new']);
   });
 
-  it('points a contactless scorer at re-adding with contacts, not the Umpires page', () => {
-    expect(noContactHint('scorer')).toMatch(/captured when the scorer is added/);
+  it('points a contactless scorer at the Scorers page, not the Umpires page', () => {
+    expect(noContactHint('scorer')).toMatch(/Add contacts on the Scorers page/);
     expect(noContactHint('scorer')).not.toMatch(/Umpires page/);
     expect(noContactHint('umpire')).toMatch(/Add contacts on the Umpires page/);
   });
@@ -241,7 +241,7 @@ describe('UmpireCell', () => {
       },
     });
     await user.click(screen.getByRole('button', { name: 'Assign scorers' }));
-    expect(screen.getByText(/captured when the scorer is added/)).toBeTruthy();
+    expect(screen.getByText(/Add contacts on the Scorers page/)).toBeTruthy();
     expect(screen.queryByText(/Umpires page/)).toBeNull();
   });
 

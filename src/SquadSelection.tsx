@@ -2,8 +2,8 @@
  *
  * The evening before a match the side's captain (or, failing one, the club chair) gets a link
  * to name the squad. The page is roster-first: search the club's registered players and tick
- * them; a guest (someone not on the roster) can only be added once the search finds nobody,
- * behind a confirm step — guests aren't linked to player records, so the guard keeps a
+ * them; a guest (someone not on the roster) can be added from any search, alongside its
+ * results, behind a confirm step — guests aren't linked to player records, so the guard keeps a
  * mistyped search from minting a duplicate of a registered player.
  *
  * Unlike the captain's report, a SUBMITTED squad stays editable until the link expires
@@ -26,6 +26,7 @@ import {
   type ForwardCandidates,
 } from './api';
 import { applyTheme } from './config';
+import { byTier, fuzzyMatchName } from './fuzzyMatch';
 import { qk } from './query';
 import type { LinkedSquadRequest, SquadRequestView, SquadSaveBody } from './types';
 
@@ -66,13 +67,23 @@ export function SquadSelectionForm({ data, busy, onSave, onCancel }: SquadFormPr
   const [captainId, setCaptainId] = useState<string>(() => request.selection?.captainId ?? '');
   const [search, setSearch] = useState('');
   const [confirmGuest, setConfirmGuest] = useState(false);
+  // The confirm step pre-fills the guest's name from the search, editable before adding.
+  const [guestName, setGuestName] = useState('');
 
   const term = search.trim().replace(/\s+/g, ' ');
-  const matches = useMemo(() => {
-    const q = term.toLowerCase();
-    return q ? roster.filter((p) => p.name.toLowerCase().includes(q)) : roster;
-  }, [roster, term]);
-  // The guest guard: only when a real search finds nobody on the roster.
+  const matches = useMemo(
+    () =>
+      term
+        ? byTier(
+            roster.flatMap((p) => {
+              const tier = fuzzyMatchName(term, p.name);
+              return tier ? [{ item: p, tier }] : [];
+            }),
+          )
+        : roster,
+    [roster, term],
+  );
+  // The guest action is offered for any real search, beside the results, behind a confirm.
   const noMatch = term.length > 0 && matches.length === 0;
   const full = picked.length >= maxPlayers;
 
@@ -87,8 +98,9 @@ export function SquadSelectionForm({ data, busy, onSave, onCancel }: SquadFormPr
   }
 
   function addGuest() {
-    if (!term || guests.length >= maxPlayers) return;
-    setGuests((g) => [...g, { name: term }]);
+    const name = guestName.trim().replace(/\s+/g, ' ');
+    if (!name || guests.length >= maxPlayers) return;
+    setGuests((g) => [...g, { name }]);
     setSearch('');
     setConfirmGuest(false);
   }
@@ -120,38 +132,7 @@ export function SquadSelectionForm({ data, busy, onSave, onCancel }: SquadFormPr
           }}
           style={{ width: '100%', margin: '10px 0' }}
         />
-        {noMatch ? (
-          <div className="sq-guest" aria-label="Add a guest">
-            {!confirmGuest ? (
-              <>
-                <div className="cr-section-sub">No registered player matches “{term}”.</div>
-                <Btn tone="outline" size="sm" onClick={() => setConfirmGuest(true)}>
-                  Not finding them? Add as guest
-                </Btn>
-              </>
-            ) : (
-              <div role="alertdialog" aria-label={`Add ${term} as a guest`}>
-                <div className="cr-section-sub">
-                  Add “{term}” as a guest? Guests aren't linked to player records — check the
-                  spelling first if they are registered with the club.
-                </div>
-                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                  <Btn
-                    tone="teal"
-                    size="sm"
-                    disabled={guests.length >= maxPlayers}
-                    onClick={addGuest}
-                  >
-                    Add guest
-                  </Btn>
-                  <Btn tone="ghost" size="sm" onClick={() => setConfirmGuest(false)}>
-                    Cancel
-                  </Btn>
-                </div>
-              </div>
-            )}
-          </div>
-        ) : (
+        {!noMatch && (
           <ul
             className="sq-roster"
             aria-label="Club players"
@@ -179,6 +160,57 @@ export function SquadSelectionForm({ data, busy, onSave, onCancel }: SquadFormPr
               <li className="cr-section-sub">No registered players found for this club.</li>
             )}
           </ul>
+        )}
+        {term.length > 0 && (
+          <div className="sq-guest" aria-label="Add a guest">
+            {!confirmGuest ? (
+              <>
+                {noMatch && (
+                  <div className="cr-section-sub">No registered player matches “{term}”.</div>
+                )}
+                <Btn
+                  tone="outline"
+                  size="sm"
+                  onClick={() => {
+                    setGuestName(term);
+                    setConfirmGuest(true);
+                  }}
+                >
+                  {noMatch
+                    ? 'Not finding them? Add as guest'
+                    : `Not one of these? Add “${term}” as a guest`}
+                </Btn>
+              </>
+            ) : (
+              <div role="alertdialog" aria-label={`Add ${guestName.trim() || term} as a guest`}>
+                <div className="cr-section-sub">
+                  Add “{guestName.trim() || term}” as a guest? Guests aren't linked to player
+                  records — check the spelling first if they are registered with the club.
+                </div>
+                <input
+                  type="text"
+                  className="field-input"
+                  aria-label="Guest name"
+                  value={guestName}
+                  onChange={(e) => setGuestName(e.target.value)}
+                  style={{ width: '100%', marginTop: 8 }}
+                />
+                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  <Btn
+                    tone="teal"
+                    size="sm"
+                    disabled={guests.length >= maxPlayers || !guestName.trim()}
+                    onClick={addGuest}
+                  >
+                    Add guest
+                  </Btn>
+                  <Btn tone="ghost" size="sm" onClick={() => setConfirmGuest(false)}>
+                    Cancel
+                  </Btn>
+                </div>
+              </div>
+            )}
+          </div>
         )}
       </div>
 

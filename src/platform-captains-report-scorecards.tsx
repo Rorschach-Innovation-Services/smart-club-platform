@@ -18,6 +18,7 @@ import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { Card, EmptyState, Icon, Pill, ScrollX } from './atoms';
 import { ApiError, listPlatformCaptainsReportScorecards } from './api';
 import { formatStamp, formatWeekdayDay } from './dates';
+import { fuzzyMatchName } from './fuzzyMatch';
 import { qk } from './query';
 import type {
   ScorecardConsoleCell,
@@ -183,6 +184,15 @@ const haystack = (tenantName: string, r: ScorecardConsoleRow) =>
     .join('\n')
     .toLowerCase();
 
+const nameHaystack = (tenantName: string, r: ScorecardConsoleRow) =>
+  [
+    r.homeTeamName,
+    r.awayTeamName,
+    r.competition,
+    tenantName,
+    ...cellsOf(r).map((c) => c.clubName),
+  ].join(' ');
+
 export function filterConsoleRows(tenants: ConsoleTenant[], f: LocalFilters): ConsoleTenant[] {
   const needle = f.search.trim().toLowerCase();
   return tenants
@@ -195,7 +205,11 @@ export function filterConsoleRows(tenants: ConsoleTenant[], f: LocalFilters): Co
             r.awayTeamName === f.club ||
             cellsOf(r).some((c) => c.clubName === f.club)) &&
           (!f.competition || r.competition === f.competition) &&
-          (!needle || haystack(t.tenantName, r).includes(needle)),
+          (!needle ||
+            haystack(t.tenantName, r).includes(needle) ||
+            // Typo tolerance for the name fields only — report refs stay exact substrings, or
+            // CR-2026-0003 would fuzzily match CR-2026-0001.
+            fuzzyMatchName(needle, nameHaystack(t.tenantName, r)) !== null),
       ),
     }))
     .filter((t) => t.rows.length > 0);

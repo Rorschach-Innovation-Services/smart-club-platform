@@ -86,6 +86,35 @@ describe('filterPlayers — search', () => {
   });
 });
 
+describe('filterPlayers — fuzzy search', () => {
+  it('finds a player despite a typo', () => {
+    expect(filterPlayers(ALL, f({ q: 'mbekk' }))).toEqual([wk]);
+  });
+
+  it('finds a player with the name tokens reversed', () => {
+    expect(filterPlayers(ALL, f({ q: 'mbeki sipho' }))).toEqual([wk]);
+  });
+
+  it('sorts prefix matches before typo matches, keeping list order within each tier', () => {
+    const exact = { firstName: 'Kevin', lastName: 'Pillay', idNumber: 'X1' };
+    const fuzzy = { firstName: 'Ravi', lastName: 'Pillai', idNumber: 'X2' };
+    const exact2 = { firstName: 'Pillay', lastName: 'Naidoo', idNumber: 'X3' };
+    expect(filterPlayers([fuzzy, exact, exact2], f({ q: 'pillay' }))).toEqual([
+      exact,
+      exact2,
+      fuzzy,
+    ]);
+  });
+
+  it('still searches the ID number by substring', () => {
+    expect(filterPlayers(ALL, f({ q: '100001' }))).toEqual([wk]);
+  });
+
+  it('excludes unrelated names', () => {
+    expect(filterPlayers(ALL, f({ q: 'Ramaphosa' }))).toEqual([]);
+  });
+});
+
 describe('filterPlayers — status', () => {
   it('treats a missing status as active (same rule as the status pills)', () => {
     expect(filterPlayers(ALL, f({ status: 'active' }))).toEqual([wk, allRounder, batter]);

@@ -158,14 +158,11 @@ export function lacksContact(u: { phone?: string; email?: string } | undefined):
 }
 
 /**
- * Where to fix a missing contact differs by register: umpires are edited on the Umpires page,
- * but there is no scorer edit screen — a scorer's contacts are only captured when they're added.
+ * Where to fix a missing contact: each register is edited on its own admin page.
  */
 export function noContactHint(noun: string): string {
   const fix =
-    noun === 'scorer'
-      ? 'Scorer contacts are captured when the scorer is added — add them as a new scorer with a phone or email.'
-      : 'Add contacts on the Umpires page.';
+    noun === 'scorer' ? 'Add contacts on the Scorers page.' : 'Add contacts on the Umpires page.';
   return `No email or cell on file — they won’t get an appointment notice. ${fix}`;
 }
 

@@ -401,6 +401,51 @@ describe('merge', () => {
       400,
     );
   });
+
+  test('keeps the scorers and the referee on every re-pointed appointment', async () => {
+    await repo.putSeries('dolphins', series('s-merge-keep'));
+    await createUmpire({ displayName: 'T.Dlamini' });
+    await createUmpire({ displayName: 'Thabo Dlamini' });
+    await createUmpire({ displayName: 'R.Pillay' });
+    const scorer = await call('POST', '/scorers', { displayName: 'Lindi Scorer' });
+    assert.equal(scorer.status, 201, await scorer.clone().text());
+    const scorerId = ((await scorer.json()) as { id: string }).id;
+    // f1: the duplicate umpires it, with an unrelated referee and a scorer alongside.
+    const put1 = await call('PUT', '/series/s-merge-keep/fixtures/f1/officials', {
+      umpires: ['u-thabo-dlamini'],
+      referee: { umpireId: 'u-r-pillay' },
+      scorers: [{ scorerId }],
+    });
+    assert.equal(put1.status, 200, await put1.clone().text());
+    // f2: the duplicate is the referee, with a scorer.
+    const put2 = await call('PUT', '/series/s-merge-keep/fixtures/f2/officials', {
+      umpires: ['u-r-pillay'],
+      referee: { umpireId: 'u-thabo-dlamini' },
+      scorers: [scorerId],
+    });
+    assert.equal(put2.status, 200, await put2.clone().text());
+
+    const res = await call('POST', '/umpires/u-thabo-dlamini/merge', { targetId: 'u-t-dlamini' });
+    assert.equal(res.status, 200, await res.clone().text());
+    assert.equal(((await res.json()) as { repointed: number }).repointed, 2);
+
+    const f1 = await repo.getFixtureOfficials('dolphins', 's-merge-keep', 'f1');
+    assert.deepEqual(
+      f1!.umpires.map((u) => u.umpireId),
+      ['u-t-dlamini'],
+    );
+    assert.equal(f1!.referee?.umpireId, 'u-r-pillay');
+    assert.deepEqual(
+      f1!.scorers?.map((x) => x.scorerId),
+      [scorerId],
+    );
+    const f2 = await repo.getFixtureOfficials('dolphins', 's-merge-keep', 'f2');
+    assert.equal(f2!.referee?.umpireId, 'u-t-dlamini');
+    assert.deepEqual(
+      f2!.scorers?.map((x) => x.scorerId),
+      [scorerId],
+    );
+  });
 });
 
 /* ─── Upload appointments (admin): the CLI's parser + matcher behind a preview/confirm pair ─── */
