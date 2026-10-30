@@ -59,6 +59,8 @@ export interface Scorer {
   phone?: string;
   email?: string;
   active: boolean;
+  /** Set when this entry was merged into another; the target id. */
+  mergedInto?: string;
   createdAt?: string;
   updatedAt?: string;
 }

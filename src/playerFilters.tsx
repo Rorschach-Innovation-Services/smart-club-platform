@@ -4,6 +4,7 @@ import { useMemo } from 'react';
 import { Btn } from './atoms';
 import { useVertical } from './branding';
 import { BOWLER_TYPES, GENDERS } from './data';
+import { byTier, fuzzyMatchName, type FuzzyTier } from './fuzzyMatch';
 
 // Sentinel for the "No team" facet option — league keys are slugs derived from
 // league names, so a literal collision with this value can't occur.
@@ -39,21 +40,29 @@ function matchesRole(p, role) {
 
 export function filterPlayers(players, f) {
   const needle = f.q.trim().toLowerCase();
-  return players.filter((p) => {
-    if (f.club !== 'all' && p.clubId !== f.club) return false;
+  const matched: Array<{ item: (typeof players)[number]; tier: FuzzyTier }> = [];
+  for (const p of players) {
+    if (f.club !== 'all' && p.clubId !== f.club) continue;
     // Absent status ⇒ active (same rule as the status pills).
-    if (f.status !== 'all' && (p.status || 'active') !== f.status) return false;
-    if (f.team !== 'all' && (f.team === NO_TEAM ? !!p.team : p.team !== f.team)) return false;
-    if (f.role !== 'all' && !matchesRole(p, f.role)) return false;
-    if (f.bowler !== 'all' && p.bowlerType !== f.bowler) return false;
-    if (f.position !== 'all' && p.position !== f.position) return false;
-    if (f.gender !== 'all' && p.gender !== f.gender) return false;
-    if (f.district !== 'all' && p.district !== f.district) return false;
-    if (!needle) return true;
-    const name = `${p.firstName || ''} ${p.lastName || ''}`.toLowerCase();
+    if (f.status !== 'all' && (p.status || 'active') !== f.status) continue;
+    if (f.team !== 'all' && (f.team === NO_TEAM ? !!p.team : p.team !== f.team)) continue;
+    if (f.role !== 'all' && !matchesRole(p, f.role)) continue;
+    if (f.bowler !== 'all' && p.bowlerType !== f.bowler) continue;
+    if (f.position !== 'all' && p.position !== f.position) continue;
+    if (f.gender !== 'all' && p.gender !== f.gender) continue;
+    if (f.district !== 'all' && p.district !== f.district) continue;
+    if (!needle) {
+      matched.push({ item: p, tier: 'exact' });
+      continue;
+    }
+    const tier = fuzzyMatchName(needle, `${p.firstName || ''} ${p.lastName || ''}`);
+    // ID search stays a plain substring; an ID hit outranks a typo-rescued name.
     const id = (p.idNumber || '').toLowerCase();
-    return name.includes(needle) || id.includes(needle);
-  });
+    if (id.includes(needle)) matched.push({ item: p, tier: 'exact' });
+    else if (tier) matched.push({ item: p, tier });
+  }
+  // Prefix (exact-tier) matches before typo matches, otherwise incoming order.
+  return byTier(matched);
 }
 
 /** "Showing X of Y players" — render only while filters are active. */

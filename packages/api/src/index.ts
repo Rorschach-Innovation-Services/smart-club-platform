@@ -7539,6 +7539,8 @@ app.patch('/scorers/:id', requireAdmin, async (c) => {
   const input = parseScorerInput(await c.req.json().catch(() => null), 'patch');
   const current = await repo.getScorer(tenant, id);
   if (!current) throw new HttpError(404, 'scorer not found');
+  if (current.mergedInto && input.active === true)
+    throw new HttpError(409, 'a merged scorer cannot be reactivated');
   if (input.displayName !== undefined) {
     const clash = findScorerNameClash(input.displayName, await repo.listScorers(tenant), id);
     if (clash)
@@ -7548,6 +7550,76 @@ app.patch('/scorers/:id', requireAdmin, async (c) => {
       });
   }
   return c.json(await repo.putScorer(tenant, applyScorerInput(current, input, id, now())));
+});
+
+/**
+ * Merge a duplicate scorer (`:id`, the source) into `targetId`: every appointment naming the
+ * source now names the target, and the source is deactivated with `mergedInto` set. Same
+ * contract as the umpire merge (409 `scorer_already_merged` on a re-merge; source retired LAST
+ * so a part-failed merge can be re-run). Scorers have no aliases to adopt.
+ */
+app.post('/scorers/:id/merge', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const sourceId = c.req.param('id');
+  const body = (await c.req.json().catch(() => null)) as { targetId?: unknown } | null;
+  const targetId = typeof body?.targetId === 'string' ? body.targetId.trim() : '';
+  if (!targetId) throw new HttpError(400, 'targetId is required');
+  if (targetId === sourceId) throw new HttpError(400, 'cannot merge a scorer into itself');
+  const [source, target] = await Promise.all([
+    repo.getScorer(ra.tenant, sourceId),
+    repo.getScorer(ra.tenant, targetId),
+  ]);
+  if (!source) throw new HttpError(404, 'scorer not found');
+  if (source.mergedInto) {
+    const into = await repo.getScorer(ra.tenant, source.mergedInto);
+    const name = into?.displayName ?? source.mergedInto;
+    throw new HttpError(409, `${source.displayName} is already merged into ${name}`, {
+      code: 'scorer_already_merged',
+      mergedInto: source.mergedInto,
+      mergedIntoName: name,
+    });
+  }
+  if (!target) throw new HttpError(404, 'target scorer not found');
+  if (!target.active) throw new HttpError(409, 'cannot merge into an inactive scorer');
+  const at = now();
+  const targetRef = { scorerId: target.id, name: target.displayName };
+  let repointed = 0;
+  // Notification-silent, like the umpire merge: this collapses two entries for the same
+  // person, who was already notified of these appointments under the duplicate.
+  // Accepted race (like the officials PUT's ledger race): this is a read-modify-write over the
+  // listed rows, so an admin officials PUT landing between the list and a row's put is
+  // overwritten with the merge's copy. The window is milliseconds and admin-only; no
+  // conditional writes.
+  for (const row of await repo.listFixtureOfficials(ra.tenant)) {
+    if (!row.scorers?.some((x) => x.scorerId === sourceId)) continue;
+    // Slot order is kept; source and target both on one fixture collapse to one entry.
+    const scorers: NonNullable<typeof row.scorers> = [];
+    for (const x of row.scorers) {
+      const next = x.scorerId === sourceId ? targetRef : x;
+      if (!scorers.some((y) => y.scorerId === next.scorerId)) scorers.push(next);
+    }
+    // putFixtureOfficials REPLACES the item, so start from the stored row: the umpires, the
+    // referee and any future field must survive a scorer merge.
+    const { seriesId, fixtureId, ...stored } = row;
+    await repo.putFixtureOfficials(ra.tenant, seriesId, fixtureId, {
+      ...stored,
+      scorers,
+      updatedAt: at,
+      updatedBy: ra.email ?? 'unknown',
+    });
+    repointed++;
+  }
+  const mergeLog = { tenant: ra.tenant, sourceId, targetId, repointed };
+  console.log(JSON.stringify({ msg: 'scorer-merge', ...mergeLog }));
+  Sentry.addBreadcrumb({
+    category: 'merge',
+    message: 'scorer-merge',
+    level: 'info',
+    data: mergeLog,
+  });
+  const retiredSource = { ...source, active: false, mergedInto: target.id, updatedAt: at };
+  await repo.putScorer(ra.tenant, retiredSource);
+  return c.json({ target, source: retiredSource, repointed });
 });
 
 /**
@@ -7713,6 +7785,10 @@ app.post('/umpires/:id/merge', requireAdmin, async (c) => {
   const at = now();
   const targetRef = { umpireId: target.id, name: target.displayName };
   let repointed = 0;
+  // Accepted race (like the officials PUT's ledger race): this is a read-modify-write over the
+  // listed rows, so an admin officials PUT landing between the list and a row's put is
+  // overwritten with the merge's copy. The window is milliseconds and admin-only; no
+  // conditional writes.
   for (const row of await repo.listFixtureOfficials(ra.tenant)) {
     const hasSource =
       row.umpires.some((u) => u.umpireId === sourceId) || row.referee?.umpireId === sourceId;
@@ -7725,7 +7801,12 @@ app.post('/umpires/:id/merge', requireAdmin, async (c) => {
     let referee = row.referee?.umpireId === sourceId ? targetRef : row.referee;
     // A merge can't leave one person as both umpire and referee on a fixture.
     if (referee && umpires.some((u) => u.umpireId === referee!.umpireId)) referee = undefined;
-    await repo.putFixtureOfficials(ra.tenant, row.seriesId, row.fixtureId, {
+    // putFixtureOfficials REPLACES the item, so start from the stored row: anything the merge
+    // doesn't touch (the scorers, any future field) must survive it. The carrier ids are
+    // re-stamped by the repo.
+    const { seriesId, fixtureId, referee: _oldReferee, ...stored } = row;
+    await repo.putFixtureOfficials(ra.tenant, seriesId, fixtureId, {
+      ...stored,
       umpires,
       ...(referee ? { referee } : {}),
       updatedAt: at,
@@ -7733,6 +7814,14 @@ app.post('/umpires/:id/merge', requireAdmin, async (c) => {
     });
     repointed++;
   }
+  const mergeLog = { tenant: ra.tenant, sourceId, targetId, repointed };
+  console.log(JSON.stringify({ msg: 'umpire-merge', ...mergeLog }));
+  Sentry.addBreadcrumb({
+    category: 'merge',
+    message: 'umpire-merge',
+    level: 'info',
+    data: mergeLog,
+  });
   const mergedTarget = {
     ...target,
     aliases: [...new Set([...target.aliases, ...(source.aliases ?? [])])],
@@ -14493,10 +14582,24 @@ function hashCode(s: string): number {
 // ───────────────────────── Error handling ─────────────────────────
 
 app.onError((err, c) => {
-  if (err instanceof HttpError)
+  if (err instanceof HttpError) {
+    // One line per expected 4xx so failures are traceable in the logs. The request body is
+    // never logged; err.message may carry staff names, which is accepted. 401/403 are
+    // skipped: scanner noise.
+    if (err.status >= 400 && err.status < 500 && err.status !== 401 && err.status !== 403)
+      console.warn(
+        JSON.stringify({
+          msg: 'http-error',
+          method: c.req.method,
+          path: c.req.path,
+          status: err.status,
+          error: err.message,
+        }),
+      );
     // Details first, `error` last: a structured error (e.g. `{ clashes, code }`) rides along
     // in the same body, but can never clobber the `error` string every existing client reads.
     return c.json({ ...(err.details ?? {}), error: err.message }, err.status as 400);
+  }
   // A body that isn't JSON throws SyntaxError out of `c.req.json()`. That is the caller's
   // mistake, not ours: answering 500 blames the server for it AND pages Sentry every time
   // a script sends a truncated payload. Nothing else in a request throws SyntaxError.

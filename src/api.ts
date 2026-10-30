@@ -987,6 +987,11 @@ export const createScorer = (body: Partial<Scorer>) =>
   request<Scorer>('/scorers', { method: 'POST', body });
 export const patchScorer = (id: string, body: Partial<Scorer>) =>
   request<Scorer>(`/scorers/${encodeURIComponent(id)}`, { method: 'PATCH', body });
+export const mergeScorer = (id: string, targetId: string) =>
+  request<{ target: Scorer; source: Scorer; repointed: number }>(
+    `/scorers/${encodeURIComponent(id)}/merge`,
+    { method: 'POST', body: { targetId } },
+  );
 
 // ── Result confirmation (the office's "checked and validated") ──
 // `recordedAt` is the result the admin looked at: a newer one from medicoach answers 409

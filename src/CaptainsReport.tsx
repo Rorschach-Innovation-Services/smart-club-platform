@@ -40,6 +40,7 @@ import {
 } from './api';
 import { applyTheme } from './config';
 import { formatSastWeekdayDay, formatWeekdayDayYear } from './dates';
+import { byTier, fuzzyMatchName } from './fuzzyMatch';
 import { qk } from './query';
 import { ownInningsFlags } from './scorecardConfirmHelpers';
 import {
@@ -139,7 +140,14 @@ function AutoField({
   // An exact match means the field is "filled" — show the full list so it can be swapped.
   const exact = options.some((o) => o.name.toLowerCase() === q);
   const list = (
-    q && !exact ? options.filter((o) => o.name.toLowerCase().includes(q)) : options
+    q && !exact
+      ? byTier(
+          options.flatMap((o) => {
+            const tier = fuzzyMatchName(q, o.name);
+            return tier ? [{ item: o, tier }] : [];
+          }),
+        )
+      : options
   ).slice(0, 50);
   const show = open && list.length > 0;
 
