@@ -14585,13 +14585,15 @@ app.onError((err, c) => {
   if (err instanceof HttpError) {
     // One line per expected 4xx so failures are traceable in the logs. The request body is
     // never logged; err.message may carry staff names, which is accepted. 401/403 are
-    // skipped: scanner noise.
+    // skipped: scanner noise. Token-length path segments are redacted: link routes carry
+    // bearer tokens in the path, and those must never reach CloudWatch. (c.req.routePath
+    // would give the matched pattern, but it is deprecated on this Hono version.)
     if (err.status >= 400 && err.status < 500 && err.status !== 401 && err.status !== 403)
       console.warn(
         JSON.stringify({
           msg: 'http-error',
           method: c.req.method,
-          path: c.req.path,
+          path: c.req.path.replace(/[A-Za-z0-9_-]{16,}/g, '<redacted>'),
           status: err.status,
           error: err.message,
         }),
