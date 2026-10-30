@@ -8,7 +8,7 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { closeSync, openSync } from 'node:fs';
 import ExcelJS from 'exceljs';
 import { tbdOf } from '../../engine/src/formats.js';
 
@@ -569,44 +569,62 @@ describe('manifest', () => {
 });
 
 const WORKBOOK = `${process.env.HOME}/Downloads/2026 Titans Club Cricket 2026-2027 Fixtures - 1st Half Final Final Draft.xlsx`;
-describe('the real union workbook (skipped when absent)', { skip: !existsSync(WORKBOOK) }, () => {
-  test('parses clean to 1,398 fixtures, 19 KO rows; 2 clashes before HELD_BACK, 0 after', async () => {
-    const wb = new ExcelJS.Workbook();
-    await wb.xlsx.readFile(WORKBOOK);
-    const { sheets, errors } = parseTitansWorkbook(wb);
-    assert.deepEqual(errors, []);
-    assert.equal(
-      sheets.reduce((n, s) => n + s.fixtures.length, 0),
-      1398,
-    );
-    assert.equal(
-      sheets.reduce((n, s) => n + s.ko.length, 0),
-      19,
-    );
-    const clubs = clubsFromMap();
-    const venues = wouldBeRegistry(sheets, clubs);
-    const before = buildTitansSeries(sheets, venues, []);
-    const after = buildTitansSeries(sheets, venues);
-    assert.deepEqual(before.unresolvedNames, []);
-    assert.deepEqual(after.heldProblems, []);
-    assert.equal(
-      scanTitansClashes(
-        before.built.map((b) => b.series),
-        clubs,
-        venues,
-      ).length,
-      2,
-    );
-    assert.equal(
-      scanTitansClashes(
-        after.built.map((b) => b.series),
-        clubs,
-        venues,
-      ).length,
-      0,
-    );
-  });
-});
+// Probe by really opening the file, as in emcu-fixture-map.test.ts: macOS privacy denial of
+// ~/Downloads passes existsSync/access(2) but fails open(2) with EPERM — skip, never fail.
+const workbookSkipReason = ((): string | null => {
+  try {
+    closeSync(openSync(WORKBOOK, 'r'));
+    return null;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return `workbook not found at ${WORKBOOK}`;
+    if (code === 'EPERM' || code === 'EACCES')
+      return `workbook not readable at ${WORKBOOK} (${code})`;
+    throw err;
+  }
+})();
+describe(
+  'the real union workbook (skipped when absent)',
+  { skip: workbookSkipReason ?? false },
+  () => {
+    test('parses clean to 1,398 fixtures, 19 KO rows; 2 clashes before HELD_BACK, 0 after', async () => {
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.readFile(WORKBOOK);
+      const { sheets, errors } = parseTitansWorkbook(wb);
+      assert.deepEqual(errors, []);
+      assert.equal(
+        sheets.reduce((n, s) => n + s.fixtures.length, 0),
+        1398,
+      );
+      assert.equal(
+        sheets.reduce((n, s) => n + s.ko.length, 0),
+        19,
+      );
+      const clubs = clubsFromMap();
+      const venues = wouldBeRegistry(sheets, clubs);
+      const before = buildTitansSeries(sheets, venues, []);
+      const after = buildTitansSeries(sheets, venues);
+      assert.deepEqual(before.unresolvedNames, []);
+      assert.deepEqual(after.heldProblems, []);
+      assert.equal(
+        scanTitansClashes(
+          before.built.map((b) => b.series),
+          clubs,
+          venues,
+        ).length,
+        2,
+      );
+      assert.equal(
+        scanTitansClashes(
+          after.built.map((b) => b.series),
+          clubs,
+          venues,
+        ).length,
+        0,
+      );
+    });
+  },
+);
 
 describe('bad workbook inputs (E33)', () => {
   test('a missing manifest sheet and an extra sheet are each fatal, by name', () => {

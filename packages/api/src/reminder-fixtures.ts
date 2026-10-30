@@ -55,7 +55,8 @@ import {
   clashPairKey,
   formatClashForHumans,
   groundKey,
-  JUNK_GROUND,
+  explicitVenue,
+  playingVenue,
   venueAliasesFor,
 } from './venue-clash.js';
 import type { Club, ScheduleChangeOrigin, Series, Venue } from './types.js';
@@ -517,21 +518,6 @@ const PLAYED_STATUSES = new Set(['completed', 'abandoned', 'played', 'no-result'
 
 const dayDiff = (a: string, b: string) =>
   Math.round((Date.parse(`${a}T00:00:00Z`) - Date.parse(`${b}T00:00:00Z`)) / DAY_MS);
-
-/** What patch-fixtures' guard compares: venueOverride || venueName, trimmed. */
-const explicitVenue = (f: LiveFixture) =>
-  (f.venueOverride ?? '').trim() || (f.venueName ?? '').trim();
-
-/** The ground the fixture plays at for display/compare: explicit, else the home side's. */
-function playingVenue(s: Series, f: LiveFixture, clubsById: Map<string, Club>): string {
-  const explicit = explicitVenue(f);
-  if (explicit) return explicit;
-  const p = (s.participants ?? []).find((x) => x.teamId === f.home);
-  if (p?.venue?.trim() && !JUNK_GROUND.test(p.venue.trim())) return p.venue.trim();
-  const clubId = p?.clubId ?? f.home;
-  const own = clubId ? clubsById.get(clubId)?.ground?.venue?.trim() : undefined;
-  return own && !JUNK_GROUND.test(own) ? own : '';
-}
 
 const sideName = (s: Series, ref: string | undefined, clubsById: Map<string, Club>) =>
   !ref

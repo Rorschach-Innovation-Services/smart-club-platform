@@ -314,6 +314,23 @@ beforeEach(async () => {
   page = null;
 });
 
+/** Run `fn` with SST_STAGE=prod and the link base left on its localhost fallback. */
+async function onProdWithLoopbackBase<T>(fn: () => T | Promise<T>): Promise<T> {
+  const prior = {
+    SST_STAGE: process.env.SST_STAGE,
+    CAPTAINS_REPORT_LINK_BASE_URL: process.env.CAPTAINS_REPORT_LINK_BASE_URL,
+  };
+  process.env.SST_STAGE = 'prod';
+  delete process.env.CAPTAINS_REPORT_LINK_BASE_URL;
+  try {
+    return await fn();
+  } finally {
+    for (const [k, v] of Object.entries(prior))
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+  }
+}
+
 describe('result → reports → notices', () => {
   test('live result with a captainRef: captain link (chair cc) for the scoring side, chair for the other', async () => {
     await seedCaptain();
@@ -1031,6 +1048,71 @@ describe('admin list', () => {
       (await app.request('/captains-reports', { headers: headers(REP_UMZINTO) })).status,
       403,
     );
+  });
+});
+
+describe('admin copy link', () => {
+  const copyLink = (id: string, auth = ADMIN) =>
+    app.request(`/captains-reports/${encodeURIComponent(id)}/link`, { headers: headers(auth) });
+
+  test('signs the stored recipient link on demand, no-store, round-trips to the form', async () => {
+    await seedCaptain();
+    page = liveResultPage('live');
+    await runPull();
+    const own = (await reportsOf()).find((r) => r.clubId === 'umzinto')!;
+    const res = await copyLink(own.id);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+    const { url } = (await res.json()) as { url: string };
+    const token = url.split('/r/')[1];
+    assert.ok(token, url);
+    const { verifyReportLinkToken } = await import('../src/captains-reports.js');
+    const check = verifyReportLinkToken(
+      token,
+      'local-dev-captains-report-link-secret', // env.ts LOCAL_AUTH fallback
+      Date.now(),
+    );
+    assert.ok(check.ok);
+    assert.equal(check.payload.r, own.id);
+    assert.equal(check.payload.m, own.recipient.memberId);
+    assert.equal((await app.request(`/captains-report-link/${token}`)).status, 200);
+  });
+
+  test('admin-only (rep 403), unknown 404, submitted and void 409', async () => {
+    await seedCaptain();
+    page = liveResultPage('live');
+    await runPull();
+    const own = (await reportsOf()).find((r) => r.clubId === 'umzinto')!;
+    const opp = (await reportsOf()).find((r) => r.clubId === 'african-warriors')!;
+    assert.equal((await copyLink(own.id, REP_UMZINTO)).status, 403);
+    assert.equal((await copyLink('not-an-id')).status, 404);
+    await app.request(`/club/captains-reports/${encodeURIComponent(own.id)}`, {
+      method: 'PUT',
+      headers: headers(REP_UMZINTO),
+      body: JSON.stringify({ ...completeBody, submit: true }),
+    });
+    assert.equal((await copyLink(own.id)).status, 409);
+    // A cleared result voids the still-pending opposition report.
+    const live = liveResultPage('live');
+    const clearedAt = new Date(Date.parse(live.fixtures[0].result.recordedAt) + 60_000);
+    page = {
+      ...live,
+      nextCursor: clearedAt.toISOString(),
+      fixtures: [{ ...live.fixtures[0], result: null, resultClearedAt: clearedAt.toISOString() }],
+    };
+    await runPull();
+    assert.equal((await reportsOf()).find((r) => r.id === opp.id)!.status, 'void');
+    assert.equal((await copyLink(opp.id)).status, 409);
+  });
+
+  test('503 on prod when the link base is loopback (never a dead link)', async () => {
+    await seedCaptain();
+    page = liveResultPage('live');
+    await runPull();
+    const own = (await reportsOf()).find((r) => r.clubId === 'umzinto')!;
+    const res = await onProdWithLoopbackBase(() => copyLink(own.id));
+    assert.equal(res.status, 503);
+    assert.equal((await copyLink(own.id)).status, 200, 'env restored: the same link signs again');
   });
 });
 

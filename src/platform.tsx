@@ -34,6 +34,7 @@ import { HelpLink, HelpProvider } from './help/HelpDrawer';
 import { TutorialsCard } from './platform-tutorials';
 import { RequiredDocsCard } from './platform-required-docs';
 import { FixtureRemindersCard } from './platform-fixture-reminders';
+import { NoticesCard } from './platform-notices';
 import { PlayerSyncCard } from './platform-player-sync';
 import { MedicoachConnectionCard } from './platform-medicoach';
 import { MedicoachConsolePage } from './platform-medicoach-console';
@@ -920,6 +921,7 @@ function TenantEditPage({ toast }: { toast: Toast }) {
           save={save}
           toast={toast}
         />
+        <NoticesCard key={`nt-${config.tenant}`} config={config} save={save} toast={toast} />
         <TransferWindowCard key={`tw-${config.tenant}`} config={config} save={save} toast={toast} />
         <PlayerSyncCard
           key={`ps-${config.tenant}-${String(config.integrations?.medicoach?.playerSync ?? false)}`}

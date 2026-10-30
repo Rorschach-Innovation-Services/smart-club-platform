@@ -10,7 +10,7 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { closeSync, existsSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   DEFAULT_WORKBOOK,
@@ -40,7 +40,24 @@ import { groundKey, normaliseName, venueAliasesFor } from '../src/venue-clash.js
 
 const WORKBOOK = process.env.EMCU_WORKBOOK ?? DEFAULT_WORKBOOK;
 const EXPORT_DIR = process.env.EMCU_EXPORT_DIR ?? '';
-const haveWorkbook = existsSync(WORKBOOK);
+/**
+ * Why the workbook tiers skip, or null when it is readable. Missing (ENOENT) and unreadable
+ * (EPERM — e.g. macOS denying the process ~/Downloads — or EACCES) both skip, never fail.
+ * The probe really opens the file: macOS privacy denial passes access(2) and fails open(2).
+ */
+const workbookSkipReason = ((): string | null => {
+  try {
+    closeSync(openSync(WORKBOOK, 'r'));
+    return null;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return `workbook not found at ${WORKBOOK}`;
+    if (code === 'EPERM' || code === 'EACCES')
+      return `workbook not readable at ${WORKBOOK} (${code})`;
+    throw err;
+  }
+})();
+const haveWorkbook = workbookSkipReason === null;
 const haveExports =
   !!EXPORT_DIR &&
   ['prod-SERIES-after.json', 'prod-CLUB.json', 'prod-VENUE.json'].every((f) =>
@@ -191,71 +208,65 @@ describe('team + venue maps', () => {
   });
 });
 
-describe(
-  'the real workbook',
-  { skip: haveWorkbook ? false : `workbook not found at ${WORKBOOK}` },
-  () => {
-    let parsed: ParsedEmcuWorkbook;
-    const get = async () => (parsed ??= parseEmcuWorkbook(await readWorkbookGrids(WORKBOOK)));
+describe('the real workbook', { skip: workbookSkipReason ?? false }, () => {
+  let parsed: ParsedEmcuWorkbook;
+  const get = async () => (parsed ??= parseEmcuWorkbook(await readWorkbookGrids(WORKBOOK)));
 
-    test('620 fixtures, every series at its verified count, no errors', async () => {
-      const p = await get();
-      assert.deepEqual(p.errors, []);
-      assert.equal(p.fixtures.length, 620);
-      for (const s of EMCU_SERIES)
-        assert.equal(p.fixtures.filter((f) => f.slug === s.slug).length, s.expected, s.slug);
-    });
-    test('times come from round headers: Div 2 T20 R10 is 17 Jan 13:00, R9 the same day 09:00', async () => {
-      const d2 = (await get()).fixtures.filter((f) => f.slug === 'd2-t20');
-      assert.ok(
-        d2
-          .filter((f) => f.round === 10)
-          .every((f) => f.date === '2027-01-17' && f.time === '13:00'),
-      );
-      assert.ok(
-        d2.filter((f) => f.round === 9).every((f) => f.date === '2027-01-17' && f.time === '09:00'),
-      );
-      assert.ok(
-        (await get()).fixtures.filter((f) => f.slug === 'd1-30ov').every((f) => f.time === '08:30'),
-      );
-    });
-    test('Div 5 plays Saturdays, Div 1-4 Sundays', async () => {
-      for (const f of (await get()).fixtures) {
-        const day = utc(f.date).getUTCDay();
-        assert.equal(day, f.slug.startsWith('d5-') ? 6 : 0, `${f.slug} ${f.date}`);
-      }
-    });
-    test('round labels are sheet-authoritative: D5S1 R11 sits on 5 Dec between R4 and R5', async () => {
-      const p = await get();
-      const d5 = p.fixtures.filter((f) => f.slug === 'd5-s1-t20');
-      const order = [...new Set(d5.map((f) => f.round))];
-      assert.deepEqual(order.slice(0, 6), [1, 2, 3, 4, 11, 5]);
-      assert.ok(d5.filter((f) => f.round === 11).every((f) => f.date === '2026-12-05'));
-      assert.ok(p.warnings.some((w) => w.includes('Div 3 S2') && w.includes('"Round 5" again')));
-    });
-    test('the Div 2 30-over groups are explicit, disjoint, seven each', async () => {
-      const p = await get();
-      const a = p.sectionTeams.get('d2-30ov-a')!;
-      const b = p.sectionTeams.get('d2-30ov-b')!;
-      assert.equal(a.size, 7);
-      assert.equal(b.size, 7);
-      assert.ok([...a].every((t) => !b.has(t)));
-    });
-    test('the Easter "TO MOVE" note on Div 2 30-over Group B R7 is captured', async () => {
-      const notes = (await get()).roundNotes;
-      assert.equal(notes.length, 1);
-      assert.equal(notes[0].slug, 'd2-30ov-b');
-      assert.equal(notes[0].round, 7);
-      assert.equal(notes[0].date, '2027-03-28');
-      assert.match(notes[0].note, /EASTER/);
-    });
-    test('the new venues list exactly the clubs that host there', async () => {
-      const p = await get();
-      for (const v of EMCU_NEW_VENUES)
-        assert.deepEqual(homeClubsAt(p.fixtures, v.name), [...v.homeClubIds!].sort(), v.name);
-    });
-  },
-);
+  test('620 fixtures, every series at its verified count, no errors', async () => {
+    const p = await get();
+    assert.deepEqual(p.errors, []);
+    assert.equal(p.fixtures.length, 620);
+    for (const s of EMCU_SERIES)
+      assert.equal(p.fixtures.filter((f) => f.slug === s.slug).length, s.expected, s.slug);
+  });
+  test('times come from round headers: Div 2 T20 R10 is 17 Jan 13:00, R9 the same day 09:00', async () => {
+    const d2 = (await get()).fixtures.filter((f) => f.slug === 'd2-t20');
+    assert.ok(
+      d2.filter((f) => f.round === 10).every((f) => f.date === '2027-01-17' && f.time === '13:00'),
+    );
+    assert.ok(
+      d2.filter((f) => f.round === 9).every((f) => f.date === '2027-01-17' && f.time === '09:00'),
+    );
+    assert.ok(
+      (await get()).fixtures.filter((f) => f.slug === 'd1-30ov').every((f) => f.time === '08:30'),
+    );
+  });
+  test('Div 5 plays Saturdays, Div 1-4 Sundays', async () => {
+    for (const f of (await get()).fixtures) {
+      const day = utc(f.date).getUTCDay();
+      assert.equal(day, f.slug.startsWith('d5-') ? 6 : 0, `${f.slug} ${f.date}`);
+    }
+  });
+  test('round labels are sheet-authoritative: D5S1 R11 sits on 5 Dec between R4 and R5', async () => {
+    const p = await get();
+    const d5 = p.fixtures.filter((f) => f.slug === 'd5-s1-t20');
+    const order = [...new Set(d5.map((f) => f.round))];
+    assert.deepEqual(order.slice(0, 6), [1, 2, 3, 4, 11, 5]);
+    assert.ok(d5.filter((f) => f.round === 11).every((f) => f.date === '2026-12-05'));
+    assert.ok(p.warnings.some((w) => w.includes('Div 3 S2') && w.includes('"Round 5" again')));
+  });
+  test('the Div 2 30-over groups are explicit, disjoint, seven each', async () => {
+    const p = await get();
+    const a = p.sectionTeams.get('d2-30ov-a')!;
+    const b = p.sectionTeams.get('d2-30ov-b')!;
+    assert.equal(a.size, 7);
+    assert.equal(b.size, 7);
+    assert.ok([...a].every((t) => !b.has(t)));
+  });
+  test('the Easter "TO MOVE" note on Div 2 30-over Group B R7 is captured', async () => {
+    const notes = (await get()).roundNotes;
+    assert.equal(notes.length, 1);
+    assert.equal(notes[0].slug, 'd2-30ov-b');
+    assert.equal(notes[0].round, 7);
+    assert.equal(notes[0].date, '2027-03-28');
+    assert.match(notes[0].note, /EASTER/);
+  });
+  test('the new venues list exactly the clubs that host there', async () => {
+    const p = await get();
+    for (const v of EMCU_NEW_VENUES)
+      assert.deepEqual(homeClubsAt(p.fixtures, v.name), [...v.homeClubIds!].sort(), v.name);
+  });
+});
 
 describe(
   'resolution against the prod exports',
@@ -263,7 +274,7 @@ describe(
     skip:
       haveWorkbook && haveExports
         ? false
-        : 'set EMCU_EXPORT_DIR (prod-*.json) and have the workbook',
+        : (workbookSkipReason ?? 'set EMCU_EXPORT_DIR (prod-*.json)'),
   },
   () => {
     const load = () =>

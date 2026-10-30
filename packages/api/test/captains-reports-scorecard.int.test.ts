@@ -479,6 +479,73 @@ describe('the correction email', () => {
     );
   });
 
+  test('operators keep the console link; no tenant extras when the field is unset', async () => {
+    await storeResult();
+    await repo.putFixtureScorecard(T, card());
+    await portalPut(
+      complete({ scorecard: { action: 'correction', feedback: 'Extras should be 7' } }),
+    );
+    assert.equal(corrections.length, 2);
+    assert.ok(corrections.every((c) => typeof c.consoleLink === 'string' && c.consoleLink));
+  });
+
+  test("the tenant's scorecardCorrectionRecipients also get it — deduped, without the console link", async () => {
+    const cfg = (await repo.getTenantConfig(T))!;
+    await repo.putTenantConfig({
+      ...cfg,
+      // OPS2 duplicates an operator (case-folded); the extra is listed twice.
+      scorecardCorrectionRecipients: [
+        'jooma@dolphins.test',
+        'OPS2@platform.test',
+        'Jooma@Dolphins.test',
+      ],
+    });
+    await storeResult();
+    await repo.putFixtureScorecard(T, card());
+    const res = await portalPut(
+      complete({ scorecard: { action: 'correction', feedback: 'Extras should be 7' } }),
+    );
+    assert.equal(res.status, 200);
+    assert.deepEqual(corrections.map((c) => c.to).sort(), [
+      'jooma@dolphins.test',
+      'ops1@platform.test',
+      'ops2@platform.test',
+    ]);
+    const extra = corrections.find((c) => c.to === 'jooma@dolphins.test')!;
+    assert.equal(extra.consoleLink, undefined, 'extras cannot open the operator console');
+    assert.equal(extra.feedback, 'Extras should be 7');
+    assert.equal(extra.tenantName, 'Dolphins Cricket');
+    for (const op of corrections.filter((c) => c.to.endsWith('@platform.test'))) {
+      assert.ok(op.consoleLink);
+    }
+  });
+
+  test('one failing extra address does not stop the others', async () => {
+    const sent: string[] = [];
+    const out = await cr.notifyOperatorsOfCorrection(
+      {
+        repo,
+        log: () => {},
+        send: async (n) => {
+          if (n.to === 'bad@x.test') throw new Error('ses down');
+          sent.push(n.to);
+          return { messageId: 'm' };
+        },
+      },
+      {
+        tenantName: 'T',
+        clubName: 'C',
+        ref: 'CR-1',
+        fixtureLine: 'A v B',
+        feedback: 'f',
+        consoleLink: 'http://x/platform',
+      },
+      ['bad@x.test', 'good@x.test'],
+    );
+    assert.deepEqual(out, { sent: 3, failed: 1 });
+    assert.deepEqual(sent.sort(), ['good@x.test', 'ops1@platform.test', 'ops2@platform.test']);
+  });
+
   test('a confirmation or a draft emails nobody; a failing sender never fails the submit', async () => {
     await repo.putFixtureScorecard(T, card());
     const draft = await linkPut('african-warriors', {

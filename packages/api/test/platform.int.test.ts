@@ -536,6 +536,85 @@ describe('tenant create → list → get → patch', () => {
     assert.equal('fixtureReminders' in ((await read.json()) as object), false);
   });
 
+  test('notice settings: operator writes them normalised; tenant admins cannot write or read them', async () => {
+    const put = (body: unknown) =>
+      app.request('/platform/tenants/dolphins', {
+        method: 'PUT',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify(body),
+      });
+    const ok = await put({
+      officialsContactLine: '  Titans umpire - 083 709 2976  ',
+      scorecardCorrectionRecipients: [
+        'Jooma@Dolphins.test',
+        ' kershen@dolphins.test',
+        'jooma@dolphins.test',
+      ],
+    });
+    assert.equal(ok.status, 200);
+    const okBody = (await ok.json()) as Record<string, unknown>;
+    assert.equal(okBody.officialsContactLine, 'Titans umpire - 083 709 2976');
+    let stored = await repo.getTenantConfig('dolphins');
+    assert.equal(stored?.officialsContactLine, 'Titans umpire - 083 709 2976');
+    assert.deepEqual(stored?.scorecardCorrectionRecipients, [
+      'jooma@dolphins.test',
+      'kershen@dolphins.test',
+    ]);
+    // The operator GET returns them.
+    const opGet = await app.request('/platform/tenants/dolphins', {
+      headers: platformHeaders(OPERATOR),
+    });
+    assert.equal(opGet.status, 200);
+    const opBody = (await opGet.json()) as Record<string, unknown>;
+    const opCfg = (opBody.config ?? opBody) as Record<string, unknown>;
+    assert.equal(opCfg.officialsContactLine, 'Titans umpire - 083 709 2976');
+
+    for (const bad of [
+      { officialsContactLine: 'x'.repeat(121) },
+      { officialsContactLine: 42 },
+      { scorecardCorrectionRecipients: 'a@b.co' },
+      { scorecardCorrectionRecipients: ['not-an-email'] },
+      { scorecardCorrectionRecipients: [7] },
+      { scorecardCorrectionRecipients: Array.from({ length: 11 }, (_, i) => `r${i}@x.co`) },
+    ]) {
+      assert.equal((await put(bad)).status, 400, JSON.stringify(bad));
+    }
+
+    // A tenant admin's PUT /tenant/config silently drops them (operator-only, ADR 0006)...
+    const adminPut = await app.request('/tenant/config', {
+      method: 'PUT',
+      headers: tenantHeaders(DOLPHINS_ADMIN, 'dolphins'),
+      body: JSON.stringify({
+        officialsContactLine: 'Forged',
+        scorecardCorrectionRecipients: ['evil@x.co'],
+      }),
+    });
+    assert.equal(adminPut.status, 200);
+    stored = await repo.getTenantConfig('dolphins');
+    assert.equal(stored?.officialsContactLine, 'Titans umpire - 083 709 2976');
+    assert.deepEqual(stored?.scorecardCorrectionRecipients, [
+      'jooma@dolphins.test',
+      'kershen@dolphins.test',
+    ]);
+    // ...and neither GET /tenant/config nor GET /tenant projects them.
+    for (const path of ['/tenant/config', '/tenant']) {
+      const read = await app.request(path, { headers: tenantHeaders(DOLPHINS_ADMIN, 'dolphins') });
+      assert.equal(read.status, 200, path);
+      const body = (await read.json()) as object;
+      assert.equal('officialsContactLine' in body, false, path);
+      assert.equal('scorecardCorrectionRecipients' in body, false, path);
+    }
+
+    // '' and [] clear.
+    assert.equal(
+      (await put({ officialsContactLine: '', scorecardCorrectionRecipients: [] })).status,
+      200,
+    );
+    stored = await repo.getTenantConfig('dolphins');
+    assert.equal(stored?.officialsContactLine ?? '', '');
+    assert.deepEqual(stored?.scorecardCorrectionRecipients ?? [], []);
+  });
+
   test('PUT /platform/tenants/:slug on unknown tenant → 404', async () => {
     const res = await app.request('/platform/tenants/ghost', {
       method: 'PUT',

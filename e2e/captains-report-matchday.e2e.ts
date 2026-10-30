@@ -242,6 +242,9 @@ test('match-day reports open to the chairs without a result, and gain it later w
 }) => {
   const s = await createSeries(request, {
     name: `Captain's report match day E2E ${RUN}`,
+    // Not 'premier': the seeded premier league defers card-less match-day opens to the
+    // Monday-noon fallback (captainsReport.deferMatchDayNotices), so nothing would open today.
+    leagueKey: 'promotion',
     fixtures: [
       fixture({
         id: 'f1',

@@ -278,6 +278,7 @@ async function seedSeries(
   request: APIRequestContext,
   seriesId: string,
   fixtures: Fx[],
+  leagueKey = 'premier',
 ): Promise<number> {
   const clubs = [...new Set(fixtures.flatMap((f) => [f.home, f.away]))];
   const create = await request.post(`${API_BASE}/series`, {
@@ -286,7 +287,7 @@ async function seedSeries(
       id: seriesId,
       name: `Squad edges ${seriesId}`,
       startDate: [...fixtures.map((f) => f.date)].sort()[0],
-      leagueKey: 'premier',
+      leagueKey,
       teams: clubs,
       participants: clubs.map((c) => ({ teamId: c, clubId: c, name: c })),
       fixtures: fixtures.map((f) => ({ ...f, round: 1 })),
@@ -495,10 +496,15 @@ test('window gating: outside the 08:00 squad window a sync run opens nothing; ea
   ]);
   // A fixture played today: its captain's reports ride their own (18:00) window. Which hour
   // each window opens at is int-level (real clock, no override); here each is forced alone.
+  // The report series are 'promotion', not 'premier': the seeded premier league defers
+  // card-less match-day opens to the Monday-noon fallback (deferMatchDayNotices).
   const R = `s-sqe-winrep-${RUN}`;
-  await seedSeries(request, R, [
-    { id: 'f1', date: TODAY, time: at('07'), home: 'umlazi', away: 'warriors' },
-  ]);
+  await seedSeries(
+    request,
+    R,
+    [{ id: 'f1', date: TODAY, time: at('07'), home: 'umlazi', away: 'warriors' }],
+    'promotion',
+  );
   await setReportNoticeWindow(request, 'closed');
   try {
     const summary = await syncNow(request);
@@ -515,9 +521,12 @@ test('window gating: outside the 08:00 squad window a sync run opens nothing; ea
 
     // The inverse: squads OPEN, reports CLOSED. A fresh today-fixture proves zero new reports.
     const R2 = `s-sqe-winrep2-${RUN}`;
-    await seedSeries(request, R2, [
-      { id: 'f1', date: TODAY, time: at('07'), home: 'ilembe', away: 'verulam' },
-    ]);
+    await seedSeries(
+      request,
+      R2,
+      [{ id: 'f1', date: TODAY, time: at('07'), home: 'ilembe', away: 'verulam' }],
+      'promotion',
+    );
     await setReportNoticeWindow(request, 'closed', 'reports');
     await setReportNoticeWindow(request, 'open', 'squads');
     await syncNow(request);
@@ -862,11 +871,15 @@ test('recipient ladder: designated → last captain (learned from a captain’s 
 test('kill switch: captainsReports off stops report opens but not squad links; an issued report link still loads', async ({
   request,
 }) => {
-  // Flag on: a fixture played today opens its match-day reports.
+  // Flag on: a fixture played today opens its match-day reports. The report series are
+  // 'promotion' (premier defers card-less match-day opens), so the switch is the only gate.
   const K1 = `s-sqe-k1-${RUN}`;
-  await seedSeries(request, K1, [
-    { id: 'f1', date: TODAY, time: at('09'), home: 'harlequins', away: 'ilembe' },
-  ]);
+  await seedSeries(
+    request,
+    K1,
+    [{ id: 'f1', date: TODAY, time: at('09'), home: 'harlequins', away: 'ilembe' }],
+    'promotion',
+  );
   await syncNow(request);
   expect((await reportsFor(request, K1)).length).toBe(2);
   const issued = await mintReportLink(K1, 'harlequins');
@@ -875,10 +888,15 @@ test('kill switch: captainsReports off stops report opens but not squad links; a
   await putTenant(request, { ...features, captainsReports: false });
   try {
     const K2 = `s-sqe-k2-${RUN}`;
-    await seedSeries(request, K2, [
-      { id: 'f1', date: YESTERDAY, time: at('09'), home: 'verulam', away: 'warriors' },
-      { id: 'f2', date: TODAY, time: at('11'), home: 'verulam', away: 'warriors' },
-    ]);
+    await seedSeries(
+      request,
+      K2,
+      [
+        { id: 'f1', date: YESTERDAY, time: at('09'), home: 'verulam', away: 'warriors' },
+        { id: 'f2', date: TODAY, time: at('11'), home: 'verulam', away: 'warriors' },
+      ],
+      'promotion',
+    );
     const K3 = `s-sqe-k3-${RUN}`;
     await seedSeries(request, K3, [
       { id: 'f1', date: TOMORROW, time: at('08'), home: 'umlazi', away: 'warriors' },

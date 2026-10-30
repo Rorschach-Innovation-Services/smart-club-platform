@@ -1392,6 +1392,9 @@ export const createClubCaptainsReport = (
 ) => request<CaptainsReport>('/club/captains-reports', { method: 'POST', body });
 export const getCaptainsReports = (query: { status?: string; from?: string; to?: string } = {}) =>
   request<CaptainsReport[]>('/captains-reports', { query });
+/** The report's current fillable link, signed on demand (never cache it). 409 once void/submitted/expired. */
+export const getCaptainsReportLink = (id: string) =>
+  request<{ url: string }>(`/captains-reports/${encodeURIComponent(id)}/link`);
 /** Clubs a report notice cannot reach (no chair email or cell) — sync tenants only. */
 export const getCaptainsReportContactGaps = () =>
   request<{ enabled: boolean; clubs: Array<{ id: string; name: string }> }>(
@@ -1501,6 +1504,9 @@ export const resendSquadRequest = (id: string) =>
   request<{ request: SquadRequestView; notice: string }>(`${adminSquadPath(id)}/resend`, {
     method: 'POST',
   });
+/** A PENDING request's current link, signed on demand (never cache it; dies on the next Resend). */
+export const getSquadRequestLink = (id: string) =>
+  request<{ url: string }>(`${adminSquadPath(id)}/link`);
 /** Void a request; a submitted squad is also withdrawn from medicoach. */
 export const voidSquadRequest = (id: string) =>
   request<{ request: SquadRequestView; voidPushQueued: boolean }>(`${adminSquadPath(id)}/void`, {

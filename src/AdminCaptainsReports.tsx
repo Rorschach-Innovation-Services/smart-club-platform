@@ -5,7 +5,8 @@
  * file"…), the appointed umpires, and a low-ratings filter (any criterion ≤ 2). There is no
  * due date. A banner lists clubs a notice cannot reach (no chair contact). A row opens the
  * read-only, printable report, where a free-text umpire can be added to the registry or
- * linked to an existing umpire so its ratings count for them.
+ * linked to an existing umpire so its ratings count for them. A pending, unexpired report's
+ * row can copy the current recipient's link to share by hand.
  */
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -17,7 +18,8 @@ import {
   matchLine,
 } from './CaptainsReport';
 import { avgRating, hasLowRating } from '../packages/engine/src/captainsReport';
-import { getCaptainsReportContactGaps } from './api';
+import { getCaptainsReportContactGaps, getCaptainsReportLink } from './api';
+import { useCopyLink } from './copyLink';
 import { qk } from './query';
 import type { CaptainsReport, CaptainsReportDelivery, ReportUmpireEntry } from './types';
 
@@ -29,6 +31,16 @@ const STATUS_CHIPS: Array<{ key: StatusFilter; label: string }> = [
   { key: 'submitted', label: 'Submitted' },
   { key: 'void', label: 'Void' },
 ];
+
+/** Copy link applies to a pending report whose link has not expired (mirrors the API's 409s). */
+export function canCopyReportLink(r: CaptainsReport, nowMs = Date.now()): boolean {
+  return r.status === 'pending' && (!r.linkExpiresAt || Date.parse(r.linkExpiresAt) > nowMs);
+}
+
+/** Why Copy link is disabled on a pending row (null = it is not): mirrors `canCopyReportLink`. */
+export function copyReportLinkBlockedReason(r: CaptainsReport, nowMs = Date.now()): string | null {
+  return canCopyReportLink(r, nowMs) ? null : 'Unavailable: the link has expired';
+}
 
 const matchesStatus = (r: CaptainsReport, f: StatusFilter) => (f === 'all' ? true : r.status === f);
 
@@ -212,6 +224,10 @@ export function AdminCaptainsReportsView({
   const [openId, setOpenId] = useState<string | null>(null);
   // An attributed report replaces the list copy until the list refetches.
   const [patched, setPatched] = useState<Record<string, CaptainsReport>>({});
+  const copyLink = useCopyLink(
+    getCaptainsReportLink,
+    'It stops working if the report is reopened or sent to someone else.',
+  );
   const gaps = useQuery({
     queryKey: qk.captainsReportContactGaps(),
     queryFn: getCaptainsReportContactGaps,
@@ -237,6 +253,7 @@ export function AdminCaptainsReportsView({
 
   return (
     <div>
+      {copyLink.node}
       <div className="page-head">
         <div className="ph-left">
           <div className="ph-crumb">Union office / Captain's reports</div>
@@ -433,6 +450,21 @@ export function AdminCaptainsReportsView({
                           {r.status === 'submitted' && (
                             <Btn tone="outline" size="sm" onClick={() => setOpenId(r.id)}>
                               View
+                            </Btn>
+                          )}
+                          {r.status === 'pending' && (
+                            <Btn
+                              tone="outline"
+                              size="sm"
+                              disabled={copyLink.busyId === r.id || !canCopyReportLink(r)}
+                              aria-label={`Copy link — ${matchLine(r)}, ${r.clubName}`}
+                              title={
+                                copyReportLinkBlockedReason(r) ??
+                                'Copy the current link to share by hand'
+                              }
+                              onClick={() => copyLink.copy(r.id)}
+                            >
+                              Copy link
                             </Btn>
                           )}
                         </td>

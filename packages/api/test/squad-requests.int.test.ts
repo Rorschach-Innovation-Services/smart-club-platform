@@ -46,6 +46,23 @@ const SC = 'league:premier';
 const LINK_SECRET = 'local-dev-captains-report-link-secret'; // env.ts's LOCAL_AUTH fallback
 const K = (n: number) => String(n).repeat(64).slice(0, 64);
 
+/** Run `fn` with SST_STAGE=prod and the link base left on its localhost fallback. */
+async function onProdWithLoopbackBase<T>(fn: () => T | Promise<T>): Promise<T> {
+  const prior = {
+    SST_STAGE: process.env.SST_STAGE,
+    CAPTAINS_REPORT_LINK_BASE_URL: process.env.CAPTAINS_REPORT_LINK_BASE_URL,
+  };
+  process.env.SST_STAGE = 'prod';
+  delete process.env.CAPTAINS_REPORT_LINK_BASE_URL;
+  try {
+    return await fn();
+  } finally {
+    for (const [k, v] of Object.entries(prior))
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+  }
+}
+
 let ddb: Server;
 let repo: typeof import('../src/repo.js');
 let squad: typeof import('../src/squad-requests.js');
@@ -1670,6 +1687,42 @@ describe('admin resend + void', () => {
     assert.equal(rows.length, 1);
     assert.equal(rows[0].requestId, ID);
     assert.equal(rows[0].op, 'void');
+  });
+
+  const copyLink = (auth = ADMIN, id = ID) =>
+    app.request(`/admin/squad-requests/${encodeURIComponent(id)}/link`, { headers: h(auth) });
+
+  test('copy link: signs the current recipient link on demand, no-store, round-trips', async () => {
+    await opened();
+    const res = await copyLink();
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+    const { url } = (await res.json()) as { url: string };
+    const token = url.split('/sq/')[1];
+    assert.ok(token, url);
+    const check = squad.verifySquadLinkToken(token, LINK_SECRET, Date.now());
+    assert.ok(check.ok);
+    const r = await reqOf('umzinto');
+    assert.equal(check.payload.q, ID);
+    assert.equal(check.payload.r, r.recipient.memberId);
+    assert.equal((await linkGet(token)).status, 200, 'the copied link loads the form');
+  });
+
+  test('copy link: admin-only (rep 403), unknown 404, submitted/void 409', async () => {
+    await opened();
+    assert.equal((await copyLink(REP_UMZ)).status, 403);
+    assert.equal((await copyLink(ADMIN, `${S1}~nope~umzinto`)).status, 404);
+    await submit();
+    assert.equal((await copyLink()).status, 409);
+    assert.equal((await post('void')).status, 200);
+    assert.equal((await copyLink()).status, 409);
+  });
+
+  test('copy link: 503 on prod when the link base is loopback (never a dead link)', async () => {
+    await opened();
+    const res = await onProdWithLoopbackBase(() => copyLink());
+    assert.equal(res.status, 503);
+    assert.equal((await copyLink()).status, 200, 'env restored: the same link signs again');
   });
 });
 
