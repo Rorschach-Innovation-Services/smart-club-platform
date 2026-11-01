@@ -109,6 +109,9 @@ describe('AdminScorersView', () => {
       fullName: null,
       phone: null,
       email: 't@example.org',
+      idNumber: null,
+      emergencyPhone: null,
+      address: null,
     });
   });
 
@@ -119,12 +122,18 @@ describe('AdminScorersView', () => {
     const phone = within(form).getByLabelText('Phone');
     await user.clear(phone);
     await user.type(phone, '0830000000');
+    await user.type(within(form).getByLabelText('ID number'), ' X123 ');
+    await user.type(within(form).getByLabelText('Emergency contact'), '0820000000');
+    await user.type(within(form).getByLabelText('Home address'), '1 Test Rd');
     await user.click(within(form).getByRole('button', { name: 'Save' }));
     expect(onPatch).toHaveBeenCalledWith('sc-pillay', {
       displayName: 'K.Pillay',
       fullName: null,
       phone: '0830000000',
       email: null,
+      idNumber: 'X123',
+      emergencyPhone: '0820000000',
+      address: '1 Test Rd',
     });
     await user.click(within(rowOf('L.Naidoo')).getByRole('button', { name: 'Deactivate' }));
     expect(onPatch).toHaveBeenCalledWith('sc-naidoo', { active: false });

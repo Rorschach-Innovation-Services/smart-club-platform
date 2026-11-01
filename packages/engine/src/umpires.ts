@@ -58,6 +58,12 @@ export interface Scorer {
   fullName?: string;
   phone?: string;
   email?: string;
+  /** National ID / passport number. PII: admin-only, never shown in lists. */
+  idNumber?: string;
+  /** Emergency contact phone. PII: admin-only. */
+  emergencyPhone?: string;
+  /** Home address. PII: admin-only, never shown in lists. */
+  address?: string;
   active: boolean;
   /** Set when this entry was merged into another; the target id. */
   mergedInto?: string;

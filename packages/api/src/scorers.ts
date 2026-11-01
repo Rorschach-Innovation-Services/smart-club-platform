@@ -16,6 +16,9 @@ export interface ScorerInput {
   fullName?: string | null;
   phone?: string | null;
   email?: string | null;
+  idNumber?: string | null;
+  emergencyPhone?: string | null;
+  address?: string | null;
   active?: boolean;
 }
 
@@ -52,6 +55,14 @@ export function parseScorerInput(raw: unknown, mode: 'create' | 'patch'): Scorer
   if (email !== undefined) {
     if (email && !EMAIL_RE.test(email)) throw new HttpError(400, 'email is not valid');
     out.email = email;
+  }
+  for (const [k, max] of [
+    ['idNumber', 20],
+    ['emergencyPhone', 30],
+    ['address', 200],
+  ] as const) {
+    const v = optionalText(body, k, max);
+    if (v !== undefined) out[k] = v;
   }
   if (body.active !== undefined) {
     if (mode === 'create') throw new HttpError(400, 'a new scorer is always active');
@@ -96,7 +107,14 @@ export function applyScorerInput(
     updatedAt: at,
   };
   if (input.displayName !== undefined) next.displayName = input.displayName;
-  for (const k of ['fullName', 'phone', 'email'] as const) {
+  for (const k of [
+    'fullName',
+    'phone',
+    'email',
+    'idNumber',
+    'emergencyPhone',
+    'address',
+  ] as const) {
     const v = input[k];
     if (v === undefined) continue;
     if (v === null) delete next[k];

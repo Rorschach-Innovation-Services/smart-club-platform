@@ -20,6 +20,7 @@
     "import-planb": "tsx src/import-planb-fixtures.ts",
     "create-recipe-knockouts": "tsx src/create-recipe-knockouts.ts",
     "import-umpire-appointments": "tsx src/import-umpire-appointments.ts",
+    "import-scorers": "tsx src/import-scorers.ts",
     "configure-tenant-docs": "tsx src/configure-tenant-docs.ts",
     "set-tenant-districts": "tsx src/set-tenant-districts.ts",
     "import-titans-compliance": "tsx src/import-titans-compliance.ts",
