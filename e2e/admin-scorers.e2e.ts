@@ -1,5 +1,12 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
-import { API_BASE, RUN, adminAuthHeader, apiHeaders, signInAsAdmin } from './helpers';
+import {
+  API_BASE,
+  RUN,
+  adminAuthHeader,
+  apiHeaders,
+  repAuthHeader,
+  signInAsAdmin,
+} from './helpers';
 import { createSeries, fixture, getSeries, ground } from './fixtures-helpers';
 
 /**
@@ -74,6 +81,51 @@ test('an admin adds a scorer from the Scorers page', async ({ page, request }) =
   await expect(page.locator('aside.nav .nav-item', { hasText: 'Scorers' })).toContainText(
     String(n),
   );
+});
+
+test('scorer PII: edit form round-trips, list shows emergency only, admin-only API', async ({
+  page,
+  request,
+}) => {
+  const name = `E2E Scorer PII ${RUN}`;
+  const idNumber = rsaId();
+  const created = await postJson<{ id: string }>(request, '/scorers', { displayName: name });
+
+  await signInAsAdmin(page);
+  const table = await openScorers(page);
+  const row = table.getByRole('row').filter({ hasText: name });
+  await row.getByRole('button', { name: 'Edit' }).click();
+  const form = page.getByRole('group', { name: `Edit ${name}` });
+  await form.getByLabel('ID number').fill(idNumber);
+  await form.getByLabel('Emergency contact').fill('+27820000123');
+  await form.getByLabel('Home address').fill('12 Synthetic Lane, Testville');
+  await form.getByRole('button', { name: 'Save' }).click();
+  await expect(form).toHaveCount(0);
+
+  // The list shows the emergency contact but never the ID number or address.
+  await expect(row).toContainText('Emergency: +27820000123');
+  await expect(row).not.toContainText(idNumber);
+  await expect(row).not.toContainText('Synthetic Lane');
+
+  // The edit form reloads the stored values.
+  await row.getByRole('button', { name: 'Edit' }).click();
+  await expect(form.getByLabel('ID number')).toHaveValue(idNumber);
+  await expect(form.getByLabel('Home address')).toHaveValue('12 Synthetic Lane, Testville');
+
+  // Admin GET carries the fields; a club rep is refused the register outright.
+  const res = await request.get(`${API_BASE}/scorers`, { headers: admin() });
+  const stored = ((await res.json()) as Array<Record<string, string>>).find(
+    (x) => x.id === created.id,
+  );
+  expect(stored).toMatchObject({
+    idNumber,
+    emergencyPhone: '+27820000123',
+    address: '12 Synthetic Lane, Testville',
+  });
+  const rep = await request.get(`${API_BASE}/scorers`, {
+    headers: apiHeaders(repAuthHeader('umlazi')),
+  });
+  expect(rep.status()).toBe(403);
 });
 
 test('merging a scorer moves its appointment and keeps the umpires', async ({ page, request }) => {

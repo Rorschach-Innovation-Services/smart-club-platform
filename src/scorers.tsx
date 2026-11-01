@@ -77,15 +77,29 @@ interface ScorerDraft {
   fullName: string;
   phone: string;
   email: string;
+  idNumber: string;
+  emergencyPhone: string;
+  address: string;
 }
 
-const emptyDraft: ScorerDraft = { displayName: '', fullName: '', phone: '', email: '' };
+const emptyDraft: ScorerDraft = {
+  displayName: '',
+  fullName: '',
+  phone: '',
+  email: '',
+  idNumber: '',
+  emergencyPhone: '',
+  address: '',
+};
 
 const draftOf = (u: Scorer): ScorerDraft => ({
   displayName: u.displayName,
   fullName: u.fullName ?? '',
   phone: u.phone ?? '',
   email: u.email ?? '',
+  idNumber: u.idNumber ?? '',
+  emergencyPhone: u.emergencyPhone ?? '',
+  address: u.address ?? '',
 });
 
 function matches(u: Scorer, q: string): boolean {
@@ -148,6 +162,9 @@ export function AdminScorersView({
     fullName: d.fullName.trim() || null,
     phone: d.phone.trim() || null,
     email: d.email.trim() || null,
+    idNumber: d.idNumber.trim() || null,
+    emergencyPhone: d.emergencyPhone.trim() || null,
+    address: d.address.trim() || null,
   });
 
   const draftFields = (d: ScorerDraft, set: (d: ScorerDraft) => void, idPrefix: string) => (
@@ -158,6 +175,9 @@ export function AdminScorersView({
           ['fullName', 'Full name', 'optional'],
           ['phone', 'Phone', 'optional'],
           ['email', 'Email', 'optional'],
+          ['idNumber', 'ID number', 'optional'],
+          ['emergencyPhone', 'Emergency contact', 'optional'],
+          ['address', 'Home address', 'optional'],
         ] as const
       ).map(([k, l, ph]) => (
         <label key={k} className="ump-form-field" htmlFor={`${idPrefix}-${k}`}>
@@ -341,10 +361,13 @@ export function AdminScorersView({
                     {u.fullName && <div className="ump-sub">{u.fullName}</div>}
                   </td>
                   <td data-label="Contact">
-                    {u.phone || u.email ? (
+                    {u.phone || u.email || u.emergencyPhone ? (
                       <>
                         {u.phone && <div>{u.phone}</div>}
                         {u.email && <div className="ump-sub">{u.email}</div>}
+                        {u.emergencyPhone && (
+                          <div className="ump-sub">Emergency: {u.emergencyPhone}</div>
+                        )}
                       </>
                     ) : (
                       <span className="ump-none">—</span>
