@@ -82,7 +82,7 @@ On **prod**, step 5 is deferred into the medicoach rollout's uniform order: afte
 ## Silent release (`--release`)
 
 - Prints `fixtureReminders.enabled` and `features.medicoachSync` and **refuses** if either is on. A CLI release skips the console's medicoach requeue, so it is only valid while sync is off and the bundle carry owns the initial load.
-- Re-reads every `s-tuskers-*` series and runs the console's release gate per series: `findClashes` against every tenant series with the tenant's aliases. A series with any clash is **held** and listed; the rest get `approved: true, released: true, releasedAt`.
+- Re-reads only the manifest's writable series (`WRITABLE_SERIES_IDS`, narrowed by `--only`) — never a `s-tuskers-*` prefix sweep, so a console-created series such as `s-tuskers-premier-league-t20-ko` is never released by this CLI — and runs the console's release gate per series: `findClashes` against every tenant series with the tenant's aliases. A series with any clash is **held** and listed; the rest get `approved: true, released: true, releasedAt`.
 - Sends nothing. Release fires no notices server-side, and this CLI imports nothing from `notify/`.
 - Exit code 1 when anything was held or changed mid-run.
 

@@ -26,7 +26,7 @@
  *
  * --release is SILENT by construction: release sends nothing server-side (the console's
  * `applySeriesPatch` fires no notice either), and this file imports nothing from `notify/`. It
- * re-reads every `s-tuskers-*` series, re-runs the console's release clash gate per series
+ * re-reads the manifest's writable series (never a `s-tuskers-*` prefix sweep), re-runs the console's release clash gate per series
  * (`findClashes` against every tenant series, tenant aliases — fail-closed parity), and writes
  * `approved/released: true` + timestamps through `writeSeriesFromSnapshot`. It REFUSES when the
  * tenant has `fixtureReminders.enabled` or `features.medicoachSync` on: a CLI release skips the
@@ -517,6 +517,44 @@ export function releasePreambleBlockers(config: TenantConfig | null): string[] {
   return out;
 }
 
+/**
+ * The series a --release run may touch: only the manifest's writable ids (∩ --only). Never a
+ * prefix sweep — a console-created `s-tuskers-premier-league-t20-ko` must not be released here.
+ */
+export function releaseCandidates(allSeries: Series[], wanted: (id: string) => boolean): Series[] {
+  return allSeries.filter(
+    (s) => WRITABLE_SERIES_IDS.includes(String(s.id)) && wanted(String(s.id)),
+  );
+}
+
+/**
+ * Fatal-gate inputs. Un-scoped: everything the sheets reference. Scoped (--only): just what the
+ * in-scope `built` series reference — still fail-closed for any in-scope problem.
+ */
+export function scopedGateInputs(
+  outcome: BuildOutcome,
+  built: Series[],
+  scoped: boolean,
+): { missingClubs: string[]; leagueKeys: string[]; registryMisses: number } {
+  if (!scoped)
+    return {
+      missingClubs: outcome.missingClubs,
+      leagueKeys: TUSKERS_LEAGUE_KEYS,
+      registryMisses: [...outcome.registryMisses.values()].reduce((n, c) => n + c, 0),
+    };
+  const teams = new Set(built.flatMap((s) => (s.teams as string[] | undefined) ?? []));
+  return {
+    missingClubs: outcome.missingClubs.filter((c) => teams.has(c)),
+    leagueKeys: [...new Set(built.map((s) => (s as unknown as { leagueKey: string }).leagueKey))],
+    registryMisses: built.reduce(
+      (n, s) =>
+        n +
+        ((s.fixtures as WrittenFixture[] | undefined) ?? []).filter((f) => f.venueOverride).length,
+      0,
+    ),
+  };
+}
+
 export interface ReleasePlan {
   release: Array<{ current: Series; next: Series }>;
   held: Array<{ series: Series; clashes: Clash[] }>;
@@ -840,16 +878,18 @@ export async function runImport(args: Args) {
       `${clashes.length} venue clash(es) — no --allow-clashes exists; resolve with KZNICU`,
     );
   if (!args.parseOnly) {
-    for (const c of outcome.missingClubs)
+    // --only: gate on the in-scope series' inputs only (consistent with the report scoping).
+    const scope = scopedGateInputs(outcome, built, args.only.length > 0);
+    for (const c of scope.missingClubs)
       fatal.push(
         `club "${c}" is not on the tenant — run bootstrap-tuskers-fixture-prereqs (or pass --map-club)`,
       );
     const have = new Set((config!.leagues ?? []).map((l) => l.key));
-    for (const k of TUSKERS_LEAGUE_KEYS)
+    for (const k of scope.leagueKeys)
       if (!have.has(k)) fatal.push(`league key "${k}" is not configured on the tenant`);
-    if (args.confirm && misses)
+    if (args.confirm && scope.registryMisses)
       fatal.push(
-        `${misses} fixture(s) miss the venue registry — run bootstrap-tuskers-fixture-prereqs --confirm`,
+        `${scope.registryMisses} fixture(s) miss the venue registry — run bootstrap-tuskers-fixture-prereqs --confirm`,
       );
     for (const s of existing)
       if (builtIds.has(String(s.id)) && s.released)
@@ -992,9 +1032,7 @@ export async function runRelease(args: Args) {
     repo.listVenues(TUSKERS_TENANT),
   ]);
   const wanted = inScope(args);
-  const mine = allSeries.filter(
-    (s) => String(s.id).startsWith(TUSKERS_SERIES_PREFIX) && wanted(String(s.id)),
-  );
+  const mine = releaseCandidates(allSeries, wanted);
   const plan = planRelease(
     mine,
     allSeries,

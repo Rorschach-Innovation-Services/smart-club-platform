@@ -1019,7 +1019,8 @@ describe('--release (silent) and --revert --propagate-deletes', () => {
   });
 
   test('refuses when fixtureReminders is enabled or medicoach sync is on', () => {
-    assert.deepEqual(releaseRefusals(null), []);
+    assert.equal(releaseRefusals(null).length, 1, 'a missing tenant config is a refusal');
+    assert.equal(releaseRefusals(undefined).length, 1);
     assert.deepEqual(releaseRefusals({ fixtureReminders: { enabled: false } } as never), []);
     assert.equal(releaseRefusals({ fixtureReminders: { enabled: true } } as never).length, 1);
     assert.equal(releaseRefusals({ features: { medicoachSync: true } } as never).length, 1);

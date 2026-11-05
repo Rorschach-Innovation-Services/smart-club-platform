@@ -547,6 +547,45 @@ describe('build + release gate', () => {
     );
     assert.equal(cli.releasePreambleBlockers(null).length, 1);
   });
+
+  test('release scope is the manifest writable ids, never a prefix sweep', () => {
+    const mk = (id: string) => ({ id, fixtures: [] }) as unknown as Series;
+    const all = [
+      ...map.WRITABLE_SERIES_IDS.map(mk),
+      mk(map.T20_KO_SERIES_ID),
+      mk('s-tuskers-something-else'),
+      mk('s-other'),
+    ];
+    const ids = (xs: Series[]) => xs.map((s) => String(s.id));
+    assert.deepEqual(ids(cli.releaseCandidates(all, () => true)), map.WRITABLE_SERIES_IDS);
+    assert.ok(!ids(cli.releaseCandidates(all, () => true)).includes(map.T20_KO_SERIES_ID));
+    assert.deepEqual(ids(cli.releaseCandidates(all, (id) => id === map.VETS_SERIES_ID)), [
+      map.VETS_SERIES_ID,
+    ]);
+  });
+
+  test('--only scopes the fatal gate inputs to the in-scope series (still fail-closed)', () => {
+    const outcome = {
+      missingClubs: ['club-a', 'club-b'],
+      registryMisses: new Map([['Ground X', 3]]),
+    } as never;
+    const built = [
+      {
+        id: map.VETS_SERIES_ID,
+        leagueKey: 'veterans-league',
+        teams: ['club-b', 'club-c'],
+        fixtures: [{ venueOverride: 'Ground X' }, {}],
+      },
+    ] as unknown as Series[];
+    const all = cli.scopedGateInputs(outcome, built, false);
+    assert.deepEqual(all.missingClubs, ['club-a', 'club-b']);
+    assert.deepEqual(all.leagueKeys, map.TUSKERS_LEAGUE_KEYS);
+    assert.equal(all.registryMisses, 3);
+    const scoped = cli.scopedGateInputs(outcome, built, true);
+    assert.deepEqual(scoped.missingClubs, ['club-b']);
+    assert.deepEqual(scoped.leagueKeys, ['veterans-league']);
+    assert.equal(scoped.registryMisses, 1);
+  });
 });
 
 describe('CLI args', () => {

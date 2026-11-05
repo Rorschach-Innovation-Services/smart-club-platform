@@ -2753,7 +2753,8 @@ export function planTitansRelease(
 /** Why a --release run must not start: the tenant could send something, or sync would requeue. */
 export function releaseRefusals(config: TenantConfig | null | undefined): string[] {
   const out: string[] = [];
-  if (config?.fixtureReminders?.enabled)
+  if (!config) return [`no tenant config for "${TITANS_TENANT}"`];
+  if (config.fixtureReminders?.enabled)
     out.push(
       'fixtureReminders is ENABLED — the reminder cron would message clubs about released fixtures',
     );
