@@ -115,6 +115,7 @@ import { ResyncDialog, isResyncRequired } from './ResyncDialog';
 import { CaptainsReportView, CaptainsReportLinkPage } from './CaptainsReport';
 import { AdminCaptainsReportsView } from './AdminCaptainsReports';
 import { SquadSelectionLinkPage } from './SquadSelection';
+import { DocRequestLinkPage } from './DocRequestLinkPage';
 import { AdminSquadRequestsView } from './AdminSquadRequests';
 import { AdminMedicoachSyncView } from './AdminMedicoachSync';
 import { erasureSummary } from './PlayerDetailModal';
@@ -376,7 +377,9 @@ function AppRoutes() {
     pathname.startsWith('/verify/') ||
     pathname.startsWith('/r/') ||
     // The pre-match squad link (/sq/<token>) likewise names its own tenant.
-    pathname.startsWith('/sq/');
+    pathname.startsWith('/sq/') ||
+    // …and so does a player's document-request link (/d/<token>).
+    pathname.startsWith('/d/');
 
   // Tenant branding/config (public). Apply theme as soon as it loads.
   // retry the tenant config: it carries the league/district catalogue the authed app
@@ -407,6 +410,8 @@ function AppRoutes() {
       <Route path="/r/:token" element={<CaptainsReportLinkPage />} />
       {/* Public pre-match squad link (editable until expiry; the token is the capability). */}
       <Route path="/sq/:token" element={<SquadSelectionLinkPage />} />
+      {/* Public player document-request upload link (the token is the capability). */}
+      <Route path="/d/:token" element={<DocRequestLinkPage />} />
       <Route
         path="/*"
         element={

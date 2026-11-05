@@ -1683,6 +1683,57 @@ export async function sendSquadSelectionDueEmail(
   return { messageId: res.MessageId ?? '' };
 }
 
+// ───────────────────────── Player document request ─────────────────────────
+
+export interface DocRequestEmailInput {
+  to: string;
+  firstName: string;
+  /** The union's display name ("KZN Dolphins"). */
+  orgName: string;
+  clubName: string;
+  /** "ID document" */
+  docName: string;
+  /** The signed upload link. NEVER logged. */
+  link: string;
+  /** When the link stops working, e.g. "Thu 19 Nov 2026". */
+  expiresText: string;
+}
+
+/** Build the document-request email. Pure — exported so tests can assert the copy. */
+export function docRequestEmailContent(input: Omit<DocRequestEmailInput, 'to'>): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const greet = input.firstName || 'there';
+  const subject = `${input.orgName}: please upload your ${input.docName}`;
+  const lead = `${input.orgName} has asked you to upload your ${input.docName} for your registration with ${input.clubName}.`;
+  const terms = `The link is personal to you and expires on ${input.expiresText}. Images (JPG, PNG) or PDF, up to 5 MB.`;
+  const text =
+    `Hi ${greet},\n\n${lead}\n\n` +
+    `Upload it here (no sign-in needed):\n\n${input.link}\n\n` +
+    `${terms}\n\n` +
+    `Thank you,\nThe ${input.orgName} office`;
+  const e = escapeHtml;
+  const html =
+    EMAIL_WRAP_OPEN +
+    `<p>Hi ${e(greet)},</p>` +
+    `<p>${e(lead)}</p>` +
+    `<p><a href="${e(input.link)}" style="color:#1D9E75;font-weight:600">Upload your ${e(input.docName)}</a> (no sign-in needed)</p>` +
+    `<p>${e(terms)}</p>` +
+    `<p>Thank you,<br/>The ${e(input.orgName)} office</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+/** Send the document-request email (the link rides in the body; never logged). */
+export async function sendDocRequestEmail(
+  input: DocRequestEmailInput,
+): Promise<{ messageId: string }> {
+  const { to, ...rest } = input;
+  return sendSesEmail(to, docRequestEmailContent(rest), `${input.docName} request`);
+}
+
 export interface SyncConflictEmailInput {
   to: string;
   orgName: string;

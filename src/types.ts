@@ -934,7 +934,9 @@ export interface ClubCommEvent {
     | 'fixture-reminder'
     // Destination chair's clearance heads-up, and the pending-clearance reminder (manual or cron).
     | 'clearance-inbound'
-    | 'clearance-reminder';
+    | 'clearance-reminder'
+    // Admin document request to the club's players (PII-free per-channel summary).
+    | 'doc-request';
   summary?: string;
 }
 
@@ -1693,6 +1695,43 @@ export interface SquadRequestView {
 }
 
 /** GET/PUT /squad-link/:token — the request plus the club roster (names + opaque ids). */
+/** The public /d/<token> page payload (first name + doc + branding; never a key). */
+export interface LinkedDocRequest {
+  state: 'pending' | 'completed';
+  firstName: string;
+  docName: string;
+  clubName: string;
+  linkExpiresAt: string;
+  maxBytes: number;
+  tenantBranding: { name: string; logoUrl: string; colors: Record<string, string> };
+}
+
+/** One row of GET /admin/doc-requests (the player register's "ID doc requested" indicator). */
+export interface DocRequestSummary {
+  clubId: string;
+  naturalKey: string;
+  docKey: string;
+  status: 'pending' | 'completed' | 'cancelled';
+  createdAt: string;
+  lastSentAt: string;
+  linkExpiresAt: string;
+  completedAt?: string;
+}
+
+export type DocRequestSendStatus =
+  | 'sent'
+  | 'failed'
+  | 'skipped_minor'
+  | 'skipped_no_contact'
+  | 'skipped_whatsapp_unavailable'
+  | 'skipped_not_found';
+
+export interface DocRequestSendResult {
+  clubId: string;
+  displayName: string;
+  status: DocRequestSendStatus;
+}
+
 export interface LinkedSquadRequest {
   request: SquadRequestView;
   roster: Array<{ id: string; name: string }>;

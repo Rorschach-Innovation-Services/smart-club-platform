@@ -22,6 +22,8 @@ const {
   captainsReportDueParams,
   squadSelectionDueParams,
   sendSquadSelectionDueWhatsApp,
+  playerDocRequestParams,
+  sendPlayerDocRequestWhatsApp,
   captainsReportOpsDigestParams,
   sendCaptainsReportOpsDigestWhatsApp,
   urlButtonComponent,
@@ -85,6 +87,14 @@ const BUILDERS = [
       recipientName: 'Sanele Mthembu',
       orgName: 'KZN Dolphins',
       match: 'Umzinto v African Warriors on Sun 4 Oct 2026',
+    }),
+  },
+  {
+    key: 'playerDocRequest' as const,
+    params: playerDocRequestParams({
+      firstName: 'Sipho',
+      orgName: 'KZN Dolphins',
+      docName: 'ID document',
     }),
   },
   {
@@ -592,6 +602,36 @@ describe('squad selection template (captain squad links)', () => {
     // The gate still refuses it if ever flipped back to pending.
     assert.throws(
       () => assertTemplateSendable({ ...def, status: 'pending' as const }),
+      WhatsAppTemplatePendingError,
+    );
+  });
+});
+
+describe('player document request template', () => {
+  const def = WHATSAPP_TEMPLATES.playerDocRequest;
+
+  test('three body params, the /d/ URL button, pending until Meta approves', () => {
+    assert.equal(def.name, 'player_doc_request');
+    assert.equal(def.paramCount, 3);
+    assert.equal(def.status, 'pending');
+    assert.equal(def.urlButton.urlTemplate, 'https://platform.club.medicoach.co.za/d/{{1}}');
+    for (const p of playerDocRequestParams({
+      firstName: 'A',
+      orgName: 'O',
+      docName: 'ID document',
+    }))
+      assert.doesNotMatch(p.text, /https?:\/\//);
+  });
+
+  test('the sender refuses while the template is pending', async () => {
+    await assert.rejects(
+      sendPlayerDocRequestWhatsApp({
+        to: '+27820000000',
+        firstName: 'A',
+        orgName: 'O',
+        docName: 'ID document',
+        token: 'tok.sig',
+      }),
       WhatsAppTemplatePendingError,
     );
   });

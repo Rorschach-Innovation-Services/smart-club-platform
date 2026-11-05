@@ -20,12 +20,13 @@ import dayjs from 'dayjs';
 import dayjsUtc from 'dayjs/plugin/utc.js';
 import dayjsCustomParseFormat from 'dayjs/plugin/customParseFormat.js';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   S3Client,
   PutObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
   CreateMultipartUploadCommand,
@@ -233,9 +234,25 @@ import {
   notifyPostponementOpened,
   notifyPostponementCountered,
   notifyPostponementResolved,
+  sendDocRequestNotice,
+  TEMPLATE_PENDING,
   type Channel,
   type SendResult,
 } from './notify/index.js';
+import { playerDocRequestTemplateReady, toE164 } from './notify/whatsapp.js';
+import {
+  DOC_REQUEST_DOCS,
+  DOC_REQUEST_LINK_DAYS,
+  DOC_REQUEST_UPLOADS_PER_HOUR,
+  aggregateDocRequestStatus,
+  completeDocRequestUpload,
+  docRequestLinkPayload,
+  docRequestSkipReason,
+  fmtDocRequestExpiry,
+  loadLinkedDocRequest,
+  signDocRequestLinkToken,
+  type DocRequestSendStatus,
+} from './doc-requests.js';
 import { findTeamBusy, type TeamBusyHit } from './team-busy.js';
 import { isSlotRef } from '../../engine/src/formats.js';
 import {
@@ -3278,6 +3295,8 @@ app.patch('/clubs/:id/players/:nk/id-doc', async (c) => {
       },
       version: current.version,
     });
+    // The document arrived by the console: any pending link request for it dies now.
+    await repo.completeDocRequest(ra.tenant, nk, 'idDoc', { at: now(), via: 'console' });
     return c.json(updated);
   } catch (err) {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'player changed; refetch');
@@ -8563,6 +8582,126 @@ app.post('/squad-link/:token/forward', async (c) => {
     { tenant, request, candidateId: body.candidateId },
   ).catch(squadFlowError);
   return c.json(await squadLinkPayload(repo, tenant, updated, true, captainsReportLinkSecret()));
+});
+
+/* ─── Player document requests (public `/doc-request-link/:token`, the `/d/<token>` page) ───
+   The token (HMAC, `docreq-link.v1.`) is the capability. GET resolves state; upload-url
+   presigns under the club's prefix (10/hour per link); complete validates the stored object
+   itself and writes `idDocMeta`. Logic and terminal states live in doc-requests.ts. */
+
+async function linkedDocRequest(c: Context<HonoEnv>) {
+  c.header('Cache-Control', 'no-store');
+  c.header('Referrer-Policy', 'no-referrer');
+  return loadLinkedDocRequest(
+    repo,
+    c.req.param('token') ?? '',
+    Date.now(),
+    captainsReportLinkSecret(),
+  );
+}
+
+/** The local sink's on-disk path for a `local/` key (dev:local only). */
+const localUploadPathForKey = (objectKey: string) =>
+  localUploadFilePath(`/local-uploads/${objectKey}`);
+
+/** Best-effort delete of an uploaded object (S3, or the dev:local sink). Never throws. */
+async function deleteUploadedObject(objectKey: string): Promise<void> {
+  try {
+    if (objectKey.startsWith('local/')) {
+      if (isLocalUploadsMode()) await unlink(localUploadPathForKey(objectKey));
+      return;
+    }
+    await s3.send(new DeleteObjectCommand({ Bucket: UPLOADS_BUCKET, Key: objectKey }));
+  } catch (err) {
+    console.warn('doc-request: best-effort object delete failed', (err as Error)?.name);
+  }
+}
+
+/** The stored object's real size + type (S3 HEAD; the local sink derives type from the ext). */
+async function headUploadedObject(
+  objectKey: string,
+): Promise<{ size: number; contentType: string } | null> {
+  if (objectKey.startsWith('local/')) {
+    if (!isLocalUploadsMode()) return null;
+    try {
+      const st = await stat(localUploadPathForKey(objectKey));
+      const ext = objectKey.split('.').pop();
+      const contentType =
+        ext === 'jpg' ? 'image/jpeg' : ext === 'png' ? 'image/png' : 'application/pdf';
+      return { size: st.size, contentType };
+    } catch {
+      return null;
+    }
+  }
+  try {
+    const res = await s3.send(new HeadObjectCommand({ Bucket: UPLOADS_BUCKET, Key: objectKey }));
+    return { size: res.ContentLength ?? 0, contentType: res.ContentType ?? '' };
+  } catch (err) {
+    const name = (err as { name?: string })?.name;
+    if (name === 'NotFound' || name === 'NoSuchKey') return null;
+    throw err;
+  }
+}
+
+app.get('/doc-request-link/:token', async (c) => {
+  const found = await linkedDocRequest(c);
+  const [cfg, club] = await Promise.all([
+    repo.getTenantConfig(found.tenant),
+    repo.getClub(found.tenant, found.request.clubId),
+  ]);
+  return c.json(docRequestLinkPayload(found, cfg, club?.name ?? ''));
+});
+
+app.post('/doc-request-link/:token/upload-url', async (c) => {
+  const found = await linkedDocRequest(c);
+  const { tenant, request } = found;
+  if (request.status !== 'pending')
+    throw new HttpError(409, 'this request is already complete', { kind: 'completed' });
+  const allowed = await repo.bumpDocRequestUploadCounter(
+    tenant,
+    request.requestId,
+    now(),
+    DOC_REQUEST_UPLOADS_PER_HOUR,
+  );
+  if (!allowed) throw new HttpError(429, 'too many uploads — please try again later');
+  const { contentType } = await c.req
+    .json<{ contentType?: string }>()
+    .catch(() => ({ contentType: undefined }));
+  const ct = contentType && ID_DOC_TYPES.has(contentType) ? contentType : 'application/pdf';
+  const ext = ct === 'image/jpeg' ? 'jpg' : ct === 'image/png' ? 'png' : 'pdf';
+  // POPIA: a random name — never the natural key (keys.ts playerKey rule).
+  const name = `player-id-${randomUUID()}.${ext}`;
+  // Local mode has no S3 bucket: mint a `local/` key and point the "presigned" PUT at this
+  // server's own /local-uploads sink (same branch as the register flow).
+  if (isLocalUploadsMode()) {
+    const localKey = `local/${tenant}/${request.clubId}/${name}`;
+    const uploadUrl = `${new URL(c.req.url).origin}/local-uploads/${localKey}`;
+    return c.json({ uploadUrl, objectKey: localKey, contentType: ct });
+  }
+  const objectKey = `${tenant}/${request.clubId}/${name}`;
+  const url = await getSignedUrl(
+    s3,
+    new PutObjectCommand({ Bucket: UPLOADS_BUCKET, Key: objectKey, ContentType: ct }),
+    { expiresIn: 300 },
+  );
+  return c.json({ uploadUrl: url, objectKey, contentType: ct });
+});
+
+app.post('/doc-request-link/:token/complete', async (c) => {
+  const found = await linkedDocRequest(c);
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as { objectKey?: unknown };
+  await completeDocRequestUpload(
+    {
+      repo,
+      headObject: headUploadedObject,
+      deleteObject: deleteUploadedObject,
+      now,
+      isVersionConflict: (err) => err instanceof VersionConflictError,
+    },
+    found,
+    body.objectKey,
+  );
+  return c.json({ state: 'completed' });
 });
 
 /** A team id belongs to the club: the club id itself, or one of its named `tm_` sides. */
@@ -14125,6 +14264,205 @@ app.post('/admin/clearances/:cid/remind', async (c) => {
     clearanceReminderCommEvents(clearance, results, today, now(), ra.email),
   );
   return c.json({ results, reminded });
+});
+
+// ───────────────────── Admin: player document requests ─────────────────────
+
+/** Most players one "Request ID document" send may address (bounded per-request work). */
+const DOC_REQUEST_MAX_PLAYERS = 200;
+
+/** The base a doc-request email link uses: the tenant's canonical origin, never the request's. */
+const docRequestLinkOrigin = (tenant: string) =>
+  canonicalWebOrigin(tenant) ?? captainsReportLinkBase();
+
+/**
+ * Pending/completed document requests for the admin player register's "ID doc requested"
+ * indicator. One partition Query; served as {clubId, naturalKey, docKey, status, dates} only.
+ */
+app.get('/admin/doc-requests', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const list = await repo.listDocRequests(ra.tenant);
+  return c.json(
+    list.map((r) => ({
+      clubId: r.clubId,
+      naturalKey: r.naturalKey,
+      docKey: r.docKey,
+      status: r.status,
+      createdAt: r.createdAt,
+      lastSentAt: r.lastSentAt ?? r.createdAt,
+      linkExpiresAt: r.linkExpiresAt,
+      ...(r.completedAt ? { completedAt: r.completedAt } : {}),
+    })),
+  );
+});
+
+/**
+ * "Request ID document": email + WhatsApp each selected player a personal signed link
+ * (`/d/<token>`) to upload the document. Admin-only. Targeted reads only (one GetItem per
+ * player/club/request — never a scan). Per player: minors and players with no usable channel
+ * are skipped and reported (no request is created); a pending request at the same club is
+ * extended and re-signed; otherwise a fresh request is minted. Idempotent per
+ * (request, `idempotencyKey`) via the NOTIFY#docreq# ledger — a replayed POST sends nothing and
+ * reports the stored outcome; a claim whose every channel failed is released for a retry.
+ */
+app.post('/admin/doc-requests', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as {
+    players?: unknown;
+    docKey?: unknown;
+    idempotencyKey?: unknown;
+  };
+  const docKey = typeof body.docKey === 'string' ? body.docKey : 'idDoc';
+  const doc = DOC_REQUEST_DOCS[docKey];
+  if (!doc) throw new HttpError(400, `unknown document "${docKey}"`);
+  if (typeof body.idempotencyKey !== 'string' || !/^[A-Za-z0-9_-]{8,80}$/.test(body.idempotencyKey))
+    throw new HttpError(400, 'idempotencyKey required');
+  const idempotencyKey = body.idempotencyKey;
+  if (!Array.isArray(body.players) || body.players.length === 0)
+    throw new HttpError(400, 'select at least one player');
+  if (body.players.length > DOC_REQUEST_MAX_PLAYERS)
+    throw new HttpError(400, `at most ${DOC_REQUEST_MAX_PLAYERS} players per request`);
+  const targets: Array<{ clubId: string; naturalKey: string }> = [];
+  const seen = new Set<string>();
+  for (const p of body.players as Array<{ clubId?: unknown; naturalKey?: unknown }>) {
+    if (typeof p?.clubId !== 'string' || typeof p?.naturalKey !== 'string' || !p.naturalKey)
+      throw new HttpError(400, 'each player needs clubId and naturalKey');
+    const k = `${p.clubId}\u0000${p.naturalKey}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    targets.push({ clubId: p.clubId, naturalKey: p.naturalKey });
+  }
+
+  const cfg = await getTenantConfigCached(c, ra.tenant).catch(() => null);
+  const whatsappOn = hasFeature(cfg, 'whatsappInvites', true);
+  const whatsappUsable = whatsappOn && playerDocRequestTemplateReady();
+  const channels: Channel[] = whatsappOn ? ['email', 'whatsapp'] : ['email'];
+  const orgName = cfg ? orgCopy(cfg).name : ra.tenant;
+  const origin = docRequestLinkOrigin(ra.tenant);
+  const secret = captainsReportLinkSecret();
+  const clubCache = new Map<string, Promise<Club | null>>();
+  const clubOf = (id: string) => {
+    if (!clubCache.has(id)) clubCache.set(id, repo.getClub(ra.tenant, id));
+    return clubCache.get(id)!;
+  };
+
+  const results: Array<{
+    clubId: string;
+    naturalKey: string;
+    displayName: string;
+    status: DocRequestSendStatus;
+  }> = [];
+  const perClub = new Map<string, SendResult[]>();
+  const nowMs = Date.now();
+  const at = new Date(nowMs).toISOString();
+
+  for (const t of targets) {
+    const player = await repo.getPlayer(ra.tenant, t.clubId, t.naturalKey);
+    const club = player ? await clubOf(t.clubId) : null;
+    if (!player || !club) {
+      results.push({ ...t, displayName: 'Unknown player', status: 'skipped_not_found' });
+      continue;
+    }
+    const displayName = `${player.firstName ?? ''} ${player.lastName ?? ''}`.trim() || 'Player';
+    const skip = docRequestSkipReason(player, whatsappUsable, (cell) => !!toE164(cell ?? ''));
+    if (skip) {
+      results.push({ ...t, displayName, status: skip });
+      continue;
+    }
+
+    // Extend + re-sign a pending request at this club; otherwise mint a fresh one.
+    const existing = await repo.getDocRequest(ra.tenant, t.naturalKey, docKey);
+    const reuse = existing && existing.status === 'pending' && existing.clubId === t.clubId;
+    const requestId = reuse ? existing.requestId : randomUUID();
+    if (!(await repo.claimDocRequestNotify(ra.tenant, requestId, idempotencyKey))) {
+      // A replay of this exact send: nothing goes out again; report what was recorded.
+      const prior = reuse ? (existing.lastSendResults ?? []) : [];
+      results.push({
+        ...t,
+        displayName,
+        status: prior.length ? aggregateDocRequestStatus(prior, TEMPLATE_PENDING) : 'sent',
+      });
+      continue;
+    }
+    const linkExpiresAt = new Date(nowMs + DOC_REQUEST_LINK_DAYS * 24 * 3600 * 1000).toISOString();
+    const request = {
+      requestId,
+      clubId: t.clubId,
+      naturalKey: t.naturalKey,
+      docKey,
+      docName: doc.name,
+      requestedBy: ra.email,
+      createdAt: reuse ? existing.createdAt : at,
+      linkExpiresAt,
+      status: 'pending' as const,
+      ...(reuse && existing.lastSendResults ? { lastSendResults: existing.lastSendResults } : {}),
+      ...(reuse && existing.lastSentAt ? { lastSentAt: existing.lastSentAt } : {}),
+    };
+    await repo.putDocRequest(ra.tenant, request);
+    const token = signDocRequestLinkToken(
+      { t: ra.tenant, q: requestId, e: Math.floor(Date.parse(linkExpiresAt) / 1000) },
+      secret,
+    );
+    const { results: sendResults } = await sendDocRequestNotice({
+      player: { firstName: player.firstName, email: player.email, cell: player.cell },
+      orgName,
+      clubName: club.name,
+      docName: doc.name,
+      link: `${origin}/d/${token}`,
+      token,
+      expiresText: fmtDocRequestExpiry(linkExpiresAt),
+      channels,
+    });
+    if (sendResults.some((r) => r.status === 'sent')) {
+      await repo.completeDocRequestNotify(ra.tenant, requestId, idempotencyKey);
+    } else {
+      await repo.releaseDocRequestNotify(ra.tenant, requestId, idempotencyKey);
+    }
+    await repo.setDocRequestSendResults(
+      ra.tenant,
+      t.naturalKey,
+      docKey,
+      requestId,
+      sendResults,
+      at,
+    );
+    const list = perClub.get(t.clubId) ?? [];
+    list.push(...sendResults);
+    perClub.set(t.clubId, list);
+    results.push({
+      ...t,
+      displayName,
+      status: aggregateDocRequestStatus(sendResults, TEMPLATE_PENDING),
+    });
+  }
+
+  // Comm log: one PII-free summary row per club per channel (counts only).
+  for (const [clubId, sends] of perClub) {
+    const events: ClubCommEvent[] = [];
+    for (const channel of ['email', 'whatsapp'] as const) {
+      const mine = sends.filter((r) => r.channel === channel);
+      if (!mine.length) continue;
+      const n = (s: SendResult['status']) => mine.filter((r) => r.status === s).length;
+      const parts = [
+        n('sent') ? `${n('sent')} sent` : '',
+        n('skipped') ? `${n('skipped')} skipped` : '',
+        n('failed') ? `${n('failed')} failed` : '',
+      ].filter(Boolean);
+      events.push({
+        id: randomUUID(),
+        channel,
+        status: n('sent') ? 'sent' : n('failed') ? 'failed' : 'skipped',
+        at,
+        by: ra.email,
+        idempotencyKey: `docreq-${idempotencyKey}-${channel}`,
+        kind: 'doc-request',
+        summary: `${doc.name}: ${parts.join(' · ')}`,
+      });
+    }
+    await repo.appendClubCommEvents(ra.tenant, clubId, events);
+  }
+
+  return c.json({ results: results.map(({ naturalKey: _nk, ...r }) => r) });
 });
 
 // ───────────────────── Admin: registration reviews ─────────────────────

@@ -827,6 +827,33 @@ export const pendingSquadSyncListKey = (tenant: string) => ({
 });
 
 /**
+ * Player document requests (admin "Request ID document"): one DOCREQ# row per player + docKey
+ * in a dedicated tenant partition, so the admin console lists every request with ONE Query and
+ * erasure finds a player's row by key (no scan). The sk carries the natural key (DB sort keys
+ * already do — PLAYER#); the LINK never does: it carries only the random requestId, resolved via
+ * the DOCREQLINK# pointer below. No gsi1/META listing — tenant/cohort/club/player erasure must
+ * enumerate this partition explicitly (see repo.ts listDocRequestPartition).
+ */
+export const docRequestPartitionPk = (tenant: string) => `${tenantPrefix(tenant)}#DOCREQ`;
+
+export const docRequestKey = (tenant: string, naturalKey: string, docKey: string) => ({
+  pk: docRequestPartitionPk(tenant),
+  sk: `DOCREQ#${naturalKey}#${docKey}`,
+});
+
+/** Token → request pointer: the signed link names only `requestId`. */
+export const docRequestLinkKey = (tenant: string, requestId: string) => ({
+  pk: docRequestPartitionPk(tenant),
+  sk: `DOCREQLINK#${requestId}`,
+});
+
+/** The doc-request notice ledger (NOTIFY#docreq#<requestId>#<idempotencyKey>). */
+export const docRequestNotifyKey = (tenant: string, requestId: string, idempotencyKey: string) => ({
+  pk: docRequestPartitionPk(tenant),
+  sk: `NOTIFY#docreq#${requestId}#${idempotencyKey}`,
+});
+
+/**
  * The WhatsApp status webhook's lookup: Meta posts statuses by message id (wamid) with no
  * tenant, so each captain's-report WhatsApp send writes `WAMSG#<wamid>` → its report. Global
  * (not tenant-prefixed) and self-expiring (`expiresAt`); it holds ids only, no PII.

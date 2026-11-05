@@ -12,12 +12,16 @@
 import * as Sentry from '@sentry/react';
 
 /**
- * A captain's-report link token (`/r/<token>`, `/captains-report-link/<token>`) is a bearer
+ * A captain's-report link token (`/r/<token>`, `/captains-report-link/<token>`) — and a
+ * document-request link token (`/d/<token>`, `/doc-request-link/<token>`) — is a bearer
  * capability: replace it with `[token]` anywhere an event or breadcrumb carries it (page URL,
  * fetch breadcrumbs, the `api_path` tag). Exported for tests.
  */
 export function scrubReportTokens(value: string): string {
-  return value.replace(/(\/(?:captains-report-link|r)\/)[^/?#\s"']+/g, '$1[token]');
+  return value.replace(
+    /(\/(?:captains-report-link|r|doc-request-link|d)\/)[^/?#\s"']+/g,
+    '$1[token]',
+  );
 }
 
 function scrub<T>(value: T): T {
