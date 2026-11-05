@@ -1072,18 +1072,37 @@ export function buildBundle(input: BuildInputs): BuildResult {
       const groups: BundleGroup[] = [];
       const fixtures: BundleFixture[] = [];
       const sourceFixtures: SourceFixture[] = [];
-      items.forEach(({ series: s, groupLabel }, i) => {
+      let pushed = 0;
+      items.forEach(({ series: s, groupLabel }) => {
         const participants = Array.isArray(s.participants)
           ? s.participants.map((p) => p.teamId)
           : (s.teams ?? []);
         const teamIds = participants.length ? participants : (s.teams ?? []);
+        const teamRefs = teamIds
+          .map((id) => w.teams.get(id)?.externalRef)
+          .filter((r): r is string => !!r);
+        // A knockout/playoff series over the same teams as an existing group
+        // would put each team in two groups (medicoach 409) — leave it out.
+        const refSet = new Set(teamRefs);
+        const twin = groups.find(
+          (g) =>
+            refSet.size > 0 &&
+            g.teamRefs.length === refSet.size &&
+            g.teamRefs.every((r) => refSet.has(r)),
+        );
+        if (twin) {
+          summary.fixtures.unresolvedSideSkipped += (s.fixtures as unknown[]).length;
+          warnings.push(
+            `league ${w.key} ${stream}: series "${groupLabel ?? s.id}" has the same teams as ${twin.name}; left out as a knockout tail (its fixtures sync once their slots resolve)`,
+          );
+          return;
+        }
+        const i = pushed++;
         groups.push({
           name: groupName(i + 1),
           ...(groupLabel ? { sourceName: groupLabel } : {}),
           order: i,
-          teamRefs: teamIds
-            .map((id) => w.teams.get(id)?.externalRef)
-            .filter((r): r is string => !!r),
+          teamRefs,
         });
         for (const raw of s.fixtures as SourceFixture[]) {
           sourceFixtures.push(raw);

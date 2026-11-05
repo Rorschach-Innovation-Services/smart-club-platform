@@ -272,3 +272,67 @@ describe('buildBundle fixture bookkeeping', () => {
     assert.ok(MedicoachBundleSchema.safeParse(bundle).success);
   });
 });
+
+describe('buildBundle inferred stream with a same-teams knockout tail', () => {
+  const clubs = ['a', 'b', 'c', 'd'].map(
+    (id) =>
+      ({
+        id,
+        name: id.toUpperCase(),
+        leagues: ['vets'],
+        ground: { venue: `${id} ground` },
+      }) as unknown as Club,
+  );
+  const config = {
+    tenant: 't',
+    branding: { name: 'T' },
+    leagues: [{ key: 'vets', label: 'Vets', group: 'Vets', district: 'All districts' }],
+  } as unknown as TenantConfig;
+  const participants = clubs.map((c) => ({ teamId: c.id, clubId: c.id, name: c.name }));
+  const common = { leagueKey: 'vets', teams: ['a', 'b', 'c', 'd'], participants };
+  const main = {
+    ...common,
+    id: 's-main',
+    name: 'Vets · Division 1 · Group A',
+    fixtures: [
+      { id: 'm1', round: 1, date: '2026-10-03', home: 'a', away: 'b' },
+      { id: 'm2', round: 1, date: '2026-10-03', home: 'c', away: 'd' },
+    ],
+  } as unknown as Series;
+  const playoff = {
+    ...common,
+    id: 's-po',
+    name: 'Vets · Division 1 · Playoff',
+    fixtures: [
+      { id: 'p1', round: 1, date: '2026-11-07', home: 'pos:1', away: 'pos:4' },
+      { id: 'p2', round: 2, date: '2026-11-14', home: 'win:p1', away: 'pos:2' },
+    ],
+  } as unknown as Series;
+  const { bundle, summary } = buildBundle({
+    tenant: 't',
+    config,
+    clubs,
+    playersByClub: new Map(),
+    series: [main, playoff],
+    seasonRuns: [],
+    recipes: { tenant: 't', utcOffset: '+02:00', leagues: {} },
+    options: { generatedAt: 'x' },
+  });
+
+  test('the playoff series is left out: one group, a warning, none of its fixtures', () => {
+    const comps = bundle.leagues[0].competitions;
+    assert.equal(comps.length, 1);
+    assert.deepEqual(
+      comps[0].groups.map((g) => g.name),
+      ['Group 1'],
+    );
+    assert.ok(
+      summary.warnings.some((w) =>
+        /series "Playoff" has the same teams as Group 1; left out as a knockout tail/.test(w),
+      ),
+    );
+    const ids = comps[0].fixtures.map((f) => f.externalRef.split(':').pop());
+    assert.deepEqual(ids.sort(), ['m1', 'm2']);
+    assert.equal(summary.fixtures.unresolvedSideSkipped, 2);
+  });
+});
