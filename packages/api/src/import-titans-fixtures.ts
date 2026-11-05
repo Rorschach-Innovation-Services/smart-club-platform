@@ -10,7 +10,11 @@
  *     --confirm                 import: backup → write series → club sync → post-write re-scan
  *     --append-sides            plan the club sides the sheets need (dry run), --confirm writes
  *     --revert                  delete the manifest series (dry run), --confirm [--include-released]
+ *                               [--propagate-deletes] (required when features.medicoachSync is on)
  *     --restore-clubs <backup>  restore club structure fields from a backup (dry run), --confirm
+ *     --release                 SILENT release (dry run = gate preview), --confirm writes
+ *                               [--only <ids>] [--include-t20-ko]; refuses when the tenant has
+ *                               fixtureReminders enabled or features.medicoachSync on
  *   common: --file, --structure, --backup-dir, --today, --no-club-sync
  *
  * Parse every sheet, resolve every side to a live club side (titans-sides.ts), build the series
@@ -33,6 +37,7 @@ import type { WrittenFixture } from './import-planb-fixtures.js';
 import { carrySyncOwnedFields, fixtureHighWater, reconcileFixtureIds } from './fixture-identity.js';
 import {
   findClashes,
+  formatClash,
   groundKey,
   normaliseName,
   venueAliasesFor,
@@ -42,6 +47,11 @@ import {
 } from './venue-clash.js';
 import { hasFeature } from './features.js';
 import { writeSeriesFromSnapshot } from './medicoach-sync/cli-write.js';
+import {
+  deleteSeriesWithSync,
+  pendingOnce,
+  queueSeriesDeletes,
+} from './medicoach-sync/schedule.js';
 import { storedDraftDrift } from './import-lions-fixtures.js';
 import { venueIdFor } from './lions-fixture-map.js';
 import { isSlotRef, loserOf, slotSource, winnerOf } from '../../engine/src/formats.js';
@@ -84,7 +94,7 @@ import {
   type TitansRawFixture,
 } from './titans-fixture-map.js';
 import { CLUB_MAP, parseStructureWorkbook, summarizeByClub } from './titans-import-map.js';
-import type { Club, Series, TenantConfig, Venue } from './types.js';
+import type { Club, PendingScheduleSync, Series, TenantConfig, Venue } from './types.js';
 import {
   planSides,
   sideKey,
@@ -1339,7 +1349,7 @@ export function renderUnionMarkdown(r: UnionReport): string {
 // ───────────────────────── CLI ─────────────────────────
 
 export interface Args {
-  mode: 'import' | 'append-sides' | 'revert' | 'restore-clubs';
+  mode: 'import' | 'append-sides' | 'revert' | 'restore-clubs' | 'release';
   /** --restore-clubs: the club backup / snapshot JSON to restore from. */
   restoreFrom: string;
   file: string;
@@ -1352,6 +1362,8 @@ export interface Args {
   noClubSync: boolean;
   /** --revert only: required to delete a RELEASED series. */
   includeReleased: boolean;
+  /** --revert only: required when the tenant syncs to medicoach — queues delete rows. */
+  propagateDeletes: boolean;
   /** Where JSON backups go (default: the working directory). */
   backupDir: string;
   /** Build (and with --confirm write) the T20 knockouts — tbd: sides, PR B stages only. */
@@ -1380,6 +1392,7 @@ export function parseArgs(argv: string[]): Args {
     today: new Date().toISOString().slice(0, 10),
     noClubSync: false,
     includeReleased: false,
+    propagateDeletes: false,
     backupDir: process.cwd(),
     includeT20Ko: false,
     koCutoff: '',
@@ -1399,11 +1412,13 @@ export function parseArgs(argv: string[]): Args {
     else if (a === '--confirm') args.confirm = true;
     else if (a === '--append-sides') args.mode = 'append-sides';
     else if (a === '--revert') args.mode = 'revert';
+    else if (a === '--release') args.mode = 'release';
     else if (a === '--restore-clubs') {
       args.mode = 'restore-clubs';
       args.restoreFrom = need(++i, a);
     } else if (a === '--no-club-sync') args.noClubSync = true;
     else if (a === '--include-released') args.includeReleased = true;
+    else if (a === '--propagate-deletes') args.propagateDeletes = true;
     else if (a === '--backup-dir') args.backupDir = need(++i, a);
     else if (a === '--include-t20-ko') args.includeT20Ko = true;
     else if (a === '--ko-cutoff') args.koCutoff = need(++i, a);
@@ -1418,12 +1433,16 @@ export function parseArgs(argv: string[]): Args {
   if (args.parseOnly && (args.confirm || args.mode !== 'import'))
     throw new Error('--parse-only takes no --confirm, --append-sides, --revert or --restore-clubs');
   if (args.mode !== 'import' && args.reportOut) throw new Error('--report-out is an import flag');
-  if (args.only.length && args.mode !== 'import' && args.mode !== 'append-sides')
-    throw new Error('--only is an import / --append-sides flag');
+  if (args.only.length && !['import', 'append-sides', 'release'].includes(args.mode))
+    throw new Error('--only is an import / --append-sides / --release flag');
   if (args.includeReleased && args.mode !== 'revert')
     throw new Error('--include-released is a --revert flag');
-  if (args.includeT20Ko && args.mode !== 'import')
-    throw new Error('--include-t20-ko is an import flag');
+  if (args.propagateDeletes && args.mode !== 'revert')
+    throw new Error('--propagate-deletes is a --revert flag');
+  if (args.includeT20Ko && args.mode !== 'import' && args.mode !== 'release')
+    throw new Error('--include-t20-ko is a --release or import flag');
+  if (args.mode === 'release' && args.noClubSync)
+    throw new Error('--no-club-sync is not a --release flag');
   if (args.koCutoff && !args.includeT20Ko)
     throw new Error('--ko-cutoff is an --include-t20-ko flag');
   if (args.koCutoff && !/^\d{4}-\d{2}-\d{2}$/.test(args.koCutoff))
@@ -1801,14 +1820,40 @@ export async function runAppendSides(args: Args) {
   console.log(`Done. ${plan.patches.length - raced} club(s) written. Backup: ${backup}`);
 }
 
+/** True when the tenant pushes its schedule to medicoach (`features.medicoachSync`). */
+export function syncOn(config: TenantConfig | null | undefined): boolean {
+  return hasFeature(config, 'medicoachSync');
+}
+
 /**
- * DELETE /series parity minus medicoach delete propagation: the series, its umpire
- * appointments and its medicoach-sync state, but no delete rows (runbook "Known gaps").
+ * DELETE /series parity, medicoach delete propagation included: `deleteSeriesWithSync` builds
+ * the delete rows FIRST, then deletes the series, its umpire appointments and its sync state
+ * (the `deleteSeriesSyncState` wipe drops the series' outbox rows), and only THEN are the rows
+ * written (`queueSeriesDeletes`). Writing them before the wipe would lose them.
+ *
+ * With sync on, a delete must propagate: refuses unless `propagateDeletes` (--propagate-deletes).
+ * With sync off no row is built (the series is not sync-mapped), so this is the plain delete.
  */
-async function deleteSeriesFully(repo: RepoModule, id: string) {
-  await repo.deleteSeries(TITANS_TENANT, id);
-  await repo.deleteFixtureOfficialsForSeries(TITANS_TENANT, id);
-  await repo.deleteSeriesSyncState(TITANS_TENANT, id);
+async function deleteSeriesFully(
+  repo: RepoModule,
+  id: string,
+  ctx: {
+    config: TenantConfig | null;
+    pending: () => Promise<PendingScheduleSync[]>;
+    propagateDeletes: boolean;
+  },
+): Promise<number> {
+  if (syncOn(ctx.config) && !ctx.propagateDeletes)
+    throw new Error(
+      `refusing to delete ${id}: ${TITANS_TENANT} has features.medicoachSync on — pass --propagate-deletes`,
+    );
+  const rows = await deleteSeriesWithSync(repo, TITANS_TENANT, id, {
+    config: ctx.config,
+    pending: ctx.pending,
+    origin: 'cli',
+  });
+  await queueSeriesDeletes(repo, TITANS_TENANT, rows);
+  return rows.length;
 }
 
 async function backupTitansSeries(series: Series[], dir: string, clubs?: Club[]): Promise<string> {
@@ -1992,14 +2037,36 @@ export async function runRevert(args: Args) {
     }
     console.warn(`\n⚠ ${msg}\n--confirm will refuse unless --include-released is passed.`);
   }
+  const config = await repo.getTenantConfig(TITANS_TENANT);
+  if (syncOn(config)) {
+    if (!args.propagateDeletes) {
+      const msg = `${TITANS_TENANT} has features.medicoachSync ON — deleting without propagation would leave these fixtures live in medicoach.`;
+      if (args.confirm) {
+        console.error(
+          `\n✗ Refusing to revert — ${msg}\nPass --propagate-deletes to queue medicoach deletes.`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      console.warn(`\n⚠ ${msg}\n--confirm will refuse unless --propagate-deletes is passed.`);
+    } else console.log('medicoach sync ON — delete rows are queued for every sync-mapped fixture.');
+  }
   if (args.confirm) await backupTitansSeries(mine, args.backupDir);
+  const pending = pendingOnce(repo, TITANS_TENANT);
+  let queued = 0;
   for (const s of mine) {
     const status = s.released ? 'RELEASED' : s.approved ? 'approved' : 'draft';
     console.log(
       `${args.confirm ? 'delete' : '[dry-run] would delete'}  ${s.id}  (${s.name} · ${status})`,
     );
-    if (args.confirm) await deleteSeriesFully(repo, String(s.id));
+    if (args.confirm)
+      queued += await deleteSeriesFully(repo, String(s.id), {
+        config,
+        pending,
+        propagateDeletes: args.propagateDeletes,
+      });
   }
+  if (args.confirm && queued) console.log(`Queued ${queued} medicoach delete row(s).`);
   console.log(
     args.confirm
       ? `Reverted ${mine.length} series. NOT reverted: bootstrap leagues/aliases/venues, --append-sides rosters, club-sync league keys/rosters and cup league keys (see the runbook; --restore-clubs puts club structure back).`
@@ -2605,10 +2672,174 @@ export function koBlockers(errors: KoError[], writes: (id: string) => boolean): 
   return errors.filter((e) => writes(e.seriesId)).map((e) => e.message);
 }
 
+// ───────────────────────── Silent release ─────────────────────────
+
+/** One series the release run keeps back, with why. */
+export interface ReleaseHeld {
+  id: string;
+  name: string;
+  reason: string;
+  clashes: Clash[];
+}
+
+export interface ReleasePlan {
+  /** Series to write, each the stored copy + approved/released stamps (gate passed). */
+  release: Array<{ original: Series; next: Series }>;
+  /** Gate failures: held as drafts, reported individually. */
+  held: ReleaseHeld[];
+  alreadyReleased: string[];
+  /** Ids in scope that are not stored on the tenant. */
+  missing: string[];
+}
+
+/** The series a --release run covers: --only, else the manifest (T20 KOs only with the flag). */
+export function releaseScope(args: Pick<Args, 'only' | 'includeT20Ko'>): string[] {
+  if (args.only.length) return args.only;
+  return WRITABLE_SERIES_IDS.filter((id) => args.includeT20Ko || !T20_KO_SERIES_IDS.includes(id));
+}
+
+/**
+ * The console's release gate, per series, without the console (applySeriesPatch's
+ * false→true release transition): approve + release, then `findClashes` of that subject
+ * against EVERY stored series of the tenant (drafts included) with the tenant's configured
+ * venue aliases. Any clash holds the series — there is no override (standing rule). Venues and
+ * times go out exactly as stored: nothing is withheld. Pure.
+ */
+export function planTitansRelease(
+  scope: string[],
+  stored: Series[],
+  clubs: Club[],
+  venues: Venue[],
+  aliases: Record<string, string>,
+  nowIso: string,
+): ReleasePlan {
+  const byId = new Map(stored.map((s) => [String(s.id), s]));
+  const plan: ReleasePlan = { release: [], held: [], alreadyReleased: [], missing: [] };
+  for (const id of scope) {
+    const current = byId.get(id);
+    if (!current) {
+      plan.missing.push(id);
+      continue;
+    }
+    if (current.released) {
+      plan.alreadyReleased.push(id);
+      continue;
+    }
+    const next: Series = {
+      ...current,
+      approved: true,
+      approvedAt: current.approved && current.approvedAt ? current.approvedAt : nowIso,
+      released: true,
+      releasedAt: nowIso,
+    };
+    // A draft carries no withholding (recall clears it); a CLI release withholds nothing.
+    delete next.withheld;
+    delete next.revealedAt;
+    const clashes = findClashes(next, stored, clubs, venues, aliases);
+    if (clashes.length) {
+      plan.held.push({
+        id,
+        name: String(current.name ?? id),
+        reason: `${clashes.length} venue clash(es)`,
+        clashes,
+      });
+      continue;
+    }
+    plan.release.push({ original: current, next });
+  }
+  return plan;
+}
+
+/** Why a --release run must not start: the tenant could send something, or sync would requeue. */
+export function releaseRefusals(config: TenantConfig | null | undefined): string[] {
+  const out: string[] = [];
+  if (config?.fixtureReminders?.enabled)
+    out.push(
+      'fixtureReminders is ENABLED — the reminder cron would message clubs about released fixtures',
+    );
+  if (syncOn(config))
+    out.push(
+      'features.medicoachSync is ON — a CLI release skips requeueRevealedSeries; release from the console, or release before connecting (bundle carry owns the initial load)',
+    );
+  return out;
+}
+
+/**
+ * --release: approve + release the titans series SILENTLY. Nothing here imports from notify/ —
+ * the console release path sends nothing either; the only senders are the club share broadcast
+ * (a human click) and the opt-in fixtureReminders cron, which the preamble refuses on.
+ */
+export async function runRelease(args: Args) {
+  const repo = await import('./repo.js');
+  const config = await repo.getTenantConfig(TITANS_TENANT);
+  console.log(
+    `Tenant ${TITANS_TENANT}: fixtureReminders ${config?.fixtureReminders?.enabled ? 'ENABLED' : 'off'} · features.medicoachSync ${syncOn(config) ? 'ON' : 'off'}`,
+  );
+  const refusals = releaseRefusals(config);
+  if (refusals.length) {
+    for (const r of refusals) console.error(`✗ ${r}`);
+    console.error('\n✗ Refusing to release.');
+    process.exitCode = 1;
+    return;
+  }
+  const scope = releaseScope(args);
+  const [stored, clubs, venues] = await Promise.all([
+    repo.listSeries(TITANS_TENANT),
+    repo.listClubs(TITANS_TENANT),
+    repo.listVenues(TITANS_TENANT),
+  ]);
+  const plan = planTitansRelease(
+    scope,
+    stored,
+    clubs,
+    venues,
+    venueAliasesFor(config),
+    new Date().toISOString(),
+  );
+  if (plan.missing.length) console.warn(`⚠ not stored (skipped): ${plan.missing.join(', ')}`);
+  if (plan.alreadyReleased.length)
+    console.log(`already released (skipped): ${plan.alreadyReleased.join(', ')}`);
+  for (const h of plan.held) {
+    console.error(`HELD  ${h.id}  (${h.name}) — ${h.reason}:`);
+    for (const c of h.clashes.slice(0, 10)) console.error(`   ${formatClash(c)}`);
+    if (h.clashes.length > 10) console.error(`   … +${h.clashes.length - 10} more`);
+  }
+  for (const r of plan.release)
+    console.log(
+      `${args.confirm ? 'release' : '[dry-run] would release'}  ${r.original.id}  (${r.original.name} · ${(r.original.fixtures ?? []).length} fixtures)`,
+    );
+  const drifted: string[] = [];
+  let released = 0;
+  if (args.confirm && plan.release.length) {
+    await backupTitansSeries(
+      plan.release.map((r) => r.original),
+      args.backupDir,
+    );
+    for (const r of plan.release) {
+      const outcome = await writeSeriesFromSnapshot(repo, TITANS_TENANT, r.original, r.next);
+      if (outcome === 'drifted') drifted.push(String(r.original.id));
+      else released++;
+    }
+  }
+  const failed = [...plan.held.map((h) => h.id), ...drifted];
+  console.log(
+    args.confirm
+      ? `\nReleased ${released} series silently (venues/times as imported, nothing withheld).`
+      : `\n[dry-run] ${plan.release.length} series would be released. Re-run with --confirm.`,
+  );
+  if (failed.length) {
+    process.exitCode = 1;
+    console.error(
+      `✗ ${failed.length} series NOT released: ${failed.join(', ')}${drifted.length ? ' (drifted ones changed since the read — re-run)' : ''}. Fix the clashes, then re-run with --only.`,
+    );
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.mode === 'append-sides') return runAppendSides(args);
   if (args.mode === 'revert') return runRevert(args);
+  if (args.mode === 'release') return runRelease(args);
   if (args.mode === 'restore-clubs') return runRestoreClubs(args);
   return runImport(args);
 }

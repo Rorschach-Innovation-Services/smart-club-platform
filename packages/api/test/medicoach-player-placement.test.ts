@@ -24,7 +24,12 @@ import {
 } from '../src/medicoach-sync/player-placement.js';
 import { buildPlayerEntry } from '../src/medicoach-sync/players.js';
 import { PlayerPushEntrySchema } from '../src/medicoach-sync-contract.js';
-import { lintLeagueCategories } from '../src/medicoach-recipes/index.js';
+import { lintLeagueCategories, recipesForTenant } from '../src/medicoach-recipes/index.js';
+import { TITANS_RECIPES } from '../src/medicoach-recipes/titans.js';
+import { LIONS_RECIPES } from '../src/medicoach-recipes/lions.js';
+import { TUSKERS_RECIPES } from '../src/medicoach-recipes/tuskers.js';
+import { TITANS_LEAGUE_KEYS, leagueLabel as titansLeagueLabel } from '../src/titans-fixture-map.js';
+import { LIONS_LEAGUES } from '../src/lions-fixture-map.js';
 import { DOLPHINS_RECIPES } from '../src/medicoach-recipes/dolphins.js';
 import { MedicoachBundleSchema } from '../src/medicoach-bundle.js';
 import type { PlayerClearance, PlayerRegistration, TenantConfig } from '../src/types.js';
@@ -518,6 +523,43 @@ describe('fan-out — recipe classification lint', () => {
       emcuU13: 'junior',
     });
     assert.equal(DOLPHINS_RECIPES.placement?.fanOut, true);
+  });
+});
+
+describe('fan-out — titans / lions / tuskers recipes', () => {
+  const titansCatalogue = TITANS_LEAGUE_KEYS.map((key) => ({ key, label: titansLeagueLabel(key) }));
+  const lionsCatalogue = LIONS_LEAGUES.map(({ key, label, group }) => ({ key, label, group }));
+  const tuskersCatalogue = [
+    { key: 'premier-league', label: 'Premier League' },
+    { key: 'veterans-league', label: 'Veterans League' },
+  ];
+
+  test('each recipe agrees with the label/group classifiers', () => {
+    assert.deepEqual(lintLeagueCategories(TITANS_RECIPES, titansCatalogue), []);
+    assert.deepEqual(lintLeagueCategories(LIONS_RECIPES, lionsCatalogue), []);
+    assert.deepEqual(lintLeagueCategories(TUSKERS_RECIPES, tuskersCatalogue), []);
+  });
+
+  test('each recipe classifies exactly the leagues its fixtures carry', () => {
+    const classified = (r: { leagues: Record<string, { category?: string }> }) =>
+      Object.entries(r.leagues)
+        .filter(([, l]) => l.category)
+        .map(([k]) => k)
+        .sort();
+    assert.deepEqual(
+      classified(TITANS_RECIPES),
+      TITANS_LEAGUE_KEYS.filter((k) => k !== 'womens-junior-league').sort(),
+    );
+    assert.deepEqual(classified(LIONS_RECIPES), LIONS_LEAGUES.map((l) => l.key).sort());
+    assert.deepEqual(classified(TUSKERS_RECIPES), ['premier-league', 'veterans-league']);
+  });
+
+  test('registered, with fan-out on for all three', () => {
+    for (const r of [TITANS_RECIPES, LIONS_RECIPES, TUSKERS_RECIPES]) {
+      assert.equal(recipesForTenant(r.tenant), r);
+      assert.equal(r.placement?.fanOut, true);
+      assert.equal(r.utcOffset, '+02:00');
+    }
   });
 });
 
