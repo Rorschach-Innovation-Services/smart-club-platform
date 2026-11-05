@@ -81,7 +81,9 @@ import { explainSyncError } from './medicoach-sync/explain.js';
 import { carrySyncOwnedFields, fixtureSyncRef } from './fixture-identity.js';
 import {
   buildInboundFixture,
-  deleteRowsFor,
+  deleteSeriesWithSync as deleteSeriesWithSyncFor,
+  pendingOnce as pendingOnceFor,
+  queueSeriesDeletes as queueSeriesDeletesFor,
   describeSchedule,
   fixtureSchedule,
   flushScheduleOutbox,
@@ -91,7 +93,6 @@ import {
   recordScheduleDiff,
   requeueRevealedSeries,
   sameMatch,
-  writePendingSync,
   seriesMappedForSync,
   seriesHoldsSchedule,
   type ScheduleFixture,
@@ -7011,70 +7012,22 @@ app.post('/clubs/:id/clash-hints', async (c) => {
   return c.json({ results });
 });
 
-/**
- * Delete a series and its smart-club state, keeping medicoach in step (contract §2 delete
- * ops). The series is read BEFORE it goes; when it is sync-mapped, a self-contained delete
- * row is built for every fixture medicoach may hold, plus any delete already queued for a
- * fixture removed earlier (the wipe below would lose it). Then: deleteSeries → officials →
- * deleteSeriesSyncState (which drops the series' outbox rows). The delete rows are RETURNED,
- * not written: the caller writes them with `queueSeriesDeletes` once it knows the deletion
- * stands (after the wipe — always — and, for a regenerate, only once the new draw landed).
- *
- * `justCreated`: the series was written earlier in the same request and never left smart
- * club (a create's rollback) — just the item delete, no reads, exactly as before.
- */
-async function deleteSeriesWithSync(
+/** `deleteSeriesWithSync` (medicoach-sync/schedule.ts) bound to this repo. */
+function deleteSeriesWithSync(
   tenant: string,
   id: string,
-  opts: {
-    justCreated?: boolean;
-    config?: TenantConfig | null;
-    /** The tenant's outbox, read at most once per request (`pendingOnce`) across series. */
-    pending?: () => Promise<PendingScheduleSync[]>;
-  } = {},
+  opts: Parameters<typeof deleteSeriesWithSyncFor>[3] = {},
 ): Promise<PendingScheduleSync[]> {
-  if (opts.justCreated) {
-    await repo.deleteSeries(tenant, id);
-    return [];
-  }
-  const before = await repo.getSeries(tenant, id);
-  let deletes: PendingScheduleSync[] = [];
-  const config = opts.config !== undefined ? opts.config : await repo.getTenantConfig(tenant);
-  if (before && (await seriesMappedForSync(repo, tenant, before, config))) {
-    deletes = deleteRowsFor(
-      tenant,
-      before,
-      (before.fixtures ?? []) as ScheduleFixture[],
-      'admin',
-      new Date().toISOString(),
-    );
-    const queued = new Set(deletes.map((r) => r.ref));
-    for (const row of await (opts.pending ?? (() => repo.listPendingSync(tenant)))())
-      if (row.seriesId === id && row.op === 'delete' && !queued.has(row.ref)) deletes.push(row);
-  }
-  await repo.deleteSeries(tenant, id);
-  // Its fixtures' umpire appointments go with it, and so does its medicoach-sync state
-  // (results, outbox rows, held conflicts, report markers); pending captain's reports are
-  // voided (ADR 0016).
-  await repo.deleteFixtureOfficialsForSeries(tenant, id);
-  await repo.deleteSeriesSyncState(tenant, id);
-  // Nothing of it awaits a carry any more (the daily reconcile is the net for other paths).
-  await repo.deleteMcAwait(tenant, id);
-  return deletes;
+  return deleteSeriesWithSyncFor(repo, tenant, id, opts);
 }
 
-/**
- * One outbox Query per request for a multi-series delete. Only this series' queued deletes are
- * read from it, so another series' wipe in the same loop does not stale it.
- */
 function pendingOnce(tenant: string): () => Promise<PendingScheduleSync[]> {
-  let p: Promise<PendingScheduleSync[]> | undefined;
-  return () => (p ??= repo.listPendingSync(tenant));
+  return pendingOnceFor(repo, tenant);
 }
 
 /** Write delete rows from `deleteSeriesWithSync` — always AFTER that series' wipe. */
-async function queueSeriesDeletes(tenant: string, rows: PendingScheduleSync[]): Promise<void> {
-  for (const row of rows) await writePendingSync(repo, tenant, row);
+function queueSeriesDeletes(tenant: string, rows: PendingScheduleSync[]): Promise<void> {
+  return queueSeriesDeletesFor(repo, tenant, rows);
 }
 
 app.delete('/series/:id', requireAdmin, async (c) => {

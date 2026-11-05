@@ -1,12 +1,18 @@
 /** Recipe registry: the checked-in recipes for tenants that have them. */
 import { isVeteransLeague, isWomensLeague, JUNIOR_GROUP } from '../../../engine/src/leagues.js';
 import { DOLPHINS_RECIPES } from './dolphins.js';
+import { LIONS_RECIPES } from './lions.js';
+import { TITANS_RECIPES } from './titans.js';
+import { TUSKERS_RECIPES } from './tuskers.js';
 import type { TenantRecipes } from './types.js';
 
 export type * from './types.js';
 
 const REGISTRY: Record<string, TenantRecipes> = {
   dolphins: DOLPHINS_RECIPES,
+  lions: LIONS_RECIPES,
+  titans: TITANS_RECIPES,
+  tuskers: TUSKERS_RECIPES,
 };
 
 /** A tenant's recipes, or an empty set (every league then maps from setup or fixtures). */

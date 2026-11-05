@@ -25,6 +25,9 @@ const {
   usableGround,
   t20HostLeagues,
   parseArgs,
+  planTitansRelease,
+  releaseRefusals,
+  releaseScope,
   stabiliseIds,
   wouldBeRegistry,
 } = await import('../src/import-titans-fixtures.js');
@@ -947,5 +950,101 @@ describe('review fixes', () => {
     const sheet = vetsSheet();
     const out = buildTitansSeries([sheet], wouldBeRegistry([sheet], clubsFromMap()), []);
     assert.equal((out.built[0].series as { maxOvers?: number }).maxOvers, undefined);
+  });
+});
+
+describe('--release (silent) and --revert --propagate-deletes', () => {
+  const clubs = [
+    { id: 'c1', name: 'C1', ground: { venue: 'ALOE PARK' } },
+    { id: 'c2', name: 'C2', ground: { venue: 'ALOE PARK' } },
+    { id: 'c3', name: 'C3', ground: { venue: 'OTHER OVAL' } },
+  ] as unknown as Club[];
+  const venues = [
+    { id: 'v-aloe', name: 'ALOE PARK', surfaces: 1 },
+    { id: 'v-other', name: 'OTHER OVAL', surfaces: 1 },
+  ] as never;
+  const p = (id: string) => ({ teamId: id, clubId: id, name: id });
+  const series = (id: string, home: string, venueName: string, extra = {}) =>
+    ({
+      id,
+      name: id,
+      version: 2,
+      approved: false,
+      released: false,
+      releasedAt: null,
+      participants: [p(home), p(`x-${id}`)],
+      fixtures: [{ id: 'f1', date: '2026-10-18', time: '14:00', home, away: `x-${id}`, venueName }],
+      ...extra,
+    }) as unknown as Series;
+  const NOW = '2026-11-05T10:00:00.000Z';
+
+  test('a clean draft is approved + released as stored (nothing withheld); a clash is held', () => {
+    const a = series('s-a', 'c1', 'ALOE PARK');
+    const b = series('s-b', 'c2', 'ALOE PARK');
+    // withholding on the series that RELEASES, so the strip assertion below means something
+    const c = series('s-c', 'c3', 'OTHER OVAL', {
+      withheld: { time: true },
+      revealedAt: '2026-10-01T00:00:00.000Z',
+    });
+    const done = series('s-done', 'c3', 'OTHER OVAL', { released: true });
+    (done.fixtures as Array<{ date: string }>)[0].date = '2026-10-25';
+    const plan = planTitansRelease(
+      ['s-c', 's-a', 's-done', 's-missing'],
+      [a, b, c, done],
+      clubs,
+      venues,
+      {},
+      NOW,
+    );
+    assert.deepEqual(
+      plan.release.map((r) => r.next.id),
+      ['s-c'],
+    );
+    const next = plan.release[0].next;
+    assert.equal(next.approved, true);
+    assert.equal(next.released, true);
+    assert.equal(next.releasedAt, NOW);
+    assert.equal(next.withheld, undefined);
+    assert.equal((next as { revealedAt?: unknown }).revealedAt, undefined);
+    assert.deepEqual(c.withheld, { time: true }, 'the stored original is untouched');
+    assert.deepEqual(next.fixtures, c.fixtures);
+    assert.equal(plan.release[0].original, c);
+    assert.deepEqual(
+      plan.held.map((h) => h.id),
+      ['s-a'],
+    );
+    assert.ok(plan.held[0].clashes.length >= 1);
+    assert.deepEqual(plan.alreadyReleased, ['s-done']);
+    assert.deepEqual(plan.missing, ['s-missing']);
+  });
+
+  test('refuses when fixtureReminders is enabled or medicoach sync is on', () => {
+    assert.equal(releaseRefusals(null).length, 1, 'a missing tenant config is a refusal');
+    assert.equal(releaseRefusals(undefined).length, 1);
+    assert.deepEqual(releaseRefusals({ fixtureReminders: { enabled: false } } as never), []);
+    assert.equal(releaseRefusals({ fixtureReminders: { enabled: true } } as never).length, 1);
+    assert.equal(releaseRefusals({ features: { medicoachSync: true } } as never).length, 1);
+  });
+
+  test('scope: --only wins; otherwise the manifest, T20 KOs only with --include-t20-ko', () => {
+    assert.deepEqual(releaseScope({ only: ['s-titans-u9-plat-a'], includeT20Ko: false }), [
+      's-titans-u9-plat-a',
+    ]);
+    const base = releaseScope({ only: [], includeT20Ko: false });
+    const withKo = releaseScope({ only: [], includeT20Ko: true });
+    assert.ok(!base.includes('s-titans-mens-t20-ko'));
+    assert.ok(withKo.includes('s-titans-mens-t20-ko'));
+  });
+
+  test('flag guards', () => {
+    assert.equal(parseArgs(['--release']).mode, 'release');
+    assert.equal(
+      parseArgs(['--release', '--only', 's-titans-veterans-league-a-ko']).only.length,
+      1,
+    );
+    assert.equal(parseArgs(['--release', '--include-t20-ko']).includeT20Ko, true);
+    assert.throws(() => parseArgs(['--release', '--parse-only']));
+    assert.equal(parseArgs(['--revert', '--propagate-deletes']).propagateDeletes, true);
+    assert.throws(() => parseArgs(['--propagate-deletes']), /--revert flag/);
   });
 });

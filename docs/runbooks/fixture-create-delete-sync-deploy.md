@@ -55,11 +55,43 @@ propagating creates and deletes. There is no feature flag.
 - A fixture that was exported, then had a side reverted to a `pos:`/`tbd:`
   placeholder, then removed, sends no delete (the diff can't see it). The daily
   reconcile / connection console remains the net.
-- EMCU's importer `deleteSeriesFully` on stale series bypasses delete
-  propagation (it refuses released series, so low risk).
-- The Titans importer's `deleteSeriesFully` (import-titans-fixtures.ts, the
-  prune path) also bypasses delete propagation, and its prune supports
-  `--include-released`, so the "refuses released" rationale does not apply.
-  Titans is not a `features.medicoachSync` tenant today; revisit before it is.
+- EMCU's importer `deleteSeriesFully` (import-emcu-fixtures.ts, the stale-series
+  prune and its revert) bypasses delete propagation: no delete rows are queued,
+  so a deleted series' fixtures stay in medicoach. It refuses released series, so
+  the risk is low, but note that EMCU writes into the **dolphins** tenant, which
+  has `features.medicoachSync` on. Not fixed (documented only). The fix, if it is
+  ever needed, is the Titans one below: route the delete through
+  `deleteSeriesWithSync` + `queueSeriesDeletes` (medicoach-sync/schedule.ts).
+  Until then, delete a stale EMCU series that medicoach holds from the console
+  (DELETE /series propagates), not with the importer.
+- **Fixed:** the Titans importer's `--revert` (import-titans-fixtures.ts,
+  `deleteSeriesFully`) now refuses `--confirm` when the tenant has
+  `features.medicoachSync` on, unless `--propagate-deletes` is passed. With it,
+  each series goes through the same `deleteSeriesWithSync` the console's
+  DELETE /series uses (extracted into medicoach-sync/schedule.ts): delete rows
+  are built from the stored series first, then the series, officials and sync
+  state are deleted (`deleteSeriesSyncState` drops the series' outbox rows),
+  and only then are the rows written with `queueSeriesDeletes`. Writing them
+  before the wipe would delete them again. The rows carry `origin: 'cli'`.
 - Group names for Plan-B creates are positional among sibling series; siblings
   added or removed after a carry can shift the label on later creates.
+
+## Notification copy audit for new sync tenants (5 Nov 2026)
+
+Before titans, lions and tuskers get `features.medicoachSync`, the sync-gated
+notices were spot-checked for Dolphins/KZNCU copy that would reach another
+union. None found. `captains_report_due`, `squad_selection_due` and
+`official_appointed_v2` take the union name as a parameter, filled from
+`orgCopy(config).name` (tenant `branding.name`, then `branding.title`, then the
+tenant slug) in captains-reports.ts, squad-requests.ts and
+medicoach-sync/schedule.ts. The officials contact line ({{6}}) comes from the
+tenant's `officialsContactLine`, defaulting to the neutral "Medicoach - 066 344
+6443". The scorecard-correction email (operators only) names the tenant from
+config. The ops digest uses `orgCopy` too. The URL buttons point at
+`platform.club.medicoach.co.za`, which resolves the tenant from the signed
+token, so they are tenant-neutral. The only hardcoded Dolphins/KZNCU strings
+are code comments and the `dolphins_*` / `emcu_*` broadcast templates, which
+only the one-off CLIs send. Retired v1 `official_appointed` still hardcodes
+`info@medicoach.co.za` (Medicoach, not Dolphins). Before connecting a tenant,
+check that `branding.name` is set, because that is the name every one of these
+notices uses.
