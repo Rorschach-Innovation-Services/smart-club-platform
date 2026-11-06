@@ -252,9 +252,11 @@ describe('admin send route', () => {
     const { results } = (await res.json()) as {
       results: Array<{ displayName: string; status: string }>;
     };
+    // The template is registered, so a cell-only player is reachable over WhatsApp
+    // (dry-run in tests reports the send as sent).
     assert.deepEqual(
       results.map((r) => r.status),
-      ['sent', 'skipped_minor', 'skipped_no_contact', 'skipped_whatsapp_unavailable'],
+      ['sent', 'skipped_minor', 'skipped_no_contact', 'sent'],
     );
     assert.equal(results[0].displayName, `${reachable.firstName} ${reachable.lastName}`);
     assert.ok(!JSON.stringify(results).includes(reachable.naturalKey), 'no natural keys served');
@@ -262,8 +264,12 @@ describe('admin send route', () => {
     assert.equal(req?.status, 'pending');
     assert.equal(req?.docName, 'ID document');
     assert.ok(!JSON.stringify(req?.lastSendResults).includes('reach@example.com'));
-    for (const p of [minor, noContact, cellOnly])
+    for (const p of [minor, noContact])
       assert.equal(await repo.getDocRequest(TENANT, p.naturalKey, 'idDoc'), null);
+    assert.equal(
+      (await repo.getDocRequest(TENANT, cellOnly.naturalKey, 'idDoc'))?.status,
+      'pending',
+    );
     const link = await repo.getDocRequestLink(TENANT, req!.requestId);
     assert.equal(link?.naturalKey, reachable.naturalKey);
   });

@@ -321,9 +321,9 @@ export const WHATSAPP_TEMPLATES = {
    * URL BUTTON pinned to the PLATFORM host (the `/d/` page themes itself from the token's
    * tenant, like `/r/` and `/sq/`), never in the body.
    *
-   * PENDING: not yet created in Meta. Submit as UTILITY (category is immutable once approved),
-   * English, 3 body params, dynamic URL button `https://platform.club.medicoach.co.za/d/{{1}}`;
-   * flip to 'registered' on approval. Runtime-gated: while pending the sender throws
+   * REGISTERED: approved in Meta 6 Nov 2026 as UTILITY (category is immutable), English,
+   * 3 body params, dynamic URL button `https://platform.club.medicoach.co.za/d/{{1}}`
+   * (Meta template id 1766883577715864). If ever flipped back to 'pending' the sender throws
    * `WhatsAppTemplatePendingError` and the admin route reports a cell-only player as
    * `skipped_whatsapp_unavailable` (email covers everyone with an address).
    */
@@ -336,7 +336,7 @@ export const WHATSAPP_TEMPLATES = {
       'Hello {{1}},\n\n' +
       '{{2}} has asked you to upload your {{3}} for your player registration.\n\n' +
       'Tap the button below to upload it securely. No sign-in is needed; the link expires in 14 days.',
-    status: 'pending',
+    status: 'registered',
     urlButton: {
       urlTemplate: 'https://platform.club.medicoach.co.za/d/{{1}}',
       suffix: 'signed document-request token',
