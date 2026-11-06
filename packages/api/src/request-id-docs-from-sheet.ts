@@ -390,6 +390,8 @@ interface Args {
   channels: Channel[];
   linkOrigin?: string;
   emailCorrection: boolean;
+  /** Send ONLY to players whose stored request has a FAILED whatsapp result (targeted retry). */
+  onlyFailedWhatsapp: boolean;
 }
 
 /** The --email-correction paragraph (resend after the Nov 2026 localhost-link run). */
@@ -417,6 +419,7 @@ function parseArgs(argv: string[]): Args {
     channels: parseChannelsArg(get('--channels')),
     linkOrigin: get('--link-origin'),
     emailCorrection: argv.includes('--email-correction'),
+    onlyFailedWhatsapp: argv.includes('--only-failed-whatsapp'),
   };
 }
 
@@ -579,6 +582,8 @@ async function main(): Promise<void> {
   });
   const fullRun = channels.length === 2;
   const orgName = cfg ? orgCopy(cfg).name : tenant;
+  if (args.onlyFailedWhatsapp && (channels.length !== 1 || channels[0] !== 'whatsapp'))
+    throw new Error('--only-failed-whatsapp requires --channels whatsapp');
 
   if (args.confirm) {
     const missing: string[] = [];
@@ -660,6 +665,7 @@ async function main(): Promise<void> {
   const perClub = new Map<string, SendResult[]>();
   const statusCounts = new Map<DocRequestSendStatus, number>();
   const bump = (s: DocRequestSendStatus) => statusCounts.set(s, (statusCounts.get(s) ?? 0) + 1);
+  let errored = 0;
   const nowMs = Date.now();
   const at = new Date(nowMs).toISOString();
   const seen = new Set<string>();
@@ -683,64 +689,89 @@ async function main(): Promise<void> {
       continue;
     }
 
-    const existing = await repo.getDocRequest(tenant, t.naturalKey, docKey);
-    const reuse = existing && existing.status === 'pending' && existing.clubId === t.clubId;
-    const requestId = reuse ? existing.requestId : randomUUID();
-    if (!(await repo.claimDocRequestNotify(tenant, requestId, idempotencyKey))) {
-      const prior = reuse ? (existing.lastSendResults ?? []) : [];
-      const status = prior.length
-        ? aggregateDocRequestStatus(prior, notify.TEMPLATE_PENDING)
-        : 'sent';
+    // One flaky network call must not abort the whole batch (a mid-run ETIMEDOUT did on
+    // 6 Nov): errors are reported per player and the loop moves on. While our ledger claim
+    // is outstanding it is released on error, so a rerun RETRIES the player instead of
+    // replay-skipping them; once completed/released it is left alone (no double sends).
+    let claimedRequestId: string | null = null;
+    try {
+      const existing = await repo.getDocRequest(tenant, t.naturalKey, docKey);
+      if (args.onlyFailedWhatsapp) {
+        const wa = existing?.lastSendResults?.find((r) => r.channel === 'whatsapp');
+        if (!wa || wa.status !== 'failed') {
+          console.log(`  ${tag}: skipped (whatsapp not in failed state — nothing to retry)`);
+          continue;
+        }
+      }
+      const reuse = existing && existing.status === 'pending' && existing.clubId === t.clubId;
+      const requestId = reuse ? existing.requestId : randomUUID();
+      if (!(await repo.claimDocRequestNotify(tenant, requestId, idempotencyKey))) {
+        const prior = reuse ? (existing.lastSendResults ?? []) : [];
+        const status = prior.length
+          ? aggregateDocRequestStatus(prior, notify.TEMPLATE_PENDING)
+          : 'sent';
+        bump(status);
+        console.log(`  ${tag}: ${status} (replay — already claimed, not re-sent)`);
+        continue;
+      }
+      claimedRequestId = requestId;
+      const linkExpiresAt = new Date(
+        nowMs + DOC_REQUEST_LINK_DAYS * 24 * 3600 * 1000,
+      ).toISOString();
+      const request = {
+        requestId,
+        clubId: t.clubId,
+        naturalKey: t.naturalKey,
+        docKey,
+        docName: doc.name,
+        requestedBy: args.requestedBy,
+        createdAt: reuse ? existing.createdAt : at,
+        linkExpiresAt,
+        status: 'pending' as const,
+        ...(reuse && existing.lastSendResults ? { lastSendResults: existing.lastSendResults } : {}),
+        ...(reuse && existing.lastSentAt ? { lastSentAt: existing.lastSentAt } : {}),
+      };
+      await repo.putDocRequest(tenant, request);
+      const token = signDocRequestLinkToken(
+        { t: tenant, q: requestId, e: Math.floor(Date.parse(linkExpiresAt) / 1000) },
+        secret,
+      );
+      const { results: sendResults } = await notify.sendDocRequestNotice({
+        player: { firstName: player.firstName, email: player.email, cell: player.cell },
+        orgName,
+        clubName: club.name,
+        docName: doc.name,
+        link: `${linkOrigin}/d/${token}`,
+        ...(args.emailCorrection ? { correctionNote: EMAIL_CORRECTION_NOTE } : {}),
+        token,
+        expiresText: fmtDocRequestExpiry(linkExpiresAt),
+        channels,
+      });
+      if (sendResults.some((r) => r.status === 'sent')) {
+        await repo.completeDocRequestNotify(tenant, requestId, idempotencyKey);
+      } else {
+        await repo.releaseDocRequestNotify(tenant, requestId, idempotencyKey);
+      }
+      claimedRequestId = null;
+      const stored = fullRun
+        ? sendResults
+        : mergeSendResults(reuse ? existing.lastSendResults : undefined, sendResults, channels);
+      await repo.setDocRequestSendResults(tenant, t.naturalKey, docKey, requestId, stored, at);
+      const list = perClub.get(t.clubId) ?? [];
+      list.push(...sendResults);
+      perClub.set(t.clubId, list);
+      const status = aggregateDocRequestStatus(sendResults, notify.TEMPLATE_PENDING);
       bump(status);
-      console.log(`  ${tag}: ${status} (replay — already claimed, not re-sent)`);
-      continue;
+      const legs = sendResults.map((r) => `${r.channel}:${r.status}`).join(' ');
+      console.log(`  ${tag}: ${status} (${legs})`);
+    } catch (err) {
+      errored++;
+      console.log(`  ${tag}: ERROR ${err instanceof Error ? err.message : String(err)}`);
+      if (claimedRequestId)
+        await repo
+          .releaseDocRequestNotify(tenant, claimedRequestId, idempotencyKey)
+          .catch(() => {});
     }
-    const linkExpiresAt = new Date(nowMs + DOC_REQUEST_LINK_DAYS * 24 * 3600 * 1000).toISOString();
-    const request = {
-      requestId,
-      clubId: t.clubId,
-      naturalKey: t.naturalKey,
-      docKey,
-      docName: doc.name,
-      requestedBy: args.requestedBy,
-      createdAt: reuse ? existing.createdAt : at,
-      linkExpiresAt,
-      status: 'pending' as const,
-      ...(reuse && existing.lastSendResults ? { lastSendResults: existing.lastSendResults } : {}),
-      ...(reuse && existing.lastSentAt ? { lastSentAt: existing.lastSentAt } : {}),
-    };
-    await repo.putDocRequest(tenant, request);
-    const token = signDocRequestLinkToken(
-      { t: tenant, q: requestId, e: Math.floor(Date.parse(linkExpiresAt) / 1000) },
-      secret,
-    );
-    const { results: sendResults } = await notify.sendDocRequestNotice({
-      player: { firstName: player.firstName, email: player.email, cell: player.cell },
-      orgName,
-      clubName: club.name,
-      docName: doc.name,
-      link: `${linkOrigin}/d/${token}`,
-      ...(args.emailCorrection ? { correctionNote: EMAIL_CORRECTION_NOTE } : {}),
-      token,
-      expiresText: fmtDocRequestExpiry(linkExpiresAt),
-      channels,
-    });
-    if (sendResults.some((r) => r.status === 'sent')) {
-      await repo.completeDocRequestNotify(tenant, requestId, idempotencyKey);
-    } else {
-      await repo.releaseDocRequestNotify(tenant, requestId, idempotencyKey);
-    }
-    const stored = fullRun
-      ? sendResults
-      : mergeSendResults(reuse ? existing.lastSendResults : undefined, sendResults, channels);
-    await repo.setDocRequestSendResults(tenant, t.naturalKey, docKey, requestId, stored, at);
-    const list = perClub.get(t.clubId) ?? [];
-    list.push(...sendResults);
-    perClub.set(t.clubId, list);
-    const status = aggregateDocRequestStatus(sendResults, notify.TEMPLATE_PENDING);
-    bump(status);
-    const legs = sendResults.map((r) => `${r.channel}:${r.status}`).join(' ');
-    console.log(`  ${tag}: ${status} (${legs})`);
     await sleep(150);
   }
 
@@ -772,6 +803,10 @@ async function main(): Promise<void> {
 
   console.log(`\n── Summary (channels ${channels.join('+')})`);
   for (const [s, n] of [...statusCounts].sort()) console.log(`  ${s}: ${n}`);
+  if (errored) {
+    console.log(`  errored: ${errored} (claims released — rerun with the SAME key to retry them)`);
+    process.exitCode = 1;
+  }
   printReport(report, false);
 }
 
