@@ -1233,6 +1233,8 @@ export async function sendDocRequestNotice(args: {
   token: string;
   expiresText: string;
   channels: Channel[];
+  /** Optional email-only correction paragraph (see DocRequestEmailInput). */
+  correctionNote?: string;
 }): Promise<{ results: SendResult[] }> {
   const { player, orgName, clubName, docName } = args;
 
@@ -1255,6 +1257,7 @@ export async function sendDocRequestNotice(args: {
         docName,
         link: args.link,
         expiresText: args.expiresText,
+        ...(args.correctionNote ? { correctionNote: args.correctionNote } : {}),
       });
       return { channel: 'email', status: 'sent', to, messageId };
     } catch (err) {

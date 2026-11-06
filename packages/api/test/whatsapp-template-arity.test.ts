@@ -610,7 +610,7 @@ describe('player document request template', () => {
   const def = WHATSAPP_TEMPLATES.playerDocRequest;
 
   test('three body params, the /d/ URL button, registered in Meta (6 Nov 2026)', () => {
-    assert.equal(def.name, 'player_doc_request');
+    assert.equal(def.name, 'player_doc_request_v2');
     assert.equal(def.paramCount, 3);
     assert.equal(def.status, 'registered');
     assert.equal(def.urlButton.urlTemplate, 'https://platform.club.medicoach.co.za/d/{{1}}');

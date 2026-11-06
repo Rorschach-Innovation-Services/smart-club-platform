@@ -71,6 +71,12 @@ export type WhatsAppTemplateDefinition = {
   bodyText: string;
   status: 'registered' | 'unverified' | 'pending';
   /**
+   * Meta's template id (WhatsApp Manager). Optional: lets a CLI preflight fetch the LIVE
+   * definition from the Graph API, since `status: 'registered'` alone can drift from what
+   * Meta actually approved.
+   */
+  metaId?: string;
+  /**
    * A URL button with a dynamic suffix (Meta "Visit website" button, URL ending in `{{1}}`).
    * `urlTemplate` is the URL as registered in Meta; the sender supplies the ONE suffix value
    * (button index 0). Absent ⇒ a body-only template.
@@ -321,14 +327,22 @@ export const WHATSAPP_TEMPLATES = {
    * URL BUTTON pinned to the PLATFORM host (the `/d/` page themes itself from the token's
    * tenant, like `/r/` and `/sq/`), never in the body.
    *
-   * REGISTERED: approved in Meta 6 Nov 2026 as UTILITY (category is immutable), English,
-   * 3 body params, dynamic URL button `https://platform.club.medicoach.co.za/d/{{1}}`
-   * (Meta template id 1766883577715864). If ever flipped back to 'pending' the sender throws
+   * REGISTERED: `player_doc_request_v2`, created via the Graph API 6 Nov 2026 as UTILITY
+   * (category is immutable), English, 3 body params, dynamic URL button
+   * `https://platform.club.medicoach.co.za/d/{{1}}` (Meta template id 1377407637611216).
+   *
+   * V2 HISTORY: the original `player_doc_request` (id 1766883577715864) was approved with NO
+   * buttons component — the UI edit dropped it, and a second UI edit stored the mangled URL
+   * `.../d/%7B%7B1%7D%7D{{1}}` — so every send failed "(#100) Invalid parameter". v2 was
+   * created by API (src had a tmp script) so the URL is byte-exact; delete the v1 template
+   * from the WABA once v2 is deployed + the resend has gone out.
+   *
+   * If ever flipped back to 'pending' the sender throws
    * `WhatsAppTemplatePendingError` and the admin route reports a cell-only player as
    * `skipped_whatsapp_unavailable` (email covers everyone with an address).
    */
   playerDocRequest: {
-    name: 'player_doc_request',
+    name: 'player_doc_request_v2',
     lang: 'en',
     paramCount: 3,
     params: ['player first name', 'org name', 'document name'],
@@ -337,6 +351,8 @@ export const WHATSAPP_TEMPLATES = {
       '{{2}} has asked you to upload your {{3}} for your player registration.\n\n' +
       'Tap the button below to upload it securely. No sign-in is needed; the link expires in 14 days.',
     status: 'registered',
+    // Live definition checked by request-id-docs-from-sheet.ts's Meta preflight.
+    metaId: '1377407637611216',
     urlButton: {
       urlTemplate: 'https://platform.club.medicoach.co.za/d/{{1}}',
       suffix: 'signed document-request token',

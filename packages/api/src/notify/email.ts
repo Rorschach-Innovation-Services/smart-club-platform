@@ -1697,6 +1697,9 @@ export interface DocRequestEmailInput {
   link: string;
   /** When the link stops working, e.g. "Thu 19 Nov 2026". */
   expiresText: string;
+  /** Optional correction line (e.g. an earlier email's link was broken), its own paragraph
+   *  above the main body. Absent ⇒ the standard email, unchanged. */
+  correctionNote?: string;
 }
 
 /** Build the document-request email. Pure — exported so tests can assert the copy. */
@@ -1709,8 +1712,9 @@ export function docRequestEmailContent(input: Omit<DocRequestEmailInput, 'to'>):
   const subject = `${input.orgName}: please upload your ${input.docName}`;
   const lead = `${input.orgName} has asked you to upload your ${input.docName} for your registration with ${input.clubName}.`;
   const terms = `The link is personal to you and expires on ${input.expiresText}. Images (JPG, PNG) or PDF, up to 5 MB.`;
+  const note = input.correctionNote;
   const text =
-    `Hi ${greet},\n\n${lead}\n\n` +
+    `Hi ${greet},\n\n${note ? `${note}\n\n` : ''}${lead}\n\n` +
     `Upload it here (no sign-in needed):\n\n${input.link}\n\n` +
     `${terms}\n\n` +
     `Thank you,\nThe ${input.orgName} office`;
@@ -1718,6 +1722,7 @@ export function docRequestEmailContent(input: Omit<DocRequestEmailInput, 'to'>):
   const html =
     EMAIL_WRAP_OPEN +
     `<p>Hi ${e(greet)},</p>` +
+    (note ? `<p>${e(note)}</p>` : '') +
     `<p>${e(lead)}</p>` +
     `<p><a href="${e(input.link)}" style="color:#1D9E75;font-weight:600">Upload your ${e(input.docName)}</a> (no sign-in needed)</p>` +
     `<p>${e(terms)}</p>` +
