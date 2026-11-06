@@ -1,7 +1,8 @@
 .DS_Store
 .vscode/
 .idea/
-node_modules/
+# no trailing slash: also matches a node_modules SYMLINK (worktree offline-install workaround)
+node_modules
 dist/
 .sst/
 sst-env.d.ts
