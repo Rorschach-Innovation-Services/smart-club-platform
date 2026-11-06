@@ -41,6 +41,9 @@ import type {
   ClubCaptainsReportDetail,
   LinkedCaptainsReport,
   LinkedSquadRequest,
+  LinkedDocRequest,
+  DocRequestSummary,
+  DocRequestSendResult,
   SquadRequestView,
   SquadSaveBody,
   TeamCaptainPutResponse,
@@ -1471,6 +1474,28 @@ export const forwardLinkedSquadRequest = (token: string, candidateId: string) =>
   request<LinkedSquadRequest>(`${squadLinkPath(token)}/forward`, {
     method: 'POST',
     body: { candidateId },
+    auth: false,
+  });
+// Player document requests. The admin send + the indicator list are authed; the /d/<token>
+// page's calls carry no auth (the token is the capability).
+export const sendDocRequests = (body: {
+  players: Array<{ clubId: string; naturalKey: string }>;
+  docKey: string;
+  idempotencyKey: string;
+}) => request<{ results: DocRequestSendResult[] }>('/admin/doc-requests', { method: 'POST', body });
+export const getDocRequests = () => request<DocRequestSummary[]>('/admin/doc-requests');
+const docLinkPath = (token: string) => `/doc-request-link/${encodeURIComponent(token)}`;
+export const getLinkedDocRequest = (token: string) =>
+  request<LinkedDocRequest>(docLinkPath(token), { auth: false });
+export const getDocRequestUploadUrl = (token: string, contentType: string) =>
+  request<{ uploadUrl: string; objectKey: string; contentType: string }>(
+    `${docLinkPath(token)}/upload-url`,
+    { method: 'POST', body: { contentType }, auth: false },
+  );
+export const completeLinkedDocRequest = (token: string, objectKey: string) =>
+  request<{ state: 'completed' }>(`${docLinkPath(token)}/complete`, {
+    method: 'POST',
+    body: { objectKey },
     auth: false,
   });
 /** A club team's designated captains, one per competition it plays in (`teamId` = the club

@@ -10,7 +10,7 @@ import {
 } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { useQueries } from '@tanstack/react-query';
+import { useQueries, useQuery } from '@tanstack/react-query';
 import * as api from './api';
 import { qk, queryClient } from './query';
 import { useCopy, useModule, useSeasonLabel, useVertical } from './branding';
@@ -144,6 +144,7 @@ import {
   clearanceHasCertificateStatus,
 } from './ClearanceCertificateModal';
 import { PlayerDetailModal } from './PlayerDetailModal';
+import { DocRequestModal } from './DocRequestModal';
 import { RegLinkModal } from './RegLinkModal';
 import { ReleaseDialog } from './ReleaseDialog';
 import { ClashPanel } from './ClashPanel';
@@ -5952,6 +5953,7 @@ export function AdminClubDetail({
                   'veterans-request-declined': 'Veterans request declined notice',
                   fixtures: 'Fixtures shared with players',
                   'fixture-reminder': 'Fixture reminder',
+                  'doc-request': 'Document request sent to players',
                 };
                 const sendItems = (club.commLog || []).map((e) => {
                   const isFixtures = e.kind === 'fixtures';
@@ -9009,6 +9011,21 @@ export function AdminPlayersView({ clubs, leagues, toast, onErasePlayer = undefi
   // Which export (by scope) is in flight, so the button the admin actually pressed shows
   // the busy label; null when idle. Both buttons disable while either runs.
   const [exportingScope, setExportingScope] = useStateA<'filtered' | 'all' | null>(null);
+  // "Request ID document": rows ticked for the send (keyed clubId:naturalKey) + the modal.
+  const [checked, setChecked] = useStateA<Set<string>>(() => new Set());
+  const [docRequestOpen, setDocRequestOpen] = useStateA(false);
+  const rowKey = (p) => `${p.clubId}:${p.naturalKey}`;
+  // Outstanding ID-doc requests (one partition read) → the row's "ID doc requested" indicator.
+  const docRequestsQuery = useQuery({ queryKey: qk.docRequests(), queryFn: api.getDocRequests });
+  const pendingIdDocRequests = useMemoA(() => {
+    const m = new Map<string, string>();
+    const nowIso = new Date().toISOString();
+    for (const r of docRequestsQuery.data ?? []) {
+      if (r.docKey !== 'idDoc' || r.status !== 'pending' || r.linkExpiresAt < nowIso) continue;
+      m.set(`${r.clubId}:${r.naturalKey}`, r.lastSentAt);
+    }
+    return m;
+  }, [docRequestsQuery.data]);
 
   // Any change to the query inputs resets pagination to the first page.
   const onFilters = (f) => {
@@ -9066,6 +9083,20 @@ export function AdminPlayersView({ clubs, leagues, toast, onErasePlayer = undefi
   const totalPages = Math.max(1, Math.ceil(filtered.length / PLAYERS_PER_PAGE));
   const safePage = Math.min(page, totalPages);
   const pageRows = filtered.slice((safePage - 1) * PLAYERS_PER_PAGE, safePage * PLAYERS_PER_PAGE);
+  // Selection is over the FILTERED list: a filter change never sends to hidden players.
+  const selectedRows = filtered.filter((p) => p.naturalKey && checked.has(rowKey(p)));
+  const selectable = filtered.filter((p) => p.naturalKey);
+  const allFilteredChecked = selectable.length > 0 && selectedRows.length === selectable.length;
+  const toggleRow = (p) =>
+    setChecked((prev) => {
+      const next = new Set(prev);
+      const k = rowKey(p);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
+      return next;
+    });
+  const toggleAllFiltered = () =>
+    setChecked(allFilteredChecked ? new Set() : new Set(selectable.map(rowKey)));
 
   return (
     <div>
@@ -9156,10 +9187,34 @@ export function AdminPlayersView({ clubs, leagues, toast, onErasePlayer = undefi
           {hasActiveFilters(filters) && (
             <FilterResultCount shown={filtered.length} total={allPlayers.length} />
           )}
+          {selectedRows.length > 0 && (
+            <div
+              className="doc-request-toolbar"
+              style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 14 }}
+            >
+              <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>
+                {selectedRows.length} selected
+              </span>
+              <Btn tone="teal" size="sm" onClick={() => setDocRequestOpen(true)}>
+                Request ID document
+              </Btn>
+              <Btn tone="ghost" size="sm" onClick={() => setChecked(new Set())}>
+                Clear selection
+              </Btn>
+            </div>
+          )}
           <div className="tbl-w" style={{ marginTop: 14 }}>
             <table className="tbl">
               <thead>
                 <tr>
+                  <th style={{ width: 32 }}>
+                    <input
+                      type="checkbox"
+                      aria-label="Select all shown players"
+                      checked={allFilteredChecked}
+                      onChange={toggleAllFiltered}
+                    />
+                  </th>
                   <th>Player</th>
                   <th>ID number</th>
                   <th>{vt.Club}</th>
@@ -9175,6 +9230,16 @@ export function AdminPlayersView({ clubs, leagues, toast, onErasePlayer = undefi
                     onClick={() => setSelectedPlayer(p)}
                     style={{ cursor: 'pointer' }}
                   >
+                    <td onClick={(e) => e.stopPropagation()}>
+                      {p.naturalKey && (
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${p.firstName} ${p.lastName}`}
+                          checked={checked.has(rowKey(p))}
+                          onChange={() => toggleRow(p)}
+                        />
+                      )}
+                    </td>
                     <td>
                       <div className="rost-name">
                         {p.firstName} {p.lastName}
@@ -9182,6 +9247,13 @@ export function AdminPlayersView({ clubs, leagues, toast, onErasePlayer = undefi
                       <div className="rost-sub">
                         {p.district || '—'} · {p.gender || '—'} · {p.nationality || '—'}
                       </div>
+                      {pendingIdDocRequests.has(rowKey(p)) && (
+                        <div className="doc-requested-badge" style={{ marginTop: 4 }}>
+                          <Pill tone="gold">
+                            ID doc requested {formatStampDay(pendingIdDocRequests.get(rowKey(p)))}
+                          </Pill>
+                        </div>
+                      )}
                     </td>
                     <td>
                       <span className="rost-id">{p.idNumber || '—'}</span>
@@ -9245,6 +9317,16 @@ export function AdminPlayersView({ clubs, leagues, toast, onErasePlayer = undefi
             </div>
           )}
         </>
+      )}
+      {docRequestOpen && (
+        <DocRequestModal
+          targets={selectedRows}
+          onClose={() => {
+            setDocRequestOpen(false);
+            setChecked(new Set());
+          }}
+          onSent={() => void queryClient.invalidateQueries({ queryKey: qk.docRequests() })}
+        />
       )}
       {selectedPlayer && (
         <PlayerDetailModal

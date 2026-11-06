@@ -138,6 +138,10 @@ import {
   captainsReportPartitionPk,
   broadcastPartitionPk,
   broadcastDeliveryKey,
+  docRequestPartitionPk,
+  docRequestKey,
+  docRequestLinkKey,
+  docRequestNotifyKey,
 } from './keys.js';
 import { PLATFORM_TENANT } from './types.js';
 import { refs as medicoachRefs } from './medicoach-bundle.js';
@@ -195,6 +199,8 @@ import type {
   TeamLastCaptain,
   SquadOpenMarker,
   PendingSquadSync,
+  DocRequest,
+  DocRequestLink,
 } from './types.js';
 
 import { tableName } from './env.js';
@@ -9083,6 +9089,9 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   // Captain's reports carry names and ratings; the partition also holds the counters and the
   // NOTIFY# ledger. No gsi1/META listing — enumerate the partition.
   for (const k of await listCaptainsReportPartitionKeys(tenant)) keys.push(k);
+  // Player document requests (DOCREQ# rows name a player by natural key; pointers + ledger
+  // share the partition). No gsi1/META listing — enumerate the partition.
+  for (const k of await listDocRequestPartitionKeys(tenant)) keys.push(k);
 
   const unique = uniqueKeys(keys);
   await batchDelete(unique);
@@ -9164,6 +9173,8 @@ export async function clearCohort(tenant: string): Promise<number> {
 
   // Captain's reports hang off the fixtures being cleared (reports, counters, ledger).
   for (const k of await listCaptainsReportPartitionKeys(tenant)) keys.push(k);
+  // Player document requests name the players being cleared (requests, pointers, ledger).
+  for (const k of await listDocRequestPartitionKeys(tenant)) keys.push(k);
 
   // Safety: never delete the tenant config or any user record.
   for (const k of keys) {
@@ -9371,6 +9382,10 @@ export async function eraseClubData(
     keys.push(outboundPostponementKey(tenant, club.id, r.id));
     keys.push(postponementKey(tenant, r.opposingClubId, r.id));
   }
+  // Player document requests addressed to this club's players (+ their pointers and ledger).
+  // One partition Query, filtered to this club.
+  const clubDocRequests = (await listDocRequests(tenant)).filter((r) => r.clubId === club.id);
+  keys.push(...(await docRequestErasureKeys(tenant, clubDocRequests)));
 
   await batchDelete(uniqueKeys(keys));
   // S3 purge BEFORE the META delete: the objectKeys are only derivable while the
@@ -9569,7 +9584,16 @@ export async function erasePlayerData(
   const vetreqs = (await listAllVeteransRequests(tenant)).filter(
     (r) => r.playerNaturalKey === naturalKey,
   );
-  if (!rows.length && !clearances.length && !reviews.length && !vetreqs.length) return null;
+  // Document requests (DOCREQ#) — a targeted begins_with Query on the person's natural key.
+  const docRequests = await listDocRequestsForPlayer(tenant, naturalKey);
+  if (
+    !rows.length &&
+    !clearances.length &&
+    !reviews.length &&
+    !vetreqs.length &&
+    !docRequests.length
+  )
+    return null;
 
   if (
     rows.some((p) => p.status === 'clearance-pending') ||
@@ -9618,6 +9642,7 @@ export async function erasePlayerData(
     keys.push(outboundVeteransRequestKey(tenant, r.veteransClubId, r.id));
     names.add(normName(r.playerName));
   }
+  keys.push(...(await docRequestErasureKeys(tenant, docRequests)));
   const emails = new Set<string>();
   const cells = new Set<string>();
   for (const p of people) {
@@ -9842,6 +9867,7 @@ export async function erasePlayerData(
       ? { squadRequestsScrubbed: squads.squadRequestsScrubbed }
       : {}),
     ...(squads.squadsRepushed ? { squadsRepushed: squads.squadsRepushed } : {}),
+    ...(docRequests.length ? { docRequests: docRequests.length } : {}),
   };
   await putPlayerEraseLog(tenant, {
     id: randomUUID(),
@@ -10844,4 +10870,321 @@ async function eraseFromSquadRows(
     }
   }
   return { teamCaptainRows, squadRequestsScrubbed, squadsRepushed };
+}
+
+// ── Player document requests (DOCREQ# / DOCREQLINK# / NOTIFY#docreq#) ──
+// One tenant partition (`TENANT#<t>#DOCREQ`): the admin list is one Query, a player's rows are
+// one begins_with Query, a link resolves by GetItem. Pending rows (and every pointer row) carry
+// a TTL `expiresAt` (epoch seconds) at link expiry + 30 days; a COMPLETED request drops its TTL
+// and persists as the audit trail until erasure sweeps it (eraseTenantData / clearCohort /
+// eraseClubData / erasePlayerData all enumerate this partition).
+
+/** Pending DOCREQ#/DOCREQLINK# rows self-expire this long after their link expires. */
+const DOCREQ_TTL_GRACE_SECONDS = 30 * 24 * 3600;
+/** NOTIFY#docreq# ledger rows (ids only) outlive any link comfortably, then self-expire. */
+const DOCREQ_NOTIFY_TTL_SECONDS = 120 * 24 * 3600;
+
+const docRequestTtl = (linkExpiresAt: string): number =>
+  Math.floor(Date.parse(linkExpiresAt) / 1000) + DOCREQ_TTL_GRACE_SECONDS;
+
+const stripDocRequest = (item: Record<string, unknown>): DocRequest => {
+  const { expiresAt: _ttl, ...rest } = stripKeys<DocRequest & { expiresAt?: number }>(item)!;
+  return rest;
+};
+
+/** One player's request for one document, or null. A single GetItem. */
+export async function getDocRequest(
+  tenant: string,
+  naturalKey: string,
+  docKey: string,
+): Promise<DocRequest | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: docRequestKey(tenant, naturalKey, docKey) }),
+  );
+  return res.Item ? stripDocRequest(res.Item) : null;
+}
+
+/** The token pointer for a request id, or null. A single GetItem. */
+export async function getDocRequestLink(
+  tenant: string,
+  requestId: string,
+): Promise<DocRequestLink | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: docRequestLinkKey(tenant, requestId) }),
+  );
+  if (!res.Item) return null;
+  const { expiresAt: _ttl, ...rest } = stripKeys<DocRequestLink & { expiresAt?: number }>(
+    res.Item,
+  )!;
+  return rest;
+}
+
+/**
+ * Write (create, or extend on a resend) a request and its token pointer. The pointer is written
+ * FIRST so a request row never exists without a resolvable link. A pending request carries the
+ * TTL; the pointer keeps its upload counter across a resend (only the TTL is refreshed).
+ */
+export async function putDocRequest(tenant: string, req: DocRequest): Promise<void> {
+  const ttl = docRequestTtl(req.linkExpiresAt);
+  await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: docRequestLinkKey(tenant, req.requestId),
+      UpdateExpression:
+        'SET requestId = :r, naturalKey = :nk, clubId = :c, docKey = :d, expiresAt = :ttl',
+      ExpressionAttributeValues: {
+        ':r': req.requestId,
+        ':nk': req.naturalKey,
+        ':c': req.clubId,
+        ':d': req.docKey,
+        ':ttl': ttl,
+      },
+    }),
+  );
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...docRequestKey(tenant, req.naturalKey, req.docKey),
+        ...req,
+        ...(req.status === 'pending' ? { expiresAt: ttl } : {}),
+      },
+    }),
+  );
+}
+
+/** Record the last send's per-channel results on a request (addresses are never stored). */
+export async function setDocRequestSendResults(
+  tenant: string,
+  naturalKey: string,
+  docKey: string,
+  requestId: string,
+  results: SendResult[],
+  at: string,
+): Promise<void> {
+  await swallowCcf(() =>
+    ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: docRequestKey(tenant, naturalKey, docKey),
+        UpdateExpression: 'SET lastSendResults = :res, lastSentAt = :at',
+        ConditionExpression: 'requestId = :r',
+        ExpressionAttributeValues: {
+          ':res': results.map(({ to: _to, ...r }) => r),
+          ':at': at,
+          ':r': requestId,
+        },
+      }),
+    ),
+  );
+}
+
+/**
+ * Mark a PENDING request completed (drops its TTL: the completed row is the audit trail).
+ * `requestId` pins the exact request (the link path); omitted, any pending request for the
+ * player + doc completes (the console-upload path). False when nothing pending matched.
+ */
+export async function completeDocRequest(
+  tenant: string,
+  naturalKey: string,
+  docKey: string,
+  opts: { at: string; via: 'link' | 'console'; requestId?: string },
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: docRequestKey(tenant, naturalKey, docKey),
+        UpdateExpression: 'SET #s = :done, completedAt = :at, completedVia = :via REMOVE expiresAt',
+        ConditionExpression: `attribute_exists(pk) AND #s = :pending${opts.requestId ? ' AND requestId = :r' : ''}`,
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: {
+          ':done': 'completed',
+          ':pending': 'pending',
+          ':at': opts.at,
+          ':via': opts.via,
+          ...(opts.requestId ? { ':r': opts.requestId } : {}),
+        },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/** Every request in the tenant (one partition Query; pointer + ledger rows excluded). */
+export async function listDocRequests(tenant: string): Promise<DocRequest[]> {
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': docRequestPartitionPk(tenant), ':s': 'DOCREQ#' },
+  });
+  return items.map(stripDocRequest);
+}
+
+/** One person's requests (every docKey) — a begins_with Query on their natural key. */
+export async function listDocRequestsForPlayer(
+  tenant: string,
+  naturalKey: string,
+): Promise<DocRequest[]> {
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: {
+      ':p': docRequestPartitionPk(tenant),
+      ':s': `DOCREQ#${naturalKey}#`,
+    },
+  });
+  return items.map(stripDocRequest);
+}
+
+/** Every key in the tenant's DOCREQ partition (requests, pointers, ledger) — for erasure. */
+async function listDocRequestPartitionKeys(
+  tenant: string,
+): Promise<Array<{ pk: string; sk: string }>> {
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p',
+    ExpressionAttributeValues: { ':p': docRequestPartitionPk(tenant) },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+/**
+ * Every key belonging to the given requests — the DOCREQ# row, its DOCREQLINK# pointer and its
+ * NOTIFY#docreq# ledger rows (one begins_with Query each). For club and player erasure.
+ */
+async function docRequestErasureKeys(
+  tenant: string,
+  requests: DocRequest[],
+): Promise<Array<{ pk: string; sk: string }>> {
+  const keys: Array<{ pk: string; sk: string }> = [];
+  for (const r of requests) {
+    keys.push(docRequestKey(tenant, r.naturalKey, r.docKey));
+    keys.push(docRequestLinkKey(tenant, r.requestId));
+    const ledger = await queryAll({
+      TableName: TABLE,
+      KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+      ExpressionAttributeValues: {
+        ':p': docRequestPartitionPk(tenant),
+        ':s': `NOTIFY#docreq#${r.requestId}#`,
+      },
+      ProjectionExpression: 'pk, sk',
+    });
+    for (const i of ledger) keys.push({ pk: i.pk as string, sk: i.sk as string });
+  }
+  return keys;
+}
+
+/**
+ * Claim the right to send one doc-request notice (`requestId` + the admin's `idempotencyKey`).
+ * True ⇒ the caller sends; false ⇒ a replay (double-click, retried POST) and nothing must go
+ * out again. Release with {@link releaseDocRequestNotify} when every channel failed, so the
+ * admin can retry.
+ */
+export async function claimDocRequestNotify(
+  tenant: string,
+  requestId: string,
+  idempotencyKey: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: {
+          ...docRequestNotifyKey(tenant, requestId, idempotencyKey),
+          status: 'in_progress',
+          startedAt: new Date().toISOString(),
+          expiresAt: Math.floor(Date.now() / 1000) + DOCREQ_NOTIFY_TTL_SECONDS,
+        },
+        ConditionExpression: 'attribute_not_exists(pk)',
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/** Mark a claimed doc-request notice sent (kept as the replay guard until its TTL). */
+export async function completeDocRequestNotify(
+  tenant: string,
+  requestId: string,
+  idempotencyKey: string,
+): Promise<void> {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: docRequestNotifyKey(tenant, requestId, idempotencyKey),
+      UpdateExpression: 'SET #s = :sent',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: { ':sent': 'sent' },
+    }),
+  );
+}
+
+/** Drop a doc-request notice claim (nothing was delivered — the admin may retry). */
+export async function releaseDocRequestNotify(
+  tenant: string,
+  requestId: string,
+  idempotencyKey: string,
+): Promise<void> {
+  await ddb.send(
+    new DeleteCommand({
+      TableName: TABLE,
+      Key: docRequestNotifyKey(tenant, requestId, idempotencyKey),
+    }),
+  );
+}
+
+/** The doc-request link's presign counter window (1 hour). */
+const DOCREQ_UPLOAD_WINDOW_MS = 60 * 60 * 1000;
+
+/**
+ * Hourly presign counter on the DOCREQLINK# pointer (same windowed shape as
+ * {@link bumpSignupTokenCounter}, its own row and its own cap). False ⇒ over the limit this
+ * hour (or the pointer is gone).
+ */
+export async function bumpDocRequestUploadCounter(
+  tenant: string,
+  requestId: string,
+  nowIso: string,
+  limit: number,
+): Promise<boolean> {
+  const cutoff = new Date(new Date(nowIso).getTime() - DOCREQ_UPLOAD_WINDOW_MS).toISOString();
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: docRequestLinkKey(tenant, requestId),
+        UpdateExpression: 'SET uploadWindowStart = :now, uploadCount = :one',
+        ConditionExpression:
+          'attribute_exists(pk) AND (attribute_not_exists(uploadWindowStart) OR uploadWindowStart < :cutoff)',
+        ExpressionAttributeValues: { ':now': nowIso, ':one': 1, ':cutoff': cutoff },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: docRequestLinkKey(tenant, requestId),
+        UpdateExpression: 'SET uploadCount = uploadCount + :one',
+        ConditionExpression:
+          'attribute_exists(pk) AND uploadWindowStart >= :cutoff AND uploadCount < :limit',
+        ExpressionAttributeValues: { ':one': 1, ':cutoff': cutoff, ':limit': limit },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
 }

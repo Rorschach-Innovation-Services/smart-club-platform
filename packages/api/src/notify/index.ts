@@ -30,6 +30,7 @@ import {
   sendFixtureReminderEmail,
   officialAppointedEmailContent,
   sendOfficialAppointedEmail,
+  sendDocRequestEmail,
 } from './email.js';
 import type {
   TutorialLink,
@@ -49,6 +50,8 @@ import {
   sendClearanceWhatsApp,
   sendFixtureReminderWhatsApp,
   sendOfficialAppointedWhatsApp,
+  sendPlayerDocRequestWhatsApp,
+  WhatsAppTemplatePendingError,
   toE164,
   PARAM_MAX,
 } from './whatsapp.js';
@@ -1206,5 +1209,88 @@ export async function sendOfficialAppointedNotice(args: {
   };
 
   const results = await Promise.all(channels.map((ch) => (ch === 'email' ? email() : whatsapp())));
+  return { results };
+}
+
+/** `SendResult.error` on a WhatsApp leg skipped because the Meta template is not approved yet. */
+export const TEMPLATE_PENDING = 'template-pending';
+
+/**
+ * Ask a player to upload a document through their signed link: email (link in the body) and
+ * WhatsApp (`player_doc_request`, the token as the URL-button suffix) concurrently. Per-channel
+ * results, never throwing — a blank/invalid contact is `skipped`, a provider error `failed`, and
+ * a not-yet-approved template is `skipped` with `error: TEMPLATE_PENDING`. The caller gates
+ * WhatsApp on the tenant's `whatsappInvites` feature by passing `channels`.
+ */
+export async function sendDocRequestNotice(args: {
+  player: { firstName: string; email?: string; cell?: string };
+  orgName: string;
+  clubName: string;
+  docName: string;
+  /** The email link (canonical tenant origin + `/d/<token>`). NEVER logged. */
+  link: string;
+  /** The signed token — the WhatsApp URL-button suffix. NEVER logged. */
+  token: string;
+  expiresText: string;
+  channels: Channel[];
+}): Promise<{ results: SendResult[] }> {
+  const { player, orgName, clubName, docName } = args;
+
+  const email = async (): Promise<SendResult> => {
+    const to = (player.email ?? '').trim();
+    if (!EMAIL_RE.test(to)) {
+      return {
+        channel: 'email',
+        status: 'skipped',
+        ...(to ? { to } : {}),
+        error: 'no valid player email on file',
+      };
+    }
+    try {
+      const { messageId } = await sendDocRequestEmail({
+        to,
+        firstName: player.firstName,
+        orgName,
+        clubName,
+        docName,
+        link: args.link,
+        expiresText: args.expiresText,
+      });
+      return { channel: 'email', status: 'sent', to, messageId };
+    } catch (err) {
+      return { channel: 'email', status: 'failed', to, error: errMessage(err) };
+    }
+  };
+
+  const whatsapp = async (): Promise<SendResult> => {
+    const cell = (player.cell ?? '').trim();
+    const e164 = toE164(cell);
+    if (!e164) {
+      return {
+        channel: 'whatsapp',
+        status: 'skipped',
+        ...(cell ? { to: cell } : {}),
+        error: 'no valid player cell on file',
+      };
+    }
+    try {
+      const { messageId } = await sendPlayerDocRequestWhatsApp({
+        to: e164,
+        firstName: player.firstName,
+        orgName,
+        docName,
+        token: args.token,
+      });
+      return { channel: 'whatsapp', status: 'sent', to: e164, messageId };
+    } catch (err) {
+      if (err instanceof WhatsAppTemplatePendingError)
+        return { channel: 'whatsapp', status: 'skipped', to: e164, error: TEMPLATE_PENDING };
+      return { channel: 'whatsapp', status: 'failed', to: e164, error: errMessage(err) };
+    }
+  };
+
+  const results = await Promise.all(
+    args.channels.map((ch) => (ch === 'email' ? email() : whatsapp())),
+  );
   return { results };
 }

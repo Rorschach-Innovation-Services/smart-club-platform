@@ -629,7 +629,10 @@ export interface ClubCommEvent {
     | 'clearance-inbound'
     // Pending-clearance nudge to the source chair (admin "Send reminder" or the ClearanceReminders
     // cron), keyed `clearance-<id>-reminder-<date>-<channel>`. Bypasses the daily cap.
-    | 'clearance-reminder';
+    | 'clearance-reminder'
+    // Admin "Request ID document" to the club's players: one PII-free summary row per channel
+    // per send (counts only, never a name or address).
+    | 'doc-request';
   /** Aggregate, PII-free outcome for a broadcast send, e.g. "8 sent · 2 skipped" (sent · skipped · failed; zero parts omitted). */
   summary?: string;
 }
@@ -709,6 +712,8 @@ export interface PlayerErasureCounts {
   squadRequestsScrubbed?: number;
   /** §8 re-upserts queued because the erased player sat in a submitted future-match squad. */
   squadsRepushed?: number;
+  /** Document requests (DOCREQ# + pointer + ledger) deleted. Absent when none. */
+  docRequests?: number;
 }
 
 /**
@@ -740,6 +745,44 @@ export interface PlayerIdDocMeta {
   uploadedAt: string;
   /** MIME type the file was signed/stored as (ID docs allow image/* or PDF). */
   contentType?: string;
+}
+
+/**
+ * An admin's request that a player upload a document (ID doc for now) through a signed public
+ * link (`/d/<token>`). One row per player + docKey (`DOCREQ#<naturalKey>#<docKey>`); the link
+ * resolves through a `DOCREQLINK#<requestId>` pointer so the natural key never rides in a URL.
+ */
+export interface DocRequest {
+  /** Random uuid — the only id a link carries. */
+  requestId: string;
+  clubId: string;
+  naturalKey: string;
+  docKey: string;
+  /** Display name of the requested document ("ID document"). */
+  docName: string;
+  /** Admin email that last sent the request. */
+  requestedBy: string;
+  createdAt: string;
+  /** ISO — when the current link stops working (extended on a resend). */
+  linkExpiresAt: string;
+  status: 'pending' | 'completed' | 'cancelled';
+  completedAt?: string;
+  /** How it completed: through the link, or an upload by another path (the console). */
+  completedVia?: 'link' | 'console';
+  lastSentAt?: string;
+  /** Per-channel outcome of the last send (no addresses stored). */
+  lastSendResults?: SendResult[];
+}
+
+/** The token-pointer row (`DOCREQLINK#<requestId>`). Holds the minimum to find the request. */
+export interface DocRequestLink {
+  requestId: string;
+  naturalKey: string;
+  clubId: string;
+  docKey: string;
+  /** Windowed presign counter (public upload-url rate limit). */
+  uploadWindowStart?: string;
+  uploadCount?: number;
 }
 
 /**

@@ -45,7 +45,8 @@
  * "registered"), `officialAppointed` / `officialAppointedV2` (the OfficialNotices cron's WhatsApp gate and
  * template choice), `captainsReportDue` / `captainsReportOpsDigest` (their senders skip the
  * channel as template-pending until it is "registered"), `clearancePendingV2` (the
- * ClearanceReminders cron's WhatsApp gate), the three `dolphins*` welcome-broadcast entries and
+ * ClearanceReminders cron's WhatsApp gate), `playerDocRequest` (its sender throws until
+ * "registered"; the admin route reports cell-only players as unavailable), the three `dolphins*` welcome-broadcast entries and
  * the two `emcu*` scorer-broadcast entries (their senders throw until "registered") — see those
  * entries.
  *
@@ -310,6 +311,35 @@ export const WHATSAPP_TEMPLATES = {
     urlButton: {
       urlTemplate: 'https://platform.club.medicoach.co.za/sq/{{1}}',
       suffix: 'signed squad token',
+    },
+  },
+
+  /**
+   * Player document request (admin console "Request ID document"): asks a player to upload a
+   * document through a personal signed link (`/d/<token>`). Parameterised by the document's
+   * display name ({{3}}) so a future document type needs no new template. The link rides in a
+   * URL BUTTON pinned to the PLATFORM host (the `/d/` page themes itself from the token's
+   * tenant, like `/r/` and `/sq/`), never in the body.
+   *
+   * REGISTERED: approved in Meta 6 Nov 2026 as UTILITY (category is immutable), English,
+   * 3 body params, dynamic URL button `https://platform.club.medicoach.co.za/d/{{1}}`
+   * (Meta template id 1766883577715864). If ever flipped back to 'pending' the sender throws
+   * `WhatsAppTemplatePendingError` and the admin route reports a cell-only player as
+   * `skipped_whatsapp_unavailable` (email covers everyone with an address).
+   */
+  playerDocRequest: {
+    name: 'player_doc_request',
+    lang: 'en',
+    paramCount: 3,
+    params: ['player first name', 'org name', 'document name'],
+    bodyText:
+      'Hello {{1}},\n\n' +
+      '{{2}} has asked you to upload your {{3}} for your player registration.\n\n' +
+      'Tap the button below to upload it securely. No sign-in is needed; the link expires in 14 days.',
+    status: 'registered',
+    urlButton: {
+      urlTemplate: 'https://platform.club.medicoach.co.za/d/{{1}}',
+      suffix: 'signed document-request token',
     },
   },
 

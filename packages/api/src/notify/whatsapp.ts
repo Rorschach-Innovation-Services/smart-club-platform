@@ -618,6 +618,56 @@ export async function sendSquadSelectionDueWhatsApp(
   );
 }
 
+export interface PlayerDocRequestWhatsAppInput {
+  to: string; // already E.164 (see toE164)
+  firstName: string;
+  /** The union's display name — template {{2}}. */
+  orgName: string;
+  /** "ID document" — template {{3}}. */
+  docName: string;
+  /** The signed doc-request token — the URL button's dynamic suffix. Never logged. */
+  token: string;
+}
+
+/**
+ * Build the three body params for `player_doc_request`, in order: {{1}} first name (fallback
+ * 'there'), {{2}} the union's display name, {{3}} the document's display name. The link rides
+ * in the URL button, never the body.
+ */
+export function playerDocRequestParams(
+  input: Pick<PlayerDocRequestWhatsAppInput, 'firstName' | 'orgName' | 'docName'>,
+): TemplateParam[] {
+  return [
+    { type: 'text', text: cleanParam(input.firstName || 'there') },
+    { type: 'text', text: cleanParam(input.orgName) },
+    { type: 'text', text: cleanParam(input.docName) },
+  ];
+}
+
+/** Whether the doc-request template may be sent (registry status is `registered`). */
+export const playerDocRequestTemplateReady = (): boolean =>
+  (WHATSAPP_TEMPLATES.playerDocRequest.status as WhatsAppTemplateDefinition['status']) ===
+  'registered';
+
+/**
+ * Document-request link over WhatsApp (URL button with the token as its suffix). Throws
+ * `WhatsAppTemplatePendingError` while the registry entry is not `registered`.
+ */
+export async function sendPlayerDocRequestWhatsApp(
+  input: PlayerDocRequestWhatsAppInput,
+): Promise<{ messageId: string }> {
+  const def = WHATSAPP_TEMPLATES.playerDocRequest;
+  assertTemplateSendable(def);
+  return sendTemplate(
+    input.to,
+    def.name,
+    def.lang,
+    playerDocRequestParams(input),
+    `${input.docName} request`,
+    input.token,
+  );
+}
+
 export interface CaptainsReportOpsDigestWhatsAppInput {
   to: string; // already E.164 (see toE164)
   recipientName: string;
