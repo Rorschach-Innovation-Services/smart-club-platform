@@ -24,6 +24,7 @@
     "request-id-docs": "tsx src/request-id-docs-from-sheet.ts",
     "configure-tenant-docs": "tsx src/configure-tenant-docs.ts",
     "set-tenant-districts": "tsx src/set-tenant-districts.ts",
+    "set-captains-report-exclusions": "tsx src/set-captains-report-exclusions.ts",
     "import-titans-compliance": "tsx src/import-titans-compliance.ts",
     "import-titans-contacts": "tsx src/import-titans-contacts.ts",
     "send-affiliation-fix-notice": "tsx src/send-affiliation-fix-notice.ts",
