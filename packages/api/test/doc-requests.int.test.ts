@@ -303,6 +303,141 @@ describe('admin send route', () => {
   });
 });
 
+describe('admin copy-link route', () => {
+  const copy = (p: { clubId: string; naturalKey: string }, docKey?: string) =>
+    app.request('/admin/doc-requests/link', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ clubId: p.clubId, naturalKey: p.naturalKey, docKey }),
+    });
+  const copied = async (p: PlayerRegistration) => {
+    const res = await copy(p);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+    const body = (await res.json()) as { url: string; linkExpiresAt: string };
+    assert.match(body.url, /\/d\//);
+    return { ...body, token: body.url.split('/d/')[1] };
+  };
+  const resolve = (token: string) => app.request(`/doc-request-link/${token}`);
+
+  test('copies a plain player link: pending request, resolvable token, no send', async () => {
+    const p = mkPlayer('alpha', { email: 'copy@example.com', cell: '0821110000' });
+    await repo.createPlayer(TENANT, p);
+    const { token } = await copied(p);
+    const req = await repo.getDocRequest(TENANT, p.naturalKey, 'idDoc');
+    assert.equal(req?.status, 'pending');
+    assert.equal(req?.requestedBy, 'admin@union.test');
+    // Nothing was sent: no send results or sent-at recorded.
+    assert.equal(req?.lastSendResults, undefined);
+    assert.equal(req?.lastSentAt, undefined);
+    const list = (await (
+      await app.request('/admin/doc-requests', { headers: headers(ADMIN) })
+    ).json()) as Array<{ naturalKey: string; status: string }>;
+    assert.ok(list.some((r) => r.naturalKey === p.naturalKey && r.status === 'pending'));
+    const pub = await resolve(token);
+    assert.equal(pub.status, 200);
+    assert.equal(((await pub.json()) as { state: string }).state, 'pending');
+  });
+
+  test('works for a minor and for a player with no contact details', async () => {
+    const minor = mkPlayer('alpha', { isMinor: true });
+    const noContact = mkPlayer('alpha');
+    for (const p of [minor, noContact]) {
+      await repo.createPlayer(TENANT, p);
+      const { token } = await copied(p);
+      assert.equal((await repo.getDocRequest(TENANT, p.naturalKey, 'idDoc'))?.status, 'pending');
+      assert.equal((await resolve(token)).status, 200);
+    }
+  });
+
+  test('reuses a pending request and extends its expiry', async () => {
+    const p = mkPlayer('alpha', { email: 'reuse@example.com' });
+    await repo.createPlayer(TENANT, p);
+    await sendRequest([p], 'idem-copy-0001');
+    const before1 = await repo.getDocRequest(TENANT, p.naturalKey, 'idDoc');
+    await new Promise((r) => setTimeout(r, 5));
+    const { token } = await copied(p);
+    const after1 = await repo.getDocRequest(TENANT, p.naturalKey, 'idDoc');
+    assert.equal(after1?.requestId, before1?.requestId);
+    assert.equal(after1?.createdAt, before1?.createdAt);
+    assert.equal(after1?.lastSentAt, before1?.lastSentAt, 'send history kept');
+    assert.ok(after1!.linkExpiresAt > before1!.linkExpiresAt, 'expiry extended');
+    const link = await repo.getDocRequestLink(TENANT, before1!.requestId);
+    assert.equal(link?.naturalKey, p.naturalKey);
+    assert.equal((await resolve(token)).status, 200);
+  });
+
+  test('a completed request re-mints a fresh request id', async () => {
+    const p = mkPlayer('alpha', { email: 'remint@example.com' });
+    await repo.createPlayer(TENANT, p);
+    const first = await copied(p);
+    const old = await repo.getDocRequest(TENANT, p.naturalKey, 'idDoc');
+    const patch = await app.request(`/clubs/alpha/players/${p.naturalKey}/id-doc`, {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({
+        objectKey: 'docreq/alpha/player-id-remint.png',
+        size: 20,
+        contentType: 'image/png',
+      }),
+    });
+    assert.equal(patch.status, 200);
+    assert.equal((await repo.getDocRequest(TENANT, p.naturalKey, 'idDoc'))?.status, 'completed');
+    const second = await copied(p);
+    const fresh = await repo.getDocRequest(TENANT, p.naturalKey, 'idDoc');
+    assert.notEqual(fresh?.requestId, old?.requestId);
+    assert.equal(fresh?.status, 'pending');
+    const stale = await resolve(first.token);
+    assert.equal(stale.status, 404);
+    assert.equal(((await stale.json()) as { kind: string }).kind, 'invalid');
+    assert.equal((await resolve(second.token)).status, 200);
+  });
+
+  test('copy then send: the send still goes out on the copied request; a copy logs nothing', async () => {
+    const p = mkPlayer('beta', { email: 'copysend@example.com' });
+    await repo.createPlayer(TENANT, p);
+    const commBefore = ((await repo.getClub(TENANT, 'beta'))?.commLog ?? []).length;
+    await copied(p);
+    const copiedReq = await repo.getDocRequest(TENANT, p.naturalKey, 'idDoc');
+    assert.equal(
+      ((await repo.getClub(TENANT, 'beta'))?.commLog ?? []).length,
+      commBefore,
+      'a copy appends no comm-log events',
+    );
+    const res = await sendRequest([p], 'idem-copysend-01');
+    assert.equal(res.status, 200);
+    const { results } = (await res.json()) as { results: Array<{ status: string }> };
+    assert.deepEqual(
+      results.map((r) => r.status),
+      ['sent'],
+      'the copy consumed no ledger claim',
+    );
+    const sentReq = await repo.getDocRequest(TENANT, p.naturalKey, 'idDoc');
+    assert.equal(sentReq?.requestId, copiedReq?.requestId, 'the send reuses the copied request');
+    assert.ok(sentReq?.lastSentAt, 'lastSentAt recorded');
+    assert.ok(sentReq?.lastSendResults?.length, 'lastSendResults recorded');
+  });
+
+  test('404 unknown player; 400 unknown docKey or missing ids; rejects non-admins', async () => {
+    assert.equal((await copy({ clubId: 'alpha', naturalKey: 'nk-nope' })).status, 404);
+    const p = mkPlayer('alpha');
+    await repo.createPlayer(TENANT, p);
+    assert.equal((await copy(p, 'passport')).status, 400);
+    const missing = await app.request('/admin/doc-requests/link', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ clubId: 'alpha' }),
+    });
+    assert.equal(missing.status, 400);
+    const rep = await app.request('/admin/doc-requests/link', {
+      method: 'POST',
+      headers: headers(REP),
+      body: JSON.stringify({ clubId: p.clubId, naturalKey: p.naturalKey }),
+    });
+    assert.equal(rep.status, 403);
+  });
+});
+
 describe('public link', () => {
   test('GET: pending payload, then the terminal states', async () => {
     const p = mkPlayer('alpha', { email: 'pub@example.com' });

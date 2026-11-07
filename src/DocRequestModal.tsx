@@ -7,7 +7,8 @@
  */
 import { useMemo, useState } from 'react';
 import { Btn, Modal, ModalCancelBtn, Pill } from './atoms';
-import { sendDocRequests, ApiError } from './api';
+import { sendDocRequests, mintDocRequestCopyLink, ApiError } from './api';
+import { useCopyLink } from './copyLink';
 import type { DocRequestSendResult, DocRequestSendStatus } from './types';
 
 export interface DocRequestTarget {
@@ -43,6 +44,9 @@ export function docRequestPreview(targets: DocRequestTarget[]) {
   return { reachable: targets.length - minors - noContact, minors, noContact };
 }
 
+/** One key per target: the dedup key (results alignment) and the copy-link id. */
+const targetId = (t: { clubId: string; naturalKey: string }) => `${t.clubId}\u0000${t.naturalKey}`;
+
 const newIdempotencyKey = () =>
   typeof crypto !== 'undefined' && 'randomUUID' in crypto
     ? crypto.randomUUID()
@@ -65,13 +69,31 @@ export function DocRequestModal({
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<DocRequestSendResult[] | null>(null);
   const preview = useMemo(() => docRequestPreview(targets), [targets]);
+  // Deduped exactly as the server dedupes, so results[i] belongs to sendTargets[i] (the server
+  // pushes one result per deduped target, in order, skips included — naturalKey is stripped).
+  const sendTargets = useMemo(() => {
+    const seen = new Set<string>();
+    return targets.filter((t) => {
+      const k = targetId(t);
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  }, [targets]);
+  const copyLink = useCopyLink((id) => {
+    const [clubId, naturalKey] = id.split('\u0000');
+    return mintDocRequestCopyLink({ clubId, naturalKey, docKey: 'idDoc' }).then((r) => {
+      onSent();
+      return r;
+    });
+  }, 'Share it only with the player (or their guardian).');
 
   const send = async () => {
     setBusy(true);
     setError(null);
     try {
       const res = await sendDocRequests({
-        players: targets.map((t) => ({ clubId: t.clubId, naturalKey: t.naturalKey })),
+        players: sendTargets.map((t) => ({ clubId: t.clubId, naturalKey: t.naturalKey })),
         docKey: 'idDoc',
         idempotencyKey,
       });
@@ -100,6 +122,15 @@ export function DocRequestModal({
         ) : (
           <>
             <ModalCancelBtn tone="ghost">Cancel</ModalCancelBtn>
+            {targets.length === 1 && (
+              <Btn
+                tone="outline"
+                disabled={busy || copyLink.busyId !== null}
+                onClick={() => copyLink.copy(targetId(targets[0]))}
+              >
+                Copy link
+              </Btn>
+            )}
             <Btn tone="teal" disabled={busy || preview.reachable === 0} onClick={() => void send()}>
               {busy
                 ? 'Sending…'
@@ -128,12 +159,25 @@ export function DocRequestModal({
                 }}
               >
                 <span>{r.displayName}</span>
-                <Pill tone={STATUS_LABEL[r.status]?.tone ?? 'gold'}>
-                  {STATUS_LABEL[r.status]?.text ?? r.status}
-                </Pill>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {r.status !== 'skipped_not_found' && sendTargets[i] && (
+                    <Btn
+                      tone="ghost"
+                      size="sm"
+                      disabled={copyLink.busyId !== null}
+                      onClick={() => copyLink.copy(targetId(sendTargets[i]))}
+                    >
+                      Copy link
+                    </Btn>
+                  )}
+                  <Pill tone={STATUS_LABEL[r.status]?.tone ?? 'gold'}>
+                    {STATUS_LABEL[r.status]?.text ?? r.status}
+                  </Pill>
+                </span>
               </li>
             ))}
           </ul>
+          {copyLink.node}
         </div>
       ) : (
         <div>
@@ -157,11 +201,18 @@ export function DocRequestModal({
               </li>
             )}
           </ul>
+          {targets.length === 1 && (
+            <p>
+              You can also copy the upload link and share it yourself — useful for minors or players
+              with no contact details on file.
+            </p>
+          )}
           {error && (
             <div className="rp-validation" role="alert">
               {error}
             </div>
           )}
+          {copyLink.node}
         </div>
       )}
     </Modal>

@@ -14465,6 +14465,61 @@ app.post('/admin/doc-requests', async (c) => {
   return c.json({ results: results.map(({ naturalKey: _nk, ...r }) => r) });
 });
 
+/**
+ * Admin "Copy link": mint or extend one player's document request and return its signed link
+ * WITHOUT sending anything (no NOTIFY ledger claim, no email/WhatsApp, no comm-log row). The
+ * send path's channel/skip rules deliberately don't apply — the admin shares the link by hand.
+ * Same reuse rule as a send (a pending request at this club is extended and re-signed; else a
+ * fresh one), so copying surfaces the pending badge just like a send would. Audit-logged
+ * (never the token or natural key) and never cached.
+ */
+app.post('/admin/doc-requests/link', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as {
+    clubId?: unknown;
+    naturalKey?: unknown;
+    docKey?: unknown;
+  };
+  const docKey = typeof body.docKey === 'string' ? body.docKey : 'idDoc';
+  const doc = DOC_REQUEST_DOCS[docKey];
+  if (!doc) throw new HttpError(400, `unknown document "${docKey}"`);
+  if (typeof body.clubId !== 'string' || typeof body.naturalKey !== 'string' || !body.naturalKey)
+    throw new HttpError(400, 'clubId and naturalKey required');
+  const clubId = body.clubId;
+  const naturalKey = body.naturalKey;
+  const player = await repo.getPlayer(ra.tenant, clubId, naturalKey);
+  if (!player) throw new HttpError(404, 'player not found');
+  if (!(await repo.getClub(ra.tenant, clubId))) throw new HttpError(404, 'club not found');
+  // No reachability/skip rules: minors and no-contact players are allowed — the admin is the delivery channel.
+
+  const nowMs = Date.now();
+  const existing = await repo.getDocRequest(ra.tenant, naturalKey, docKey);
+  const reuse = existing && existing.status === 'pending' && existing.clubId === clubId;
+  const requestId = reuse ? existing.requestId : randomUUID();
+  const linkExpiresAt = new Date(nowMs + DOC_REQUEST_LINK_DAYS * 24 * 3600 * 1000).toISOString();
+  await repo.putDocRequest(ra.tenant, {
+    requestId,
+    clubId,
+    naturalKey,
+    docKey,
+    docName: doc.name,
+    requestedBy: ra.email,
+    createdAt: reuse ? existing.createdAt : new Date(nowMs).toISOString(),
+    linkExpiresAt,
+    status: 'pending' as const,
+    ...(reuse && existing.lastSendResults ? { lastSendResults: existing.lastSendResults } : {}),
+    ...(reuse && existing.lastSentAt ? { lastSentAt: existing.lastSentAt } : {}),
+  });
+  const token = signDocRequestLinkToken(
+    { t: ra.tenant, q: requestId, e: Math.floor(Date.parse(linkExpiresAt) / 1000) },
+    captainsReportLinkSecret(),
+  );
+  const url = `${docRequestLinkOrigin(ra.tenant)}/d/${token}`;
+  assertLiveLinkBase(url);
+  console.info(`[doc-request] ${ra.tenant} ${requestId} (${docKey}): link copied by ${ra.email}`);
+  return c.json({ url, linkExpiresAt }, 200, { 'Cache-Control': 'no-store' });
+});
+
 // ───────────────────── Admin: registration reviews ─────────────────────
 
 /** Every registration review in the tenant — off-system alerts (plus any legacy holds). */

@@ -1483,6 +1483,15 @@ export const sendDocRequests = (body: {
   docKey: string;
   idempotencyKey: string;
 }) => request<{ results: DocRequestSendResult[] }>('/admin/doc-requests', { method: 'POST', body });
+export const mintDocRequestCopyLink = (body: {
+  clubId: string;
+  naturalKey: string;
+  docKey: string;
+}) =>
+  request<{ url: string; linkExpiresAt: string }>('/admin/doc-requests/link', {
+    method: 'POST',
+    body,
+  });
 export const getDocRequests = () => request<DocRequestSummary[]>('/admin/doc-requests');
 const docLinkPath = (token: string) => `/doc-request-link/${encodeURIComponent(token)}`;
 export const getLinkedDocRequest = (token: string) =>

@@ -11,6 +11,7 @@ import {
   signInAsAdmin,
   uniqueIdNumber,
 } from './helpers';
+import { clipboardContext, copyFrom } from './clipboard';
 
 /**
  * Player document requests end to end: the union admin filters the player register to two
@@ -31,6 +32,7 @@ const LINK_SECRET = 'local-dev-captains-report-link-secret'; // env.ts LOCAL_AUT
 const TAG = `Dq${RUN}`; // spec-unique: RUN alone is shared by every spec in a run
 const REACH = `${TAG}Reach`;
 const NOCONTACT = `${TAG}None`;
+const COPY = `${TAG}Copy`;
 const PNG = {
   name: 'id.png',
   mimeType: 'image/png',
@@ -120,6 +122,7 @@ test.beforeAll(async ({ request }) => {
   reach = await createPlayer(request, REACH, { email: `docreq-${RUN}@example.com` });
   const none = await createPlayer(request, NOCONTACT, {});
   await removeContact(none.naturalKey);
+  await createPlayer(request, COPY, { email: `docreq-copy-${RUN}@example.com` });
 });
 
 test('an admin requests ID documents from selected players', async ({ page }) => {
@@ -134,6 +137,8 @@ test('an admin requests ID documents from selected players', async ({ page }) =>
   await page.getByRole('button', { name: 'Request ID document' }).click();
 
   const modal = page.getByRole('dialog');
+  // Copy link is a single-player action: absent with two selected.
+  await expect(modal.getByRole('button', { name: 'Copy link' })).toHaveCount(0);
   await expect(modal.locator('.doc-request-preview')).toContainText('1 will be sent a link');
   await expect(modal.locator('.doc-request-preview')).toContainText(
     '1 will be skipped — no email or cell on file',
@@ -144,12 +149,49 @@ test('an admin requests ID documents from selected players', async ({ page }) =>
   await expect(results).toHaveCount(2);
   await expect(results.filter({ hasText: REACH })).toContainText('Sent');
   await expect(results.filter({ hasText: NOCONTACT })).toContainText('no contact details');
+  // Every result row (skips included) offers its own Copy link.
+  for (const name of [REACH, NOCONTACT])
+    await expect(
+      results.filter({ hasText: name }).getByRole('button', { name: 'Copy link' }),
+    ).toBeEnabled();
   await modal.getByRole('button', { name: 'Done' }).click();
 
   await expect(rows.filter({ hasText: REACH }).locator('.doc-requested-badge')).toContainText(
     'ID doc requested',
   );
   await expect(rows.filter({ hasText: NOCONTACT }).locator('.doc-requested-badge')).toHaveCount(0);
+});
+
+test("an admin copies one player's link without sending; the link opens the upload page", async ({
+  browser,
+}) => {
+  const ctx = await clipboardContext(browser);
+  const page = await ctx.newPage();
+  await signInAsAdmin(page);
+  await page.goto('/admin/players');
+  await page.getByLabel('Search players').fill(COPY);
+  await page.getByLabel(`Select Test ${COPY}`).check();
+  await expect(page.locator('.doc-request-toolbar')).toContainText('1 selected');
+  await page.getByRole('button', { name: 'Request ID document' }).click();
+
+  const modal = page.getByRole('dialog').filter({ hasText: 'Send to 1 player' });
+  const copy = modal.getByRole('button', { name: 'Copy link' });
+  await expect(copy).toBeEnabled();
+  const url = await copyFrom(page, copy);
+  expect(url).toMatch(/^\/d\/[\w-]+\.[\w-]+$/);
+
+  // Copying opened the request (nothing was sent): the register shows the indicator.
+  const fallback = page.getByRole('dialog', { name: 'Copy this link' });
+  if (await fallback.isVisible()) await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  const row = page.locator('table.tbl tbody tr', { hasText: COPY });
+  await expect(row.locator('.doc-requested-badge')).toContainText('ID doc requested');
+
+  const p = await ctx.newPage();
+  await p.goto(url);
+  await expect(p.getByRole('heading', { name: /Hi Test/ })).toBeVisible();
+  await expect(p.getByLabel('Upload your ID document')).toBeAttached();
+  await ctx.close();
 });
 
 test('the player uploads through their link; the console shows the document', async ({ page }) => {
