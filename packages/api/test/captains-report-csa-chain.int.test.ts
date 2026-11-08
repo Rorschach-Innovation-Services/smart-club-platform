@@ -681,7 +681,7 @@ describe('4. old fixtures', () => {
       confirm: true,
       backupDir: mkdtempSync(path.join(tmpdir(), 'csa-chain-')),
     };
-    // No result stored: past its Monday-noon fallback, the card-less report opens to the chair.
+    // No result stored: past its Monday 18:00 fallback, the card-less report opens to the chair.
     assert.equal(await runBackfill(args, deps), 0);
     assert.deepEqual(notices.map((n) => [n.recipientKind, n.to.email]).sort(), [
       ['chair', 'chair@african-warriors.test'],

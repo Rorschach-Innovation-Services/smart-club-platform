@@ -214,14 +214,19 @@ export function noticeLeagueResolver(
 
 /**
  * When a deferred league's fixture played on `matchDate` falls back to a card-less open: the
- * first Monday strictly after it, 12:00 SAST (epoch ms).
+ * first Monday strictly after it, DEFERRED_FALLBACK_HOUR (18:00) SAST (epoch ms). At exactly
+ * that instant the fallback is due and the 18:00 notice window is open, so the 18:00 cron run
+ * opens the reports.
  */
 export function deferredFallbackAt(matchDate: string): number {
   const d = Date.parse(`${matchDate}T00:00:00Z`);
   const dow = new Date(d).getUTCDay();
   const days = (1 - dow + 7) % 7 || 7;
-  return d + days * DAY_MS + 12 * 3600_000 - TENANT_UTC_OFFSET_MINUTES * 60_000;
+  return d + days * DAY_MS + DEFERRED_FALLBACK_HOUR * 3600_000 - TENANT_UTC_OFFSET_MINUTES * 60_000;
 }
+
+/** SAST hour on the following Monday at which a deferred league's unresulted fixtures open card-less. */
+export const DEFERRED_FALLBACK_HOUR = 18;
 
 /** How far back (days) the match-day opener looks for a deferred league's unresulted fixtures. */
 export const DEFERRED_FALLBACK_LOOKBACK_DAYS = 7;
@@ -1287,7 +1292,7 @@ export interface MatchDayOpenSummary {
   disabled?: true;
   /**
    * Fixtures of a `deferMatchDayNotices` league held back for their result (before the
-   * Monday-noon fallback). Only present when a tenant league carries the override.
+   * Monday 18:00 fallback). Only present when a tenant league carries the override.
    */
   held?: number;
 }
@@ -1317,7 +1322,7 @@ const daysBefore = (date: string, days: number) =>
  * window. A `deferMatchDayNotices` league gets no card-less match-day open — its report opens
  * when the result lands — except as a bounded fallback: a fixture of the last
  * DEFERRED_FALLBACK_LOOKBACK_DAYS still without a stored result once the following Monday
- * 12:00 SAST has passed opens card-less anyway (scrape failed, match abandoned). A tenant with
+ * 18:00 SAST has passed opens card-less anyway (scrape failed, match abandoned). A tenant with
  * no league override takes exactly the old path.
  */
 export async function openMatchDayReports(
@@ -1346,7 +1351,7 @@ export async function openMatchDayReports(
     opts?.targetDates ??
       Array.from({ length: MATCH_DAY_LOOKBACK_DAYS + 1 }, (_, i) => daysBefore(today, i)),
   );
-  // A deferred league's fallback looks further back (its Monday-noon is up to a week out).
+  // A deferred league's fallback looks further back (its Monday 18:00 is up to a week out).
   const deferredDates = new Set(
     opts?.targetDates ??
       Array.from({ length: DEFERRED_FALLBACK_LOOKBACK_DAYS + 1 }, (_, i) => daysBefore(today, i)),
@@ -1379,7 +1384,7 @@ export async function openMatchDayReports(
     for (const f of (s.fixtures as StoredFixture[] | undefined) ?? []) {
       if (!f?.id || !f.date || !(deferred ? deferredDates : dates).has(f.date)) continue;
       if (deferred) {
-        // Held for the result (which opens the report itself) until the Monday-noon
+        // Held for the result (which opens the report itself) until the Monday 18:00
         // fallback; past it, only a fixture with no stored result opens card-less.
         if (now().getTime() < deferredFallbackAt(f.date)) {
           if (dates.has(f.date)) sum.held = (sum.held ?? 0) + 1;

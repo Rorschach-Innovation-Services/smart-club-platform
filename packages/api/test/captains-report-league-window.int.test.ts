@@ -8,7 +8,7 @@
  *  - the result-hook path notifies a premier result at 04:45, a no-override tenant does not;
  *  - a mixed REPORTOPEN# batch at 05:00 drains ONLY the premier marker;
  *  - the match-day opener holds premier fixtures for their result, and opens them card-less
- *    only past the following Monday 12:00 SAST with still no stored result;
+ *    only past the following Monday 18:00 SAST with still no stored result;
  *  - reminders follow each report's league window;
  *  - a tenant with no override keeps the old early returns byte-identical.
  *
@@ -282,10 +282,18 @@ describe('reportNoticeWindowOpenFor (pure)', () => {
     }
   });
 
-  test('the deferred fallback is the following Monday 12:00 SAST', () => {
-    assert.equal(reports.deferredFallbackAt(SAT), at(MON, 12).getTime());
-    assert.equal(reports.deferredFallbackAt(SUN), at(MON, 12).getTime());
-    assert.equal(reports.deferredFallbackAt(MON), at('2026-11-02', 12).getTime());
+  test('the deferred fallback is the following Monday 18:00 SAST', () => {
+    assert.equal(reports.DEFERRED_FALLBACK_HOUR, 18);
+    assert.equal(reports.deferredFallbackAt(SAT), at(MON, 18).getTime());
+    assert.equal(reports.deferredFallbackAt(SUN), at(MON, 18).getTime());
+    assert.equal(reports.deferredFallbackAt(MON), at('2026-11-02', 18).getTime());
+    assert.equal(reports.deferredFallbackAt('2026-11-08'), Date.parse('2026-11-09T16:00:00.000Z'));
+    assert.equal(reports.deferredFallbackAt('2026-11-07'), Date.parse('2026-11-09T16:00:00.000Z'));
+    // At exactly 18:00 the fallback is due AND the default (18:00) window is open.
+    const boundary = new Date('2026-11-09T16:00:00.000Z');
+    assert.equal(boundary.getTime() < reports.deferredFallbackAt('2026-11-08'), false);
+    assert.equal(reports.isReportNoticeWindowOpen(boundary), true);
+    assert.equal(reports.isReportNoticeWindowOpenFor(boundary, PREMIER_LEAGUE), true);
   });
 });
 
@@ -368,7 +376,8 @@ describe('openMatchDayReports', () => {
 
     notices.length = 0;
     // Sunday evening and Monday early (premier's window is open, the fallback is not due).
-    for (const t of [at(SUN, 18, 30), at(MON, 5), at(MON, 11, 59)]) await matchDayAt(t);
+    for (const t of [at(SUN, 18, 30), at(MON, 5), at(MON, 12, 15), at(MON, 17, 59)])
+      await matchDayAt(t);
     assert.equal(notices.length, 0);
     const premierReports = (await repo.listCaptainsReports('dolphins')).filter(
       (r) => r.seriesId === PREMIER,
@@ -376,9 +385,9 @@ describe('openMatchDayReports', () => {
     assert.deepEqual(premierReports, []);
   });
 
-  test('past Monday 12:00 a premier fixture with no stored result opens card-less', async () => {
+  test('past Monday 18:00 a premier fixture with no stored result opens card-less', async () => {
     await seed();
-    const s = await matchDayAt(at(MON, 12, 15));
+    const s = await matchDayAt(at(MON, 18, 15));
     assert.equal(s.opened, 2);
     assert.deepEqual(seriesOfNotices(), [PREMIER]);
     const opened = (await repo.listCaptainsReports('dolphins')).filter(
@@ -390,14 +399,14 @@ describe('openMatchDayReports', () => {
       assert.equal(r.recipient.kind, 'chair');
     }
     notices.length = 0;
-    await matchDayAt(at(MON, 12, 30));
+    await matchDayAt(at(MON, 18, 30));
     assert.equal(notices.length, 0, 'a re-run sends nothing');
   });
 
-  test('past Monday 12:00 a premier fixture WITH a stored result is left to the result path', async () => {
+  test('past Monday 18:00 a premier fixture WITH a stored result is left to the result path', async () => {
     await seed();
     await storeResult(PREMIER, 'f3', PREMIER_REF, false);
-    const s = await matchDayAt(at(MON, 12, 15));
+    const s = await matchDayAt(at(MON, 18, 15));
     assert.equal(s.opened, 0);
     assert.equal(notices.length, 0);
   });
