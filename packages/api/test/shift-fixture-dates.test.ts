@@ -8,7 +8,14 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { planDateShift, computeShift, buildPairMap } from '../src/shift-fixture-dates.js';
+import {
+  planDateShift,
+  computeShift,
+  buildPairMap,
+  isOverruledClash,
+  parseArgs,
+} from '../src/shift-fixture-dates.js';
+import type { Clash } from '../src/venue-clash.js';
 import type { Series } from '../src/types.js';
 
 interface Fx {
@@ -279,5 +286,44 @@ describe('planDateShift — a round that spans more than one date warns and slot
     assert.equal(byId.get('f1b'), '2026-11-15'); // the moved slot
     assert.equal(byId.get('f2'), '2026-11-14'); // before the target → untouched
     assert.equal(byId.get('f3'), '2026-11-28'); // 11-21 + 7
+  });
+});
+
+describe('isOverruledClash — --overrule-series (7 Nov 2026 directive)', () => {
+  const clash = (withName: string): Clash => ({
+    fixtureId: 'f1',
+    ground: 'Kingsmead',
+    date: '2027-01-16',
+    with: { seriesId: 's-other', seriesName: withName, fixtureId: 'g1' },
+  });
+
+  test('an introduced clash against a series matching the substring is overruled', () => {
+    assert.equal(isOverruledClash('KZNCU Premier 50ov', clash('EMCU Division 1'), 'emcu'), true);
+    // the subject side matching also counts
+    assert.equal(isOverruledClash('EMCU Division 2', clash('KZNCU Premier'), 'EMCU'), true);
+  });
+
+  test('a non-matching introduced clash is not overruled (still refuses)', () => {
+    assert.equal(
+      isOverruledClash('KZNCU Premier 50ov', clash('Veterans Promotion'), 'emcu'),
+      false,
+    );
+    assert.equal(isOverruledClash('KZNCU Premier 50ov', clash('EMCU Division 1'), ''), false);
+  });
+
+  test('parseArgs reads --overrule-series', () => {
+    const a = parseArgs([
+      '--tenant',
+      'dolphins',
+      '--series',
+      's1',
+      '--from-date',
+      '2026-12-12',
+      '--to-date',
+      '2027-01-16',
+      '--overrule-series',
+      'EMCU',
+    ]);
+    assert.equal(a.overruleSeries, 'EMCU');
   });
 });

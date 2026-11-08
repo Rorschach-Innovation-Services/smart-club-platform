@@ -33,9 +33,15 @@
  * present before, by the same clashKey subset rule the in-season gate uses) it refuses to
  * write even with `--confirm`. On write it backs up the touched series to JSON first, then
  * `repo.updateSeries` with the read `version` (OCC).
+ *
+ * `--overrule-series <substring>` (7 Nov 2026 union directive: the shifted KZNCU leagues
+ * overrule EMCU fixtures at clashing venues) — an introduced clash whose subject or opposing
+ * series name contains the substring (case-insensitive) is accepted and listed as OVERRULED;
+ * every other introduced clash still refuses the write.
  */
 import { writeFile } from 'node:fs/promises';
 import { findClashes, clashKey, formatClashForHumans } from './venue-clash.js';
+import type { Clash } from './venue-clash.js';
 import type { Club, Series, Venue } from './types.js';
 
 // `./repo.js` (and its AWS SDK deps) is imported dynamically inside `main()` so that the
@@ -240,6 +246,7 @@ interface CliArgs {
   toDates: string[];
   cascade: CascadeMode;
   confirm: boolean;
+  overruleSeries?: string;
 }
 
 export function parseArgs(argv: string[]): CliArgs {
@@ -254,6 +261,7 @@ export function parseArgs(argv: string[]): CliArgs {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--confirm') args.confirm = true;
+    else if (a === '--overrule-series') args.overruleSeries = argv[++i] ?? '';
     else if (a === '--tenant') args.tenant = argv[++i] ?? '';
     else if (a === '--series') args.series.push(...splitList(argv[++i] ?? ''));
     else if (a === '--from-date') args.fromDates.push(...splitList(argv[++i] ?? ''));
@@ -272,6 +280,19 @@ export function parseArgs(argv: string[]): CliArgs {
   // Validate the pairing early so bad input fails before any read.
   buildPairMap(args.fromDates, args.toDates);
   return args;
+}
+
+/** True when an introduced clash is accepted under `--overrule-series`: the substring
+ * (case-insensitive) appears in the subject series name or the opposing series name. */
+export function isOverruledClash(subjectName: string, clash: Clash, substring: string): boolean {
+  const needle = substring.toLowerCase();
+  if (!needle) return false;
+  return (
+    subjectName.toLowerCase().includes(needle) ||
+    String(clash.with.seriesName ?? '')
+      .toLowerCase()
+      .includes(needle)
+  );
 }
 
 /** Every season-wide clash, keyed by the date/time-free clashKey used by the in-season
@@ -331,15 +352,22 @@ export async function runShift(argv: string[]): Promise<void> {
   // Clash check on the would-be state of the whole tenant.
   const before = allClashKeys(all, clubs, venues);
   const modifiedAll = all.map((s) => modifiedById.get(String(s.id)) ?? s);
-  const afterClashes = modifiedAll.flatMap((s) => findClashes(s, modifiedAll, clubs, venues));
+  const afterClashes = modifiedAll.flatMap((s) =>
+    findClashes(s, modifiedAll, clubs, venues).map((clash) => ({
+      clash,
+      subjectSeriesName: String(s.name ?? ''),
+    })),
+  );
   const seenKeys = new Set<string>();
-  const uniqueAfter = afterClashes.filter((c) => {
+  const uniqueAfterTagged = afterClashes.filter(({ clash: c }) => {
     const k = clashKey(c);
     if (seenKeys.has(k)) return false;
     seenKeys.add(k);
     return true;
   });
-  const introduced = uniqueAfter.filter((c) => !before.has(clashKey(c)));
+  const uniqueAfter = uniqueAfterTagged.map((t) => t.clash);
+  const introducedTagged = uniqueAfterTagged.filter((t) => !before.has(clashKey(t.clash)));
+  const introduced = introducedTagged.map((t) => t.clash);
 
   console.log(
     `Clash check on the resulting calendar: ${uniqueAfter.length} clash(es) total, ${introduced.length} NEWLY introduced.`,
@@ -349,9 +377,24 @@ export async function runShift(argv: string[]): Promise<void> {
   for (const c of preExisting) console.log(`   pre-existing  ${formatClashForHumans(c)}`);
   console.log('');
 
-  if (introduced.length) {
+  let blocking = introduced;
+  if (args.overruleSeries) {
+    const sub = args.overruleSeries;
+    const overruled = introducedTagged.filter((t) =>
+      isOverruledClash(t.subjectSeriesName, t.clash, sub),
+    );
+    blocking = introducedTagged
+      .filter((t) => !isOverruledClash(t.subjectSeriesName, t.clash, sub))
+      .map((t) => t.clash);
+    for (const t of overruled) console.log(`   OVERRULED  ${formatClashForHumans(t.clash)}`);
     console.log(
-      `Refusing to write: the change would introduce ${introduced.length} new venue clash(es). ` +
+      `${overruled.length} introduced clash(es) OVERRULED against series matching "${sub}"; ${blocking.length} still blocking.\n`,
+    );
+  }
+
+  if (blocking.length) {
+    console.log(
+      `Refusing to write: the change would introduce ${blocking.length} new venue clash(es). ` +
         'Adjust the dates or cascade mode and re-run.',
     );
     process.exitCode = 1;
