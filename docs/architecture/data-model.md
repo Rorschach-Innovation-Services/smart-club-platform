@@ -52,8 +52,9 @@ tenant-prefix erasure straightforward. See [ADR 0001](0001-aws-native-dynamodb.m
 Umpires (`TENANT#<t>#UMPIRE#<id>`) and scorers (`TENANT#<t>#SCORER#<id>`) carry optional
 lifecycle fields ([officials API](../api/officials.md)):
 
-- `pending: true`, `source: 'self-registration'`, `submittedAt`, `resubmissions`: a
-  submission through the public link, waiting for an admin. Always `active: false`.
+- `pending: true`, `source: 'self-registration'`, `submittedAt`: a submission through the
+  public link, waiting for an admin. Always `active: false`. Every submission is its own
+  record; a public submission never modifies an existing one.
 - `consentAt`: when the person gave POPIA consent; carried onto the target on a merge.
 - `erasedAt`, `erasedBy`: the record is an anonymous stub (`Removed umpire` /
   `Removed scorer`, no contact fields) kept so appointments and ratings keyed by the id still

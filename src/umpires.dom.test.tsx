@@ -586,7 +586,10 @@ const ERASED_AND_PENDING: Umpire[] = [
     pending: true,
     source: 'self-registration',
     submittedAt: '2026-11-08T09:30:00Z',
-    resubmissions: 2,
+    pendingDuplicates: [
+      { id: 'u-k-ndlovu-x1', displayName: 'K.Ndlovu', submittedAt: '2026-11-08T10:00:00Z' },
+      { id: 'u-t-ndlovu', displayName: 'T.Ndlovu', submittedAt: '2026-11-09T10:00:00Z' },
+    ],
     possibleMatches: [
       { id: 'u-a-ngubane', displayName: 'A.Ngubane', reason: 'phone' },
       { id: 'u-s-gasa', displayName: 'S.Gasa', reason: 'surname-initial' },
@@ -684,7 +687,12 @@ describe('AdminUmpiresView — erase, pending and the registration link', () => 
     expect(within(row).getByText('Khaya Ndlovu')).toBeTruthy();
     expect(within(row).getByText('0821112222')).toBeTruthy();
     expect(within(row).getByText(/^Submitted /)).toBeTruthy();
-    expect(within(row).getByText('Resubmitted 2×')).toBeTruthy();
+    const dups = within(row).getByTestId('pending-duplicates');
+    expect(dups.textContent).toMatch(
+      /Another pending registration uses this cell number: K\.Ndlovu \(submitted 8 Nov 2026, \d\d:\d\d\)\. Check which one is genuine and reject the other\./,
+    );
+    expect(dups.textContent).toMatch(/cell number: T\.Ndlovu \(submitted 9 Nov 2026/);
+    expect(screen.queryByText(/Resubmitted/)).toBeNull();
     const matches = within(row).getByRole('list', { name: 'Possible matches for K.Ndlovu' });
     expect(within(matches).getByText('(same phone)')).toBeTruthy();
     expect(within(matches).getByText('(same surname and initial)')).toBeTruthy();

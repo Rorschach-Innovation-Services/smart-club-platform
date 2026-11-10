@@ -170,7 +170,10 @@ contact them about fixtures); the server records `consentAt` and `source:
 admin approves it, merges it into an existing entry, or rejects it. Reject hard-deletes the
 pending record. A merge never overwrites a held phone or email without the admin choosing;
 `consentAt` moves to the target and the pending copy is then deleted. The public response is
-the same whether or not the person was already on the register.
+the same whether or not the person was already on the register. A submission never changes an
+existing record: each one is filed separately, so someone holding the link who knows a
+person's cell cannot overwrite that person's details. Same-cell pending entries are shown to
+the admin side by side, and rejecting one leaves the others.
 
 **Erasure (Delete).** An admin's Delete on an umpire or scorer (`DELETE /umpires/:id`,
 `/scorers/:id`) wipes:

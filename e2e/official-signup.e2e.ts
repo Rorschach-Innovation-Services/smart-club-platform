@@ -18,7 +18,7 @@ const Title = (r: Role) => (r === 'umpire' ? 'Umpires' : 'Scorers');
 /** Letters-only, run-unique tag (names are matched case/punctuation-insensitively). */
 const TAG = RUN.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);
 let phoneSeq = Math.floor(Math.random() * 1e6);
-/** A fresh SA cell each call, so same-phone resubmission never folds two tests together. */
+/** A fresh SA cell each call, so no two tests share a cell (same-cell registrations flag each other). */
 const cell = () => `083${String(phoneSeq++ % 1e7).padStart(7, '0')}`;
 
 async function openRegister(page: Page, role: Role) {
@@ -280,33 +280,43 @@ test('Replace link and Turn off link kill the old URL', async ({ page, browser }
   await expectLinkDead(browser, second);
 });
 
-test('a resubmission while the admin reviews makes Approve refuse; the record stays pending', async ({
+test('two registrations with one cell number are both pending and flag each other', async ({
   page,
   browser,
   request,
 }) => {
-  const sub: Submission = { firstNames: 'Ayanda', surname: `Stale${TAG}`, phone: cell() };
+  const phone = cell();
+  const a: Submission = { firstNames: 'Ayanda', surname: `Dupone${TAG}`, phone };
+  const b: Submission = { firstNames: 'Bheki', surname: `Duptwo${TAG}`, phone };
+  const nameA = displayOf('umpire', a);
+  const nameB = displayOf('umpire', b);
   await signInAsAdmin(page);
   const table = await openRegister(page, 'umpire');
   const path = await createLink(page);
   await closeModal(page);
-  await submitPublic(browser, path, 'umpire', sub);
+  await submitPublic(browser, path, 'umpire', a);
+  await submitPublic(browser, path, 'umpire', b);
 
   await page.reload();
   await openRegister(page, 'umpire');
   await page.getByRole('button', { name: /^Pending/ }).click();
-  const row = table.getByTestId('pending-row').filter({ hasText: sub.phone });
-  await expect(row).toBeVisible();
-
-  // The applicant submits again (same cell) while the Pending tab is open: updated in place.
-  await submitPublic(browser, path, 'umpire', { ...sub, email: `stale.${TAG}@example.org` });
-
-  await row.getByTestId('pending-approve').click();
-  await expect(page.getByTestId('officials-notice')).toHaveText(
-    'This registration was updated by the applicant while you were reviewing it. Check the details again before approving.',
+  // Filter by full name: each row's caution line also names the other's sheet name.
+  const rowA = table.getByTestId('pending-row').filter({ hasText: `Ayanda Dupone${TAG}` });
+  const rowB = table.getByTestId('pending-row').filter({ hasText: `Bheki Duptwo${TAG}` });
+  await expect(rowA.getByTestId('pending-duplicates')).toContainText(
+    `Another pending registration uses this cell number: ${nameB}`,
   );
-  await expect(row).toContainText('Pending');
-  const stored = (await register(request, 'umpire')).find((u) => u.phone === sub.phone)!;
-  expect(stored.pending).toBe(true);
-  expect(stored.active).toBe(false);
+  await expect(rowB.getByTestId('pending-duplicates')).toContainText(
+    `Another pending registration uses this cell number: ${nameA}`,
+  );
+  // The second submission did not overwrite the first.
+  await expect(rowA).toContainText(`Ayanda Dupone${TAG}`);
+  const both = (await register(request, 'umpire')).filter((u) => u.phone === phone && u.pending);
+  expect(both.map((u) => u.displayName).sort()).toEqual([nameA, nameB].sort());
+
+  await rowB.getByTestId('pending-reject').click();
+  await page.getByTestId('pending-reject-confirm').click();
+  await expect(rowB).toHaveCount(0);
+  await expect(rowA).toBeVisible();
+  await expect(rowA.getByTestId('pending-duplicates')).toHaveCount(0);
 });

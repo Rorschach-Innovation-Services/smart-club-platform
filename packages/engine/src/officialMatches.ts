@@ -109,3 +109,35 @@ export function findPossibleMatches(
     .sort((a, b) => RANK[a.reason] - RANK[b.reason] || a.displayName.localeCompare(b.displayName))
     .slice(0, max);
 }
+
+export interface PendingDuplicate {
+  id: string;
+  displayName: string;
+  submittedAt?: string;
+}
+
+/**
+ * The OTHER pending, unerased records holding the same cell as `subject` (comparablePhone),
+ * oldest submission first. Each public submission files its own record, so the admin sees
+ * same-cell entries side by side instead of one silently overwriting another.
+ */
+export function findPendingDuplicates(
+  subject: Pick<MatchableOfficial, 'id' | 'phone'>,
+  register: Array<MatchableOfficial & { submittedAt?: string }>,
+): PendingDuplicate[] {
+  const phone = comparablePhone(subject.phone);
+  if (!phone) return [];
+  return register
+    .filter(
+      (r) => r.id !== subject.id && r.pending && !r.erasedAt && comparablePhone(r.phone) === phone,
+    )
+    .sort(
+      (a, b) =>
+        (a.submittedAt ?? '').localeCompare(b.submittedAt ?? '') || a.id.localeCompare(b.id),
+    )
+    .map((r) => ({
+      id: r.id,
+      displayName: r.displayName,
+      ...(r.submittedAt ? { submittedAt: r.submittedAt } : {}),
+    }));
+}

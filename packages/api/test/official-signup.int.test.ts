@@ -252,18 +252,42 @@ describe('public submission', () => {
     assert.equal((await pendingScorers()).length, 0, 'body role ignored');
   });
 
-  test('same-phone resubmission updates the pending record in place', async () => {
+  test('a same-phone submission files its OWN pending record; the first is untouched', async () => {
+    const [first] = await pendingUmpires();
+    await new Promise((r) => setTimeout(r, 5));
     const res = await submit(
       umpTok,
-      person({ firstNames: 'Andile', phone: '+27821234567', email: undefined }),
+      person({
+        firstNames: 'Imposter',
+        surname: 'Ngubane',
+        phone: '+27821234567',
+        email: 'evil@example.org',
+      }),
     );
     assert.deepEqual(await json(res), { ok: true });
     const list = await pendingUmpires();
-    assert.equal(list.length, 1);
-    assert.equal(list[0].fullName, 'Andile Ngubane');
-    assert.equal(list[0].email, undefined, 'latest wins');
-    assert.equal(list[0].resubmissions, 1);
-    assert.ok(!list[0].aliases.includes('andilethabongubane'), 'stale name alias dropped');
+    assert.equal(list.length, 2);
+    assert.deepEqual(await repo.getUmpire(TENANT, first.id), first, 'byte-for-byte unchanged');
+    const second = list.find((u) => u.id !== first.id)!;
+    assert.equal(second.fullName, 'Imposter Ngubane');
+    // Both rows list each other in pendingDuplicates (admin view).
+    const view = await json<Array<Umpire & { pendingDuplicates?: unknown }>>(
+      await call('GET', '/umpires'),
+    );
+    assert.deepEqual(view.find((u) => u.id === first.id)!.pendingDuplicates, [
+      { id: second.id, displayName: second.displayName, submittedAt: second.submittedAt },
+    ]);
+    assert.deepEqual(view.find((u) => u.id === second.id)!.pendingDuplicates, [
+      { id: first.id, displayName: first.displayName, submittedAt: first.submittedAt },
+    ]);
+    // Rejecting one leaves the other.
+    const del = await call('DELETE', `/umpires/${second.id}`);
+    assert.equal((await json<{ hardDeleted: boolean }>(del)).hardDeleted, true);
+    assert.deepEqual(await repo.getUmpire(TENANT, first.id), first);
+    const after = await json<Array<Umpire & { pendingDuplicates?: unknown }>>(
+      await call('GET', '/umpires'),
+    );
+    assert.deepEqual(after.find((u) => u.id === first.id)!.pendingDuplicates, []);
   });
 
   test('a scorer submission carries the scorer-only fields', async () => {
@@ -566,7 +590,7 @@ describe('pending lifecycle', () => {
 });
 
 describe('review guards and limits', () => {
-  test('approve/merge need submittedAt and 409 registration_changed after a resubmission', async () => {
+  test('approve/merge need submittedAt and 409 registration_changed when the record changed', async () => {
     const tok = await mint('umpire');
     await submit(tok, person({ firstNames: 'Stale', surname: 'Review', phone: '0824440000' }));
     const seen = (await pendingUmpires()).find((u) => u.phone === '0824440000')!;
@@ -575,8 +599,12 @@ describe('review guards and limits', () => {
       (await call('POST', `/umpires/${seen.id}/merge`, { targetId: 'u-target' })).status,
       400,
     );
-    await new Promise((r) => setTimeout(r, 5));
-    await submit(tok, person({ firstNames: 'Stale', surname: 'Changed', phone: '0824440000' }));
+    // A concurrent admin action changed the record (simulated through the repo).
+    await repo.putUmpire(TENANT, {
+      ...seen,
+      fullName: 'Stale Changed',
+      submittedAt: new Date().toISOString(),
+    });
     const approve = await call('POST', `/umpires/${seen.id}/approve`, {
       submittedAt: seen.submittedAt,
     });
@@ -597,7 +625,7 @@ describe('review guards and limits', () => {
     await repo.deleteUmpire(TENANT, seen.id);
   });
 
-  test('scorer resubmission clears optional fields left out', async () => {
+  test('scorer: a same-phone submission never touches the first one', async () => {
     const tok = await mint('scorer');
     await submit(
       tok,
@@ -607,18 +635,25 @@ describe('review guards and limits', () => {
         phone: '0825550000',
         idNumber: '99',
         address: 'A',
+        emergencyPhone: '0845550000',
       }),
     );
+    const first = (await pendingScorers()).find((x) => x.phone === '0825550000')!;
     await submit(
       tok,
-      person({ firstNames: 'Opt', surname: 'Fields', phone: '0825550000', email: undefined }),
+      person({
+        firstNames: 'Other',
+        surname: 'Person',
+        phone: '0825550000',
+        email: 'x@example.org',
+        idNumber: '11',
+        address: 'B',
+      }),
     );
-    const s = (await pendingScorers()).find((x) => x.phone === '0825550000')!;
-    assert.equal(s.idNumber, undefined);
-    assert.equal(s.address, undefined);
-    assert.equal(s.email, undefined);
-    assert.equal(s.resubmissions, 1);
-    await repo.deleteScorer(TENANT, s.id);
+    assert.deepEqual(await repo.getScorer(TENANT, first.id), first, 'byte-for-byte unchanged');
+    const both = (await pendingScorers()).filter((x) => x.phone === '0825550000');
+    assert.equal(both.length, 2);
+    for (const x of both) await repo.deleteScorer(TENANT, x.id);
   });
 
   test('an id collision at create retries with a suffixed id (no 500)', async () => {
@@ -655,10 +690,10 @@ describe('review guards and limits', () => {
     await repo.deleteUmpire(TENANT, 'u-r-condition');
   });
 
-  test('pending cap: a NEW submission beyond MAX_PENDING_OFFICIALS is 429; a resubmission is not', async () => {
+  test('pending cap counts every submission, same-phone ones included', async () => {
     const { MAX_PENDING_OFFICIALS } = await import('../src/official-signup.js');
     const already = (await pendingScorers()).length;
-    for (let i = already; i < MAX_PENDING_OFFICIALS; i++)
+    for (let i = already; i < MAX_PENDING_OFFICIALS - 2; i++)
       await repo.putScorer(TENANT, {
         id: `sc-flood-${i}`,
         displayName: `Flood ${i}`,
@@ -668,18 +703,15 @@ describe('review guards and limits', () => {
         submittedAt: 'x',
       } as Scorer);
     const tok = await mint('scorer');
-    const fresh = await submit(
-      tok,
-      person({ firstNames: 'New', surname: 'Person', phone: '0827778888' }),
-    );
-    assert.equal(fresh.status, 429);
-    const again = await submit(
-      tok,
-      person({ firstNames: 'Flood', surname: 'Again', phone: '0700000001' }),
-    );
-    assert.equal(again.status, 200, 'in-place resubmission accepted');
-    for (let i = already; i < MAX_PENDING_OFFICIALS; i++)
+    const same = person({ firstNames: 'Twice', surname: 'Over', phone: '0827778888' });
+    assert.equal((await submit(tok, same)).status, 200);
+    assert.equal((await submit(tok, same)).status, 200, 'second same-phone record is its own');
+    assert.equal((await submit(tok, same)).status, 429, 'the cap counts both');
+    assert.equal((await pendingScorers()).length, MAX_PENDING_OFFICIALS);
+    for (let i = already; i < MAX_PENDING_OFFICIALS - 2; i++)
       await repo.deleteScorer(TENANT, `sc-flood-${i}`);
+    for (const x of (await pendingScorers()).filter((x) => x.phone === '0827778888'))
+      await repo.deleteScorer(TENANT, x.id);
   });
 
   test('umpire pending-merge filling fullName adds it as an alias, or 409s on a clash', async () => {

@@ -47,8 +47,6 @@ export interface Umpire {
   erasedAt?: string;
   /** Who erased the record (actor id). */
   erasedBy?: string;
-  /** Repeat self-registrations with the same phone folded into this pending record. */
-  resubmissions?: number;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -107,8 +105,6 @@ export interface Scorer {
   erasedAt?: string;
   /** Who erased the record (actor id). */
   erasedBy?: string;
-  /** Repeat self-registrations with the same phone folded into this pending record. */
-  resubmissions?: number;
   createdAt?: string;
   updatedAt?: string;
 }

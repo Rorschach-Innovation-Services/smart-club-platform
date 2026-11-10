@@ -1006,7 +1006,17 @@ export interface PossibleMatch {
   reason: 'phone' | 'name' | 'surname-initial';
 }
 /** Admin list rows: erased stubs are flagged; pending rows carry ranked merge candidates. */
-export type OfficialListExtras = { erased?: true; possibleMatches?: PossibleMatch[] };
+/** Another pending registration of the same role with the same cell number. */
+export interface PendingDuplicate {
+  id: string;
+  displayName: string;
+  submittedAt?: string;
+}
+export type OfficialListExtras = {
+  erased?: true;
+  possibleMatches?: PossibleMatch[];
+  pendingDuplicates?: PendingDuplicate[];
+};
 export interface OfficialVacatedFixture {
   seriesId: string;
   fixtureId: string;
@@ -1025,7 +1035,7 @@ export const eraseOfficial = (role: OfficialRole, id: string) =>
     { method: 'DELETE' },
   );
 /**
- * `submittedAt` is the pending record's as the admin saw it; a resubmission since answers 409
+ * `submittedAt` is the pending record's as the admin saw it; a change to the record since answers 409
  * `registration_changed` and nothing is written.
  */
 export const approveOfficial = <T = Umpire | Scorer>(

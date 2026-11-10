@@ -345,12 +345,11 @@ import {
   OFFICIAL_SIGNUPS_PER_HOUR,
   isSignupRole,
   parseContactChoice,
-  pendingWithPhone,
   planPendingMerge,
   signupBodyFrom,
   type SignupRole,
 } from './official-signup.js';
-import { findPossibleMatches } from '../../engine/src/officialMatches.js';
+import { findPendingDuplicates, findPossibleMatches } from '../../engine/src/officialMatches.js';
 import {
   eraseOfficial,
   previewOfficialErase,
@@ -1449,55 +1448,26 @@ app.post('/official-signup', async (c) => {
   const tooMany = () => new HttpError(429, 'too many registrations — please try again later');
   const overCap = (register: Array<Umpire | Scorer>) =>
     register.filter((r) => r.pending && !r.erasedAt).length >= MAX_PENDING_OFFICIALS;
+  // Every submission files its OWN pending record: a public link must never let one
+  // submission overwrite another (same-cell entries are surfaced as pendingDuplicates).
   if (role === 'umpire') {
     const existing = await repo.listUmpires(tenant);
-    const prior = pendingWithPhone(existing, body.phone);
-    if (!prior && overCap(existing)) throw tooMany();
-    if (prior) {
-      // Latest wins: `aliases: []` rebuilds the alias set from the new names only.
-      const next = applyUmpireInput(
-        prior,
-        { ...input, email: input.email ?? null, aliases: [] },
-        prior.id,
-        at,
-      );
-      await repo.putUmpire(tenant, {
-        ...next,
-        ...stamp,
-        submittedAt: at,
-        consentAt: at,
-        resubmissions: (prior.resubmissions ?? 0) + 1,
-      });
-    } else {
-      const stem = umpireIdFor(input.displayName!);
-      const taken = new Set(existing.map((u) => u.id));
-      await createOfficialWithFreshId(stem, taken, (id) => {
-        const umpire = applyUmpireInput(undefined, input, id, at);
-        return repo.createUmpire(tenant, { ...umpire, ...stamp, submittedAt: at, consentAt: at });
-      });
-    }
+    if (overCap(existing)) throw tooMany();
+    const stem = umpireIdFor(input.displayName!);
+    const taken = new Set(existing.map((u) => u.id));
+    await createOfficialWithFreshId(stem, taken, (id) => {
+      const umpire = applyUmpireInput(undefined, input, id, at);
+      return repo.createUmpire(tenant, { ...umpire, ...stamp, submittedAt: at, consentAt: at });
+    });
   } else {
     const existing = await repo.listScorers(tenant);
-    const prior = pendingWithPhone(existing, body.phone);
-    if (!prior && overCap(existing)) throw tooMany();
-    if (prior) {
-      const clear = { email: null, idNumber: null, emergencyPhone: null, address: null };
-      const next = applyScorerInput(prior, { ...clear, ...input }, prior.id, at);
-      await repo.putScorer(tenant, {
-        ...next,
-        ...stamp,
-        submittedAt: at,
-        consentAt: at,
-        resubmissions: (prior.resubmissions ?? 0) + 1,
-      });
-    } else {
-      const stem = scorerIdFor(input.displayName!);
-      const taken = new Set(existing.map((x) => x.id));
-      await createOfficialWithFreshId(stem, taken, (id) => {
-        const scorer = applyScorerInput(undefined, input as ScorerInput, id, at);
-        return repo.createScorer(tenant, { ...scorer, ...stamp, submittedAt: at, consentAt: at });
-      });
-    }
+    if (overCap(existing)) throw tooMany();
+    const stem = scorerIdFor(input.displayName!);
+    const taken = new Set(existing.map((x) => x.id));
+    await createOfficialWithFreshId(stem, taken, (id) => {
+      const scorer = applyScorerInput(undefined, input as ScorerInput, id, at);
+      return repo.createScorer(tenant, { ...scorer, ...stamp, submittedAt: at, consentAt: at });
+    });
   }
   console.info(`[official-signup] ${tenant} ${role}: submission accepted`);
   return c.json({ ok: true });
@@ -7632,15 +7602,25 @@ app.get('/scorers', requireAdmin, async (c) => {
   );
 });
 
-/** Admin lists: each PENDING record carries its ranked merge candidates (active records only). */
+/**
+ * Admin lists: each PENDING record carries its ranked merge candidates (active records only)
+ * and the other pending records of the role with the same cell (`pendingDuplicates`).
+ */
 function withPossibleMatches<T extends Umpire | Scorer>(r: T, _i: number, all: T[]) {
-  return r.pending ? { ...r, possibleMatches: findPossibleMatches(r, all) } : r;
+  return r.pending
+    ? {
+        ...r,
+        possibleMatches: findPossibleMatches(r, all),
+        pendingDuplicates: findPendingDuplicates(r, all),
+      }
+    : r;
 }
 
 /**
  * The stale-review guard for Approve and a pending Merge: the body must echo the
- * `submittedAt` the admin reviewed (400 without it). A public resubmission since then (same
- * cell, latest wins) makes it 409 `registration_changed`, and nothing is written.
+ * `submittedAt` the admin reviewed (400 without it). A different stored value (a concurrent
+ * admin action changed the record) makes it 409 `registration_changed`, and nothing is written.
+ * Public submissions never modify an existing record.
  */
 function reviewedSubmission(current: Umpire | Scorer, body: unknown): string {
   const s = (body as { submittedAt?: unknown } | null)?.submittedAt;

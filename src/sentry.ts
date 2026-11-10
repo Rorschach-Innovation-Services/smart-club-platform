@@ -12,16 +12,22 @@
 import * as Sentry from '@sentry/react';
 
 /**
- * A captain's-report link token (`/r/<token>`, `/captains-report-link/<token>`) — and a
- * document-request link token (`/d/<token>`, `/doc-request-link/<token>`) — is a bearer
- * capability: replace it with `[token]` anywhere an event or breadcrumb carries it (page URL,
- * fetch breadcrumbs, the `api_path` tag). Exported for tests.
+ * Link tokens are bearer capabilities: replace them with `[token]` anywhere an event or
+ * breadcrumb carries them (page URL, fetch breadcrumbs, the `api_path` tag, messages). Covers
+ * the path forms (`/r/`, `/captains-report-link/`, `/sq/`, `/squad-link/`, `/d/`,
+ * `/doc-request-link/`) and `t=` query values (club `/signup`, player `/register/:clubId`,
+ * official `/officials/register` and `/official-signup`): `?t=` / `&t=` in a URL, a bare query
+ * string starting `t=`, and Sentry's pair form `["t","…"]`. Mirrors the API's scrubber
+ * (packages/api/src/instrument.ts). Exported for tests.
  */
 export function scrubReportTokens(value: string): string {
-  return value.replace(
-    /(\/(?:captains-report-link|r|doc-request-link|d)\/)[^/?#\s"']+/g,
-    '$1[token]',
-  );
+  return value
+    .replace(
+      /(\/(?:captains-report-link|r|squad-link|sq|doc-request-link|d)\/)[^/?#\s"']+/g,
+      '$1[token]',
+    )
+    .replace(/(["?&]t=)[^&#\s"'\\]+/g, '$1[token]')
+    .replace(/(\["t",\s*")[^"]*/g, '$1[token]');
 }
 
 function scrub<T>(value: T): T {

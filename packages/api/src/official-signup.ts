@@ -75,15 +75,6 @@ export function signupBodyFrom(
   return out;
 }
 
-/** The pending record of this role already holding `phone`, if any (resubmission). */
-export function pendingWithPhone<T extends Umpire | Scorer>(
-  register: T[],
-  phone: string,
-): T | undefined {
-  const want = comparablePhone(phone);
-  return register.find((r) => r.pending && !r.erasedAt && comparablePhone(r.phone) === want);
-}
-
 export type ContactField = 'phone' | 'email';
 export type ContactChoice = Partial<Record<ContactField, 'source' | 'target'>>;
 

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   comparablePhone,
+  findPendingDuplicates,
   findPossibleMatches,
   initialAndSurname,
   umpireSheetName,
@@ -67,5 +68,34 @@ describe('officialMatches', () => {
     const out = findPossibleMatches(subject, register);
     expect(out).toHaveLength(5);
     expect(out.every((m) => m.id.startsWith('ok'))).toBe(true);
+  });
+});
+
+describe('findPendingDuplicates', () => {
+  it('lists the other pending same-cell records, oldest first, excluding self/erased/active', () => {
+    const reg = [
+      rec({
+        id: 'p1',
+        pending: true,
+        active: false,
+        phone: '0821234567',
+        submittedAt: '2026-11-02',
+      } as never),
+      rec({
+        id: 'p2',
+        pending: true,
+        active: false,
+        phone: '+27 82 123 4567',
+        submittedAt: '2026-11-01',
+      } as never),
+      rec({ id: 'p3', pending: true, active: false, phone: '0821234567', erasedAt: 'x' } as never),
+      rec({ id: 'live', phone: '0821234567' }),
+      rec({ id: 'other', pending: true, active: false, phone: '0830000000' }),
+    ];
+    expect(findPendingDuplicates({ id: 'p1', phone: '0821234567' }, reg as never)).toEqual([
+      { id: 'p2', displayName: 'p2', submittedAt: '2026-11-01' },
+    ]);
+    expect(findPendingDuplicates({ id: 'other', phone: '0830000000' }, reg as never)).toEqual([]);
+    expect(findPendingDuplicates({ id: 'x' }, reg as never)).toEqual([]);
   });
 });

@@ -74,8 +74,8 @@ emergency contact or address. Clients hide stubs from every tab and from merge t
 club-facing umpire list (active only) never includes them.
 
 **Pending records (live).** Pending records carry `pending: true` (plus `source`,
-`submittedAt`, `consentAt`, and `resubmissions` once the same cell has submitted again) and,
-for admins only, a ranked `possibleMatches` list:
+`submittedAt`, `consentAt`) and, for admins only, a ranked `possibleMatches` list and a
+`pendingDuplicates` list:
 
 ```json
 "possibleMatches": [
@@ -89,6 +89,17 @@ for admins only, a ranked `possibleMatches` list:
 unmerged, unerased records only (`packages/engine/src/officialMatches.ts`). `name` is an exact
 normalised match on display name, full name or (umpires) alias; `surname-initial` is the same
 last name and first initial, so `A.Ngubane` meets `Andile Ngubane`. Nothing is preselected.
+
+```json
+"pendingDuplicates": [
+  { "id": "u-a-ngubane-3f2a9c", "displayName": "A.Ngubane", "submittedAt": "2026-11-10T08:00:00.000Z" }
+]
+```
+
+`pendingDuplicates` lists the OTHER pending, unerased records of the same role whose cell
+matches this one's (compared as `0XXXXXXXXX`), oldest submission first; `[]` when none
+(`findPendingDuplicates`). Same-cell submissions are never folded together, so the admin
+decides which (if any) is genuine.
 
 ## Erase (live)
 
@@ -167,20 +178,22 @@ are read for scorers only. Names are whitespace-collapsed, each at most 60 chara
 `fullName` = `"<firstNames> <surname>"`; `displayName` = the full name for scorers, the sheet
 form `A.Ngubane` for umpires. Failures are `400 { "error": "<message>" }`; more than
 `OFFICIAL_SIGNUPS_PER_HOUR` (120) submissions per token per hour is `429`, and so is a NEW
-submission once the role already has `MAX_PENDING_OFFICIALS` (300) pending records (a
-same-cell resubmission is still accepted).
+submission once the role already has `MAX_PENDING_OFFICIALS` (300) pending records. The cap
+counts every pending record, same-cell ones included.
 
 The record lands `active: false, pending: true, source: 'self-registration'` with
-`submittedAt` and `consentAt`. A pending record of that role with the same cell is updated in
-place instead (latest values win, `resubmissions` + 1). Every accepted submission answers
+`submittedAt` and `consentAt`. Every submission files its OWN pending record (an id suffix on
+a name collision): a public submission never modifies an existing record, even one with the
+same cell, so a link holder who knows someone's number cannot overwrite their registration.
+Every accepted submission answers
 `200 { "ok": true }`, whether or not the person is already on the register.
 
 ### Stale-review guard (approve and pending-merge)
 
-A public resubmission can rewrite a pending record while an admin is looking at it, so both
-calls below must echo the record's `submittedAt` as read: missing is `400 "submittedAt is
-required"`; a different value (resubmitted since) is `409 { "code": "registration_changed" }`
-and nothing is written. Re-read the list and review again.
+Both calls below must echo the record's `submittedAt` as read: missing is `400 "submittedAt is
+required"`; a different stored value is `409 { "code": "registration_changed" }` and nothing
+is written. Re-read the list and review again. A resubmission no longer changes a record (it
+creates a new one), so this now guards against concurrent admin actions only.
 
 ### `POST /{umpires,scorers}/:id/approve` (admin)
 

@@ -10,6 +10,7 @@ import {
   type ContactChoice,
   type OfficialRole,
   type OfficialVacatedFixture,
+  type PendingDuplicate,
   type PossibleMatch,
 } from './api';
 import { useCopyLink } from './copyLink';
@@ -26,7 +27,8 @@ export interface OfficialRow {
   mergedInto?: string;
   pending?: true;
   submittedAt?: string;
-  resubmissions?: number;
+  /** Other pending registrations of this role with the same cell number. */
+  pendingDuplicates?: PendingDuplicate[];
   erasedAt?: string;
   /** Admin list only: an erased stub (docs/api/officials.md). */
   erased?: true;
@@ -186,14 +188,29 @@ export function NoticeBar({ notice, onDismiss }: { notice: Notice; onDismiss: ()
 
 /* ─── Pending row ─── */
 
-/** Submitted date, resubmission hint and the ranked candidates, under the pending row's name. */
+/** Submitted date, a same-cell duplicate caution and the ranked candidates, under the pending row's name. */
 export function PendingDetails({ official }: { official: OfficialRow }) {
   const matches = official.possibleMatches ?? [];
-  const n = official.resubmissions ?? 0;
+  const dups = official.pendingDuplicates ?? [];
   return (
     <div className="ump-sub" data-testid="pending-details">
       {official.submittedAt && <div>Submitted {formatStamp(official.submittedAt)}</div>}
-      {n > 0 && <div>Resubmitted {n}×</div>}
+      {dups.length > 0 && (
+        <div
+          className="insights-callout warn"
+          role="note"
+          data-testid="pending-duplicates"
+          style={{ margin: '6px 0', padding: '6px 10px' }}
+        >
+          {dups.map((d) => (
+            <div key={d.id}>
+              Another pending registration uses this cell number: {d.displayName}
+              {d.submittedAt ? ` (submitted ${formatStamp(d.submittedAt)})` : ''}. Check which one
+              is genuine and reject the other.
+            </div>
+          ))}
+        </div>
+      )}
       {matches.length > 0 ? (
         <div>
           Possibly already on the register:
@@ -221,7 +238,7 @@ export const REGISTRATION_CHANGED_NOTICE =
   'This registration was updated by the applicant while you were reviewing it. Check the details again before approving.';
 
 export interface PendingHandlers {
-  /** `submittedAt` is the pending record's as shown; a newer resubmission answers 409. */
+  /** `submittedAt` is the pending record's as shown; a change since answers 409. */
   onApprove?: (id: string, submittedAt: string) => Promise<unknown>;
   onMergePending?: (
     id: string,

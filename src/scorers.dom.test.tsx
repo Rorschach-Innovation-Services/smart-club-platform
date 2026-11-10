@@ -266,6 +266,7 @@ describe('AdminScorersView — erase, pending and the registration link', () => 
     expect(within(row).getByText('0831112222')).toBeTruthy();
     expect(within(row).getByText('Emergency: 0839998888')).toBeTruthy();
     expect(within(row).queryByText(/Resubmitted/)).toBeNull();
+    expect(within(row).queryByTestId('pending-duplicates')).toBeNull();
     const list = within(row).getByRole('list', { name: 'Possible matches for Priya Govender' });
     expect(within(list).getByText('(same name)')).toBeTruthy();
     expect(within(row).queryByRole('button', { name: 'Reactivate' })).toBeNull();
