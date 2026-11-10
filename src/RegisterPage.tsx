@@ -7,7 +7,7 @@
  * name. A successful submit increments the club's derived player count.
  */
 import { useEffect, useId, useState } from 'react';
-import type { ReactNode, ChangeEventHandler, InputHTMLAttributes } from 'react';
+import type { ReactNode, ChangeEventHandler } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import {
   getRegistration,
@@ -38,6 +38,7 @@ import {
 } from './branding';
 import { formatDayYear } from './dates';
 import type { TransferWindow } from './types';
+import { CenterCard, Section, Label, Field, Check } from './formFields';
 
 /**
  * The player-facing message for a failed submit. A 409 keeps the server's deliberately
@@ -925,71 +926,6 @@ export function RegisterPage() {
   );
 }
 
-function CenterCard({ children, wide }: { children?: ReactNode; wide?: boolean }) {
-  return (
-    <div className="ps-screen">
-      <div className={`ps-cards ${wide ? 'reg-cards' : 'reg-cards-sm'}`}>
-        <div className="ps-card reg-card">{children}</div>
-      </div>
-    </div>
-  );
-}
-
-function Section({ title, children }: { title: ReactNode; children?: ReactNode }) {
-  return (
-    <div className="reg-section">
-      <div className="reg-section-title">{title}</div>
-      <div className="reg-grid">{children}</div>
-    </div>
-  );
-}
-
-function Label({ label, required }: { label: ReactNode; required?: boolean }) {
-  return (
-    <span className="reg-label">
-      {label}
-      {required && <span className="req">*</span>}
-    </span>
-  );
-}
-
-interface FieldProps {
-  label: ReactNode;
-  type?: string;
-  required?: boolean;
-  value: string;
-  onChange: ChangeEventHandler<HTMLInputElement>;
-  placeholder?: string;
-  inputMode?: InputHTMLAttributes<HTMLInputElement>['inputMode'];
-  span?: boolean;
-}
-function Field({
-  label,
-  type = 'text',
-  required,
-  value,
-  onChange,
-  placeholder,
-  inputMode,
-  span,
-}: FieldProps) {
-  return (
-    <label className={span ? 'reg-span' : undefined} style={{ display: 'block' }}>
-      <Label label={label} required={required} />
-      <input
-        className="field-input"
-        type={type}
-        inputMode={inputMode}
-        required={required}
-        value={value}
-        onChange={onChange}
-        placeholder={placeholder}
-        style={{ width: '100%', fontSize: 16 }}
-      />
-    </label>
-  );
-}
-
 const DOB_MONTHS = [
   'January',
   'February',
@@ -1201,22 +1137,5 @@ function Seg({
         ))}
       </div>
     </div>
-  );
-}
-
-function Check({
-  label,
-  checked,
-  onChange,
-}: {
-  label: ReactNode;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-}) {
-  return (
-    <label className="rp-check rp-pill" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
-      <span>{label}</span>
-    </label>
   );
 }

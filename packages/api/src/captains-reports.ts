@@ -621,7 +621,10 @@ export async function checkUmpireIds(
       continue;
     }
     const reg = await repo.getUmpire(tenant, u.umpireId);
-    if (!reg || reg.mergedInto) throw new ReportInputError('unknown umpire');
+    // Erased and pending entries cannot be named as a substitute (appointed umpires above
+    // still pass, so an open report naming an erased umpire stays submittable).
+    if (!reg || reg.mergedInto || reg.erasedAt || reg.pending)
+      throw new ReportInputError('unknown umpire');
     out.push({
       ...u,
       name: reg.displayName,

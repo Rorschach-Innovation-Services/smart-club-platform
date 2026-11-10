@@ -996,6 +996,93 @@ export const mergeScorer = (id: string, targetId: string) =>
     { method: 'POST', body: { targetId } },
   );
 
+// ── Officials: erase + self-registration (docs/api/officials.md) ──
+export type OfficialRole = 'umpire' | 'scorer';
+const officialPath = (role: OfficialRole, id: string, suffix = '') =>
+  `/${role === 'umpire' ? 'umpires' : 'scorers'}/${encodeURIComponent(id)}${suffix}`;
+export interface PossibleMatch {
+  id: string;
+  displayName: string;
+  reason: 'phone' | 'name' | 'surname-initial';
+}
+/** Admin list rows: erased stubs are flagged; pending rows carry ranked merge candidates. */
+export type OfficialListExtras = { erased?: true; possibleMatches?: PossibleMatch[] };
+export interface OfficialVacatedFixture {
+  seriesId: string;
+  fixtureId: string;
+  date?: string;
+  label: string;
+}
+export const getOfficialErasePreview = (role: OfficialRole, id: string) =>
+  request<{
+    vacated: OfficialVacatedFixture[];
+    counts: { today: number; upcoming: number; played: number };
+  }>(officialPath(role, id, '/erase-preview'));
+/** Erase (or, for an unreferenced pending record, Reject = hard delete). */
+export const eraseOfficial = (role: OfficialRole, id: string) =>
+  request<{ erased: string[]; hardDeleted: boolean; vacated: OfficialVacatedFixture[] }>(
+    officialPath(role, id),
+    { method: 'DELETE' },
+  );
+/**
+ * `submittedAt` is the pending record's as the admin saw it; a resubmission since answers 409
+ * `registration_changed` and nothing is written.
+ */
+export const approveOfficial = <T = Umpire | Scorer>(
+  role: OfficialRole,
+  id: string,
+  submittedAt: string,
+) => request<T>(officialPath(role, id, '/approve'), { method: 'POST', body: { submittedAt } });
+export type ContactChoice = Partial<Record<'phone' | 'email', 'source' | 'target'>>;
+/**
+ * Merge a PENDING record into an active one. 409 `contact_choice_required` carries
+ * `details.conflicts: [{field, source, target}]`; 409 `registration_changed` means the
+ * registrant resubmitted since `submittedAt`; an umpire target can also answer 409
+ * `umpire_alias_taken` (`umpireId`, `displayName`).
+ */
+export const mergePendingOfficial = <T = Umpire | Scorer>(
+  role: OfficialRole,
+  id: string,
+  targetId: string,
+  submittedAt: string,
+  contact?: ContactChoice,
+) =>
+  request<{ target: T; previous: { phone: string | null; email: string | null }; repointed: 0 }>(
+    officialPath(role, id, '/merge'),
+    { method: 'POST', body: { targetId, submittedAt, ...(contact ? { contact } : {}) } },
+  );
+export const getOfficialSignupLink = (role: OfficialRole) =>
+  request<{ url: string | null; createdAt?: string }>(`/admin/official-signup-link/${role}`);
+export const createOfficialSignupLink = (role: OfficialRole) =>
+  request<{ url: string; createdAt: string }>(`/admin/official-signup-link/${role}`, {
+    method: 'POST',
+  });
+export const revokeOfficialSignupLink = (role: OfficialRole) =>
+  request<{ ok: true }>(`/admin/official-signup-link/${role}`, { method: 'DELETE' });
+export const getOfficialSignup = (token: string) =>
+  request<{ role: OfficialRole; tenantName: string }>('/official-signup', {
+    auth: false,
+    query: { t: token },
+  });
+export interface OfficialSignupBody {
+  firstNames: string;
+  surname: string;
+  phone: string;
+  email?: string;
+  consent: true;
+  /** Scorers only. */
+  idNumber?: string;
+  emergencyPhone?: string;
+  address?: string;
+}
+export const submitOfficialSignup = (token: string, body: OfficialSignupBody) =>
+  request<{ ok: true }>('/official-signup', {
+    method: 'POST',
+    auth: false,
+    query: { t: token },
+    body,
+  });
+
 // ── Result confirmation (the office's "checked and validated") ──
 // `recordedAt` is the result the admin looked at: a newer one from medicoach answers 409
 // `result_changed` (with the current result in the error details).
@@ -1060,7 +1147,8 @@ export interface OfficialsNotifyStatusRow {
   umpireId: string;
   status: 'queued' | 'completed' | 'exhausted';
   attempts: number;
-  reason?: string;
+  /** Completed WITHOUT a send: 'backfill' (pre-feature) or 'expired' (match already played). */
+  reason?: 'backfill' | 'expired';
   completedAt?: string;
 }
 export const getOfficialsNotifyStatus = (seriesId: string) =>

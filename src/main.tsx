@@ -109,6 +109,8 @@ import { AdminPostponements, postponementAttentionCount } from './club-postponem
 import { Onboarding } from './onboarding';
 import { AdminUmpiresView, mergeErrorMessage } from './umpires';
 import { AdminScorersView, scorerMergeErrorMessage } from './scorers';
+import { OfficialSignupPage } from './OfficialSignupPage';
+import { isErased, officialWriteErrorMessage, pendingCount } from './officialsAdmin';
 import { UmpireAppointmentsUpload } from './UmpireAppointmentsUpload';
 import { ResyncDialog, isResyncRequired } from './ResyncDialog';
 
@@ -401,6 +403,9 @@ function AppRoutes() {
       <Route path="/register/:clubId" element={<RegisterPage />} />
       {/* Public club self-registration — the tenant-wide signup link. */}
       <Route path="/signup" element={<ClubSignupPage />} />
+      {/* Public umpire / scorer self-registration — the per-role link from the Umpires and
+          Scorers pages (the token names the role). */}
+      <Route path="/officials/register" element={<OfficialSignupPage />} />
       {/* Public how-to-use-the-app tutorial videos (linked from chair onboarding + portal nav). */}
       <Route path="/tutorials" element={<TutorialsPage />} />
       {/* Public transfer-certificate check — the target of the certificate's QR code. */}
@@ -1496,6 +1501,8 @@ function Shell({
   }
   function patchScorer(id: string, body: Partial<Scorer>) {
     return withToast(() => api.patchScorer(id, body), 'Could not save the scorer', {
+      // A deleted (erased) or still-pending scorer refuses the write: say why; the 409 refetches.
+      errorMessage: (e) => officialWriteErrorMessage('scorer', e),
       invalidate: [qk.scorers()],
     }).then(() => {
       invalidate(qk.scorers());
@@ -1503,7 +1510,7 @@ function Shell({
   }
   function mergeScorer(sourceId: string, targetId: string) {
     return withToast(() => api.mergeScorer(sourceId, targetId), 'Could not merge the scorers', {
-      errorMessage: scorerMergeErrorMessage,
+      errorMessage: (e) => scorerMergeErrorMessage(e) ?? officialWriteErrorMessage('scorer', e),
       invalidate: [qk.scorers(), qk.series()],
     }).then((res) => {
       toastShow(`Merged — ${res.repointed} appointment(s) moved to ${res.target.displayName}`);
@@ -1538,6 +1545,8 @@ function Shell({
   }
   function patchUmpire(id: string, body: Partial<Umpire>) {
     return withToast(() => api.patchUmpire(id, body), 'Could not save the umpire', {
+      // A deleted (erased) or still-pending umpire refuses the write: say why; the 409 refetches.
+      errorMessage: (e) => officialWriteErrorMessage('umpire', e),
       invalidate: [qk.umpires()],
     }).then(() => {
       invalidate(qk.umpires());
@@ -1548,13 +1557,58 @@ function Shell({
     // An umpire already merged elsewhere (a stale page) says where it went, and the 409
     // refreshes the list so its row shows "Merged into …".
     return withToast(() => api.mergeUmpire(sourceId, targetId), 'Could not merge the umpires', {
-      errorMessage: mergeErrorMessage,
+      errorMessage: (e) => mergeErrorMessage(e) ?? officialWriteErrorMessage('umpire', e),
       invalidate: [qk.umpires(), qk.series()],
     }).then((res) => {
       toastShow(`Merged — ${res.repointed} appointment(s) moved to ${res.target.displayName}`);
       invalidate(qk.umpires());
       invalidate(qk.series());
     });
+  }
+
+  // ── Officials: Pending queue, Delete (erase) and the self-registration link ──
+  // Errors are the views' to show (an Approve clash or a contact choice is answered in place);
+  // a 409/404 still refetches the register so a stale row corrects itself.
+  function officialAdminProps(role: api.OfficialRole) {
+    const key = role === 'umpire' ? qk.umpires() : qk.scorers();
+    const refetchOn = (err: unknown) => {
+      if (
+        err instanceof ApiError &&
+        (err.status === 404 || err.status === 409) &&
+        err.code !== 'contact_choice_required'
+      )
+        invalidate(key);
+      throw err;
+    };
+    return {
+      onApprove: (id: string, submittedAt: string) =>
+        api.approveOfficial(role, id, submittedAt).then(() => invalidate(key), refetchOn),
+      onMergePending: (
+        id: string,
+        targetId: string,
+        submittedAt: string,
+        contact?: api.ContactChoice,
+      ) =>
+        api.mergePendingOfficial(role, id, targetId, submittedAt, contact).then((res) => {
+          invalidate(key);
+          invalidate(qk.series());
+          return res;
+        }, refetchOn),
+      onErase: (id: string) =>
+        api.eraseOfficial(role, id).then((res) => {
+          // Vacated appointments ride on GET /series; report snapshots name umpires.
+          invalidate(key);
+          invalidate(qk.series());
+          if (role === 'umpire') invalidate(qk.captainsReports());
+          return res;
+        }, refetchOn),
+      loadErasePreview: (id: string) => api.getOfficialErasePreview(role, id),
+      signupLink: {
+        load: () => api.getOfficialSignupLink(role),
+        create: () => api.createOfficialSignupLink(role),
+        revoke: () => api.revokeOfficialSignupLink(role),
+      },
+    };
   }
 
   // ── Derive view from URL ──
@@ -2524,6 +2578,8 @@ function Shell({
     icon: () => ReactNode;
     num?: number | string;
     dot?: string;
+    /** Items waiting for review, shown as a dot beside `num` (Umpires / Scorers). */
+    pending?: number;
     action?: () => void;
   }
   // Clearance badge counts: admin sees cohort-wide; a club counts only requests it must action.
@@ -2607,12 +2663,14 @@ function Shell({
             label: 'Umpires',
             icon: Icon.Whistle,
             num: allUmpires.filter((u) => u.active).length || undefined,
+            pending: pendingCount(allUmpires),
           },
           {
             v: 'scorers',
             label: 'Scorers',
             icon: Icon.Doc,
             num: allScorers.filter((s) => s.active).length || undefined,
+            pending: pendingCount(allScorers),
           },
           {
             v: 'captains_reports',
@@ -3036,6 +3094,7 @@ function Shell({
             onMerge={mergeUmpire}
             onUpload={() => gotoAdminView('umpire_upload')}
             reports={allCaptainsReports}
+            {...officialAdminProps('umpire')}
           />
         );
       if (view === 'scorers' && vertical.sport === 'cricket')
@@ -3048,6 +3107,7 @@ function Shell({
             onCreate={createScorer}
             onPatch={patchScorer}
             onMerge={mergeScorer}
+            {...officialAdminProps('scorer')}
           />
         );
       if (view === 'umpire_upload' && vertical.sport === 'cricket')
@@ -3240,7 +3300,9 @@ function Shell({
             clubs={clubs}
             players={players}
             directory={clubDirectory}
-            umpires={allUmpires}
+            // An admin's register also holds erased stubs and pending registrations; neither
+            // may be picked as the umpire who stood (the server refuses both).
+            umpires={allUmpires.filter((u) => !isErased(u) && !u.pending)}
             toast={toastShow}
           />
         );
@@ -3416,6 +3478,16 @@ function Shell({
               <span className="ni-label">{n.label}</span>
               {n.num && <span className={`ni-num ${n.num === 'NEW' ? 'new' : ''}`}>{n.num}</span>}
               {!n.num && n.dot && <span className={`ni-dot ${n.dot}`} />}
+              {/* Self-registrations waiting for review (Umpires / Scorers). */}
+              {n.pending > 0 && (
+                <span
+                  className="ni-dot gold"
+                  role="img"
+                  aria-label={`${n.pending} pending`}
+                  title={`${n.pending} registration${n.pending === 1 ? '' : 's'} waiting for review`}
+                  data-testid={`nav-pending-${n.v}`}
+                />
+              )}
             </button>
           ))}
 

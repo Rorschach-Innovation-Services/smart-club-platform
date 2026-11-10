@@ -71,6 +71,8 @@ import {
   tenantsListGsi1pk,
   exportLogKey,
   playerEraseLogKey,
+  officialEraseLogKey,
+  officialEraseLogsListKey,
   playerEraseLogsListKey,
   exportLogsListKey,
   userKey,
@@ -150,6 +152,7 @@ import type {
   ClubCommEvent,
   ExportLogEntry,
   PlayerEraseLogEntry,
+  OfficialEraseLogEntry,
   PlayerErasureCounts,
   League,
   SendResult,
@@ -1022,6 +1025,44 @@ export async function listPlayerEraseLogs(tenant: string): Promise<PlayerEraseLo
 /** Enumerate a tenant's player-erasure audit keys (tenant erasure — above the pk-prefix sweep). */
 async function listPlayerEraseLogKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
   const { pk, skPrefix } = playerEraseLogsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+/** Record one official erase run (PII-free). A fresh item per run, like PLAYERERASE#. */
+export async function putOfficialEraseLog(
+  tenant: string,
+  entry: OfficialEraseLogEntry,
+): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...officialEraseLogKey(tenant, entry.erasedAt, entry.id), ...entry },
+    }),
+  );
+}
+
+/** A tenant's official-erasure audit rows, oldest first. */
+export async function listOfficialEraseLogs(tenant: string): Promise<OfficialEraseLogEntry[]> {
+  const { pk, skPrefix } = officialEraseLogsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<OfficialEraseLogEntry>(i)!);
+}
+
+/** Enumerate a tenant's official-erasure audit keys (tenant erasure — above the prefix sweep). */
+async function listOfficialEraseLogKeys(
+  tenant: string,
+): Promise<Array<{ pk: string; sk: string }>> {
+  const { pk, skPrefix } = officialEraseLogsListKey(tenant);
   const items = await queryAll({
     TableName: TABLE,
     KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
@@ -2715,6 +2756,80 @@ export async function putUmpire(tenant: string, umpire: Umpire): Promise<Umpire>
   return umpire;
 }
 
+/** A pending registration changed (resubmitted) since the admin read it. */
+export class RegistrationChangedError extends Error {
+  constructor() {
+    super('this registration was resubmitted since you opened it');
+    this.name = 'RegistrationChangedError';
+  }
+}
+
+/**
+ * Write an official record only while the stored one is still the pending submission the
+ * admin reviewed (`submittedAt` unchanged); throws RegistrationChangedError otherwise.
+ */
+export async function putOfficialIfSubmittedAt(
+  tenant: string,
+  role: 'umpire' | 'scorer',
+  record: Umpire | Scorer,
+  submittedAt: string,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item:
+          role === 'umpire'
+            ? {
+                ...umpireKey(tenant, record.id),
+                ...umpireGsi1(tenant, record.displayName),
+                ...record,
+              }
+            : {
+                ...scorerKey(tenant, record.id),
+                ...scorerGsi1(tenant, record.displayName),
+                ...record,
+              },
+        ConditionExpression: 'submittedAt = :s',
+        ExpressionAttributeValues: { ':s': submittedAt },
+      }),
+    );
+  } catch (err) {
+    if (isCcf(err)) throw new RegistrationChangedError();
+    throw err;
+  }
+}
+
+/** Hard-delete a pending official only while `submittedAt` is unchanged (see above). */
+export async function deleteOfficialIfSubmittedAt(
+  tenant: string,
+  role: 'umpire' | 'scorer',
+  id: string,
+  submittedAt: string,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new DeleteCommand({
+        TableName: TABLE,
+        Key: role === 'umpire' ? umpireKey(tenant, id) : scorerKey(tenant, id),
+        ConditionExpression: 'submittedAt = :s',
+        ExpressionAttributeValues: { ':s': submittedAt },
+      }),
+    );
+  } catch (err) {
+    if (isCcf(err)) throw new RegistrationChangedError();
+    throw err;
+  }
+}
+
+/**
+ * Hard-delete an umpire record. Callers decide when this is safe (a pending self-registration
+ * with no references); an erase of an appointed official keeps the stub instead.
+ */
+export async function deleteUmpire(tenant: string, umpireId: string): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: TABLE, Key: umpireKey(tenant, umpireId) }));
+}
+
 export async function listFixtureOfficials(tenant: string): Promise<FixtureOfficialsRecord[]> {
   const { pk, skPrefix } = fixtureOfficialsListKey(tenant);
   const items = await queryAll({
@@ -2844,6 +2959,11 @@ export async function putScorer(tenant: string, scorer: Scorer): Promise<Scorer>
   return scorer;
 }
 
+/** Hard-delete a scorer record (see deleteUmpire for when this is safe). */
+export async function deleteScorer(tenant: string, scorerId: string): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: TABLE, Key: scorerKey(tenant, scorerId) }));
+}
+
 /** pk/sk pairs for every umpire, scorer + officials item — the erasure sweep needs keys. */
 async function listUmpireAndOfficialsKeys(
   tenant: string,
@@ -2869,6 +2989,13 @@ async function listUmpireAndOfficialsKeys(
 /** `umpireId` on a ledger row is the registry id for the role (a scorer id for 'scorer'). */
 export type OfficialRole = 'umpire' | 'referee' | 'scorer';
 export type OfficialsNotifyStatus = 'queued' | 'completed' | 'exhausted';
+/**
+ * Why a row reads as not sent. 'backfill' is STORED (a pre-feature appointment the backfill
+ * CLI claimed as completed). 'expired' is DERIVED, never stored: GET …/officials/notify-status
+ * reports it for a still-queued row whose fixture date has passed (the cron holds such rows
+ * queued, so a re-dated fixture still sends).
+ */
+export type OfficialsNotifyReason = 'backfill' | 'expired';
 
 export interface OfficialsNotifyRow {
   seriesId: string;
@@ -2878,8 +3005,8 @@ export interface OfficialsNotifyRow {
   status: OfficialsNotifyStatus;
   attempts: number;
   queuedAt: string;
-  /** Why a row was completed without a send ('backfill'). */
-  reason?: string;
+  /** Why a row was completed without a send. */
+  reason?: OfficialsNotifyReason;
   completedAt?: string;
   lastError?: string;
   results?: Array<{ channel: string; status: string; error?: string }>;
@@ -2896,7 +3023,9 @@ const OFFICIALS_NOTIFY_TTL_SECONDS = 400 * 24 * 3600;
 export async function queueOfficialsNotify(
   tenant: string,
   pair: { seriesId: string; fixtureId: string; role: OfficialRole; umpireId: string },
-  initial: { status: 'queued' } | { status: 'completed'; reason: string } = { status: 'queued' },
+  initial: { status: 'queued' } | { status: 'completed'; reason: 'backfill' } = {
+    status: 'queued',
+  },
 ): Promise<boolean> {
   const at = new Date().toISOString();
   try {
@@ -3885,6 +4014,108 @@ export async function attributeCaptainsReportUmpire(
     if (isCcf(err)) throw new CaptainsReportStateError('that umpire entry has changed');
     throw err;
   }
+}
+
+/**
+ * Official erasure: scrub erased umpire ids from one captain's report with targeted,
+ * per-element conditional writes (never a whole-item put, so a concurrent draft save or
+ * submission is not overwritten).
+ *
+ * Every touched element is conditioned on still carrying the same `umpireId` at that index;
+ * a draft save that reshuffled the `umpires` list in between fails the condition, and the
+ * report is re-read and re-planned (bounded retries). Names are rewritten to `placeholder`
+ * on `umpiresSnapshot[]`, `umpires[]` and `umpires[].attributed.freeTextName`. With
+ * `dropFromPending` (the fixture is not yet played) a PENDING report instead loses the
+ * snapshot entry and the matching `umpires[]` card, so no captain is asked to rate the
+ * placeholder. Any PENDING report also drops a substitute card (not in the snapshot) naming
+ * an erased id. Every removal is additionally conditioned on `status = pending`.
+ *
+ * Returns true when the report was changed.
+ */
+export async function scrubCaptainsReportUmpires(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+  ids: ReadonlySet<string>,
+  placeholder: string,
+  dropFromPending: boolean,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const report = await getCaptainsReport(tenant, key.seriesId, key.fixtureId, key.clubId);
+    if (!report) return false;
+    const isPending = report.status === 'pending';
+    const drop = dropFromPending && isPending;
+    // On an open (pending) report a SUBSTITUTE card naming an erased id must go: the captain's
+    // next save would otherwise fail the substitute check ("unknown umpire").
+    const appointed = new Set((report.umpiresSnapshot ?? []).map((u) => u.umpireId));
+    let pendingOnly = drop;
+    const set: string[] = [];
+    const remove: string[] = [];
+    const cond: string[] = ['attribute_exists(pk)'];
+    const values: Record<string, unknown> = {};
+    const names: Record<string, string> = {};
+    let n = 0;
+    const guard = (path: string, id: string) => {
+      const v = `:id${n++}`;
+      values[v] = id;
+      cond.push(`${path}.umpireId = ${v}`);
+    };
+    (report.umpiresSnapshot ?? []).forEach((u, i) => {
+      if (!ids.has(u.umpireId)) return;
+      const path = `umpiresSnapshot[${i}]`;
+      if (drop) remove.push(path);
+      else if (u.name !== placeholder) set.push(`${path}.#n = :ph`);
+      else return;
+      guard(path, u.umpireId);
+    });
+    (report.umpires ?? []).forEach((u, i) => {
+      if (!u.umpireId || !ids.has(u.umpireId)) return;
+      const path = `umpires[${i}]`;
+      let touched = false;
+      if (drop || (isPending && !appointed.has(u.umpireId))) {
+        pendingOnly = true;
+        remove.push(path);
+        touched = true;
+      } else {
+        if (u.name !== placeholder) {
+          set.push(`${path}.#n = :ph`);
+          touched = true;
+        }
+        if (u.attributed && u.attributed.freeTextName !== placeholder) {
+          set.push(`${path}.attributed.freeTextName = :ph`);
+          touched = true;
+        }
+      }
+      if (touched) guard(path, u.umpireId);
+    });
+    if (!set.length && !remove.length) return false;
+    if (pendingOnly) {
+      cond.push('#s = :pending');
+      names['#s'] = 'status';
+      values[':pending'] = 'pending';
+    }
+    if (set.some((x) => x.includes('#n'))) names['#n'] = 'name';
+    if (set.length) values[':ph'] = placeholder;
+    set.push('updatedAt = :at');
+    values[':at'] = new Date().toISOString();
+    try {
+      await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: reportKeyOf(tenant, key),
+          UpdateExpression:
+            `SET ${set.join(', ')}` + (remove.length ? ` REMOVE ${remove.join(', ')}` : ''),
+          ConditionExpression: cond.join(' AND '),
+          ...(Object.keys(names).length ? { ExpressionAttributeNames: names } : {}),
+          ExpressionAttributeValues: values,
+        }),
+      );
+      return true;
+    } catch (err) {
+      if (!isCcf(err)) throw err;
+      // The report moved under us (a draft save, a submission): re-read and re-plan.
+    }
+  }
+  throw new CaptainsReportStateError('the report kept changing; re-run the erase');
 }
 
 /** NOTIFY# rows outlive the reports' 14-day opening window comfortably, then self-expire. */
@@ -8338,9 +8569,14 @@ export async function resolveReview(
  * consumer checks the field it requires, so neither token works on the other's
  * endpoints.
  */
-export async function getToken(
-  token: string,
-): Promise<{ tenant: string; clubId?: string; kind?: 'club-signup'; createdAt: string } | null> {
+export async function getToken(token: string): Promise<{
+  tenant: string;
+  clubId?: string;
+  kind?: 'club-signup' | 'official-signup';
+  /** Official-signup tokens only: the register the link files into. */
+  role?: 'umpire' | 'scorer';
+  createdAt: string;
+} | null> {
   const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: tokenKey(token) }));
   return stripKeys(res.Item);
 }
@@ -8369,6 +8605,21 @@ export async function putSignupToken(
     new PutCommand({
       TableName: TABLE,
       Item: { ...tokenKey(token), tenant, kind: 'club-signup', createdAt },
+    }),
+  );
+}
+
+/** Store an official self-registration token (kind-tagged + role, no clubId). */
+export async function putOfficialSignupToken(
+  token: string,
+  tenant: string,
+  role: 'umpire' | 'scorer',
+  createdAt: string,
+): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...tokenKey(token), tenant, kind: 'official-signup', role, createdAt },
     }),
   );
 }
@@ -8578,6 +8829,58 @@ export async function updateClubSignupLink(
       ConditionExpression: 'attribute_exists(pk)',
     }),
   );
+}
+
+/**
+ * SET or REMOVE one role's official-signup-link pointer with targeted updates (like
+ * updateClubSignupLink), so a concurrent Settings save can't clobber or resurrect it.
+ * The map is created on first use; removing from a config without the map is a no-op.
+ */
+export async function updateOfficialSignupLink(
+  tenant: string,
+  role: 'umpire' | 'scorer',
+  link: { token: string; createdAt: string } | null,
+): Promise<void> {
+  const Key = tenantConfigKey(tenant);
+  if (link) {
+    await ddb
+      .send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key,
+          UpdateExpression: 'SET officialSignupLinks = :empty',
+          ConditionExpression: 'attribute_exists(pk) AND attribute_not_exists(officialSignupLinks)',
+          ExpressionAttributeValues: { ':empty': {} },
+        }),
+      )
+      .catch((err) => {
+        if (!isCcf(err)) throw err;
+      });
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key,
+        UpdateExpression: 'SET officialSignupLinks.#r = :v',
+        ConditionExpression: 'attribute_exists(pk)',
+        ExpressionAttributeNames: { '#r': role },
+        ExpressionAttributeValues: { ':v': link },
+      }),
+    );
+    return;
+  }
+  await ddb
+    .send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key,
+        UpdateExpression: 'REMOVE officialSignupLinks.#r',
+        ConditionExpression: 'attribute_exists(pk) AND attribute_exists(officialSignupLinks)',
+        ExpressionAttributeNames: { '#r': role },
+      }),
+    )
+    .catch((err) => {
+      if (!isCcf(err)) throw err;
+    });
 }
 
 // ── Users ──
@@ -9002,6 +9305,8 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   invalidatePlayerSyncFlag(tenant);
   const config = await getTenantConfig(tenant);
   if (config?.clubSignupLink?.token) await deleteToken(config.clubSignupLink.token);
+  for (const link of Object.values(config?.officialSignupLinks ?? {}))
+    if (link?.token) await deleteToken(link.token);
 
   const keys: Array<{ pk: string; sk: string }> = [tenantConfigKey(tenant)];
   const objectKeys: string[] = [];
@@ -9076,6 +9381,7 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   // share that partition and the same exposure — miss them and they survive the tenant.
   for (const k of await listExportLogKeys(tenant)) keys.push(k);
   for (const k of await listPlayerEraseLogKeys(tenant)) keys.push(k);
+  for (const k of await listOfficialEraseLogKeys(tenant)) keys.push(k);
   for (const k of await listVenueKeys(tenant)) keys.push(k);
   // Medicoach sync (ADR 0016): results (may hold a captain's player ref — PII) and the
   // SYNC partition (cursor + audit rows) have no gsi1/META listing; enumerate them.

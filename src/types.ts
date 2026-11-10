@@ -414,6 +414,8 @@ export interface TenantConfig {
    */
   knownClubs: DirectoryClub[];
   clubSignupLink?: ClubSignupLink;
+  /** Server-owned official self-registration link pointers (never written by Settings). */
+  officialSignupLinks?: { umpire?: ClubSignupLink; scorer?: ClubSignupLink };
   leagues?: League[];
   /**
    * Operator-managed district list. Absent ⇒ frontend falls back to the shared

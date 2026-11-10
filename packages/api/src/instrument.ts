@@ -16,13 +16,21 @@ import * as Sentry from '@sentry/aws-serverless';
  * A captain's-report link token is a bearer capability (ADR 0016): it must never reach Sentry.
  * Replaces the token in `/captains-report-link/<token>` and `/r/<token>` paths — and a squad-selection link's
  * `/squad-link/<token>` and `/sq/<token>` paths, and a document-request link's
- * `/doc-request-link/<token>` and `/d/<token>` paths — with `[token]`.
+ * `/doc-request-link/<token>` and `/d/<token>` paths, and `t=` query values — with `[token]`.
  * Exported for tests.
  */
 export function scrubReportTokens(value: string): string {
-  return value.replace(
-    /(\/(?:captains-report-link|r|squad-link|sq|doc-request-link|d)\/)[^/?#\s"']+/g,
-    '$1[token]',
+  return (
+    value
+      .replace(
+        /(\/(?:captains-report-link|r|squad-link|sq|doc-request-link|d)\/)[^/?#\s"']+/g,
+        '$1[token]',
+      )
+      // Link tokens carried as `?t=` (club signup, player /register, official signup): in a
+      // URL (`?t=` / `&t=`), at the start of a bare `query_string` ("t=…"), and in Sentry's
+      // pair form (["t","…"]).
+      .replace(/(["?&]t=)[^&#\s"']+/g, '$1[token]')
+      .replace(/(\["t",\s*")[^"]*/g, '$1[token]')
   );
 }
 

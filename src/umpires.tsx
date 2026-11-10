@@ -4,7 +4,22 @@
 
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Btn, Icon, Pill } from './atoms';
-import { ApiError, type OfficialsNotifyStatusRow } from './api';
+import { ApiError, type OfficialListExtras, type OfficialsNotifyStatusRow } from './api';
+import {
+  DeleteOfficialDialog,
+  NoticeBar,
+  PendingActions,
+  PendingDetails,
+  PendingPill,
+  SignupLinkModal,
+  isErased,
+  partitionOfficials,
+  type ErasePreview,
+  type Notice,
+  type OfficialFilter,
+  type PendingHandlers,
+  type SignupLinkHandlers,
+} from './officialsAdmin';
 import {
   MAX_SCORERS_PER_FIXTURE,
   MAX_UMPIRES_PER_FIXTURE,
@@ -119,7 +134,8 @@ export function doubleBookingIndex(
 /* ─── The picker ─── */
 
 /**
- * The editor's notice badge for one ledger row, or null for none (backfilled = never sent).
+ * The editor's notice badge for one ledger row, or null for none (backfilled = never sent;
+ * expired = closed unsent once the match date passed).
  * Pass the registry entry so a queued notice for someone with neither email nor cell reads as
  * waiting on contact details rather than about to go out (display only).
  */
@@ -131,6 +147,14 @@ export function noticeBadge(
   person?: { phone?: string; email?: string },
 ): { label: string; title?: string } | null {
   if (!row) return null;
+  // The status route derives `reason: 'expired'` for a notice still queued on a played fixture
+  // (held, never sent), so the reason wins over the status.
+  if (row.reason === 'expired') {
+    return {
+      label: 'Not sent (match played)',
+      title: 'The notice was still waiting when the match date passed, so it was never sent.',
+    };
+  }
   if (row.status === 'queued') {
     if (person && !(person.email ?? '').trim() && !(person.phone ?? '').trim()) {
       return {
@@ -613,8 +637,9 @@ export function appointmentCounts(allSeries: Series[]): Map<string, number> {
   return out;
 }
 
-export interface AdminUmpiresViewProps {
-  umpires: Umpire[];
+export interface AdminUmpiresViewProps extends PendingHandlers {
+  /** The admin list: erased stubs (`erased: true`) stay in for name lookups and ratings. */
+  umpires: (Umpire & OfficialListExtras)[];
   allSeries: Series[];
   loading?: boolean;
   onCreate: (body: Partial<Umpire>) => Promise<unknown>;
@@ -624,6 +649,10 @@ export interface AdminUmpiresViewProps {
   onUpload?: () => void;
   /** Captain's reports — rating averages are computed here, in the browser (ADR 0004). */
   reports?: CaptainsReport[];
+  /** Loads Delete's confirm counts. With `onErase`, every non-pending row gets Delete. */
+  loadErasePreview?: (id: string) => Promise<ErasePreview>;
+  /** The umpire self-registration link. Absent ⇒ no "Registration link" button. */
+  signupLink?: SignupLinkHandlers;
 }
 
 /**
@@ -657,18 +686,35 @@ export function AdminUmpiresView({
   onPatch,
   onMerge,
   onUpload,
+  onApprove,
+  onMergePending,
+  onErase,
+  loadErasePreview,
+  signupLink,
 }: AdminUmpiresViewProps) {
   const [q, setQ] = useState('');
-  const [filter, setFilter] = useState<'active' | 'inactive' | 'all'>('active');
+  const [filter, setFilter] = useState<OfficialFilter>('active');
+  const [notice, setNotice] = useState<Notice>(null);
+  const [deleting, setDeleting] = useState<Umpire | null>(null);
+  const [linkOpen, setLinkOpen] = useState(false);
   const [adding, setAdding] = useState<UmpireDraft | null>(null);
   const [editing, setEditing] = useState<{ id: string; draft: UmpireDraft } | null>(null);
   const [merging, setMerging] = useState<{ id: string; targetId: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const counts = useMemo(() => appointmentCounts(allSeries), [allSeries]);
+  // Ratings roll up through every merge chain, erased stubs included.
   const ratings = useMemo(() => ratingSummaries(reports, umpires), [reports, umpires]);
-  const active = umpires.filter((u) => u.active);
-  const inactive = umpires.filter((u) => !u.active);
-  const list = (filter === 'active' ? active : filter === 'inactive' ? inactive : umpires)
+  const { visible, active, pending, inactive } = partitionOfficials(umpires);
+  const erasedIds = new Set(umpires.filter(isErased).map((u) => u.id));
+  const list = (
+    filter === 'active'
+      ? active
+      : filter === 'pending'
+        ? pending
+        : filter === 'inactive'
+          ? inactive
+          : visible
+  )
     .filter((u) => matches(u, q))
     .sort((a, b) => a.displayName.localeCompare(b.displayName));
 
@@ -729,6 +775,16 @@ export function AdminUmpiresView({
           </p>
         </div>
         <div className="ph-actions">
+          {signupLink && (
+            <Btn
+              tone="outline"
+              icon={Icon.Form}
+              data-testid="officials-signup-link"
+              onClick={() => setLinkOpen(true)}
+            >
+              Registration link
+            </Btn>
+          )}
           {onUpload && (
             <Btn tone="outline" icon={Icon.Upload} onClick={onUpload}>
               Upload appointments
@@ -751,9 +807,13 @@ export function AdminUmpiresView({
         </div>
         <div className="players-stat">
           <div className="players-stat-l">Appointments</div>
-          <div className="players-stat-n">{[...counts.values()].reduce((a, b) => a + b, 0)}</div>
+          <div className="players-stat-n">
+            {[...counts].reduce((a, [id, n]) => (erasedIds.has(id) ? a : a + n), 0)}
+          </div>
         </div>
       </div>
+
+      <NoticeBar notice={notice} onDismiss={() => setNotice(null)} />
 
       {adding && (
         <div className="ump-form" role="group" aria-label="New umpire">
@@ -790,8 +850,9 @@ export function AdminUmpiresView({
         {(
           [
             ['active', 'Active', active.length],
+            ['pending', 'Pending', pending.length],
             ['inactive', 'Inactive', inactive.length],
-            ['all', 'All', umpires.length],
+            ['all', 'All', visible.length],
           ] as const
         ).map(([k, l, n]) => (
           <button
@@ -831,13 +892,15 @@ export function AdminUmpiresView({
             {!loading && list.length === 0 && (
               <tr>
                 <td colSpan={6} className="ump-empty">
-                  {!umpires.length
+                  {!visible.length
                     ? 'No umpires yet. Add one, or upload this week’s appointments sheet.'
                     : q.trim()
                       ? 'No umpires match this search.'
-                      : filter === 'inactive'
-                        ? 'No inactive or merged umpires.'
-                        : 'No active umpires. Reactivate one from the Inactive list, or add one.'}
+                      : filter === 'pending'
+                        ? 'No registrations waiting for review.'
+                        : filter === 'inactive'
+                          ? 'No inactive or merged umpires.'
+                          : 'No active umpires. Reactivate one from the Inactive list, or add one.'}
                 </td>
               </tr>
             )}
@@ -880,11 +943,13 @@ export function AdminUmpiresView({
                   </tr>
                 );
               const mergeTargets = active.filter((t) => t.id !== u.id);
+              const isPending = !!u.pending;
               return (
-                <tr key={u.id}>
+                <tr key={u.id} data-testid={isPending ? 'pending-row' : undefined}>
                   <td data-label="Umpire">
                     <div style={{ fontWeight: 700 }}>{u.displayName}</div>
                     {u.fullName && <div className="ump-sub">{u.fullName}</div>}
+                    {isPending && <PendingDetails official={u} />}
                   </td>
                   <td data-label="Contact">
                     {u.phone || u.email ? (
@@ -924,7 +989,9 @@ export function AdminUmpiresView({
                     })()}
                   </td>
                   <td data-label="Status">
-                    {u.active ? (
+                    {isPending ? (
+                      <PendingPill />
+                    ) : u.active ? (
                       <Pill tone="teal" dot>
                         Active
                       </Pill>
@@ -937,7 +1004,18 @@ export function AdminUmpiresView({
                     )}
                   </td>
                   <td data-label="Actions">
-                    {merging?.id === u.id ? (
+                    {isPending ? (
+                      <PendingActions
+                        role="umpire"
+                        official={u}
+                        activeEntries={active}
+                        onApprove={onApprove}
+                        onMergePending={onMergePending}
+                        onErase={onErase}
+                        onEdit={() => setEditing({ id: u.id, draft: draftOf(u) })}
+                        onNotice={setNotice}
+                      />
+                    ) : merging?.id === u.id ? (
                       <div className="ump-merge">
                         <select
                           aria-label={`Merge ${u.displayName} into`}
@@ -1001,6 +1079,16 @@ export function AdminUmpiresView({
                             Merge…
                           </Btn>
                         )}
+                        {onErase && loadErasePreview && (
+                          <Btn
+                            tone="ghost"
+                            size="sm"
+                            data-testid="official-delete"
+                            onClick={() => setDeleting(u)}
+                          >
+                            Delete
+                          </Btn>
+                        )}
                       </div>
                     )}
                   </td>
@@ -1011,9 +1099,23 @@ export function AdminUmpiresView({
         </table>
       </div>
       <p className="ump-footnote">
-        Merging moves every appointment and the sheet spelling to the umpire you pick, then retires
-        the duplicate. It cannot be undone.
+        {filter === 'pending'
+          ? 'Approve adds the person to the register. Merge into… adds their details to an entry that is already there; nothing on that entry is replaced unless you choose it.'
+          : `Merging moves every appointment and the sheet spelling to the umpire you pick, then retires the duplicate. It cannot be undone.`}
       </p>
+      {deleting && onErase && loadErasePreview && (
+        <DeleteOfficialDialog
+          role="umpire"
+          official={deleting}
+          loadPreview={loadErasePreview}
+          onErase={onErase}
+          onClose={() => setDeleting(null)}
+          onDone={setNotice}
+        />
+      )}
+      {linkOpen && signupLink && (
+        <SignupLinkModal role="umpire" link={signupLink} onClose={() => setLinkOpen(false)} />
+      )}
     </div>
   );
 }

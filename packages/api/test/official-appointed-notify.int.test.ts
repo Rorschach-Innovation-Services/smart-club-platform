@@ -10,7 +10,8 @@
  * complete; completed rows never re-send; a row with no usable contact stays queued (no attempt
  * counted) and sends once contacts are added; a fixture with no date leaves the row queued until
  * a date lands; a row whose official is no longer on the fixture is dropped; provider failures
- * count attempts and exhaust at the cap (captured to Sentry).
+ * count attempts and exhaust at the cap (captured to Sentry); a queued row whose fixture date has
+ * passed is held queued without sending (dateTbc fixtures excepted) and sends if re-dated.
  *
  * Senders run in dry-run (NOTIFY_DRY_RUN=1). Run with the API package's runner (tsx --test).
  */
@@ -118,6 +119,9 @@ async function run(
   const summary = await cron.runOfficialNotices({
     captureException: (_err, tags) => captured.push(tags),
     log: () => {},
+    // Pinned before every fixture date in this file so the past-fixture hold never fires
+    // by accident as the real calendar moves on; expiry tests pass their own `today`.
+    today: () => '2026-10-01',
     send: async (args) => {
       sends.push(args);
       return notify.sendOfficialAppointedNotice(args);
@@ -802,5 +806,79 @@ describe('scorer notices', () => {
       body.rows.map((r) => `${r.role}:${r.umpireId}`),
       [`scorer:${scorerA}`],
     );
+  });
+});
+
+describe('past-fixture hold', () => {
+  before(async () => {
+    await createUmpire({ displayName: 'E.Later' });
+  });
+
+  test('a queued row for a past fixture is held: nothing sent, no write, derived expired badge', async () => {
+    await repo.putSeries(TENANT, series('s-exp', [fx('f1', { date: '2026-11-08' })]));
+    await appoint('s-exp', 'f1', { umpires: ['u-a-ngubane'] });
+    const { sends, summary } = await run({ today: () => '2026-11-10' });
+    assert.equal(sends.filter((s) => s.seriesName === 'Series s-exp').length, 0);
+    assert.equal(summary.heldPast, 1);
+    const [row] = await ledger('s-exp');
+    assert.equal(row.status, 'queued');
+    assert.equal(row.attempts, 0);
+    assert.equal(row.reason, undefined, "'expired' is never stored");
+    const res = await call('GET', '/series/s-exp/officials/notify-status');
+    const body = (await res.json()) as { rows: Array<{ status: string; reason?: string }> };
+    assert.deepEqual(
+      body.rows.map((r) => [r.status, r.reason]),
+      [['queued', 'expired']],
+    );
+  });
+
+  test('re-dated to today-or-later, a held row sends', async () => {
+    await repo.putSeries(TENANT, series('s-exp', [fx('f1', { date: '2026-11-22' })]));
+    const { sends } = await run({ today: () => '2026-11-10' });
+    const mine = sends.filter((s) => s.seriesName === 'Series s-exp');
+    assert.equal(mine.length, 1);
+    assert.equal(mine[0].dateLabel, 'Sun 2026-11-22');
+    assert.equal((await ledger('s-exp'))[0].status, 'completed');
+  });
+
+  test('a fixture dated today is not held', async () => {
+    await repo.putSeries(TENANT, series('s-exp-today', [fx('f1', { date: '2026-11-10' })]));
+    await appoint('s-exp-today', 'f1', { umpires: ['u-a-ngubane'] });
+    const { sends } = await run({ today: () => '2026-11-10' });
+    assert.equal(sends.filter((s) => s.seriesName === 'Series s-exp-today').length, 1);
+  });
+
+  test('contact added later sends future fixtures only', async () => {
+    await repo.putSeries(
+      TENANT,
+      series('s-later', [fx('past', { date: '2026-11-01' }), fx('future', { date: '2026-11-22' })]),
+    );
+    await appoint('s-later', 'past', { umpires: ['u-e-later'] });
+    await appoint('s-later', 'future', { umpires: ['u-e-later'] });
+    await run({ today: () => '2026-10-25' });
+    assert.ok((await ledger('s-later')).every((r) => r.status === 'queued'));
+    const patch = await call('PATCH', '/umpires/u-e-later', { email: 'el@example.org' });
+    assert.equal(patch.status, 200, await patch.clone().text());
+    const { sends } = await run({ today: () => '2026-11-10' });
+    const mine = sends.filter((s) => s.seriesName === 'Series s-later');
+    assert.equal(mine.length, 1);
+    assert.equal(mine[0].dateLabel, 'Sun 2026-11-22');
+    const byFixture = new Map((await ledger('s-later')).map((r) => [r.fixtureId, r]));
+    assert.equal(byFixture.get('past')?.status, 'queued', 'held, not closed');
+    assert.equal(byFixture.get('future')?.status, 'completed');
+  });
+
+  test('a dateTbc fixture keeps its old date but is not held', async () => {
+    await repo.putSeries(
+      TENANT,
+      series('s-tbc', [fx('f1', { date: '2026-11-01', dateTbc: true })]),
+    );
+    await appoint('s-tbc', 'f1', { umpires: ['u-a-ngubane'] });
+    const { sends } = await run({ today: () => '2026-11-10' });
+    assert.equal((await ledger('s-tbc'))[0].status, 'completed');
+    assert.equal(sends.filter((s) => s.seriesName === 'Series s-tbc').length, 1);
+    const res = await call('GET', '/series/s-tbc/officials/notify-status');
+    const body = (await res.json()) as { rows: Array<{ reason?: string }> };
+    assert.ok(body.rows.every((r) => r.reason !== 'expired'));
   });
 });

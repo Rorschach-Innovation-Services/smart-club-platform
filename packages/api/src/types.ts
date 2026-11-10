@@ -274,6 +274,15 @@ export interface TenantConfig {
    * so a concurrent Settings save can't resurrect a revoked link.
    */
   clubSignupLink?: { token: string; createdAt: string };
+  /**
+   * Pointers to the official self-registration links (TOKEN# items, kind 'official-signup'),
+   * one live link per role. Same rules as clubSignupLink: written ONLY via
+   * repo.updateOfficialSignupLink, stripped from Settings saves, never in a public payload.
+   */
+  officialSignupLinks?: {
+    umpire?: { token: string; createdAt: string };
+    scorer?: { token: string; createdAt: string };
+  };
   /** Admin-managed league catalogue clubs opt into. Empty for a fresh tenant. */
   leagues?: League[];
   /**
@@ -728,6 +737,36 @@ export interface PlayerEraseLogEntry {
   by: string;
   at: string;
   counts: PlayerErasureCounts;
+}
+
+/** Per-category counts for one official erase run (see official-erase.ts). */
+export interface OfficialErasureCounts {
+  /** Registry records stubbed (the official + merged duplicates), or hard-deleted. */
+  records: number;
+  /** Not-yet-played fixtures the official was removed from. */
+  vacated: number;
+  /** Played fixtures whose denormalised name was rewritten to the placeholder. */
+  renamed: number;
+  /** Appointment-notice ledger rows deleted. */
+  ledger: number;
+  /** Captain's reports whose umpire names were scrubbed. */
+  reports: number;
+}
+
+/**
+ * Audit row for one official erase run (`OFFICIALERASE#<iso>#<id>` under the tenant pk).
+ * PII-free: role, registry id (a name slug, a documented residual), actor and counts only.
+ */
+export interface OfficialEraseLogEntry {
+  id: string;
+  kind: 'official-erasure';
+  tenant: string;
+  role: 'umpire' | 'scorer';
+  officialId: string;
+  hardDeleted: boolean;
+  erasedAt: string;
+  erasedBy: string;
+  counts: OfficialErasureCounts;
 }
 
 /** Onboard payload: a Club plus the flat chair contact fields the admin form sends. */

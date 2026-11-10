@@ -177,7 +177,16 @@ new suite is `test/match-week-office.int.test.ts`, port 4693).
   template is role-parameterized, so no new Meta template). A scorer with no stored
   phone/email simply has nothing sent — the register accepts name-only entries.
 - POPIA: The scorer register is a new named-individual contact registry actively messaged by
-  appointment notices; like umpires, records are deactivated (active:false), never deleted.
+  appointment notices. Records were originally deactivated (active:false), never deleted.
+  **Amended (Nov 2026, docs/api/officials.md):** an admin can now Delete an umpire or scorer.
+  Delete erases the person's details but keeps an anonymous stub (`Removed umpire` /
+  `Removed scorer`, `erasedAt`, always inactive) under the same id, together with every
+  record merged into it. The id is kept because past appointments, the officials ledger and
+  captain's-report ratings are keyed by it: re-keying would orphan them, and the stub lets
+  played fixtures and rating roll-ups still resolve. Fixtures not yet played lose the
+  official. Officials can also self-register through a per-role public link; a submission
+  lands as a **pending** record (inactive, not appointable) until an admin approves it, merges
+  it into an existing entry, or rejects it (a hard delete, since nothing references it yet).
 - Ground-use thresholds are a starting proxy, not agronomy; tune `HEAVY_WEEK_*` /
   `RESTED_DAYS` with the union.
 - Known, unchanged: approving a series can toast success on a failed save; "Series

@@ -454,6 +454,21 @@ describe('Upload appointments and merge refusals', () => {
 });
 
 describe('appointment notice badges and the no-contact hint', () => {
+  it('an expired notice reads "Not sent (match played)" whether still queued or completed', () => {
+    const contactless = { phone: '', email: '' };
+    expect(noticeBadge({ status: 'queued', reason: 'expired' })?.label).toBe(
+      'Not sent (match played)',
+    );
+    // Even for someone with no contacts: the match is played, so no "waiting" badge.
+    expect(noticeBadge({ status: 'queued', reason: 'expired' }, contactless)?.label).toBe(
+      'Not sent (match played)',
+    );
+    expect(noticeBadge({ status: 'completed', reason: 'expired' })?.label).toBe(
+      'Not sent (match played)',
+    );
+    expect(noticeBadge({ status: 'queued' })?.label).toBe('Notice queued');
+  });
+
   it('maps ledger rows to badges; a backfilled row shows none', () => {
     expect(noticeBadge(undefined)).toBeNull();
     expect(noticeBadge({ status: 'queued' })).toEqual({ label: 'Notice queued' });
@@ -542,5 +557,419 @@ describe('appointment notice badges and the no-contact hint', () => {
     await Promise.resolve();
     expect(screen.queryByText(/Notified|Notice queued|Couldn’t reach/)).toBeNull();
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+});
+
+/* ─── Erased stubs, the Pending queue, Delete and the registration link ─── */
+
+const ERASED_AND_PENDING: Umpire[] = [
+  ...UMPIRES,
+  // An erased duplicate that had been merged into B.Tyali: hidden, but its ratings roll up.
+  {
+    ...ump('u-gone-dup', 'Removed umpire', { aliases: [] }),
+    active: false,
+    mergedInto: 'u-b-tyali',
+    erasedAt: '2026-11-01T10:00:00Z',
+    erased: true,
+  } as Umpire,
+  {
+    ...ump('u-gone', 'Removed umpire', { aliases: [] }),
+    active: false,
+    erasedAt: '2026-11-01T10:00:00Z',
+    erased: true,
+  } as Umpire,
+  {
+    ...ump('u-k-ndlovu', 'K.Ndlovu', { aliases: [] }),
+    fullName: 'Khaya Ndlovu',
+    phone: '0821112222',
+    active: false,
+    pending: true,
+    source: 'self-registration',
+    submittedAt: '2026-11-08T09:30:00Z',
+    resubmissions: 2,
+    possibleMatches: [
+      { id: 'u-a-ngubane', displayName: 'A.Ngubane', reason: 'phone' },
+      { id: 'u-s-gasa', displayName: 'S.Gasa', reason: 'surname-initial' },
+    ],
+  } as Umpire,
+];
+
+describe('AdminUmpiresView — erase, pending and the registration link', () => {
+  const rated = (umpireId: string, score: number) => ({
+    umpireId,
+    name: umpireId,
+    ratings: {
+      decisions: score,
+      pressure: score,
+      behaviour: score,
+      communication: score,
+      regulations: score,
+    },
+    concerns: {},
+    otherConcern: '',
+    comments: '',
+  });
+  const setupFull = (over: Partial<Parameters<typeof AdminUmpiresView>[0]> = {}) => {
+    const props = {
+      umpires: ERASED_AND_PENDING,
+      allSeries: [S2],
+      onCreate: vi.fn().mockResolvedValue(undefined),
+      onPatch: vi.fn().mockResolvedValue(undefined),
+      onMerge: vi.fn().mockResolvedValue(undefined),
+      onApprove: vi.fn().mockResolvedValue(undefined),
+      onMergePending: vi.fn().mockResolvedValue({
+        target: { displayName: 'A.Ngubane', phone: '0821112222' },
+        previous: { phone: '0820000001', email: null },
+        repointed: 0,
+      }),
+      onErase: vi
+        .fn()
+        .mockResolvedValue({ erased: ['u-b-tyali'], hardDeleted: false, vacated: [] }),
+      loadErasePreview: vi.fn().mockResolvedValue({
+        vacated: [
+          { seriesId: 's1', fixtureId: 'f1', date: '2026-11-15', label: 'Home CC v Away CC' },
+          { seriesId: 's1', fixtureId: 'f2', date: '2026-11-10', label: 'Away CC v Home CC' },
+        ],
+        counts: { today: 1, upcoming: 4, played: 12 },
+      }),
+      signupLink: {
+        load: vi.fn().mockResolvedValue({ url: null }),
+        create: vi.fn().mockResolvedValue({
+          url: 'https://app.example/officials/register?t=tok1',
+          createdAt: '2026-11-10T08:00:00Z',
+        }),
+        revoke: vi.fn().mockResolvedValue({ ok: true }),
+      },
+      ...over,
+    };
+    const user = userEvent.setup();
+    renderWithProviders(<AdminUmpiresView {...props} />);
+    return { ...props, user };
+  };
+  const tab = (name: RegExp) => screen.getByRole('button', { name });
+  const rowOf = (name: string) => screen.getByText(name).closest('tr') as HTMLElement;
+
+  it('hides erased stubs from every tab, count and merge target', async () => {
+    const { user } = setupFull();
+    expect(tab(/^Active/).textContent).toBe('Active3');
+    expect(tab(/^Pending/).textContent).toBe('Pending1');
+    expect(tab(/^Inactive/).textContent).toBe('Inactive1');
+    expect(tab(/^All/).textContent).toBe('All5');
+    for (const t of [/^Active/, /^Pending/, /^Inactive/, /^All/]) {
+      await user.click(tab(t));
+      expect(screen.queryByText('Removed umpire')).toBeNull();
+    }
+    await user.click(tab(/^Active/));
+    await user.click(within(rowOf('A.Ngubane')).getByRole('button', { name: 'Merge…' }));
+    const select = screen.getByLabelText('Merge A.Ngubane into');
+    expect(within(select).queryByText('Removed umpire')).toBeNull();
+    expect(within(select).queryByText('K.Ndlovu')).toBeNull();
+  });
+
+  it('rolls ratings up through an erased merge chain', () => {
+    setupFull({
+      reports: [
+        { id: 'r1', status: 'submitted', umpires: [rated('u-gone-dup', 5)] },
+      ] as unknown as CaptainsReport[],
+    });
+    expect(within(rowOf('B.Tyali')).getByText('5.0')).toBeTruthy();
+  });
+
+  it('lists a pending registration with its details and candidates, never under Inactive', async () => {
+    const { user } = setupFull();
+    await user.click(tab(/^Inactive/));
+    expect(screen.queryByText('K.Ndlovu')).toBeNull();
+    await user.click(tab(/^Pending/));
+    const row = rowOf('K.Ndlovu');
+    expect(within(row).getByText('Khaya Ndlovu')).toBeTruthy();
+    expect(within(row).getByText('0821112222')).toBeTruthy();
+    expect(within(row).getByText(/^Submitted /)).toBeTruthy();
+    expect(within(row).getByText('Resubmitted 2×')).toBeTruthy();
+    const matches = within(row).getByRole('list', { name: 'Possible matches for K.Ndlovu' });
+    expect(within(matches).getByText('(same phone)')).toBeTruthy();
+    expect(within(matches).getByText('(same surname and initial)')).toBeTruthy();
+    expect(within(row).getByText('Pending')).toBeTruthy();
+    expect(within(row).queryByRole('button', { name: 'Reactivate' })).toBeNull();
+    expect(within(row).queryByRole('button', { name: 'Delete' })).toBeNull();
+    expect(within(row).getByRole('button', { name: 'Edit' })).toBeTruthy();
+    // Merge into…: candidates first, nothing preselected.
+    await user.click(within(row).getByRole('button', { name: 'Merge into…' }));
+    const select = screen.getByLabelText('Merge K.Ndlovu into') as HTMLSelectElement;
+    expect(select.value).toBe('');
+    const groups = [...select.querySelectorAll('optgroup')].map((g) => g.label);
+    expect(groups).toEqual(['Possible matches', 'Everyone else']);
+    expect(select.querySelectorAll('optgroup')[1].textContent).toContain('B.Tyali');
+    expect(screen.getByTestId('pending-merge-confirm')).toHaveProperty('disabled', true);
+  });
+
+  it('approves, and on a name clash points the admin to Merge', async () => {
+    const { user, onApprove } = setupFull();
+    await user.click(tab(/^Pending/));
+    await user.click(within(rowOf('K.Ndlovu')).getByRole('button', { name: 'Approve' }));
+    expect(onApprove).toHaveBeenCalledWith('u-k-ndlovu', '2026-11-08T09:30:00Z');
+    expect(screen.getByRole('status').textContent).toMatch(/K\.Ndlovu approved/);
+
+    vi.mocked(onApprove!).mockRejectedValueOnce(
+      new ApiError(409, 'alias taken', 'umpire_alias_taken', {
+        umpireId: 'u-a-ngubane',
+        displayName: 'A.Ngubane',
+      }),
+    );
+    await user.click(within(rowOf('K.Ndlovu')).getByRole('button', { name: 'Approve' }));
+    const alert = screen.getByRole('alert');
+    expect(alert.textContent).toMatch(/“A\.Ngubane” is already on the register/);
+    expect(alert.textContent).toMatch(/Merge into…/);
+  });
+
+  it('asks for an explicit choice per conflicting contact before merging, then says what changed', async () => {
+    const { user, onMergePending } = setupFull();
+    vi.mocked(onMergePending!).mockRejectedValueOnce(
+      new ApiError(409, 'choose which contact details to keep', 'contact_choice_required', {
+        conflicts: [{ field: 'phone', source: '0821112222', target: '0820000001' }],
+      }),
+    );
+    await user.click(tab(/^Pending/));
+    await user.click(within(rowOf('K.Ndlovu')).getByRole('button', { name: 'Merge into…' }));
+    await user.selectOptions(screen.getByLabelText('Merge K.Ndlovu into'), 'u-a-ngubane');
+    await user.click(screen.getByTestId('pending-merge-confirm'));
+    expect(onMergePending).toHaveBeenLastCalledWith(
+      'u-k-ndlovu',
+      'u-a-ngubane',
+      '2026-11-08T09:30:00Z',
+      undefined,
+    );
+
+    const dialog = within(screen.getByTestId('contact-choice-dialog'));
+    const phone = within(dialog.getByRole('group', { name: 'Phone' }));
+    expect(phone.getByText('0820000001')).toBeTruthy();
+    expect(phone.getByText('0821112222')).toBeTruthy();
+    expect(phone.getAllByRole('radio').every((r) => !(r as HTMLInputElement).checked)).toBe(true);
+    const confirm = screen.getByTestId('contact-choice-confirm');
+    expect(confirm).toHaveProperty('disabled', true);
+    await user.click(phone.getByLabelText(/Use submitted/));
+    expect(confirm).toHaveProperty('disabled', false);
+    await user.click(confirm);
+    expect(onMergePending).toHaveBeenLastCalledWith(
+      'u-k-ndlovu',
+      'u-a-ngubane',
+      '2026-11-08T09:30:00Z',
+      {
+        phone: 'source',
+      },
+    );
+    expect(screen.getByRole('status').textContent).toMatch(
+      /Merged into A\.Ngubane\. Phone replaced: was 0820000001, now 0821112222\./,
+    );
+  });
+
+  it('rejects a pending registration behind a confirm', async () => {
+    const { user, onErase } = setupFull();
+    await user.click(tab(/^Pending/));
+    await user.click(within(rowOf('K.Ndlovu')).getByRole('button', { name: 'Reject' }));
+    expect(onErase).not.toHaveBeenCalled();
+    await user.click(screen.getByTestId('pending-reject-confirm'));
+    expect(onErase).toHaveBeenCalledWith('u-k-ndlovu');
+  });
+
+  it('Delete states the consequences from the preview and needs the typed name', async () => {
+    const { user, onErase, loadErasePreview } = setupFull();
+    await user.click(within(rowOf('B.Tyali')).getByRole('button', { name: 'Delete' }));
+    expect(loadErasePreview).toHaveBeenCalledWith('u-b-tyali');
+    const summary = await screen.findByTestId('official-delete-summary');
+    expect(summary.textContent).toBe(
+      'Their personal details will be permanently erased. They will be removed from 4 upcoming fixtures and 1 today. 12 past appointments and their ratings are kept under “Removed umpire”.',
+    );
+    const fixtures = screen.getByRole('list', { name: 'Fixtures losing this official' });
+    expect(within(fixtures).getAllByRole('listitem')).toHaveLength(2);
+    expect(within(fixtures).getByText(/Home CC v Away CC · 15 Nov 2026/)).toBeTruthy();
+    expect(screen.getByText('This cannot be undone.')).toBeTruthy();
+    const confirm = screen.getByTestId('official-delete-confirm');
+    expect(confirm).toHaveProperty('disabled', true);
+    await user.type(screen.getByLabelText('Type B.Tyali to confirm'), 'B.Tyal');
+    expect(confirm).toHaveProperty('disabled', true);
+    await user.type(screen.getByLabelText('Type B.Tyali to confirm'), 'i');
+    expect(confirm).toHaveProperty('disabled', false);
+    await user.click(confirm);
+    expect(onErase).toHaveBeenCalledWith('u-b-tyali');
+    expect(screen.getByRole('status').textContent).toMatch(/B\.Tyali deleted/);
+  });
+
+  it('offers Delete on merged and inactive rows too', async () => {
+    const { user } = setupFull();
+    await user.click(tab(/^Inactive/));
+    expect(within(rowOf('Old Name')).getByRole('button', { name: 'Delete' })).toBeTruthy();
+  });
+
+  it('the registration link modal creates, replaces (with a warning) and turns off the link', async () => {
+    const { user, signupLink } = setupFull();
+    await user.click(screen.getByRole('button', { name: 'Registration link' }));
+    expect((await screen.findByTestId('signup-link-state')).textContent).toMatch(
+      /No registration link yet/,
+    );
+    await user.click(screen.getByRole('button', { name: 'Create link' }));
+    expect(signupLink.create).toHaveBeenCalledTimes(1);
+    expect((screen.getByLabelText('Link to share') as HTMLInputElement).value).toBe(
+      'https://app.example/officials/register?t=tok1',
+    );
+    expect(screen.getByTestId('signup-link-state').textContent).toMatch(
+      /Link active since 10 Nov 2026/,
+    );
+    expect(screen.getByRole('button', { name: 'Copy link' })).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Replace link' }));
+    expect(screen.getByText(/The current link stops working straight away/)).toBeTruthy();
+    await user.click(screen.getByTestId('signup-link-confirm'));
+    expect(signupLink.create).toHaveBeenCalledTimes(2);
+    expect(screen.getByText(/The previous link no longer works/)).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Turn off link' }));
+    await user.click(screen.getByTestId('signup-link-confirm'));
+    expect(signupLink.revoke).toHaveBeenCalled();
+    expect(screen.getByTestId('signup-link-state').textContent).toMatch(/No registration link yet/);
+  });
+
+  it('shows an existing link with its created date', async () => {
+    const { user } = setupFull({
+      signupLink: {
+        load: vi.fn().mockResolvedValue({
+          url: 'https://app.example/officials/register?t=old',
+          createdAt: '2026-10-01T08:00:00Z',
+        }),
+        create: vi.fn(),
+        revoke: vi.fn(),
+      },
+    });
+    await user.click(screen.getByRole('button', { name: 'Registration link' }));
+    expect((await screen.findByTestId('signup-link-state')).textContent).toMatch(
+      /Link active since 1 Oct 2026/,
+    );
+  });
+});
+
+describe('AdminUmpiresView — stale registrations, merge refusals and the delete preview', () => {
+  const PENDING = ERASED_AND_PENDING;
+  const base = {
+    umpires: PENDING,
+    allSeries: [S2],
+    onCreate: vi.fn(),
+    onPatch: vi.fn(),
+    onMerge: vi.fn(),
+  };
+  const rowOf = (name: string) => screen.getByText(name).closest('tr') as HTMLElement;
+  const openPending = async (user: ReturnType<typeof userEvent.setup>) =>
+    user.click(screen.getByRole('button', { name: /^Pending/ }));
+  const startMerge = async (user: ReturnType<typeof userEvent.setup>) => {
+    await openPending(user);
+    await user.click(within(rowOf('K.Ndlovu')).getByRole('button', { name: 'Merge into…' }));
+    await user.selectOptions(screen.getByLabelText('Merge K.Ndlovu into'), 'u-a-ngubane');
+    await user.click(screen.getByTestId('pending-merge-confirm'));
+  };
+  const changed = () => new ApiError(409, 'registration changed', 'registration_changed', {});
+
+  it('Approve on a registration the applicant changed says so and keeps it pending', async () => {
+    const onApprove = vi.fn().mockRejectedValue(changed());
+    const user = userEvent.setup();
+    renderWithProviders(<AdminUmpiresView {...base} onApprove={onApprove} />);
+    await openPending(user);
+    await user.click(within(rowOf('K.Ndlovu')).getByRole('button', { name: 'Approve' }));
+    expect(screen.getByRole('alert').textContent).toBe(
+      'This registration was updated by the applicant while you were reviewing it. Check the details again before approving.',
+    );
+    expect(within(rowOf('K.Ndlovu')).getByText('Pending')).toBeTruthy();
+  });
+
+  it('Merge on a changed registration closes the picker and the contact dialog', async () => {
+    const onMergePending = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new ApiError(409, 'choose', 'contact_choice_required', {
+          conflicts: [{ field: 'phone', source: '0821112222', target: '0820000001' }],
+        }),
+      )
+      .mockRejectedValueOnce(changed());
+    const user = userEvent.setup();
+    renderWithProviders(<AdminUmpiresView {...base} onMergePending={onMergePending} />);
+    await startMerge(user);
+    await user.click(screen.getByLabelText(/Use submitted/));
+    await user.click(screen.getByTestId('contact-choice-confirm'));
+    expect(screen.queryByTestId('contact-choice-dialog')).toBeNull();
+    expect(screen.queryByTestId('pending-merge-target')).toBeNull();
+    expect(screen.getByRole('alert').textContent).toMatch(/updated by the applicant/);
+  });
+
+  it('a sheet-name clash on merge names the existing umpire', async () => {
+    const onMergePending = vi.fn().mockRejectedValue(
+      new ApiError(409, 'alias taken', 'umpire_alias_taken', {
+        umpireId: 'u-s-gasa',
+        displayName: 'S.Gasa',
+      }),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<AdminUmpiresView {...base} onMergePending={onMergePending} />);
+    await startMerge(user);
+    expect(screen.getByRole('alert').textContent).toMatch(/already used by “S\.Gasa”/);
+  });
+
+  it('an empty conflicts list opens no dialog, and a repeat ask after a choice does not loop', async () => {
+    const ask = (conflicts: unknown[]) =>
+      new ApiError(409, 'choose', 'contact_choice_required', { conflicts });
+    const onMergePending = vi
+      .fn()
+      .mockRejectedValueOnce(ask([]))
+      .mockRejectedValueOnce(
+        ask([{ field: 'email', source: 'a@example.org', target: 'b@example.org' }]),
+      )
+      .mockRejectedValueOnce(
+        ask([{ field: 'email', source: 'a@example.org', target: 'b@example.org' }]),
+      );
+    const user = userEvent.setup();
+    renderWithProviders(<AdminUmpiresView {...base} onMergePending={onMergePending} />);
+    await startMerge(user);
+    expect(screen.queryByTestId('contact-choice-dialog')).toBeNull();
+    expect(screen.getByRole('alert').textContent).toMatch(/could not be matched up/);
+
+    await user.click(screen.getByTestId('pending-merge-confirm'));
+    await user.click(screen.getByLabelText(/Keep current/));
+    await user.click(screen.getByTestId('contact-choice-confirm'));
+    expect(onMergePending).toHaveBeenCalledTimes(3);
+    expect(screen.queryByTestId('contact-choice-dialog')).toBeNull();
+    expect(screen.getByRole('alert').textContent).toMatch(/could not be matched up/);
+  });
+
+  it('Delete loads the preview once across re-renders; a failed load keeps Delete disabled until Retry', async () => {
+    const preview = {
+      vacated: [],
+      counts: { today: 0, upcoming: 0, played: 1 },
+    };
+    const first = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue(preview);
+    const user = userEvent.setup();
+    const props = { ...base, onErase: vi.fn().mockResolvedValue({}) };
+    const { rerender } = renderWithProviders(
+      <AdminUmpiresView {...props} loadErasePreview={(id) => first(id)} />,
+    );
+    await user.click(within(rowOf('B.Tyali')).getByRole('button', { name: 'Delete' }));
+    expect(await screen.findByText(/Could not check their appointments/)).toBeTruthy();
+    // A new handler identity on every parent render must not refetch.
+    rerender(<AdminUmpiresView {...props} loadErasePreview={(id) => first(id)} />);
+    rerender(<AdminUmpiresView {...props} loadErasePreview={(id) => first(id)} />);
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('official-delete-confirm')).toHaveProperty('disabled', true);
+
+    await user.click(screen.getByTestId('official-delete-retry'));
+    expect(await screen.findByTestId('official-delete-summary')).toBeTruthy();
+    expect(first).toHaveBeenCalledTimes(2);
+    await user.type(screen.getByTestId('official-delete-typed'), 'B.Tyali');
+    expect(screen.getByTestId('official-delete-confirm')).toHaveProperty('disabled', false);
+  });
+
+  it('the Pending tab explains Approve and Merge instead of the merge footnote', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<AdminUmpiresView {...base} />);
+    expect(screen.getByText(/Merging moves every appointment/)).toBeTruthy();
+    await openPending(user);
+    expect(screen.queryByText(/Merging moves every appointment/)).toBeNull();
+    expect(
+      screen.getByText(/Approve adds the person to the register\. Merge into… adds their details/),
+    ).toBeTruthy();
   });
 });

@@ -144,7 +144,13 @@ import {
   stripJoinedOfficials,
   umpireIdFor,
 } from './umpires.js';
-import { applyScorerInput, findScorerNameClash, parseScorerInput, scorerIdFor } from './scorers.js';
+import {
+  applyScorerInput,
+  findScorerNameClash,
+  parseScorerInput,
+  scorerIdFor,
+  type ScorerInput,
+} from './scorers.js';
 import {
   advanceCompetition,
   competitionSeriesName,
@@ -298,6 +304,8 @@ import type {
   SyncConflict,
   PendingPlayerSync,
   PlayerSyncReview,
+  Umpire,
+  Scorer,
 } from './types.js';
 import { teamIdsForClub, resolveTeam } from './teams.js';
 import { applySetSide, orphanSides, parseSetSide } from './set-side.js';
@@ -331,6 +339,24 @@ import {
   type ConsoleStatusFilter,
   loadScorecardConsole,
 } from './captains-reports.js';
+import {
+  createWithFreshId,
+  MAX_PENDING_OFFICIALS,
+  OFFICIAL_SIGNUPS_PER_HOUR,
+  isSignupRole,
+  parseContactChoice,
+  pendingWithPhone,
+  planPendingMerge,
+  signupBodyFrom,
+  type SignupRole,
+} from './official-signup.js';
+import { findPossibleMatches } from '../../engine/src/officialMatches.js';
+import {
+  eraseOfficial,
+  previewOfficialErase,
+  OfficialNotFoundError,
+  type OfficialRoleKind,
+} from './official-erase.js';
 import {
   adminVoidSquadRequest,
   forwardSquadRequest,
@@ -1364,6 +1390,118 @@ async function resolveSignupTenant(token: string | undefined): Promise<TenantCon
   }
   return cfg;
 }
+
+/**
+ * Resolve an official self-registration token to its tenant + role, or 404 (same rules as
+ * resolveSignupTenant: kind-tagged token, live config, and equal to that role's pointer, so
+ * a rotated or revoked link is dead). The role comes from the TOKEN, never the body.
+ */
+async function resolveOfficialSignup(
+  token: string | undefined,
+): Promise<{ cfg: TenantConfig; role: SignupRole }> {
+  if (!token) throw new HttpError(400, 'missing token');
+  const resolved = await repo.getToken(token);
+  if (!resolved || resolved.kind !== 'official-signup' || !isSignupRole(resolved.role))
+    throw new HttpError(404, 'invalid signup link');
+  const cfg = await repo.getTenantConfig(resolved.tenant);
+  if (!cfg || cfg.officialSignupLinks?.[resolved.role]?.token !== token)
+    throw new HttpError(404, 'invalid signup link');
+  return { cfg, role: resolved.role };
+}
+
+/** Validate an official self-registration link → which register + the org name. */
+app.get('/official-signup', async (c) => {
+  const { cfg, role } = await resolveOfficialSignup(c.req.query('t'));
+  return c.json({ role, tenantName: orgCopy(cfg).name }, 200, { 'Cache-Control': 'no-store' });
+});
+
+/**
+ * Official self-registration: files a PENDING, inactive record (an admin approves or merges
+ * it before it can be appointed). A pending record with the same cell is updated in place
+ * (latest wins). One generic `{ ok: true }` for every accepted submission, so the response
+ * never says whether the person is already on the register.
+ */
+/** createWithFreshId bound to the registers' id-collision errors. */
+const createOfficialWithFreshId = (
+  stem: string,
+  taken: Set<string>,
+  create: (id: string) => Promise<unknown>,
+) =>
+  createWithFreshId(
+    stem,
+    taken,
+    create,
+    (err) => err instanceof repo.UmpireExistsError || err instanceof repo.ScorerExistsError,
+  );
+
+app.post('/official-signup', async (c) => {
+  const token = c.req.query('t');
+  const { cfg, role } = await resolveOfficialSignup(token);
+  const tenant = cfg.tenant;
+  const body = signupBodyFrom(await c.req.json().catch(() => null), role, normalizeZaCell);
+  // The register's own validation (lengths, email) — create mode, like the admin Add.
+  const input =
+    role === 'umpire' ? parseUmpireInput(body, 'create') : parseScorerInput(body, 'create');
+  const allowed = await repo.bumpSignupTokenCounter(token!, now(), OFFICIAL_SIGNUPS_PER_HOUR);
+  if (!allowed) throw new HttpError(429, 'too many registrations — please try again later');
+  const at = now();
+  const stamp = { active: false, pending: true as const, source: 'self-registration' as const };
+  const tooMany = () => new HttpError(429, 'too many registrations — please try again later');
+  const overCap = (register: Array<Umpire | Scorer>) =>
+    register.filter((r) => r.pending && !r.erasedAt).length >= MAX_PENDING_OFFICIALS;
+  if (role === 'umpire') {
+    const existing = await repo.listUmpires(tenant);
+    const prior = pendingWithPhone(existing, body.phone);
+    if (!prior && overCap(existing)) throw tooMany();
+    if (prior) {
+      // Latest wins: `aliases: []` rebuilds the alias set from the new names only.
+      const next = applyUmpireInput(
+        prior,
+        { ...input, email: input.email ?? null, aliases: [] },
+        prior.id,
+        at,
+      );
+      await repo.putUmpire(tenant, {
+        ...next,
+        ...stamp,
+        submittedAt: at,
+        consentAt: at,
+        resubmissions: (prior.resubmissions ?? 0) + 1,
+      });
+    } else {
+      const stem = umpireIdFor(input.displayName!);
+      const taken = new Set(existing.map((u) => u.id));
+      await createOfficialWithFreshId(stem, taken, (id) => {
+        const umpire = applyUmpireInput(undefined, input, id, at);
+        return repo.createUmpire(tenant, { ...umpire, ...stamp, submittedAt: at, consentAt: at });
+      });
+    }
+  } else {
+    const existing = await repo.listScorers(tenant);
+    const prior = pendingWithPhone(existing, body.phone);
+    if (!prior && overCap(existing)) throw tooMany();
+    if (prior) {
+      const clear = { email: null, idNumber: null, emergencyPhone: null, address: null };
+      const next = applyScorerInput(prior, { ...clear, ...input }, prior.id, at);
+      await repo.putScorer(tenant, {
+        ...next,
+        ...stamp,
+        submittedAt: at,
+        consentAt: at,
+        resubmissions: (prior.resubmissions ?? 0) + 1,
+      });
+    } else {
+      const stem = scorerIdFor(input.displayName!);
+      const taken = new Set(existing.map((x) => x.id));
+      await createOfficialWithFreshId(stem, taken, (id) => {
+        const scorer = applyScorerInput(undefined, input as ScorerInput, id, at);
+        return repo.createScorer(tenant, { ...scorer, ...stamp, submittedAt: at, consentAt: at });
+      });
+    }
+  }
+  console.info(`[official-signup] ${tenant} ${role}: submission accepted`);
+  return c.json({ ok: true });
+});
 
 /** Validate a club signup link → org name + the district choices for the form. */
 app.get('/club-signup', async (c) => {
@@ -7487,9 +7625,205 @@ app.put('/series/:id/fixtures/:fixtureId/officials', requireAdmin, async (c) => 
 app.get('/scorers', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
   return c.json(
-    (await repo.listScorers(tenant)).sort((a, b) => a.displayName.localeCompare(b.displayName)),
+    (await repo.listScorers(tenant))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName))
+      .map(flagErased)
+      .map(withPossibleMatches),
   );
 });
+
+/** Admin lists: each PENDING record carries its ranked merge candidates (active records only). */
+function withPossibleMatches<T extends Umpire | Scorer>(r: T, _i: number, all: T[]) {
+  return r.pending ? { ...r, possibleMatches: findPossibleMatches(r, all) } : r;
+}
+
+/**
+ * The stale-review guard for Approve and a pending Merge: the body must echo the
+ * `submittedAt` the admin reviewed (400 without it). A public resubmission since then (same
+ * cell, latest wins) makes it 409 `registration_changed`, and nothing is written.
+ */
+function reviewedSubmission(current: Umpire | Scorer, body: unknown): string {
+  const s = (body as { submittedAt?: unknown } | null)?.submittedAt;
+  if (typeof s !== 'string' || !s) throw new HttpError(400, 'submittedAt is required');
+  if (s !== current.submittedAt) throw registrationChanged();
+  return s;
+}
+
+const registrationChanged = () =>
+  new HttpError(409, 'this registration was resubmitted since you opened it — review it again', {
+    code: 'registration_changed',
+  });
+
+async function guardRegistration(write: () => Promise<void>): Promise<void> {
+  try {
+    await write();
+  } catch (err) {
+    if (err instanceof repo.RegistrationChangedError) throw registrationChanged();
+    throw err;
+  }
+}
+
+/**
+ * Approve a pending self-registration: the register's clash check runs against ACTIVE
+ * records, then the record goes live (`active: true`, `pending` cleared; source,
+ * submittedAt and consentAt kept). For umpires the aliases start resolving from here.
+ */
+app.post('/umpires/:id/approve', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const current = await repo.getUmpire(tenant, id);
+  if (!current) throw new HttpError(404, 'umpire not found');
+  if (current.erasedAt)
+    throw new HttpError(409, 'this umpire has been removed', { code: 'umpire_erased' });
+  if (!current.pending)
+    throw new HttpError(409, 'this umpire is not awaiting approval', {
+      code: 'umpire_not_pending',
+    });
+  const submittedAt = reviewedSubmission(current, await c.req.json().catch(() => null));
+  const clash = findAliasConflict(current.aliases, await repo.listUmpires(tenant), id);
+  if (clash)
+    throw new HttpError(409, `${clash.displayName} already answers to that name`, {
+      code: 'umpire_alias_taken',
+      umpireId: clash.id,
+      displayName: clash.displayName,
+    });
+  const { pending: _p, ...rest } = current;
+  const next: Umpire = { ...rest, active: true, updatedAt: now() };
+  await guardRegistration(() => repo.putOfficialIfSubmittedAt(tenant, 'umpire', next, submittedAt));
+  return c.json(next);
+});
+
+app.post('/scorers/:id/approve', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const current = await repo.getScorer(tenant, id);
+  if (!current) throw new HttpError(404, 'scorer not found');
+  if (current.erasedAt)
+    throw new HttpError(409, 'this scorer has been removed', { code: 'scorer_erased' });
+  if (!current.pending)
+    throw new HttpError(409, 'this scorer is not awaiting approval', {
+      code: 'scorer_not_pending',
+    });
+  const submittedAt = reviewedSubmission(current, await c.req.json().catch(() => null));
+  const clash = findScorerNameClash(current.displayName, await repo.listScorers(tenant), id);
+  if (clash)
+    throw new HttpError(409, `${clash.displayName} is already in the register`, {
+      code: 'scorer_name_taken',
+      scorerId: clash.id,
+      displayName: clash.displayName,
+    });
+  const { pending: _p, ...rest } = current;
+  const next: Scorer = { ...rest, active: true, updatedAt: now() };
+  await guardRegistration(() => repo.putOfficialIfSubmittedAt(tenant, 'scorer', next, submittedAt));
+  return c.json(next);
+});
+
+/**
+ * Merge a PENDING submission into an existing entry (the merge routes branch here when the
+ * source is pending): fill-blanks, an explicit per-field choice for a held phone/email that
+ * differs (409 `contact_choice_required` otherwise), no alias move, consent carried. The
+ * target is written BEFORE the source is deleted, so a crash never loses the submission.
+ */
+async function mergePendingOfficial<T extends Umpire | Scorer>(
+  c: Context<HonoEnv>,
+  role: SignupRole,
+  source: T,
+  target: T | null,
+  body: { contact?: unknown; submittedAt?: unknown } | null,
+) {
+  const { tenant } = c.get('requestAuth')!;
+  const submittedAt = reviewedSubmission(source, body);
+  if (!target) throw new HttpError(404, `target ${role} not found`);
+  if (!target.active || target.pending)
+    throw new HttpError(409, `cannot merge into an inactive ${role}`);
+  const choice = parseContactChoice(body?.contact);
+  const at = now();
+  const { next, conflicts } = planPendingMerge(role, source, target, choice, at);
+  if (conflicts.length)
+    throw new HttpError(409, 'choose which contact details to keep', {
+      code: 'contact_choice_required',
+      conflicts,
+    });
+  if (role === 'umpire') {
+    // A filled-in full name joins the target's alias set exactly as an Edit would (display +
+    // full name over the existing aliases; nothing else of the source's), and must not take
+    // a name another active umpire already answers to.
+    const t = target as Umpire;
+    const n = next as Umpire;
+    if (n.fullName !== t.fullName) {
+      n.aliases = applyUmpireInput(t, { fullName: n.fullName }, t.id, at).aliases;
+      const clash = findAliasConflict(n.aliases, await repo.listUmpires(tenant), t.id);
+      if (clash)
+        throw new HttpError(409, `${clash.displayName} already answers to that name`, {
+          code: 'umpire_alias_taken',
+          umpireId: clash.id,
+          displayName: clash.displayName,
+        });
+    }
+  }
+  const previous = { phone: target.phone ?? null, email: target.email ?? null };
+  // Re-check just before writing; the source delete below is conditional as well.
+  const fresh =
+    role === 'umpire'
+      ? await repo.getUmpire(tenant, source.id)
+      : await repo.getScorer(tenant, source.id);
+  if (fresh?.submittedAt !== submittedAt) throw registrationChanged();
+  if (role === 'umpire') await repo.putUmpire(tenant, next as Umpire);
+  else await repo.putScorer(tenant, next as Scorer);
+  await guardRegistration(() =>
+    repo.deleteOfficialIfSubmittedAt(tenant, role, source.id, submittedAt),
+  );
+  // No registry ids in the log (they are name slugs).
+  console.info(`[official-merge] ${tenant} ${role}: pending registration merged`);
+  return c.json({ target: next, previous, repointed: 0 });
+}
+
+/** Erased stubs stay in the admin lists (name lookups, rating roll-ups) flagged for the views. */
+function flagErased<T extends { erasedAt?: string }>(r: T): T & { erased?: true } {
+  return r.erasedAt ? { ...r, erased: true } : r;
+}
+
+/**
+ * Erase an official (docs/api/officials.md): personal details wiped, an anonymous stub kept,
+ * not-yet-played fixtures vacated. A pending self-registration nobody references is
+ * hard-deleted (Reject). Re-running on an erased record completes a half-finished erase.
+ */
+async function eraseOfficialRoute(c: Context<HonoEnv>, role: OfficialRoleKind) {
+  const ra = c.get('requestAuth')!;
+  try {
+    const { auditId, counts, ...result } = await eraseOfficial(
+      repo,
+      ra.tenant,
+      role,
+      c.req.param('id')!,
+      ra.email ?? 'admin',
+    );
+    // Never the registry id (a name slug): role, outcome, counts and the audit row id.
+    console.info(
+      `[official-erase] ${ra.tenant} ${role}: ${result.hardDeleted ? 'hard-deleted' : 'erased'} by ${ra.email} audit=${auditId} ${JSON.stringify(counts)}`,
+    );
+    return c.json(result);
+  } catch (err) {
+    if (err instanceof OfficialNotFoundError) throw new HttpError(404, err.message);
+    if (err instanceof repo.CaptainsReportStateError) throw new HttpError(409, err.message);
+    throw err;
+  }
+}
+
+async function eraseOfficialPreviewRoute(c: Context<HonoEnv>, role: OfficialRoleKind) {
+  const ra = c.get('requestAuth')!;
+  try {
+    return c.json(await previewOfficialErase(repo, ra.tenant, role, c.req.param('id')!));
+  } catch (err) {
+    if (err instanceof OfficialNotFoundError) throw new HttpError(404, err.message);
+    throw err;
+  }
+}
+
+app.get('/scorers/:id/erase-preview', requireAdmin, (c) => eraseOfficialPreviewRoute(c, 'scorer'));
+app.delete('/scorers/:id', requireAdmin, (c) => eraseOfficialRoute(c, 'scorer'));
+app.get('/umpires/:id/erase-preview', requireAdmin, (c) => eraseOfficialPreviewRoute(c, 'umpire'));
+app.delete('/umpires/:id', requireAdmin, (c) => eraseOfficialRoute(c, 'umpire'));
 
 app.post('/scorers', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
@@ -7521,6 +7855,14 @@ app.patch('/scorers/:id', requireAdmin, async (c) => {
   const input = parseScorerInput(await c.req.json().catch(() => null), 'patch');
   const current = await repo.getScorer(tenant, id);
   if (!current) throw new HttpError(404, 'scorer not found');
+  // An erased stub holds no personal details and must stay that way.
+  if (current.erasedAt)
+    throw new HttpError(409, 'this scorer has been removed', { code: 'scorer_erased' });
+  // A self-registration is activated only through Approve (which runs the clash checks).
+  if (current.pending && input.active === true)
+    throw new HttpError(409, 'approve this registration instead of reactivating it', {
+      code: 'scorer_pending',
+    });
   if (current.mergedInto && input.active === true)
     throw new HttpError(409, 'a merged scorer cannot be reactivated');
   if (input.displayName !== undefined) {
@@ -7543,7 +7885,11 @@ app.patch('/scorers/:id', requireAdmin, async (c) => {
 app.post('/scorers/:id/merge', requireAdmin, async (c) => {
   const ra = c.get('requestAuth')!;
   const sourceId = c.req.param('id');
-  const body = (await c.req.json().catch(() => null)) as { targetId?: unknown } | null;
+  const body = (await c.req.json().catch(() => null)) as {
+    targetId?: unknown;
+    contact?: unknown;
+    submittedAt?: unknown;
+  } | null;
   const targetId = typeof body?.targetId === 'string' ? body.targetId.trim() : '';
   if (!targetId) throw new HttpError(400, 'targetId is required');
   if (targetId === sourceId) throw new HttpError(400, 'cannot merge a scorer into itself');
@@ -7552,6 +7898,9 @@ app.post('/scorers/:id/merge', requireAdmin, async (c) => {
     repo.getScorer(ra.tenant, targetId),
   ]);
   if (!source) throw new HttpError(404, 'scorer not found');
+  if (source.erasedAt || target?.erasedAt)
+    throw new HttpError(409, 'a removed scorer cannot be merged', { code: 'scorer_erased' });
+  if (source.pending) return mergePendingOfficial(c, 'scorer', source, target, body);
   if (source.mergedInto) {
     const into = await repo.getScorer(ra.tenant, source.mergedInto);
     const name = into?.displayName ?? source.mergedInto;
@@ -7664,7 +8013,22 @@ app.delete('/series/:id/fixtures/:fixtureId/result/confirm', requireAdmin, async
  */
 app.get('/series/:id/officials/notify-status', requireAdmin, async (c) => {
   const ra = c.get('requestAuth')!;
-  const rows = await repo.listOfficialsNotifyForSeries(ra.tenant, c.req.param('id'));
+  const [rows, series] = await Promise.all([
+    repo.listOfficialsNotifyForSeries(ra.tenant, c.req.param('id')),
+    repo.getSeries(ra.tenant, c.req.param('id')),
+  ]);
+  // 'expired' is DERIVED here, never stored: the cron holds a queued row whose fixture date
+  // has passed (no send), and the badge reads it as "Not sent (match played)".
+  const today = tenantDate();
+  const fixtures = new Map(
+    ((series?.fixtures ?? []) as Array<{ id?: string; date?: string; dateTbc?: boolean }>).map(
+      (f) => [f.id, f],
+    ),
+  );
+  const heldPast = (fixtureId: string) => {
+    const f = fixtures.get(fixtureId);
+    return !!f?.date && f.dateTbc !== true && f.date < today;
+  };
   return c.json({
     rows: rows.map((r) => ({
       fixtureId: r.fixtureId,
@@ -7672,7 +8036,11 @@ app.get('/series/:id/officials/notify-status', requireAdmin, async (c) => {
       umpireId: r.umpireId,
       status: r.status,
       attempts: r.attempts,
-      ...(r.reason ? { reason: r.reason } : {}),
+      ...(r.reason
+        ? { reason: r.reason }
+        : r.status === 'queued' && heldPast(r.fixtureId)
+          ? { reason: 'expired' as const }
+          : {}),
       ...(r.completedAt ? { completedAt: r.completedAt } : {}),
     })),
   });
@@ -7684,7 +8052,7 @@ app.get('/umpires', async (c) => {
   const all = (await repo.listUmpires(ra.tenant)).sort((a, b) =>
     a.displayName.localeCompare(b.displayName),
   );
-  if (ra.membership.role === 'admin') return c.json(all);
+  if (ra.membership.role === 'admin') return c.json(all.map(flagErased).map(withPossibleMatches));
   return c.json(all.filter((u) => u.active).map((u) => ({ id: u.id, displayName: u.displayName })));
 });
 
@@ -7719,6 +8087,14 @@ app.patch('/umpires/:id', requireAdmin, async (c) => {
   const input = parseUmpireInput(await c.req.json().catch(() => null), 'patch');
   const current = await repo.getUmpire(tenant, id);
   if (!current) throw new HttpError(404, 'umpire not found');
+  // An erased stub holds no personal details and must stay that way.
+  if (current.erasedAt)
+    throw new HttpError(409, 'this umpire has been removed', { code: 'umpire_erased' });
+  // A self-registration is activated only through Approve (which runs the clash checks).
+  if (current.pending && input.active === true)
+    throw new HttpError(409, 'approve this registration instead of reactivating it', {
+      code: 'umpire_pending',
+    });
   if (current.mergedInto && input.active === true)
     throw new HttpError(409, 'a merged umpire cannot be reactivated');
   const next = applyUmpireInput(current, input, id, now());
@@ -7744,7 +8120,11 @@ app.patch('/umpires/:id', requireAdmin, async (c) => {
 app.post('/umpires/:id/merge', requireAdmin, async (c) => {
   const ra = c.get('requestAuth')!;
   const sourceId = c.req.param('id');
-  const body = (await c.req.json().catch(() => null)) as { targetId?: unknown } | null;
+  const body = (await c.req.json().catch(() => null)) as {
+    targetId?: unknown;
+    contact?: unknown;
+    submittedAt?: unknown;
+  } | null;
   const targetId = typeof body?.targetId === 'string' ? body.targetId.trim() : '';
   if (!targetId) throw new HttpError(400, 'targetId is required');
   if (targetId === sourceId) throw new HttpError(400, 'cannot merge an umpire into itself');
@@ -7753,6 +8133,9 @@ app.post('/umpires/:id/merge', requireAdmin, async (c) => {
     repo.getUmpire(ra.tenant, targetId),
   ]);
   if (!source) throw new HttpError(404, 'umpire not found');
+  if (source.erasedAt || target?.erasedAt)
+    throw new HttpError(409, 'a removed umpire cannot be merged', { code: 'umpire_erased' });
+  if (source.pending) return mergePendingOfficial(c, 'umpire', source, target, body);
   if (source.mergedInto) {
     const into = await repo.getUmpire(ra.tenant, source.mergedInto);
     const name = into?.displayName ?? source.mergedInto;
@@ -8382,7 +8765,9 @@ app.post('/captains-reports/:id/umpires/:index/attribute', requireAdmin, async (
   const umpireId = typeof body.umpireId === 'string' ? body.umpireId : '';
   const action = body.action === 'registered' ? 'registered' : 'linked';
   const reg = umpireId ? await repo.getUmpire(ra.tenant, umpireId) : null;
-  if (!reg || reg.mergedInto) throw new HttpError(400, 'unknown umpire');
+  // Erased and pending entries are not attributable (an erased stub holds no person).
+  if (!reg || reg.mergedInto || reg.erasedAt || reg.pending)
+    throw new HttpError(400, 'unknown umpire');
   try {
     const saved = await repo.attributeCaptainsReportUmpire(ra.tenant, report, index, entry.name, {
       ...entry,
@@ -9916,6 +10301,7 @@ async function applyTenantConfigPatch(
   // Settings tab's whole-config save must not resurrect a revoked link. registrationAccess
   // is retired; strip it too so an old client can't write it back onto the row.
   delete (patch as { clubSignupLink?: unknown }).clubSignupLink;
+  delete (patch as { officialSignupLinks?: unknown }).officialSignupLinks;
   delete (patch as { registrationAccess?: unknown }).registrationAccess;
   // The setup milestone is written ONLY via POST/DELETE /platform/tenants/:slug/setup-complete
   // (a direct, audited put). Strip it from EVERY merge-patch — the tenant-admin PUT
@@ -13731,6 +14117,63 @@ app.delete('/admin/club-signup-link', async (c) => {
   if (cfg.clubSignupLink?.token) await repo.deleteToken(cfg.clubSignupLink.token);
   await repo.updateClubSignupLink(ra.tenant, null);
   return c.json({ ok: true });
+});
+
+// ───────────────── Admin: official self-registration links ─────────────────
+
+function officialSignupUrl(c: Context<HonoEnv>, tenant: string, token: string): string {
+  const url = `${resolveLoginUrl(c, tenant)}/officials/register?t=${encodeURIComponent(token)}`;
+  assertLiveLinkBase(url);
+  return url;
+}
+
+function signupRoleParam(c: Context<HonoEnv>): SignupRole {
+  const role = c.req.param('role');
+  if (!isSignupRole(role)) throw new HttpError(404, 'unknown register');
+  return role;
+}
+
+/** The role's live self-registration link, or `url: null`. A bearer credential: no-store. */
+app.get('/admin/official-signup-link/:role', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const role = signupRoleParam(c);
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const link = cfg.officialSignupLinks?.[role];
+  const body = link
+    ? { url: officialSignupUrl(c, ra.tenant, link.token), createdAt: link.createdAt }
+    : { url: null };
+  return c.json(body, 200, { 'Cache-Control': 'no-store' });
+});
+
+/** Mint (or rotate) the role's link; the previous token dies. Pointer via a targeted update. */
+app.post('/admin/official-signup-link/:role', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const role = signupRoleParam(c);
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const token = randomUUID();
+  const createdAt = now();
+  const url = officialSignupUrl(c, ra.tenant, token);
+  await repo.putOfficialSignupToken(token, ra.tenant, role, createdAt);
+  const old = cfg.officialSignupLinks?.[role]?.token;
+  if (old && old !== token) await repo.deleteToken(old);
+  await repo.updateOfficialSignupLink(ra.tenant, role, { token, createdAt });
+  console.info(`[official-signup-link] ${ra.tenant} ${role}: link minted by ${ra.email}`);
+  return c.json({ url, createdAt }, 200, { 'Cache-Control': 'no-store' });
+});
+
+/** Revoke the role's link (token + pointer). Idempotent. */
+app.delete('/admin/official-signup-link/:role', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const role = signupRoleParam(c);
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const old = cfg.officialSignupLinks?.[role]?.token;
+  if (old) await repo.deleteToken(old);
+  await repo.updateOfficialSignupLink(ra.tenant, role, null);
+  console.info(`[official-signup-link] ${ra.tenant} ${role}: link revoked by ${ra.email}`);
+  return c.json({ ok: true }, 200, { 'Cache-Control': 'no-store' });
 });
 
 // ───────────────────── Admin: player clearances ─────────────────────

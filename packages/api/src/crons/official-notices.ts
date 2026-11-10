@@ -8,8 +8,11 @@
  *   listTenants → listQueuedOfficialsNotify (one partition Query; tenants with none cost one read)
  *   → per row: re-read the fixture's CURRENT officials (drop the row when the official is no
  *   longer on it — a raced or stale enqueue) → leave the row queued while the fixture has no
- *   date (it sends once the date lands) → send via sendOfficialAppointedNotice → `completed` on
- *   any `sent`.
+ *   date (it sends once the date lands) → HOLD it queued, sending nothing and counting no
+ *   attempt, while the fixture's date is before the tenant's today (a notice that waited on
+ *   missing contacts must not announce a match already played once a phone is added; the row
+ *   is never closed, so a fixture re-dated to today or later still sends) → send
+ *   via sendOfficialAppointedNotice → `completed` on any `sent`.
  *
  * When nothing was sent:
  *   - every channel `skipped` (no usable email/cell on the official's umpire or scorer registry entry): the row stays
@@ -48,6 +51,7 @@ import { hasFeature } from '../features.js';
 import { orgCopy } from '../branding.js';
 import { playingVenue } from '../venue-clash.js';
 import { officialsContactLineFor } from '../officials-contact.js';
+import { tenantDate } from '../tenant-time.js';
 import type { Channel, Club, Scorer, Series, TenantConfig, Umpire } from '../types.js';
 
 /** Failed sends before a row is marked `exhausted` (≈50 minutes of 5-minute retries). */
@@ -75,6 +79,8 @@ export interface OfficialNoticesDeps {
    * runtime gate (either registered) and the template choice (v2 when registered). */
   officialTemplate: OfficialTemplateStatus;
   attemptCap: number;
+  /** The tenant's calendar day (YYYY-MM-DD, SAST); queued rows for fixtures dated before it are held. */
+  today: () => string;
   captureException: (err: unknown, tags: Record<string, string>) => void;
   log: (message: string, data?: Record<string, unknown>) => void;
 }
@@ -90,6 +96,8 @@ export interface OfficialNoticesSummary {
   stale: number;
   /** Rows whose send failed (attempt counted). */
   failed: number;
+  /** Rows held queued (not sent, no attempt) because the fixture's date has passed. */
+  heldPast: number;
   /** Rows marked `exhausted` this run. */
   exhausted: number;
   /** Unexpected per-row / per-tenant faults (each captured to Sentry). */
@@ -111,6 +119,7 @@ const defaultDeps = (): OfficialNoticesDeps => ({
     v2Status: WHATSAPP_TEMPLATES.officialAppointedV2.status as WhatsAppTemplateDefinition['status'],
   },
   attemptCap: ATTEMPT_CAP,
+  today: () => tenantDate(),
   captureException: (err, tags) => Sentry.captureException(err, { tags }),
   log: (message, data) => console.log(JSON.stringify({ msg: message, ...data })),
 });
@@ -142,6 +151,13 @@ interface FixtureLite {
   away?: string;
   venueName?: string;
   venueOverride?: string;
+  /** Postponed with no new date yet: the stored date is the OLD one, so never "past". */
+  dateTbc?: boolean;
+}
+
+/** True when a dated, non-TBC fixture is before `today` (shared with the notify-status route). */
+export function isPastFixture(f: { date?: string; dateTbc?: boolean }, today: string): boolean {
+  return !!f.date && f.dateTbc !== true && f.date < today;
 }
 
 /** Run one drain pass. Exported for tests (inject the seams in `overrides`). */
@@ -156,6 +172,7 @@ export async function runOfficialNotices(
     deferred: 0,
     stale: 0,
     failed: 0,
+    heldPast: 0,
     exhausted: 0,
     errors: 0,
     dryRun: process.env.NOTIFY_DRY_RUN === '1',
@@ -163,6 +180,7 @@ export async function runOfficialNotices(
 
   // A failure HERE (the registry read) fails the whole run on purpose: there is nothing to isolate.
   const tenants = await repo.listTenants();
+  const today = deps.today();
   for (const cfg of tenants) {
     const tenant = cfg.tenant;
     try {
@@ -210,6 +228,12 @@ export async function runOfficialNotices(
         }
         if (!fixture.date) {
           summary.deferred++;
+          return;
+        }
+        // Played already: hold the row (no send, no write) so a re-dated fixture still sends.
+        // String compare is safe on YYYY-MM-DD. dateTbc keeps the old date, so it is not past.
+        if (isPastFixture(fixture, today)) {
+          summary.heldPast++;
           return;
         }
         // `umpireId` is the registry id for the role: scorer rows resolve against the scorers.

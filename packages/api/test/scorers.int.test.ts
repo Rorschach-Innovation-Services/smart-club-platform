@@ -223,3 +223,67 @@ describe('scorer merge', () => {
     assert.equal(f1!.updatedBy, 'admin@test');
   });
 });
+
+describe('erased and pending guards', () => {
+  const seed = async (id: string, extra: Record<string, unknown>) => {
+    await repo.putScorer('dolphins', {
+      id,
+      displayName: id,
+      active: false,
+      ...extra,
+    } as import('../src/types.js').Scorer);
+  };
+
+  before(async () => {
+    await seed('sc-guard-erased', {
+      displayName: 'Removed scorer',
+      erasedAt: '2026-11-01T00:00:00Z',
+      erasedBy: 'admin@test',
+    });
+    await seed('sc-guard-pending', {
+      displayName: 'Pat Pending',
+      pending: true,
+      source: 'self-registration',
+    });
+    await seed('sc-guard-live', { displayName: 'Lee Live', active: true });
+  });
+
+  test('PATCH an erased scorer is 409 scorer_erased, for any field', async () => {
+    for (const body of [{ displayName: 'Back Again' }, { phone: '0821234567' }, { active: true }]) {
+      const res = await call('PATCH', '/scorers/sc-guard-erased', body);
+      assert.equal(res.status, 409);
+      assert.equal(((await res.json()) as { code: string }).code, 'scorer_erased');
+    }
+  });
+
+  test('PATCH active:true on a pending scorer is 409 scorer_pending; other edits are allowed', async () => {
+    const res = await call('PATCH', '/scorers/sc-guard-pending', { active: true });
+    assert.equal(res.status, 409);
+    assert.equal(((await res.json()) as { code: string }).code, 'scorer_pending');
+    const ok = await call('PATCH', '/scorers/sc-guard-pending', {
+      displayName: 'Patricia Pending',
+    });
+    assert.equal(ok.status, 200, await ok.clone().text());
+    const stored = await repo.getScorer('dolphins', 'sc-guard-pending');
+    assert.equal(stored?.displayName, 'Patricia Pending');
+    assert.equal(stored?.pending, true);
+    assert.equal(stored?.active, false);
+  });
+
+  test('merge is 409 scorer_erased when the source or the target is erased', async () => {
+    for (const [src, target] of [
+      ['sc-guard-erased', 'sc-guard-live'],
+      ['sc-guard-pending', 'sc-guard-erased'],
+    ]) {
+      const res = await call('POST', `/scorers/${src}/merge`, { targetId: target });
+      assert.equal(res.status, 409);
+      assert.equal(((await res.json()) as { code: string }).code, 'scorer_erased');
+    }
+  });
+
+  test('deleteScorer removes the record', async () => {
+    await seed('sc-guard-gone', { pending: true });
+    await repo.deleteScorer('dolphins', 'sc-guard-gone');
+    assert.equal(await repo.getScorer('dolphins', 'sc-guard-gone'), null);
+  });
+});

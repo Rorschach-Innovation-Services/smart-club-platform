@@ -108,6 +108,9 @@ debt.
   load-bearing.)
 - Collect the minimum necessary fields. The current set is name, DOB, optional cell/email,
   and (for minors) guardian name.
+- **Umpires and scorers** can register themselves through a per-role public link (see
+  [Umpire and scorer registers](#officials)). The form has a required consent checkbox and
+  the server stamps `consentAt` on the record.
 
 ## Veterans finder — data minimisation & opaque handles
 
@@ -150,6 +153,56 @@ veterans requests; it scrubs captain's reports that name them and the `captainRe
 [API reference](../api/clearances.md#player-erasure) for the contract and what it does **not**
 cover (past comm-log entries, `INVITE#` markers, data already exported to Medicoach). For an
 official, delete the `USER#` record + Cognito user.
+
+## Umpire and scorer registers {#officials}
+
+The union's umpire and scorer registers hold named individuals who are sent appointment
+notices. Contact details are shown only to administrators. See the
+[officials API](../api/officials.md) for the contract.
+
+**Collected through the public link.** The office shares one link per role
+(`/officials/register?t=<token>`); replacing or turning it off kills the old token at once.
+Umpires give first names, surname, cell phone and an optional email. Scorers give the same
+plus an optional ID number, emergency contact number and home address. The submit requires a
+ticked consent box (the details are used by the union's office to appoint the person and
+contact them about fixtures); the server records `consentAt` and `source:
+'self-registration'`. The record waits as **pending** (inactive, not appointable) until an
+admin approves it, merges it into an existing entry, or rejects it. Reject hard-deletes the
+pending record. A merge never overwrites a held phone or email without the admin choosing;
+`consentAt` moves to the target and the pending copy is then deleted. The public response is
+the same whether or not the person was already on the register.
+
+**Erasure (Delete).** An admin's Delete on an umpire or scorer (`DELETE /umpires/:id`,
+`/scorers/:id`) wipes:
+
+- the record's name, full name, aliases, phone, email and (scorers) ID number, emergency
+  contact and address, and the same on every record merged into it;
+- the official from every fixture not yet played (dated today or later, undated, or date
+  TBC), and their name on the officials rows of played fixtures;
+- for umpires, the name fields on captain's reports (`umpiresSnapshot[].name`,
+  `umpires[].name`, `umpires[].attributed.freeTextName`); a pending report on a fixture not
+  yet played drops the entry instead;
+- unsent appointment notices (and every notice on fixtures not yet played).
+
+It keeps an anonymous stub under the same id (`Removed umpire` / `Removed scorer`, inactive),
+so past appointments and ratings, which are keyed by id, still resolve. Each run writes a
+PII-free `OFFICIALERASE#` audit row (role, id, actor, counts). Delete can be re-run on an
+erased record to finish an interrupted erase.
+
+**Known residuals.**
+
+- Ids are name slugs (for example `u-a-ngubane`), so the id kept on the stub still hints at
+  the name. Re-keying would break rating attribution.
+- Free-text umpire names typed by captains, with no register id, are not found by an erase.
+- A captain's draft save that read its report just before an erase can write the old name
+  back. Re-running Delete clears it.
+- If a later appointments sheet still names an erased umpire, an upload with "create
+  umpires" on makes a fresh record rather than reviving the stub.
+- Erasing on a match day removes the official from that day's fixture, and from its pending
+  captain's-report card, even if the match has already been played: today counts as "not yet
+  played".
+- Registry ids (name slugs) persist in CloudWatch logs written before the erase. The erase
+  and pending-merge log lines themselves carry only the role, counts and the audit row id.
 
 ## Retention
 

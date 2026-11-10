@@ -4,7 +4,22 @@
 
 import { useMemo, useState } from 'react';
 import { Btn, Icon, Pill } from './atoms';
-import { ApiError } from './api';
+import { ApiError, type OfficialListExtras } from './api';
+import {
+  DeleteOfficialDialog,
+  NoticeBar,
+  PendingActions,
+  PendingDetails,
+  PendingPill,
+  SignupLinkModal,
+  isErased,
+  partitionOfficials,
+  type ErasePreview,
+  type Notice,
+  type OfficialFilter,
+  type PendingHandlers,
+  type SignupLinkHandlers,
+} from './officialsAdmin';
 import { fixtureVenueLabel } from './umpires';
 import { normalizeText } from './fuzzyMatch';
 import type { Club, FixtureOfficials, Scorer, Series } from './types';
@@ -108,14 +123,19 @@ function matches(u: Scorer, q: string): boolean {
   return normalizeText(u.displayName).includes(n) || normalizeText(u.fullName ?? '').includes(n);
 }
 
-export interface AdminScorersViewProps {
-  scorers: Scorer[];
+export interface AdminScorersViewProps extends PendingHandlers {
+  /** The admin list: erased stubs (`erased: true`) stay in for name lookups. */
+  scorers: (Scorer & OfficialListExtras)[];
   allSeries: Series[];
   clubs: Club[];
   loading?: boolean;
   onCreate: (body: Partial<Scorer>) => Promise<unknown>;
   onPatch: (id: string, body: Partial<Scorer>) => Promise<unknown>;
   onMerge: (sourceId: string, targetId: string) => Promise<unknown>;
+  /** Loads Delete's confirm counts. With `onErase`, every non-pending row gets Delete. */
+  loadErasePreview?: (id: string) => Promise<ErasePreview>;
+  /** The scorer self-registration link. Absent ⇒ no "Registration link" button. */
+  signupLink?: SignupLinkHandlers;
 }
 
 const todayIso = () => new Date().toISOString().slice(0, 10);
@@ -128,9 +148,17 @@ export function AdminScorersView({
   onCreate,
   onPatch,
   onMerge,
+  onApprove,
+  onMergePending,
+  onErase,
+  loadErasePreview,
+  signupLink,
 }: AdminScorersViewProps) {
   const [q, setQ] = useState('');
-  const [filter, setFilter] = useState<'active' | 'inactive' | 'all'>('active');
+  const [filter, setFilter] = useState<OfficialFilter>('active');
+  const [notice, setNotice] = useState<Notice>(null);
+  const [deleting, setDeleting] = useState<Scorer | null>(null);
+  const [linkOpen, setLinkOpen] = useState(false);
   const [adding, setAdding] = useState<ScorerDraft | null>(null);
   const [editing, setEditing] = useState<{ id: string; draft: ScorerDraft } | null>(null);
   const [merging, setMerging] = useState<{ id: string; targetId: string } | null>(null);
@@ -140,9 +168,17 @@ export function AdminScorersView({
     () => scorerUpcomingAppointments(allSeries, clubs, todayIso()),
     [allSeries, clubs],
   );
-  const active = scorers.filter((u) => u.active);
-  const inactive = scorers.filter((u) => !u.active);
-  const list = (filter === 'active' ? active : filter === 'inactive' ? inactive : scorers)
+  const { visible, active, pending, inactive } = partitionOfficials(scorers);
+  const erasedIds = new Set(scorers.filter(isErased).map((u) => u.id));
+  const list = (
+    filter === 'active'
+      ? active
+      : filter === 'pending'
+        ? pending
+        : filter === 'inactive'
+          ? inactive
+          : visible
+  )
     .filter((u) => matches(u, q))
     .sort((a, b) => a.displayName.localeCompare(b.displayName));
 
@@ -208,6 +244,16 @@ export function AdminScorersView({
           </p>
         </div>
         <div className="ph-actions">
+          {signupLink && (
+            <Btn
+              tone="outline"
+              icon={Icon.Form}
+              data-testid="officials-signup-link"
+              onClick={() => setLinkOpen(true)}
+            >
+              Registration link
+            </Btn>
+          )}
           <Btn tone="teal" icon={Icon.Plus} onClick={() => setAdding({ ...emptyDraft })}>
             Add scorer
           </Btn>
@@ -225,9 +271,13 @@ export function AdminScorersView({
         </div>
         <div className="players-stat">
           <div className="players-stat-l">Appointments</div>
-          <div className="players-stat-n">{[...counts.values()].reduce((a, b) => a + b, 0)}</div>
+          <div className="players-stat-n">
+            {[...counts].reduce((a, [id, n]) => (erasedIds.has(id) ? a : a + n), 0)}
+          </div>
         </div>
       </div>
+
+      <NoticeBar notice={notice} onDismiss={() => setNotice(null)} />
 
       {adding && (
         <div className="ump-form" role="group" aria-label="New scorer">
@@ -264,8 +314,9 @@ export function AdminScorersView({
         {(
           [
             ['active', 'Active', active.length],
+            ['pending', 'Pending', pending.length],
             ['inactive', 'Inactive', inactive.length],
-            ['all', 'All', scorers.length],
+            ['all', 'All', visible.length],
           ] as const
         ).map(([k, l, n]) => (
           <button
@@ -304,13 +355,15 @@ export function AdminScorersView({
             {!loading && list.length === 0 && (
               <tr>
                 <td colSpan={5} className="ump-empty">
-                  {!scorers.length
+                  {!visible.length
                     ? 'No scorers yet. Add one here, or from a fixture’s Officials cell.'
                     : q.trim()
                       ? 'No scorers match this search.'
-                      : filter === 'inactive'
-                        ? 'No inactive or merged scorers.'
-                        : 'No active scorers. Reactivate one from the Inactive list, or add one.'}
+                      : filter === 'pending'
+                        ? 'No registrations waiting for review.'
+                        : filter === 'inactive'
+                          ? 'No inactive or merged scorers.'
+                          : 'No active scorers. Reactivate one from the Inactive list, or add one.'}
                 </td>
               </tr>
             )}
@@ -354,11 +407,13 @@ export function AdminScorersView({
                 );
               const mergeTargets = active.filter((t) => t.id !== u.id);
               const next = upcoming.get(u.id) ?? [];
+              const isPending = !!u.pending;
               return (
-                <tr key={u.id}>
+                <tr key={u.id} data-testid={isPending ? 'pending-row' : undefined}>
                   <td data-label="Scorer">
                     <div style={{ fontWeight: 700 }}>{u.displayName}</div>
                     {u.fullName && <div className="ump-sub">{u.fullName}</div>}
+                    {isPending && <PendingDetails official={u} />}
                   </td>
                   <td data-label="Contact">
                     {u.phone || u.email || u.emergencyPhone ? (
@@ -381,7 +436,9 @@ export function AdminScorersView({
                     {counts.get(u.id) ?? 0}
                   </td>
                   <td data-label="Status">
-                    {u.active ? (
+                    {isPending ? (
+                      <PendingPill />
+                    ) : u.active ? (
                       <Pill tone="teal" dot>
                         Active
                       </Pill>
@@ -394,7 +451,18 @@ export function AdminScorersView({
                     )}
                   </td>
                   <td data-label="Actions">
-                    {merging?.id === u.id ? (
+                    {isPending ? (
+                      <PendingActions
+                        role="scorer"
+                        official={u}
+                        activeEntries={active}
+                        onApprove={onApprove}
+                        onMergePending={onMergePending}
+                        onErase={onErase}
+                        onEdit={() => setEditing({ id: u.id, draft: draftOf(u) })}
+                        onNotice={setNotice}
+                      />
+                    ) : merging?.id === u.id ? (
                       <div className="ump-merge">
                         <select
                           aria-label={`Merge ${u.displayName} into`}
@@ -458,6 +526,16 @@ export function AdminScorersView({
                             Merge…
                           </Btn>
                         )}
+                        {onErase && loadErasePreview && (
+                          <Btn
+                            tone="ghost"
+                            size="sm"
+                            data-testid="official-delete"
+                            onClick={() => setDeleting(u)}
+                          >
+                            Delete
+                          </Btn>
+                        )}
                       </div>
                     )}
                   </td>
@@ -468,9 +546,23 @@ export function AdminScorersView({
         </table>
       </div>
       <p className="ump-footnote">
-        Merging moves every appointment to the scorer you pick, then retires the duplicate. It
-        cannot be undone.
+        {filter === 'pending'
+          ? 'Approve adds the person to the register. Merge into… adds their details to an entry that is already there; nothing on that entry is replaced unless you choose it.'
+          : `Merging moves every appointment to the scorer you pick, then retires the duplicate. It cannot be undone.`}
       </p>
+      {deleting && onErase && loadErasePreview && (
+        <DeleteOfficialDialog
+          role="scorer"
+          official={deleting}
+          loadPreview={loadErasePreview}
+          onErase={onErase}
+          onClose={() => setDeleting(null)}
+          onDone={setNotice}
+        />
+      )}
+      {linkOpen && signupLink && (
+        <SignupLinkModal role="scorer" link={signupLink} onClose={() => setLinkOpen(false)} />
+      )}
     </div>
   );
 }

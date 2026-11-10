@@ -28,6 +28,27 @@ export interface Umpire {
   active: boolean;
   /** Set when this entry was merged into another; the target id. */
   mergedInto?: string;
+  /**
+   * A self-registration awaiting admin approval. Pending records are always `active: false`;
+   * only the Approve route may activate one (PATCH `active: true` is refused).
+   */
+  pending?: true;
+  /** How the record was created when not by an admin, e.g. the public signup link. */
+  source?: 'self-registration';
+  /** When a self-registration was submitted (ISO). */
+  submittedAt?: string;
+  /** When the person gave POPIA consent to the register holding their details (ISO). */
+  consentAt?: string;
+  /**
+   * Set when an admin erased this official's personal details. The record stays as an
+   * anonymous stub (always `active: false`) so past appointments and ratings resolve; any
+   * further write is refused.
+   */
+  erasedAt?: string;
+  /** Who erased the record (actor id). */
+  erasedBy?: string;
+  /** Repeat self-registrations with the same phone folded into this pending record. */
+  resubmissions?: number;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -67,6 +88,27 @@ export interface Scorer {
   active: boolean;
   /** Set when this entry was merged into another; the target id. */
   mergedInto?: string;
+  /**
+   * A self-registration awaiting admin approval. Pending records are always `active: false`;
+   * only the Approve route may activate one (PATCH `active: true` is refused).
+   */
+  pending?: true;
+  /** How the record was created when not by an admin, e.g. the public signup link. */
+  source?: 'self-registration';
+  /** When a self-registration was submitted (ISO). */
+  submittedAt?: string;
+  /** When the person gave POPIA consent to the register holding their details (ISO). */
+  consentAt?: string;
+  /**
+   * Set when an admin erased this official's personal details. The record stays as an
+   * anonymous stub (always `active: false`) so past appointments and ratings resolve; any
+   * further write is refused.
+   */
+  erasedAt?: string;
+  /** Who erased the record (actor id). */
+  erasedBy?: string;
+  /** Repeat self-registrations with the same phone folded into this pending record. */
+  resubmissions?: number;
   createdAt?: string;
   updatedAt?: string;
 }

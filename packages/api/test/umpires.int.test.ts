@@ -650,3 +650,95 @@ describe('upload appointments', () => {
     assert.deepEqual(body.sections, ['Under 9 festival']);
   });
 });
+
+describe('erased and pending guards', () => {
+  const seed = async (id: string, extra: Record<string, unknown>) => {
+    await repo.putUmpire('dolphins', {
+      id,
+      displayName: id,
+      aliases: [],
+      active: false,
+      ...extra,
+    } as import('../src/types.js').Umpire);
+  };
+
+  before(async () => {
+    await seed('u-guard-erased', {
+      displayName: 'Removed umpire',
+      erasedAt: '2026-11-01T00:00:00Z',
+      erasedBy: 'admin@test',
+    });
+    await seed('u-guard-pending', {
+      displayName: 'P.Pending',
+      pending: true,
+      source: 'self-registration',
+    });
+    await seed('u-guard-live', { displayName: 'L.Live', aliases: ['llive'], active: true });
+  });
+
+  test('PATCH an erased umpire is 409 umpire_erased, for any field', async () => {
+    for (const body of [{ displayName: 'X.Back' }, { phone: '0821234567' }, { active: true }]) {
+      const res = await call('PATCH', '/umpires/u-guard-erased', body);
+      assert.equal(res.status, 409);
+      assert.equal(((await res.json()) as { code: string }).code, 'umpire_erased');
+    }
+  });
+
+  test('PATCH active:true on a pending umpire is 409 umpire_pending; other edits are allowed', async () => {
+    const res = await call('PATCH', '/umpires/u-guard-pending', { active: true });
+    assert.equal(res.status, 409);
+    assert.equal(((await res.json()) as { code: string }).code, 'umpire_pending');
+    const ok = await call('PATCH', '/umpires/u-guard-pending', { displayName: 'P.Pendings' });
+    assert.equal(ok.status, 200, await ok.clone().text());
+    const stored = await repo.getUmpire('dolphins', 'u-guard-pending');
+    assert.equal(stored?.displayName, 'P.Pendings');
+    assert.equal(stored?.pending, true);
+    assert.equal(stored?.active, false);
+  });
+
+  test('merge is 409 umpire_erased when the source or the target is erased', async () => {
+    for (const [src, target] of [
+      ['u-guard-erased', 'u-guard-live'],
+      ['u-guard-pending', 'u-guard-erased'],
+    ]) {
+      const res = await call('POST', `/umpires/${src}/merge`, { targetId: target });
+      assert.equal(res.status, 409);
+      assert.equal(((await res.json()) as { code: string }).code, 'umpire_erased');
+    }
+  });
+
+  test('checkUmpireIds: erased/pending substitutes rejected; an appointed erased umpire still passes', async () => {
+    const { checkUmpireIds, ReportInputError } = await import('../src/captains-reports.js');
+    const entry = (umpireId: string) => ({
+      umpireId,
+      name: 'typed',
+      ratings: {},
+      concerns: {},
+      otherConcern: '',
+      comments: '',
+    });
+    const report = { umpiresSnapshot: [{ umpireId: 'u-guard-erased', name: 'Removed umpire' }] };
+    for (const id of ['u-guard-pending', 'u-guard-erased']) {
+      await assert.rejects(
+        checkUmpireIds(repo, 'dolphins', { umpiresSnapshot: [] }, [entry(id)]),
+        ReportInputError,
+      );
+    }
+    await assert.rejects(
+      checkUmpireIds(repo, 'dolphins', report, [entry('u-guard-pending')]),
+      ReportInputError,
+    );
+    const out = await checkUmpireIds(repo, 'dolphins', report, [entry('u-guard-erased')]);
+    assert.equal(out[0].umpireId, 'u-guard-erased');
+    assert.equal(out[0].name, 'Removed umpire');
+    assert.equal(out[0].substitute, undefined);
+    const live = await checkUmpireIds(repo, 'dolphins', report, [entry('u-guard-live')]);
+    assert.equal(live[0].substitute, true);
+  });
+
+  test('deleteUmpire removes the record', async () => {
+    await seed('u-guard-gone', { pending: true });
+    await repo.deleteUmpire('dolphins', 'u-guard-gone');
+    assert.equal(await repo.getUmpire('dolphins', 'u-guard-gone'), null);
+  });
+});
