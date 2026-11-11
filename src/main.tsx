@@ -110,7 +110,12 @@ import { Onboarding } from './onboarding';
 import { AdminUmpiresView, mergeErrorMessage } from './umpires';
 import { AdminScorersView, scorerMergeErrorMessage } from './scorers';
 import { OfficialSignupPage } from './OfficialSignupPage';
-import { isErased, officialWriteErrorMessage, pendingCount } from './officialsAdmin';
+import {
+  isErased,
+  officialNameTakenMessage,
+  officialWriteErrorMessage,
+  pendingCount,
+} from './officialsAdmin';
 import { UmpireAppointmentsUpload } from './UmpireAppointmentsUpload';
 import { ResyncDialog, isResyncRequired } from './ResyncDialog';
 
@@ -1494,7 +1499,11 @@ function Shell({
     ).then(() => invalidate(qk.series()));
   }
   function createScorer(body: Partial<Scorer>): Promise<Scorer> {
-    return withToast(() => api.createScorer(body), 'Could not add the scorer').then((x) => {
+    return withToast(() => api.createScorer(body), 'Could not add the scorer', {
+      // Name already on the register: say who holds it, not the generic race line.
+      errorMessage: (e) => officialNameTakenMessage('scorer', e, 'add'),
+      rawConflict: true,
+    }).then((x) => {
       invalidate(qk.scorers());
       return x;
     });
@@ -1502,7 +1511,9 @@ function Shell({
   function patchScorer(id: string, body: Partial<Scorer>) {
     return withToast(() => api.patchScorer(id, body), 'Could not save the scorer', {
       // A deleted (erased) or still-pending scorer refuses the write: say why; the 409 refetches.
-      errorMessage: (e) => officialWriteErrorMessage('scorer', e),
+      errorMessage: (e) =>
+        officialNameTakenMessage('scorer', e, 'edit') ?? officialWriteErrorMessage('scorer', e),
+      rawConflict: true,
       invalidate: [qk.scorers()],
     }).then(() => {
       invalidate(qk.scorers());
@@ -1538,7 +1549,11 @@ function Shell({
     ).then(() => invalidate(qk.series()));
   }
   function createUmpire(body: Partial<Umpire>): Promise<Umpire> {
-    return withToast(() => api.createUmpire(body), 'Could not add the umpire').then((u) => {
+    return withToast(() => api.createUmpire(body), 'Could not add the umpire', {
+      // Name already on the register: say who holds it, not the generic race line.
+      errorMessage: (e) => officialNameTakenMessage('umpire', e, 'add'),
+      rawConflict: true,
+    }).then((u) => {
       invalidate(qk.umpires());
       return u;
     });
@@ -1546,7 +1561,9 @@ function Shell({
   function patchUmpire(id: string, body: Partial<Umpire>) {
     return withToast(() => api.patchUmpire(id, body), 'Could not save the umpire', {
       // A deleted (erased) or still-pending umpire refuses the write: say why; the 409 refetches.
-      errorMessage: (e) => officialWriteErrorMessage('umpire', e),
+      errorMessage: (e) =>
+        officialNameTakenMessage('umpire', e, 'edit') ?? officialWriteErrorMessage('umpire', e),
+      rawConflict: true,
       invalidate: [qk.umpires()],
     }).then(() => {
       invalidate(qk.umpires());

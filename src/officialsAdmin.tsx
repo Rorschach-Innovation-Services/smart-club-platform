@@ -92,6 +92,25 @@ export function officialWriteErrorMessage(role: OfficialRole, err: unknown): str
   return null;
 }
 
+/**
+ * Toast copy when Add or Edit is refused because another entry already holds the name
+ * (409 `umpire_alias_taken` / `scorer_name_taken`), or null for any other error. Without
+ * this the toast fell back to the generic "someone else changed this" line.
+ */
+export function officialNameTakenMessage(
+  role: OfficialRole,
+  err: unknown,
+  action: 'add' | 'edit',
+): string | null {
+  if (!(err instanceof ApiError)) return null;
+  if (err.code !== 'umpire_alias_taken' && err.code !== 'scorer_name_taken') return null;
+  const name = err.details?.displayName;
+  const who = typeof name === 'string' && name ? `“${name}”` : `Another ${noun(role)}`;
+  return action === 'add'
+    ? `${who} is already on the register under that name, so nothing was added. Find them on the All tab and use Edit instead.`
+    : `${who} is already on the register under that name. Use a different name, or Merge… if they are the same person.`;
+}
+
 /** Inline copy for a refused merge of a pending record. */
 export function mergeErrorMessageFor(role: OfficialRole, err: unknown): string {
   if (err instanceof ApiError) {

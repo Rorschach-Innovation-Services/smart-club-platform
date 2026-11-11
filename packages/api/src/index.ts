@@ -7814,6 +7814,7 @@ app.post('/scorers', requireAdmin, async (c) => {
     throw new HttpError(409, `${clash.displayName} is already in the register`, {
       code: 'scorer_name_taken',
       scorerId: clash.id,
+      displayName: clash.displayName,
     });
   const stem = scorerIdFor(input.displayName!);
   const taken = new Set(existing.map((x) => x.id));
@@ -7851,6 +7852,7 @@ app.patch('/scorers/:id', requireAdmin, async (c) => {
       throw new HttpError(409, `${clash.displayName} is already in the register`, {
         code: 'scorer_name_taken',
         scorerId: clash.id,
+        displayName: clash.displayName,
       });
   }
   return c.json(await repo.putScorer(tenant, applyScorerInput(current, input, id, now())));
@@ -8050,6 +8052,7 @@ app.post('/umpires', requireAdmin, async (c) => {
     throw new HttpError(409, `${clash.displayName} already answers to that name`, {
       code: 'umpire_alias_taken',
       umpireId: clash.id,
+      displayName: clash.displayName,
     });
   try {
     await repo.createUmpire(tenant, umpire);
@@ -8084,6 +8087,7 @@ app.patch('/umpires/:id', requireAdmin, async (c) => {
       throw new HttpError(409, `${clash.displayName} already answers to that name`, {
         code: 'umpire_alias_taken',
         umpireId: clash.id,
+        displayName: clash.displayName,
       });
   }
   await repo.putUmpire(tenant, next);
