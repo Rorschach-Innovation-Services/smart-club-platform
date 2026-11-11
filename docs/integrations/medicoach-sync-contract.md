@@ -359,8 +359,8 @@ the sync's own, so a removal needs a LICENCE, and a side is protected by a FLOOR
   ordering stamp). An upsert may remove only a team in that stored set (prior ∪ newly stored).
   A ref with **no stored set** (written by the importer before sets existed, or freshly linked by
   the matcher or a `resolution.link`) removes **nothing**: the push applies its adds and stores
-  its set as the baseline. Sentry: `smartclub-sync-legacy-baseline` (info, one per batch, counts
-  only: `refs`, `sparedRemovals`). A hand-added membership is therefore in no set and no number of
+  its set as the baseline. Logged, not sent to Sentry: `smartclub_player_legacy_baseline` (one
+  structured line per batch, counts only: `refs`, `sparedRemovals`). A hand-added membership is therefore in no set and no number of
   pushes removes it. The baseline for imported refs is backfilled from the import bundle by
   `scripts/backfill-smartclub-desired-sets.ts`.
 - **Roster floor.** No upsert/remove removal may leave a mapped side with fewer than **11** live
