@@ -6,6 +6,8 @@
  *
  * See docs/architecture/data-model.md for the full access-pattern → key mapping.
  */
+import { createHash } from 'node:crypto';
+import { PLATFORM_TENANT } from './types.js';
 
 export type EntityType =
   | 'CLUB'
@@ -891,6 +893,91 @@ export const broadcastPartitionPk = (tenant: string, runId: string) =>
 export const broadcastDeliveryKey = (tenant: string, runId: string, wamid: string) => ({
   pk: broadcastPartitionPk(tenant, runId),
   sk: `WA#${wamid}`,
+});
+
+/**
+ * Platform audit trail. Every row of an entry lives in ONE month partition, so an entry is
+ * written atomically and a tenant's history is enumerable month by month without a scan:
+ * pk `TENANT#<t>#AUDIT#<yyyy-mm>` (platform actions with no tenant: `PLATFORM#AUDIT#<yyyy-mm>`).
+ *
+ *   A#<iso>#<id>                       headline (feed, newest first)
+ *   D#<iso>#<id>                       detail (field changes + mentions)
+ *   E#<type>#<entityId>#<iso>#<id>     entity pointer (record history; erasure scrub)
+ *   C#<clubId>#<iso>#<id>              club pointer (club history; club erasure)
+ *   U#<actorKey>#<iso>#<id>            actor pointer ("everything by this person")
+ *
+ * Ids are escaped with {@link encodeAuditKeyPart} (composite ids such as series + fixture carry
+ * `#`), so a `begins_with` on `E#<type>#<id>#` can never match a different id. An id longer than
+ * {@link AUDIT_KEY_ID_MAX_BYTES} once escaped is truncated and suffixed with a hash of the whole
+ * id ({@link auditKeyId}), keeping every sort key under DynamoDB's 1,024-byte limit; the row
+ * bodies keep the full id. No gsi1/META listing: tenant erasure enumerates the month partitions
+ * (see repo.listAuditKeys).
+ */
+export const auditPartitionPk = (tenant: string, month: string) =>
+  tenant === PLATFORM_TENANT ? `PLATFORM#AUDIT#${month}` : `${tenantPrefix(tenant)}#AUDIT#${month}`;
+
+/** Escape `%` and `#` so an id can sit between `#` separators in a sort key. */
+export const encodeAuditKeyPart = (s: string) => s.replace(/%/g, '%25').replace(/#/g, '%23');
+
+/** Longest escaped id a pointer sort key carries verbatim (bytes). */
+export const AUDIT_KEY_ID_MAX_BYTES = 200;
+
+/**
+ * An id as it sits in a pointer sort key: escaped, and when that is over
+ * {@link AUDIT_KEY_ID_MAX_BYTES}, its first 150 bytes plus `%h` and a SHA-256 prefix of the
+ * whole id. An escaped id only carries `%` as `%25` / `%23`, so a hashed key can never equal one
+ * kept verbatim. Deterministic, so writers and readers derive the same key.
+ */
+export function auditKeyId(id: string): string {
+  const enc = encodeAuditKeyPart(id);
+  if (Buffer.byteLength(enc, 'utf8') <= AUDIT_KEY_ID_MAX_BYTES) return enc;
+  let head = enc.slice(0, 150);
+  while (Buffer.byteLength(head, 'utf8') > 150) head = head.slice(0, -1);
+  return `${head}%h${createHash('sha256').update(id).digest('hex').slice(0, 32)}`;
+}
+
+/** The `yyyy-mm` partition an ISO instant falls in. */
+export const auditMonthOf = (iso: string) => iso.slice(0, 7);
+
+const auditTail = (at: string, id: string) => `${at}#${auditKeyId(id)}`;
+
+export const auditHeadlineKey = (tenant: string, at: string, id: string) => ({
+  pk: auditPartitionPk(tenant, auditMonthOf(at)),
+  sk: `A#${auditTail(at, id)}`,
+});
+
+export const auditDetailKey = (tenant: string, at: string, id: string) => ({
+  pk: auditPartitionPk(tenant, auditMonthOf(at)),
+  sk: `D#${auditTail(at, id)}`,
+});
+
+/** sk prefix of one record's pointers (`begins_with` across month partitions). */
+export const auditEntityPointerPrefix = (type: string, entityId: string) =>
+  `E#${auditKeyId(type)}#${auditKeyId(entityId)}#`;
+
+export const auditEntityPointerKey = (
+  tenant: string,
+  type: string,
+  entityId: string,
+  at: string,
+  id: string,
+) => ({
+  pk: auditPartitionPk(tenant, auditMonthOf(at)),
+  sk: `${auditEntityPointerPrefix(type, entityId)}${auditTail(at, id)}`,
+});
+
+export const auditClubPointerPrefix = (clubId: string) => `C#${auditKeyId(clubId)}#`;
+
+export const auditClubPointerKey = (tenant: string, clubId: string, at: string, id: string) => ({
+  pk: auditPartitionPk(tenant, auditMonthOf(at)),
+  sk: `${auditClubPointerPrefix(clubId)}${auditTail(at, id)}`,
+});
+
+export const auditActorPointerPrefix = (actorKey: string) => `U#${auditKeyId(actorKey)}#`;
+
+export const auditActorPointerKey = (tenant: string, actorKey: string, at: string, id: string) => ({
+  pk: auditPartitionPk(tenant, auditMonthOf(at)),
+  sk: `${auditActorPointerPrefix(actorKey)}${auditTail(at, id)}`,
 });
 
 /** Prefix used to erase an entire tenant's non-user items. */

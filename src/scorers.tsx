@@ -4,6 +4,7 @@
 
 import { useMemo, useState } from 'react';
 import { Btn, Icon, Pill } from './atoms';
+import { HistoryButton } from './AuditLog';
 import { ApiError, type OfficialListExtras } from './api';
 import {
   DeleteOfficialDialog,
@@ -526,6 +527,7 @@ export function AdminScorersView({
                             Merge…
                           </Btn>
                         )}
+                        <HistoryButton type="scorer" id={u.id} title={u.displayName} />
                         {onErase && loadErasePreview && (
                           <Btn
                             tone="ghost"

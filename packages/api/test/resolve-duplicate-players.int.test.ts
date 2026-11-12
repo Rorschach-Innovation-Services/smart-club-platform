@@ -140,7 +140,17 @@ before(async () => {
     }),
   );
   countItems = async () =>
-    (await admin.send(new ScanCommand({ TableName: TABLE, Select: 'COUNT' }))).Count ?? 0;
+    (
+      await admin.send(
+        new ScanCommand({
+          TableName: TABLE,
+          Select: 'COUNT',
+          // Audit-trail partitions are not product data.
+          FilterExpression: 'NOT contains(pk, :audit)',
+          ExpressionAttributeValues: { ':audit': { S: '#AUDIT#' } },
+        }),
+      )
+    ).Count ?? 0;
 
   const seed = await import('../src/seed-core.js');
   await seed.seedTenantConfig(T);

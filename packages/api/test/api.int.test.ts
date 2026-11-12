@@ -1111,6 +1111,177 @@ describe('eraseTenantData removes INVITE# idempotency markers', () => {
   });
 });
 
+describe('audit trail rows under tenant, club and cohort erasure', () => {
+  const AT = new Date().toISOString();
+  // Seeded through repo.putAuditEntry exactly as the request middleware will write them.
+  const seedAudit = async (
+    tenant: string,
+    record: (a: typeof import('../src/audit.js')) => void,
+  ) => {
+    const a = await import('../src/audit.js');
+    const scope = a.newAuditScope({
+      at: AT,
+      tenant,
+      actor: { kind: 'user', key: 'u', sub: 'u', email: 'admin@test', via: 'console' },
+    });
+    a.runAudited(scope, () => record(a));
+    const set = a.buildEntry(scope, { status: 200 });
+    await repo.putAuditEntry(set);
+    return set.entry;
+  };
+  /** Raw rows of the tenant's audit partition for this month — independent of the repo reader. */
+  const auditRows = async (tenant: string) => {
+    const { DynamoDBClient } = await import('@aws-sdk/client-dynamodb');
+    const { DynamoDBDocumentClient, QueryCommand } = await import('@aws-sdk/lib-dynamodb');
+    const doc = DynamoDBDocumentClient.from(
+      new DynamoDBClient({
+        endpoint: process.env.DYNAMO_ENDPOINT,
+        region: 'localhost',
+        credentials: { accessKeyId: 'local', secretAccessKey: 'local' },
+      }),
+    );
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: TABLE,
+        KeyConditionExpression: 'pk = :p',
+        ExpressionAttributeValues: { ':p': `TENANT#${tenant}#AUDIT#${AT.slice(0, 7)}` },
+      }),
+    );
+    return res.Items ?? [];
+  };
+  const club = (id: string, name: string) => ({
+    id,
+    name,
+    district: 'Test District',
+    sub: 's',
+    chair: 'Chair',
+    affiliation: 'not_started' as const,
+    cqi: 0,
+    docs: {},
+    players: 0,
+    teams: 0,
+    women: 0,
+    juniors: 0,
+    color: '#123456',
+    ground: {},
+    leagues: [],
+    version: 1,
+  });
+
+  test('tenant erasure leaves no #AUDIT# rows', async () => {
+    const T = 'auditerase';
+    for (let i = 0; i < 3; i++)
+      await seedAudit(T, (a) =>
+        a.auditTarget({
+          type: 'umpire',
+          id: `u-${i}`,
+          label: `Ump ${i}`,
+          op: 'update',
+          clubId: 'c1',
+          changes: [{ field: 'displayName', from: 'A', to: 'B' }],
+        }),
+      );
+    assert.ok((await auditRows(T)).length > 0, 'precondition');
+    await repo.eraseTenantData(T);
+    assert.deepEqual(await auditRows(T), []);
+    assert.deepEqual(await repo.listAuditKeys(T), []);
+  });
+
+  test("club deletion redacts the club's side; a two-club entry keeps the surviving side", async () => {
+    const T = 'auditclub';
+    await repo.createClub(T, club('gone', 'Vanishing CC'));
+    await repo.createClub(T, club('survivor', 'Survivor CC'));
+    const two = await seedAudit(T, (a) => {
+      a.auditTarget({
+        type: 'clearance',
+        id: 'clr-1',
+        label: 'Vanishing CC to Survivor CC',
+        op: 'create',
+        clubId: 'gone',
+        changes: [{ field: 'fromClubName', to: 'Vanishing CC' }],
+      });
+      a.auditTarget({
+        type: 'club',
+        id: 'survivor',
+        label: 'Survivor CC',
+        op: 'update',
+        changes: [{ field: 'chair', from: 'Old Chair', to: 'New Chair' }],
+      });
+    });
+    await seedAudit(T, (a) =>
+      a.auditTarget({
+        type: 'club',
+        id: 'gone',
+        label: 'Vanishing CC',
+        op: 'update',
+        changes: [{ field: 'chair', from: 'Gone Chairperson', to: 'Other' }],
+      }),
+    );
+    await repo.eraseClubData(T, (await repo.getClub(T, 'gone'))!);
+    const text = JSON.stringify(await auditRows(T));
+    for (const v of ['Vanishing CC', 'Gone Chairperson']) assert.ok(!text.includes(v), v);
+    const kept = await repo.getAuditEntry(T, AT, two.id);
+    assert.equal(kept?.entry.targets.find((t) => t.id === 'survivor')?.label, 'Survivor CC');
+    assert.deepEqual(kept?.detail?.targets.find((t) => t.id === 'survivor')?.changes, [
+      { field: 'chair', from: 'Old Chair', to: 'New Chair' },
+    ]);
+    assert.equal(kept?.entry.targets.find((t) => t.id === 'clr-1')?.scrubbed, true);
+  });
+
+  test('clearCohort removes cohort entries whole; config, user and link entries stay', async () => {
+    const T = 'auditcohort';
+    await repo.createClub(T, club('cc', 'Cohort CC'));
+    const cohort = await seedAudit(T, (a) => {
+      a.auditSet({ action: 'player.update' });
+      a.auditTarget({
+        type: 'player',
+        id: 'nk-cohort',
+        label: 'Cohort Player',
+        op: 'update',
+        clubId: 'cc',
+        changes: [{ field: 'firstName', from: 'A', to: 'B' }],
+      });
+    });
+    const kept = [
+      await seedAudit(T, (a) => {
+        a.auditSet({ action: 'settings.update' });
+        a.auditTarget({ type: 'tenant', id: T, op: 'update' });
+      }),
+      await seedAudit(T, (a) => {
+        a.auditSet({ action: 'user.invite' });
+        a.auditTarget({ type: 'user', id: 'sub-x', label: 'x@test', op: 'create' });
+      }),
+      await seedAudit(T, (a) => {
+        a.auditSet({ action: 'link.copy' });
+        a.auditTarget({ type: 'club', id: 'cc', label: 'Cohort CC', op: 'link' });
+      }),
+      // A kept entry that only MENTIONS a cohort record.
+      await seedAudit(T, (a) => {
+        a.auditSet({ action: 'user.update' });
+        a.auditTarget({
+          type: 'user',
+          id: 'sub-y',
+          label: 'y@test',
+          op: 'update',
+          changes: [
+            { field: 'captain', to: 'Cohort Player', ref: { type: 'player', id: 'nk-c2' } },
+          ],
+          mentions: [{ type: 'player', id: 'nk-c2', label: 'Cohort Player' }],
+        });
+      }),
+    ];
+    await repo.clearCohort(T);
+    const rows = await auditRows(T);
+    assert.ok(!rows.some((r) => r.entryId === cohort.id), 'every row of the cohort entry is gone');
+    assert.deepEqual([...new Set(rows.map((r) => r.entryId))].sort(), kept.map((e) => e.id).sort());
+    // Kept entries keep their own names, but no cohort record's name survives in them.
+    const text = JSON.stringify(rows);
+    assert.ok(!text.includes('Cohort Player'), 'a mentioned player name survived');
+    assert.ok(!text.includes('Cohort CC'), 'a cohort club label survived');
+    assert.ok(text.includes('y@test') && text.includes('x@test'), 'user labels stay');
+  });
+});
+
 describe('compliance doc view-url + replace', () => {
   const baseClub = {
     id: 'docclub',

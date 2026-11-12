@@ -124,7 +124,9 @@ Ledger rows on not-yet-played fixtures are deleted whatever their status; elsewh
 unsent (queued/exhausted) rows go. For umpires, every captain's report naming the id has
 `umpiresSnapshot[].name`, `umpires[].name` and `umpires[].attributed.freeTextName` rewritten;
 a PENDING report on a not-yet-played fixture drops the snapshot entry and the matching card
-instead. Ratings stay keyed to the id. Each run writes a PII-free `OFFICIALERASE#` audit row.
+instead. Ratings stay keyed to the id. Each run writes a PII-free `OFFICIALERASE#` audit row,
+and strips the erased people's names and values from the platform audit trail
+(`docs/api/audit.md`, "Officials"); the erase's own audit entry carries counts only.
 
 A pending record with no fixture, report or ledger reference is hard-deleted instead (this is
 Reject; `hardDeleted: true`). Re-running on an already-erased record repeats every step and

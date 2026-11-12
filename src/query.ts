@@ -92,6 +92,13 @@ export const qk = {
     time,
   ],
   signupLink: () => ['signup-link', t()],
+  // Audit trail (ADR 0023). The feed key carries its filters; every audit key shares the
+  // ['audit', tenant] prefix, which main.tsx's withToast invalidates after every write so an
+  // open Activity page or History refreshes. (Operator-portal audit keys are separate.)
+  audit: () => ['audit', t()],
+  auditFeed: (filters: Record<string, string | undefined>) => ['audit', t(), 'feed', filters],
+  auditEntity: (type: string, id: string) => ['audit', t(), 'entity', type, id],
+  auditEntry: (at: string, id: string) => ['audit', t(), 'entry', at, id],
   // Operator portal keys are deliberately NOT tenant-scoped: /platform/* is
   // tenant-independent (the slug in the key names the MANAGED tenant, not the host's).
   platformTenants: () => ['platform-tenants'],
@@ -100,6 +107,27 @@ export const qk = {
   platformTenantReps: (slug: string) => ['platform-tenant-reps', slug],
   platformMedicoachConnection: (slug: string) => ['platform-medicoach-connection', slug],
   platformMedicoachOverview: () => ['platform-medicoach-overview'],
+  // Audit trail for a managed union (slug) or the platform partition ('*').
+  platformAuditFeed: (slug: string, filters: Record<string, string | undefined>) => [
+    'platform-audit',
+    slug,
+    'feed',
+    filters,
+  ],
+  platformAuditEntity: (slug: string, type: string, id: string) => [
+    'platform-audit',
+    slug,
+    'entity',
+    type,
+    id,
+  ],
+  platformAuditEntry: (slug: string, at: string, id: string) => [
+    'platform-audit',
+    slug,
+    'entry',
+    at,
+    id,
+  ],
   // Cross-tenant.
   platformCaptainsReportScorecards: (days: number, status: string, tenant: string) => [
     'platform-captains-report-scorecards',

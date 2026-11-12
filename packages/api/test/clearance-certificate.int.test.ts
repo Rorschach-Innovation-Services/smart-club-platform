@@ -421,16 +421,33 @@ describe('lazy issue when the approve-time hook failed', () => {
       undefined,
     );
 
-    const res = await call(
-      'POST',
-      `/clubs/gamma/clearances/${approved.clearance.id}/certificate/view-url`,
-      rep('gamma'),
-    );
+    const issues = async () =>
+      (await repo.listAuditFeed(TENANT, { limit: 200 })).items.filter(
+        (e) => e.action === 'clearance.certificate.issue',
+      );
+    const before = (await issues()).length;
+    const view = () =>
+      call(
+        'POST',
+        `/clubs/gamma/clearances/${approved.clearance.id}/certificate/view-url`,
+        rep('gamma'),
+      );
+    const res = await view();
     assert.equal(res.status, 200);
     const { serial } = (await res.json()) as { serial: string };
     const mirror = await repo.getInboundClearance(TENANT, 'gamma', approved.clearance.id);
     assert.equal(mirror?.certificateMeta?.serial, serial);
     assert.equal((await repo.getCertificateBySerial(serial))?.status, 'valid');
+    // The view route is skipped in the audit registry, but this view ISSUED the certificate.
+    const issued = await issues();
+    assert.equal(issued.length, before + 1);
+    assert.deepEqual(
+      issued[0].targets.map((t) => [t.type, t.id, t.op]),
+      [['clearance', approved.clearance.id, 'issue']],
+    );
+    // A later plain view issues nothing and records nothing.
+    assert.equal((await view()).status, 200);
+    assert.equal((await issues()).length, before + 1);
   });
 
   test('view-url on a still-pending clearance is a 409', async () => {

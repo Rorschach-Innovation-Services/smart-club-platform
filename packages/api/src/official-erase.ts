@@ -15,15 +15,19 @@
  *      opening copies its snapshot names from the officials row): names scrubbed per element;
  *      a pending report drops the entry on a not-yet-played fixture, and drops substitute
  *      cards naming the erased id on any fixture (repo.scrubCaptainsReportUmpires).
- *   5. A PII-free OFFICIALERASE# audit row.
+ *   5. Audit trail: every entry naming a record in the set loses that person's names and values
+ *      (repo.scrubAuditForEntity); the record id stays, like the stub (assumption 4).
+ *   6. A PII-free OFFICIALERASE# audit row.
  *
  * Every classification is derived from fixture dates, never from "was the official still on
  * it", so a re-run after a crash in step 2 still finds the right ledger rows and reports.
  *
  * A PENDING, never-erased record is hard-deleted instead (this is Reject): it cannot be
- * referenced, so no walk is needed. Accepted race, as in the merge: the officials rows are
- * read-modify-write, so an admin officials PUT landing between the list and the put is
- * overwritten.
+ * referenced, so no walk is needed — but its audit entries (the signup, any edits) are scrubbed
+ * FIRST, while the record still exists: a re-run after the delete is a 404.
+ *
+ * Accepted race, as in the merge: the officials rows are read-modify-write, so an admin
+ * officials PUT landing between the list and the put is overwritten.
  *
  * Deliberately no notices to co-officials, matching a normal removal.
  */
@@ -65,6 +69,7 @@ export type EraseRepo = Pick<
   | 'deleteOfficialsNotify'
   | 'listCaptainsReports'
   | 'scrubCaptainsReportUmpires'
+  | 'scrubAuditForEntity'
   | 'putOfficialEraseLog'
 >;
 
@@ -277,6 +282,7 @@ export async function eraseOfficial(
     role === 'umpire' ? await repo.getUmpire(tenant, id) : await repo.getScorer(tenant, id);
   if (!record) throw new OfficialNotFoundError(`${role} not found`);
   if (record.pending && !record.erasedAt) {
+    await repo.scrubAuditForEntity(tenant, role, [id], { placeholder });
     if (role === 'umpire') await repo.deleteUmpire(tenant, id);
     else await repo.deleteScorer(tenant, id);
     counts.records = 1;
@@ -353,7 +359,11 @@ export async function eraseOfficial(
     }
   }
 
-  // 5. Audit.
+  // 5. Audit trail: names and values out of every entry naming the set (runs again on a re-run,
+  // repairing an entry recorded while the erase was in flight).
+  await repo.scrubAuditForEntity(tenant, role, ids, { placeholder });
+
+  // 6. Audit row.
   await audit(false);
   return { erased: [...ids], hardDeleted: false, vacated, auditId, counts };
 }

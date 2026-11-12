@@ -145,6 +145,7 @@ import {
 } from './ClearanceCertificateModal';
 import { PlayerDetailModal } from './PlayerDetailModal';
 import { DocRequestModal } from './DocRequestModal';
+import { HistoryButton } from './AuditLog';
 import { RegLinkModal } from './RegLinkModal';
 import { ReleaseDialog } from './ReleaseDialog';
 import { ClashPanel } from './ClashPanel';
@@ -1561,6 +1562,7 @@ export function FixtureTable({
           >
             Duplicate
           </Btn>
+          <HistoryButton type="series" id={series.id} title={series.name} />
           <Btn
             tone="ghost"
             size="sm"
@@ -3604,6 +3606,16 @@ export function AdminSettingsView({
             and how clubs and players are notified.
           </p>
         </div>
+        {api.getActiveTenant() && (
+          <div className="ph-actions">
+            <HistoryButton
+              type="tenant-config"
+              id={api.getActiveTenant()!}
+              title={`${orgName} settings`}
+              tone="outline"
+            />
+          </div>
+        )}
       </div>
 
       <div
@@ -5328,6 +5340,7 @@ export function AdminClubDetail({
           <Btn tone="outline" icon={Icon.Mail} size="sm" onClick={emailChair}>
             Email {vt.chair}
           </Btn>
+          <HistoryButton type="club" id={club.id} title={club.name} />
         </div>
       </div>
 
@@ -7612,6 +7625,7 @@ export function AdminTeamAccessView({
                             {busySub === u.sub ? 'Sending…' : 'Resend'}
                           </Btn>
                         )}
+                        <HistoryButton type="user" id={u.sub} title={u.email} />
                         <Btn
                           tone="outline"
                           size="sm"
@@ -9361,6 +9375,7 @@ export function AdminPlayersView({ clubs, leagues, toast, onErasePlayer = undefi
                 }
               : undefined
           }
+          showHistory
           adminErase={
             onErasePlayer
               ? {

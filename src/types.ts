@@ -1787,3 +1787,101 @@ export interface TeamCaptainPutResponse extends TeamCaptainCompetition {
 export interface CaptainCandidatesResponse {
   candidates: Array<{ id: string; name: string; affiliate?: true }>;
 }
+
+/* ─── Audit trail (ADR 0023; contract: docs/api/audit.md) ─── */
+
+/** Who made a change: a signed-in person, a public link, or nothing attributable. */
+export interface AuditActor {
+  kind: 'user' | 'link' | 'system';
+  /** Stable key: the Cognito sub, or `link:<kind>:<recipient|request|shared>`. */
+  key: string;
+  sub?: string;
+  /** Snapshot at the time of the change. */
+  email?: string;
+  role?: string;
+  /** Held the platform operator membership. */
+  operator?: boolean;
+  /** 'console' | 'platform' | the link kind ('captains-report', 'squad', …). */
+  via: string;
+  recipientKind?: string;
+  recipientId?: string;
+}
+
+export interface AuditRef {
+  type: string;
+  id: string;
+}
+
+export type AuditValue = string | number | boolean | null | AuditValue[];
+
+/** One field change. `masked` ⇒ changed, value not stored; `scrubbed` ⇒ removed by an erasure. */
+export interface AuditChange {
+  field: string;
+  from?: AuditValue;
+  to?: AuditValue;
+  masked?: true;
+  ref?: AuditRef;
+  fromRef?: AuditRef;
+  scrubbed?: true;
+}
+
+export interface AuditMention extends AuditRef {
+  label?: string;
+}
+
+export interface AuditTargetHead {
+  type: string;
+  /** '' once an erasure blanked it. */
+  id: string;
+  label?: string;
+  op: string;
+  clubId?: string;
+  changeCount: number;
+  scrubbed?: true;
+}
+
+export interface AuditTruncation {
+  targets?: number;
+  changes?: number;
+  mentions?: number;
+  values?: number;
+  rows?: number;
+  detail?: number;
+}
+
+export type AuditOutcome = 'started' | 'ok' | 'failed';
+
+export interface AuditEntry {
+  id: string;
+  at: string;
+  /** Union slug, or '*' for platform actions with no union. */
+  tenant: string;
+  requestId?: string;
+  actor: AuditActor;
+  action: string;
+  route?: { method: string; pattern: string };
+  status: number;
+  outcome: AuditOutcome;
+  visibility: 'tenant' | 'operator';
+  targets: AuditTargetHead[];
+  counts?: Record<string, number>;
+  truncated?: AuditTruncation;
+  expiresAt: number;
+}
+
+export interface AuditDetail {
+  targets: Array<{ type: string; id: string; changes: AuditChange[] }>;
+  mentions: AuditMention[];
+}
+
+/** One page of a feed or a record's history, newest first. No `cursor` ⇒ nothing older. */
+export interface AuditPage {
+  items: AuditEntry[];
+  cursor?: string;
+}
+
+/** GET …/audit/entry/:at/:id */
+export interface AuditEntryWithDetail {
+  entry: AuditEntry;
+  detail: AuditDetail | null;
+}

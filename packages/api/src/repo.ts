@@ -144,10 +144,31 @@ import {
   docRequestKey,
   docRequestLinkKey,
   docRequestNotifyKey,
+  auditPartitionPk,
+  auditMonthOf,
+  auditHeadlineKey,
+  auditDetailKey,
+  auditEntityPointerPrefix,
+  auditClubPointerPrefix,
+  auditActorPointerPrefix,
 } from './keys.js';
+import {
+  AUDIT_CAPS,
+  AUDIT_LAUNCH_MONTH,
+  AUDIT_RETENTION_DAYS,
+  auditEntryNamesCohort,
+  isCohortAuditEntry,
+  redactAuditClub,
+  scrubAuditCohort,
+  scrubAuditEntity,
+  type ScrubResult,
+} from './audit.js';
 import { PLATFORM_TENANT } from './types.js';
 import { refs as medicoachRefs } from './medicoach-bundle.js';
 import type {
+  AuditDetail,
+  AuditEntry,
+  AuditVisibility,
   Club,
   ClubCommEvent,
   ExportLogEntry,
@@ -9398,6 +9419,9 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   // Player document requests (DOCREQ# rows name a player by natural key; pointers + ledger
   // share the partition). No gsi1/META listing — enumerate the partition.
   for (const k of await listDocRequestPartitionKeys(tenant)) keys.push(k);
+  // Audit trail (TENANT#<t>#AUDIT#<yyyy-mm>): one partition per month, no gsi1/META listing —
+  // enumerate every month from the feature's launch.
+  for (const k of await listAuditKeys(tenant)) keys.push(k);
 
   const unique = uniqueKeys(keys);
   await batchDelete(unique);
@@ -9481,6 +9505,10 @@ export async function clearCohort(tenant: string): Promise<number> {
   for (const k of await listCaptainsReportPartitionKeys(tenant)) keys.push(k);
   // Player document requests name the players being cleared (requests, pointers, ledger).
   for (const k of await listDocRequestPartitionKeys(tenant)) keys.push(k);
+  // Audit entries about cohort records only (clubs, players, series…) go with them; config,
+  // user and link entries stay (audit.isCohortAuditEntry), with any cohort record they still
+  // name scrubbed (audit.scrubAuditCohort).
+  for (const k of await clearCohortAudit(tenant)) keys.push(k);
 
   // Safety: never delete the tenant config or any user record.
   for (const k of keys) {
@@ -9744,6 +9772,10 @@ export async function eraseClubData(
     }
   }
 
+  // Audit trail: redact this club's side of every entry concerning it (its C# pointers); a
+  // surviving club's side stays. Before META, so a re-delete re-runs it.
+  await scrubAuditForClub(tenant, club.id, { placeholder: ERASED_NAME });
+
   // META last, and only after everything else succeeded (see doc): the META item is
   // the re-deletability anchor — while it exists, the delete can always be retried.
   await ddb.send(new DeleteCommand({ TableName: TABLE, Key: clubKey(tenant, club.id) }));
@@ -9855,11 +9887,15 @@ function scrubScorecardNames(
  *    sweep never re-fetches the name from medicoach;
  *  - a captain's report's scorecard correction `feedback`: the person's name is replaced
  *    (case-insensitive, whole words), conditional on the text being unchanged
- *    (`reportScorecardFeedbackScrubbed`).
+ *    (`reportScorecardFeedbackScrubbed`);
+ *  - audit-trail entries naming the person: names, values and the natural key are scrubbed and
+ *    the person's `E#` pointers dropped ({@link scrubAuditForEntity}), just before the PLAYER# rows.
  *
  * Gate: a pending clearance naming the person, or any `clearance-pending` row, throws
- * {@link PlayerErasureBlockedError} BEFORE anything is touched. Returns null when nothing in any
- * category exists (a clean 404 — and the re-run of a completed erasure).
+ * {@link PlayerErasureBlockedError} BEFORE anything is touched. With no rows in any category but
+ * audit-trail pointers still naming the person (removed from a roster, or their club deleted),
+ * only the audit scrub runs and the counts read zero but `auditEntries`. Returns null when
+ * nothing at all exists (a clean 404 — and the re-run of a completed erasure).
  *
  * Ordering is the re-runnable invariant: the scorecard + correction-feedback scrubs run FIRST,
  * while every row naming the person (and so every spelling of their name) is still intact; then
@@ -9898,8 +9934,37 @@ export async function erasePlayerData(
     !reviews.length &&
     !vetreqs.length &&
     !docRequests.length
-  )
-    return null;
+  ) {
+    // No rows left (a roster removal or a club delete took them), but the audit trail can still
+    // carry the natural key: scrub it. Only when pointers existed is this an erasure (counts +
+    // the PLAYERERASE# row); with nothing at all it stays null (404).
+    const audit = await scrubAuditForEntityCounted(tenant, 'player', [naturalKey], {
+      placeholder: ERASED_NAME,
+      dropPointers: true,
+    });
+    if (!audit.pointers) return null;
+    const counts: PlayerErasureCounts = {
+      playerRows: 0,
+      clearances: 0,
+      registrationReviews: 0,
+      veteransRequests: 0,
+      documents: 0,
+      certificates: 0,
+      captainsReportsScrubbed: 0,
+      scorecardsScrubbed: 0,
+      reportScorecardFeedbackScrubbed: 0,
+      reportOpenMarkers: 0,
+      auditEntries: audit.entries,
+    };
+    await putPlayerEraseLog(tenant, {
+      id: randomUUID(),
+      kind: 'player-erasure',
+      by: opts.by,
+      at,
+      counts,
+    });
+    return counts;
+  }
 
   if (
     rows.some((p) => p.status === 'clearance-pending') ||
@@ -10149,6 +10214,14 @@ export async function erasePlayerData(
     at,
   );
 
+  // ── Audit trail: names, values and the natural key itself (derived from the ID number) out
+  // of every entry naming the person; their pointers go too. Before the PLAYER# rows, so a
+  // re-run still finds the person.
+  const audit = await scrubAuditForEntityCounted(tenant, 'player', [naturalKey], {
+    placeholder: ERASED_NAME,
+    dropPointers: true,
+  });
+
   // ── PLAYER# rows last (the re-run anchor) ──
   for (const p of rows) await deletePlayer(tenant, p);
   // Medicoach player sync (ADR 0019): an `erase` tombstone (after the row deletes, whose own
@@ -10174,6 +10247,7 @@ export async function erasePlayerData(
       : {}),
     ...(squads.squadsRepushed ? { squadsRepushed: squads.squadsRepushed } : {}),
     ...(docRequests.length ? { docRequests: docRequests.length } : {}),
+    ...(audit.entries ? { auditEntries: audit.entries } : {}),
   };
   await putPlayerEraseLog(tenant, {
     id: randomUUID(),
@@ -11493,4 +11567,648 @@ export async function bumpDocRequestUploadCounter(
     if (isCcf(err)) return false;
     throw err;
   }
+}
+
+// ── Platform audit trail (keys: keys.ts audit*; capture: audit.ts) ──
+// One month partition per tenant holds every row of every entry recorded that month (headline,
+// detail, E#/C#/U# pointers). Readers step month partitions newest first from now back to the
+// launch month (no scan, no index); every row carries `expiresAt` (TTL) and readers drop
+// expired rows themselves, since TTL deletion lags.
+
+/** Thrown for a cursor this API did not issue (handlers map it to 400). */
+export class InvalidAuditCursorError extends Error {
+  constructor() {
+    super('invalid cursor');
+    this.name = 'InvalidAuditCursorError';
+  }
+}
+
+export interface AuditPage {
+  items: AuditEntry[];
+  /** Opaque; absent when there is nothing older. */
+  cursor?: string;
+}
+
+export interface AuditListOptions {
+  cursor?: string;
+  /**
+   * Entries per page (default 50, max 200). A filtered feed page can come back shorter when its
+   * read budget runs out (listAuditFeed).
+   */
+  limit?: number;
+  /** Clock override (tests). */
+  now?: Date;
+}
+
+const AUDIT_DEFAULT_LIMIT = 50;
+const AUDIT_MAX_LIMIT = 200;
+
+const nextMonth = (m: string) => {
+  const [y, mo] = m.split('-').map(Number);
+  return mo === 12 ? `${y + 1}-01` : `${y}-${String(mo + 1).padStart(2, '0')}`;
+};
+const prevMonth = (m: string) => {
+  const [y, mo] = m.split('-').map(Number);
+  return mo === 1 ? `${y - 1}-12` : `${y}-${String(mo - 1).padStart(2, '0')}`;
+};
+
+/**
+ * Every month partition that can hold a live entry, oldest first: the launch month (or two
+ * years back, whichever is later) through next month (a clock running slightly ahead).
+ */
+function auditMonths(now: Date, from?: string): string[] {
+  const retention = auditMonthOf(
+    new Date(now.getTime() - AUDIT_RETENTION_DAYS * 86_400_000).toISOString(),
+  );
+  let m = [AUDIT_LAUNCH_MONTH, retention, ...(from ? [from] : [])].sort().at(-1)!;
+  const last = nextMonth(auditMonthOf(now.toISOString()));
+  const out: string[] = [];
+  for (; m <= last; m = nextMonth(m)) out.push(m);
+  return out;
+}
+
+const encodeAuditCursor = (c: { m: string; k?: string }) =>
+  Buffer.from(JSON.stringify(c)).toString('base64url');
+
+function decodeAuditCursor(s: string): { m: string; k?: string } {
+  try {
+    const c = JSON.parse(Buffer.from(s, 'base64url').toString('utf8')) as {
+      m?: unknown;
+      k?: unknown;
+    };
+    const { m, k } = c;
+    if (typeof m === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(m)) {
+      if (typeof k === 'string') return { m, k };
+      if (k === undefined) return { m };
+    }
+  } catch {
+    /* fall through */
+  }
+  throw new InvalidAuditCursorError();
+}
+
+const auditLimit = (n: number | undefined) =>
+  Math.max(1, Math.min(AUDIT_MAX_LIMIT, Math.floor(n ?? AUDIT_DEFAULT_LIMIT)));
+
+const toAuditEntry = (item: Record<string, unknown>): AuditEntry => {
+  const { pk, sk, rowType, entryId, ...entry } = item;
+  return entry as unknown as AuditEntry;
+};
+
+const isLive = (item: Record<string, unknown>, nowSec: number) =>
+  typeof item.expiresAt !== 'number' || item.expiresAt > nowSec;
+
+/**
+ * Read one sk range across month partitions, newest first, until `limit` rows were read or the
+ * oldest month is done. The cursor resumes inside a month (its last sort key) or at the top of
+ * an older one.
+ */
+async function walkAuditMonths(
+  tenant: string,
+  range: { prefix: string } | { lo: string; hi: string },
+  opts: AuditListOptions & { fromMonth?: string; toMonth?: string },
+): Promise<{ rows: Record<string, unknown>[]; cursor?: string }> {
+  const now = opts.now ?? new Date();
+  const months = auditMonths(now, opts.fromMonth).filter((m) => !opts.toMonth || m <= opts.toMonth);
+  if (!months.length) return { rows: [] };
+  const oldest = months[0];
+  const limit = auditLimit(opts.limit);
+  const start = opts.cursor ? decodeAuditCursor(opts.cursor) : { m: months[months.length - 1] };
+  // A cursor names a month this query reads and a sort key inside its range; anything else was
+  // not issued for it (a forged far-future month would otherwise walk thousands of partitions,
+  // and a foreign key would reach DynamoDB as a ValidationException).
+  if (!months.includes(start.m)) throw new InvalidAuditCursorError();
+  if (
+    start.k !== undefined &&
+    ('prefix' in range
+      ? !start.k.startsWith(range.prefix)
+      : start.k < range.lo || start.k > range.hi)
+  )
+    throw new InvalidAuditCursorError();
+  let m = start.m;
+  let k = start.k;
+  const rows: Record<string, unknown>[] = [];
+  while (m >= oldest) {
+    const pk = auditPartitionPk(tenant, m);
+    const res = await ddb.send(
+      new QueryCommand({
+        TableName: TABLE,
+        KeyConditionExpression:
+          'prefix' in range
+            ? 'pk = :p AND begins_with(sk, :s)'
+            : 'pk = :p AND sk BETWEEN :lo AND :hi',
+        ExpressionAttributeValues:
+          'prefix' in range
+            ? { ':p': pk, ':s': range.prefix }
+            : { ':p': pk, ':lo': range.lo, ':hi': range.hi },
+        ScanIndexForward: false,
+        Limit: limit - rows.length,
+        ...(k ? { ExclusiveStartKey: { pk, sk: k } } : {}),
+      }),
+    );
+    rows.push(...(res.Items ?? []));
+    if (res.LastEvaluatedKey) {
+      k = res.LastEvaluatedKey.sk as string;
+      if (rows.length >= limit) return { rows, cursor: encodeAuditCursor({ m, k }) };
+      continue;
+    }
+    m = prevMonth(m);
+    k = undefined;
+    if (rows.length >= limit)
+      return { rows, ...(m >= oldest ? { cursor: encodeAuditCursor({ m }) } : {}) };
+  }
+  return { rows };
+}
+
+/** The headlines a page of pointer rows points at, in pointer order (expired/missing dropped). */
+async function auditHeadlinesFor(
+  tenant: string,
+  pointers: Record<string, unknown>[],
+  nowSec: number,
+): Promise<AuditEntry[]> {
+  const keys = [
+    ...new Map(
+      pointers
+        .filter((p) => isLive(p, nowSec))
+        .map((p) => {
+          const key = auditHeadlineKey(tenant, p.at as string, p.entryId as string);
+          return [key.sk, key] as const;
+        }),
+    ).values(),
+  ];
+  const found = await batchGetAuditRows(keys);
+  return keys.flatMap((k) => {
+    const item = found.get(auditRowRef(k));
+    return item && isLive(item, nowSec) ? [toAuditEntry(item)] : [];
+  });
+}
+
+const auditRowRef = (k: { pk: string; sk: string }) => `${k.pk}\u0000${k.sk}`;
+
+/**
+ * BatchGet audit rows (100 keys per call, unprocessed keys retried with backoff; leftovers
+ * throw). Keyed by {@link auditRowRef}; missing rows are absent.
+ */
+async function batchGetAuditRows(
+  keys: Array<{ pk: string; sk: string }>,
+): Promise<Map<string, Record<string, unknown>>> {
+  const found = new Map<string, Record<string, unknown>>();
+  for (let i = 0; i < keys.length; i += 100) {
+    let batch: Array<{ pk: string; sk: string }> = keys.slice(i, i + 100);
+    for (let attempt = 0; batch.length > 0 && attempt <= BATCH_DELETE_RETRIES; attempt++) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
+      const res = await ddb.send(
+        new BatchGetCommand({ RequestItems: { [TABLE]: { Keys: batch } } }),
+      );
+      for (const item of res.Responses?.[TABLE] ?? [])
+        found.set(auditRowRef(item as { pk: string; sk: string }), item);
+      batch = (res.UnprocessedKeys?.[TABLE]?.Keys ?? []) as typeof batch;
+    }
+    if (batch.length) throw new Error(`audit: ${batch.length} rows unprocessed after retries`);
+  }
+  return found;
+}
+
+/** Concurrent conditional rewrites per scrub (bounded: one Lambda, one table). */
+const AUDIT_REWRITE_CONCURRENCY = 16;
+
+/** Run `jobs` with at most `n` in flight; the first failure rejects (the rest still settle). */
+async function runBounded(jobs: Array<() => Promise<void>>, n: number): Promise<void> {
+  let next = 0;
+  const errors: unknown[] = [];
+  const worker = async () => {
+    while (next < jobs.length) {
+      const job = jobs[next++];
+      try {
+        await job();
+      } catch (err) {
+        errors.push(err);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(n, jobs.length) }, worker));
+  if (errors.length) throw errors[0];
+}
+
+/**
+ * Write one entry (the rows audit.buildEntry produced) in ONE TransactWriteItems, so a detail
+ * row holding values is never stored without its pointer rows. Re-writing the same entry id and
+ * instant (the final entry after a "started" headline) overwrites it row by row. The dynalite
+ * (offline/test) path has no TransactWriteItems → sequential fallback in the rows' own order
+ * (pointers, then detail, then headline), which keeps the invariant if it stops part-way.
+ */
+export async function putAuditEntry(set: {
+  rows: Array<{ pk: string; sk: string }>;
+}): Promise<void> {
+  const { rows } = set;
+  if (!rows.length) return;
+  if (rows.length > AUDIT_CAPS.rows)
+    throw new Error(`audit entry has ${rows.length} rows (max ${AUDIT_CAPS.rows})`);
+  if (localEndpoint) {
+    for (const Item of rows) await ddb.send(new PutCommand({ TableName: TABLE, Item }));
+    return;
+  }
+  await ddb.send(
+    new TransactWriteCommand({
+      TransactItems: rows.map((Item) => ({ Put: { TableName: TABLE, Item } })),
+    }),
+  );
+}
+
+/** Delete an entry's rows (a refused bulk request's "started" rows). */
+export async function deleteAuditRows(rows: Array<{ pk: string; sk: string }>): Promise<void> {
+  await batchDelete(uniqueKeys(rows.map(({ pk, sk }) => ({ pk, sk }))));
+}
+
+/**
+ * A tenant's activity feed (`PLATFORM_TENANT` for platform actions), newest first. `from`/`to`
+ * bound the instant (ISO or date prefix). `actor` reads that person's `U#` pointers instead of
+ * the headlines. `actorEmail` (used only without `actor`) reads the headlines and keeps those
+ * whose actor email snapshot matches, case-insensitively — a person no longer on the team.
+ * `type` (a target type), `actorEmail` and `visibility` filter what is read: a filtered request
+ * keeps reading until `limit` entries match or {@link AUDIT_FILTER_READ_BUDGET} rows were read,
+ * and its cursor resumes right after the last row it looked at \u2014 so a page can still be short
+ * (budget spent) while a cursor remains ("load more"). Unfiltered reads are one walk of `limit`.
+ */
+export async function listAuditFeed(
+  tenant: string,
+  opts: AuditListOptions & {
+    from?: string;
+    to?: string;
+    actor?: string;
+    actorEmail?: string;
+    type?: string;
+    visibility?: AuditVisibility | AuditVisibility[];
+  } = {},
+): Promise<AuditPage> {
+  const nowSec = Math.floor((opts.now ?? new Date()).getTime() / 1000);
+  const fromMonth = opts.from ? auditMonthOf(opts.from) : undefined;
+  const toMonth = opts.to ? auditMonthOf(opts.to) : undefined;
+  const limit = auditLimit(opts.limit);
+  const email = opts.actor ? undefined : opts.actorEmail?.trim().toLowerCase() || undefined;
+  const vis = opts.visibility && new Set([opts.visibility].flat());
+  // The actor path reads pointers across whole months, so from/to filter after the read too.
+  const actorBounds = !!opts.actor && !!(opts.from || opts.to);
+  const filtered = !!(email || vis || opts.type || actorBounds);
+  const matches = (e: AuditEntry) =>
+    (!actorBounds ||
+      ((!opts.from || e.at >= opts.from) && (!opts.to || e.at <= `${opts.to}\uffff`))) &&
+    (!email || e.actor.email?.toLowerCase() === email) &&
+    (!vis || vis.has(e.visibility)) &&
+    (!opts.type || e.targets.some((t) => t.type === opts.type));
+  const range = opts.actor
+    ? { prefix: auditActorPointerPrefix(opts.actor) }
+    : { lo: `A#${opts.from ?? ''}`, hi: `A#${opts.to ?? ''}\uffff` };
+
+  const items: AuditEntry[] = [];
+  let cursor = opts.cursor;
+  let read = 0;
+  for (;;) {
+    const page = await walkAuditMonths(tenant, range, {
+      ...opts,
+      cursor,
+      limit: filtered ? Math.min(AUDIT_MAX_LIMIT, AUDIT_FILTER_READ_BUDGET - read) : limit,
+      fromMonth,
+      toMonth,
+    });
+    read += page.rows.length;
+    // Each row's entry (undefined when expired / missing), in walk order.
+    let entryOf: (row: Record<string, unknown>) => AuditEntry | undefined;
+    if (opts.actor) {
+      const heads = await auditHeadlinesFor(tenant, page.rows, nowSec);
+      const byId = new Map(heads.map((h) => [h.id, h]));
+      entryOf = (row) => byId.get(row.entryId as string);
+    } else entryOf = (row) => (isLive(row, nowSec) ? toAuditEntry(row) : undefined);
+    for (const [i, row] of page.rows.entries()) {
+      const e = entryOf(row);
+      if (!e || !matches(e)) continue;
+      items.push(e);
+      if (filtered && items.length >= limit) {
+        // Cut right after this row: the next page resumes from it.
+        const last = i === page.rows.length - 1;
+        const at = auditMonthOf(row.at as string);
+        const next = last ? page.cursor : encodeAuditCursor({ m: at, k: row.sk as string });
+        return { items, ...(next ? { cursor: next } : {}) };
+      }
+    }
+    cursor = page.cursor;
+    if (!filtered || !cursor || read >= AUDIT_FILTER_READ_BUDGET) break;
+  }
+  return { items, ...(cursor ? { cursor } : {}) };
+}
+
+/** Rows one filtered feed request may read before it returns a short page with a cursor. */
+const AUDIT_FILTER_READ_BUDGET = 2000;
+
+/** One record's history (its `E#` pointers across months), newest first. */
+export async function listAuditForEntity(
+  tenant: string,
+  type: string,
+  id: string,
+  opts: AuditListOptions = {},
+): Promise<AuditPage> {
+  const nowSec = Math.floor((opts.now ?? new Date()).getTime() / 1000);
+  const page = await walkAuditMonths(tenant, { prefix: auditEntityPointerPrefix(type, id) }, opts);
+  const items = await auditHeadlinesFor(tenant, page.rows, nowSec);
+  return { items, ...(page.cursor ? { cursor: page.cursor } : {}) };
+}
+
+/** Every entry concerning one club (its `C#` pointers), newest first. */
+export async function listAuditForClub(
+  tenant: string,
+  clubId: string,
+  opts: AuditListOptions = {},
+): Promise<AuditPage> {
+  const nowSec = Math.floor((opts.now ?? new Date()).getTime() / 1000);
+  const page = await walkAuditMonths(tenant, { prefix: auditClubPointerPrefix(clubId) }, opts);
+  const items = await auditHeadlinesFor(tenant, page.rows, nowSec);
+  return { items, ...(page.cursor ? { cursor: page.cursor } : {}) };
+}
+
+/** Everything one actor did (their `U#` pointers, keyed on the actor key), newest first. */
+export async function listAuditForActor(
+  tenant: string,
+  actorKey: string,
+  opts: AuditListOptions = {},
+): Promise<AuditPage> {
+  const nowSec = Math.floor((opts.now ?? new Date()).getTime() / 1000);
+  const page = await walkAuditMonths(tenant, { prefix: auditActorPointerPrefix(actorKey) }, opts);
+  const items = await auditHeadlinesFor(tenant, page.rows, nowSec);
+  return { items, ...(page.cursor ? { cursor: page.cursor } : {}) };
+}
+
+/**
+ * One entry's headline + detail (detail null when the entry recorded no values). Addressed by
+ * the entry's instant (`at`, which fixes its month partition and sort key) and id. Null when
+ * missing or expired.
+ */
+export async function getAuditEntry(
+  tenant: string,
+  at: string,
+  id: string,
+  opts: { now?: Date } = {},
+): Promise<{ entry: AuditEntry; detail: AuditDetail | null } | null> {
+  const nowSec = Math.floor((opts.now ?? new Date()).getTime() / 1000);
+  const [head, det] = await Promise.all([
+    ddb.send(new GetCommand({ TableName: TABLE, Key: auditHeadlineKey(tenant, at, id) })),
+    ddb.send(new GetCommand({ TableName: TABLE, Key: auditDetailKey(tenant, at, id) })),
+  ]);
+  if (!head.Item || !isLive(head.Item, nowSec)) return null;
+  return { entry: toAuditEntry(head.Item), detail: det.Item ? toAuditDetail(det.Item) : null };
+}
+
+const toAuditDetail = (item: Record<string, unknown>): AuditDetail => ({
+  targets: (item.targets as AuditDetail['targets']) ?? [],
+  mentions: (item.mentions as AuditDetail['mentions']) ?? [],
+});
+
+/** Every audit row key of a tenant (all month partitions) — for tenant erasure. */
+export async function listAuditKeys(
+  tenant: string,
+  opts: { now?: Date } = {},
+): Promise<Array<{ pk: string; sk: string }>> {
+  const keys: Array<{ pk: string; sk: string }> = [];
+  for (const m of auditMonths(opts.now ?? new Date())) {
+    const items = await queryAll({
+      TableName: TABLE,
+      KeyConditionExpression: 'pk = :p',
+      ExpressionAttributeValues: { ':p': auditPartitionPk(tenant, m) },
+      ProjectionExpression: 'pk, sk',
+    });
+    for (const i of items) keys.push({ pk: i.pk as string, sk: i.sk as string });
+  }
+  return keys;
+}
+
+/** Every pointer row with one sk prefix, across all live month partitions. */
+async function auditPointersWithPrefix(
+  tenant: string,
+  prefix: string,
+  now: Date,
+): Promise<Record<string, unknown>[]> {
+  const out: Record<string, unknown>[] = [];
+  for (const m of auditMonths(now)) {
+    out.push(
+      ...(await queryAll({
+        TableName: TABLE,
+        KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+        ExpressionAttributeValues: { ':p': auditPartitionPk(tenant, m), ':s': prefix },
+        ProjectionExpression: 'pk, sk, entryId, #at',
+        ExpressionAttributeNames: { '#at': 'at' },
+      })),
+    );
+  }
+  return out;
+}
+
+/**
+ * Rewrite the headline + detail of each entry a set of pointers names. Rows are read with
+ * BatchGet (100 keys a call) and the rewrites run {@link AUDIT_REWRITE_CONCURRENCY} at a time,
+ * so a club with thousands of entries fits inside its 30 s delete. Per entry: detail first,
+ * headline second, each conditional on still existing (a concurrent tenant erase or TTL delete
+ * must not be resurrected). A detail without a headline (a non-atomic local write that stopped
+ * part-way) is still scrubbed. Idempotent. Returns the distinct entries found and how many
+ * changed.
+ */
+async function rewriteAuditEntries(
+  tenant: string,
+  pointers: Record<string, unknown>[],
+  fn: (entry: AuditEntry, detail: AuditDetail | null) => ScrubResult,
+): Promise<{ entries: number; changed: number }> {
+  const entries = new Map<string, { at: string; id: string }>();
+  for (const p of pointers) {
+    const at = p.at as string;
+    const id = p.entryId as string;
+    if (at && id) entries.set(`${at}\u0000${id}`, { at, id });
+  }
+  const list = [...entries.values()];
+  const rows = await batchGetAuditRows(
+    list.flatMap(({ at, id }) => [
+      auditHeadlineKey(tenant, at, id),
+      auditDetailKey(tenant, at, id),
+    ]),
+  );
+  const jobs: Array<() => Promise<void>> = [];
+  let found = 0;
+  for (const { at, id } of list) {
+    const head = rows.get(auditRowRef(auditHeadlineKey(tenant, at, id)));
+    const det = rows.get(auditRowRef(auditDetailKey(tenant, at, id)));
+    if (head || det) found++;
+    const job = auditRewriteJob(tenant, at, id, head, det, fn);
+    if (job) jobs.push(job);
+  }
+  await runBounded(jobs, AUDIT_REWRITE_CONCURRENCY);
+  return { entries: found, changed: jobs.length };
+}
+
+/** The conditional puts that rewrite one entry, or null when `fn` changes nothing. */
+function auditRewriteJob(
+  tenant: string,
+  at: string,
+  id: string,
+  head: Record<string, unknown> | undefined,
+  det: Record<string, unknown> | undefined,
+  fn: (entry: AuditEntry, detail: AuditDetail | null) => ScrubResult,
+): (() => Promise<void>) | null {
+  if (!head && !det) return null;
+  // A missing headline is stood in by an empty one so the detail is still rewritten.
+  const entry = head ? toAuditEntry(head) : ({ targets: [] } as unknown as AuditEntry);
+  const detail = det ? toAuditDetail(det) : null;
+  const out = fn(entry, detail);
+  if (!out.changed) return null;
+  const hKey = auditHeadlineKey(tenant, at, id);
+  const dKey = auditDetailKey(tenant, at, id);
+  return async () => {
+    if (det && out.detail)
+      await swallowCcf(() =>
+        ddb.send(
+          new PutCommand({
+            TableName: TABLE,
+            Item: { ...det, ...out.detail, ...dKey },
+            ConditionExpression: 'attribute_exists(pk)',
+          }),
+        ),
+      );
+    if (head)
+      await swallowCcf(() =>
+        ddb.send(
+          new PutCommand({
+            TableName: TABLE,
+            Item: { ...out.entry, ...hKey, rowType: 'audit', entryId: id },
+            ConditionExpression: 'attribute_exists(pk)',
+          }),
+        ),
+      );
+  };
+}
+
+/**
+ * Erasure: strip the given records' names and values from every audit entry that names them
+ * (found through their `E#` pointers — no scan). Matching targets lose label and values, changes
+ * naming them lose their values, matching mentions read `placeholder`. Safe to run again (an
+ * erase re-run repairs an entry flushed while it ran).
+ *
+ * `dropPointers` (player erasure: the natural key is derived from the ID number) also blanks the
+ * id inside the entries and deletes the pointer rows, whose sort keys carry it. Pointers go only
+ * after the entries were rewritten, so a crash in between leaves them for the re-run.
+ * Officials keep their (name-slug) id and pointers, like the register stub (assumption 4).
+ */
+export async function scrubAuditForEntity(
+  tenant: string,
+  type: string,
+  ids: Iterable<string>,
+  opts: { placeholder: string; dropPointers?: boolean; now?: Date },
+): Promise<number> {
+  return (await scrubAuditForEntityCounted(tenant, type, ids, opts)).changed;
+}
+
+/**
+ * {@link scrubAuditForEntity} with its counts: `entries` the pointers named (and that still
+ * exist), `changed` the entries rewritten, `pointers` the pointer rows found (dropped with
+ * `dropPointers`).
+ */
+async function scrubAuditForEntityCounted(
+  tenant: string,
+  type: string,
+  ids: Iterable<string>,
+  opts: { placeholder: string; dropPointers?: boolean; now?: Date },
+): Promise<{ entries: number; changed: number; pointers: number }> {
+  const idSet = new Set([...ids].filter(Boolean));
+  if (!idSet.size) return { entries: 0, changed: 0, pointers: 0 };
+  const now = opts.now ?? new Date();
+  const pointers: Record<string, unknown>[] = [];
+  for (const id of idSet)
+    pointers.push(
+      ...(await auditPointersWithPrefix(tenant, auditEntityPointerPrefix(type, id), now)),
+    );
+  const { entries, changed } = await rewriteAuditEntries(tenant, pointers, (entry, detail) =>
+    scrubAuditEntity(entry, detail, type, idSet, {
+      placeholder: opts.placeholder,
+      blankIds: opts.dropPointers === true,
+    }),
+  );
+  if (opts.dropPointers && pointers.length)
+    await batchDelete(pointers.map((p) => ({ pk: p.pk as string, sk: p.sk as string })));
+  return { entries, changed, pointers: pointers.length };
+}
+
+/**
+ * Club erasure (assumption 5): through the club's `C#` pointers, redact that club's side of
+ * every entry — its own targets and mentions lose names and values — while targets of any
+ * surviving club stay intact. Pointers are kept (the club id is a name slug, not personal data),
+ * so a re-run finds the same entries.
+ */
+export async function scrubAuditForClub(
+  tenant: string,
+  clubId: string,
+  opts: { placeholder: string; now?: Date },
+): Promise<number> {
+  const pointers = await auditPointersWithPrefix(
+    tenant,
+    auditClubPointerPrefix(clubId),
+    opts.now ?? new Date(),
+  );
+  const { changed } = await rewriteAuditEntries(tenant, pointers, (entry, detail) =>
+    redactAuditClub(entry, detail, clubId, { placeholder: opts.placeholder }),
+  );
+  return changed;
+}
+
+/**
+ * Cohort clear (assumption 6), audit side: returns the keys of every row of every entry that is
+ * about cohort records only (audit.isCohortAuditEntry) — the caller deletes them — and scrubs
+ * the entries that stay but still name a cohort record (audit.scrubAuditCohort: labels and
+ * values out, as an erasure would). Config, user and link entries stay. One partition Query per
+ * month; rows are grouped by their `entryId`.
+ */
+async function clearCohortAudit(
+  tenant: string,
+  opts: { now?: Date } = {},
+): Promise<Array<{ pk: string; sk: string }>> {
+  const keys: Array<{ pk: string; sk: string }> = [];
+  const jobs: Array<() => Promise<void>> = [];
+  for (const m of auditMonths(opts.now ?? new Date())) {
+    const items = await queryAll({
+      TableName: TABLE,
+      KeyConditionExpression: 'pk = :p',
+      ExpressionAttributeValues: { ':p': auditPartitionPk(tenant, m) },
+    });
+    const byEntry = new Map<
+      string,
+      { head?: Record<string, unknown>; det?: Record<string, unknown> }
+    >();
+    for (const i of items) {
+      const sk = i.sk as string;
+      if (!sk.startsWith('A#') && !sk.startsWith('D#')) continue;
+      const e = byEntry.get(i.entryId as string) ?? {};
+      if (sk.startsWith('A#')) e.head = i;
+      else e.det = i;
+      byEntry.set(i.entryId as string, e);
+    }
+    const doomed = new Set<string>();
+    for (const [entryId, { head, det }] of byEntry) {
+      if (
+        head &&
+        isCohortAuditEntry({
+          action: (head.action as string) ?? '',
+          targets: (head.targets as AuditEntry['targets']) ?? [],
+        })
+      ) {
+        doomed.add(entryId);
+        continue;
+      }
+      const at = (head?.at ?? det?.at) as string | undefined;
+      if (!at) continue;
+      const job = auditRewriteJob(tenant, at, entryId, head, det, (entry, detail) =>
+        auditEntryNamesCohort(entry, detail)
+          ? scrubAuditCohort(entry, detail, { placeholder: ERASED_NAME })
+          : { entry, detail, changed: false },
+      );
+      if (job) jobs.push(job);
+    }
+    for (const i of items)
+      if (doomed.has(i.entryId as string)) keys.push({ pk: i.pk as string, sk: i.sk as string });
+  }
+  await runBounded(jobs, AUDIT_REWRITE_CONCURRENCY);
+  return keys;
 }

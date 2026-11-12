@@ -83,6 +83,8 @@ import type {
   ClubSignupInfo,
   ClubSignupResult,
   PostponementRequest,
+  AuditPage,
+  AuditEntryWithDetail,
 } from './types';
 
 /**
@@ -1693,6 +1695,34 @@ export const changeUserEmail = (sub: string, email: string) =>
     { method: 'PATCH', body: { email } },
   );
 
+// ── Audit trail (ADR 0023; docs/api/audit.md) ──
+// Feed filters. `actor` is an actor key (a sub, or `link:…`) or an email; `type` a record
+// type; `from` / `to` ISO dates (inclusive). `limit` bounds the rows READ, so a page can come
+// back short or empty while a `cursor` remains — keep following it.
+export interface AuditFeedQuery {
+  from?: string;
+  to?: string;
+  actor?: string;
+  type?: string;
+  cursor?: string;
+  limit?: number;
+}
+const auditPath = (type: string, id: string) =>
+  `${encodeURIComponent(type)}/${encodeURIComponent(id)}`;
+const auditEntryPath = (at: string, id: string) =>
+  `${encodeURIComponent(at)}/${encodeURIComponent(id)}`;
+type AuditPageQuery = Pick<AuditFeedQuery, 'cursor' | 'limit'>;
+
+/** The union's activity feed (union admins; union-visible entries only). */
+export const getAuditFeed = (query: AuditFeedQuery = {}) =>
+  request<AuditPage>('/admin/audit', { query: { ...query } });
+/** One record's history. Composite ids (series `s1` + fixture `f1`) are `s1#f1`. */
+export const getAuditEntity = (type: string, id: string, query: AuditPageQuery = {}) =>
+  request<AuditPage>(`/admin/audit/entity/${auditPath(type, id)}`, { query: { ...query } });
+/** One entry with its field changes; `at` is the entry's own `at`. */
+export const getAuditEntry = (at: string, id: string) =>
+  request<AuditEntryWithDetail>(`/admin/audit/entry/${auditEntryPath(at, id)}`);
+
 // ── Club self-registration link (admin) ──
 // One tenant-wide link clubs use to register themselves (/signup?t=<token>).
 // Generating replaces any prior token — the old link stops working immediately.
@@ -1811,6 +1841,33 @@ export const platformUpdateTenant = (slug: string, patch: Partial<TenantConfig>)
     method: 'PUT',
     body: patch,
   });
+// Audit trail, operator side: any union's feed (every visibility) and the platform-level feed.
+export const platformGetAuditFeed = (slug: string, query: AuditFeedQuery = {}) =>
+  request<AuditPage>(`/platform/tenants/${encodeURIComponent(slug)}/audit`, {
+    query: { ...query },
+  });
+export const platformGetAuditEntity = (
+  slug: string,
+  type: string,
+  id: string,
+  query: AuditPageQuery = {},
+) =>
+  request<AuditPage>(
+    `/platform/tenants/${encodeURIComponent(slug)}/audit/entity/${auditPath(type, id)}`,
+    { query: { ...query } },
+  );
+export const platformGetAuditEntry = (slug: string, at: string, id: string) =>
+  request<AuditEntryWithDetail>(
+    `/platform/tenants/${encodeURIComponent(slug)}/audit/entry/${auditEntryPath(at, id)}`,
+  );
+/** Platform-level entries (no union): the feed and one entry's detail. */
+export const platformGetPlatformAuditFeed = (query: AuditFeedQuery = {}) =>
+  request<AuditPage>('/platform/audit', { query: { ...query } });
+export const platformGetPlatformAuditEntry = (at: string, id: string) =>
+  request<AuditEntryWithDetail>(`/platform/audit/entry/${auditEntryPath(at, id)}`);
+/** The platform partition's slug, used only to key the platform feed's query cache. */
+export const PLATFORM_AUDIT_SLUG = '*';
+
 // Idempotent per email: re-granting an existing admin succeeds with the same sub.
 export const platformAddAdmin = (slug: string, email: string) =>
   request<{ tenant: string; email: string; sub: string; adminCount: number }>(

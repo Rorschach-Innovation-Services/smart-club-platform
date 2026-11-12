@@ -46,6 +46,7 @@ import { StructureIntakeWizard } from './platform-structure-intake';
 import { RosterIntakeWizard } from './platform-roster-intake';
 import { RepsPage } from './platform-reps';
 import { OnboardingPage, buildOnboardingSteps } from './platform-onboarding';
+import { AuditActivityView } from './AuditLog';
 import type {
   TenantConfig,
   TenantSummary,
@@ -510,6 +511,15 @@ export function PlatformPortal({
               </span>
               <span className="ni-label">Scorecard answers</span>
             </button>
+            <button
+              className={`nav-item ${path === '/platform/activity' ? 'active' : ''}`}
+              onClick={() => navigate('/platform/activity')}
+            >
+              <span className="ni-icon">
+                <Icon.Clock />
+              </span>
+              <span className="ni-label">Platform activity</span>
+            </button>
 
             {hasTenantConsole && (
               <>
@@ -574,6 +584,8 @@ export function PlatformPortal({
                 element={<MedicoachConsolePage toast={toastShow} />}
               />
               <Route path="/platform/tenants/:slug/overview" element={<TenantOverviewPage />} />
+              <Route path="/platform/tenants/:slug/activity" element={<TenantActivityPage />} />
+              <Route path="/platform/activity" element={<PlatformActivityPage />} />
               <Route
                 path="/platform/tenants/:slug/overview/leagues/:leagueKey"
                 element={<TenantLeaguePage />}
@@ -964,6 +976,20 @@ function TenantEditPage({ toast }: { toast: Toast }) {
             </Btn>
           }
         />
+        <Card
+          title="Activity"
+          sub="Who changed what for this client, and when: the union's own changes and those made here."
+          action={
+            <Btn
+              tone="outline"
+              size="sm"
+              icon={Icon.Clock}
+              onClick={() => navigate(`/platform/tenants/${slug}/activity`)}
+            >
+              Open activity
+            </Btn>
+          }
+        />
         <ClubDirectoryCard
           key={`kc-${config.tenant}`}
           slug={slug}
@@ -1126,6 +1152,50 @@ function OnboardingCard({
           </Btn>
         </div>
       }
+    />
+  );
+}
+
+/* ─── Activity (audit trail, ADR 0023) ─── */
+
+/** One client's activity: everything the union admins see, plus operator-portal changes. */
+function TenantActivityPage() {
+  const { slug = '' } = useParams();
+  const navigate = useNavigate();
+  const tenantsQ = useQuery({ queryKey: qk.platformTenants(), queryFn: api.platformListTenants });
+  const name = tenantsQ.data?.find((t: TenantSummary) => t.tenant === slug)?.name || slug;
+  return (
+    <AuditActivityView
+      key={slug}
+      source={{ kind: 'tenant', slug }}
+      crumb={`Platform / Clients / ${name} / Activity`}
+      title={
+        <>
+          {name} <em>activity</em>
+        </>
+      }
+      description="Who changed what for this client, and when. Includes changes made in the operator portal, which the union's admins do not see."
+      actions={
+        <Btn tone="outline" size="sm" onClick={() => navigate(`/platform/tenants/${slug}`)}>
+          Back to settings
+        </Btn>
+      }
+    />
+  );
+}
+
+/** Operator-portal changes that belong to no single client. */
+function PlatformActivityPage() {
+  return (
+    <AuditActivityView
+      source={{ kind: 'platform' }}
+      crumb="Platform / Activity"
+      title={
+        <>
+          Platform <em>activity</em>
+        </>
+      }
+      description="Changes made in the operator portal. It only shows actions not tied to a client, so creating or changing a client appears in that client's own activity instead."
     />
   );
 }

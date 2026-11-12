@@ -109,6 +109,7 @@ import { AdminPostponements, postponementAttentionCount } from './club-postponem
 import { Onboarding } from './onboarding';
 import { AdminUmpiresView, mergeErrorMessage } from './umpires';
 import { AdminScorersView, scorerMergeErrorMessage } from './scorers';
+import { AuditActivityView } from './AuditLog';
 import { OfficialSignupPage } from './OfficialSignupPage';
 import {
   isErased,
@@ -678,8 +679,13 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
     opts: ToastCopyOptions & { invalidate?: any[] } = {},
   ) {
     try {
-      return await fn();
+      const result = await fn();
+      // The write left an audit entry: an open Activity page or History refreshes.
+      invalidate(qk.audit());
+      return result;
     } catch (err) {
+      // A refused write can leave one too (a `failed` entry after a partial write).
+      invalidate(qk.audit());
       const conflict = err instanceof ApiError && err.status === 409;
       // The admin cancelled a confirmation (ResyncCancelled): nothing to tell them.
       if (!(err instanceof ResyncCancelled)) toastShow(toastCopy(err, errMsg, opts), 'warn');
@@ -2747,6 +2753,8 @@ function Shell({
         ]
       : []),
     { v: 'team', label: 'Team & Access', icon: Icon.Users, num: users.length || undefined },
+    // Audit trail (ADR 0023): who changed what. Admins only; no module gate.
+    { v: 'activity', label: 'Activity', icon: Icon.Clock },
   ].sort((a, b) => a.label.localeCompare(b.label));
 
   // A multi-team club appears under its `tm_…` ids — match its resolved team set.
@@ -3226,6 +3234,7 @@ function Shell({
             toast={toastShow}
           />
         );
+      if (view === 'activity') return <AuditActivityView users={users} clubs={clubs} />;
       if (view === 'settings')
         return (
           <AdminSettingsView

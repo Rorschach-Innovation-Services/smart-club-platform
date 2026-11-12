@@ -279,13 +279,19 @@ Responses:
   ```
 
   `documents` counts S3 objects (row ID docs + clearance/review docs + certificate PDFs).
-  `reportOpenMarkers` counts markers whose captain ref was scrubbed. The console toast reads
+  `reportOpenMarkers` counts markers whose captain ref was scrubbed. `auditEntries` (present
+  when non-zero) counts the audit-trail entries that named the person: names, values and the
+  natural key scrubbed, the person's audit pointers dropped (ADR 0023). The console toast reads
   `<Name> erased — 2 club registrations, 1 clearance, …` (non-zero counts only).
 
-- `404` — `player not found`, **only** when player rows, clearances, registration reviews and
-  veterans requests are **all** empty for the natural key. A person with no `PLAYER#` row left
-  anywhere but a lingering clearance (say, a window-closed auto-reject) is still erasable. A
-  re-run of a completed erasure 404s.
+  A person already removed from every roster (or whose club was deleted) can still have
+  audit-trail entries naming them. Then only that scrub runs: `200` with every count `0` but
+  `auditEntries`, and a `PLAYERERASE#` row with those counts.
+
+- `404` — `player not found`, **only** when player rows, clearances, registration reviews,
+  veterans requests, document requests and audit-trail pointers are **all** empty for the
+  natural key. A person with no `PLAYER#` row left anywhere but a lingering clearance (say, a
+  window-closed auto-reject) is still erasable. A re-run of a completed erasure 404s.
 - `409` — `resolve or reject the open clearance first`: a **pending** clearance names the
   person, or any of their rows is `clearance-pending`. Nothing is touched; the gate runs before
   the first write. Resolve it (approve, override or reject) and retry.

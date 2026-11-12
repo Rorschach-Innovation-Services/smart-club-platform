@@ -719,10 +719,142 @@ describe('scorer erase', () => {
   });
 });
 
+describe('audit trail scrub', () => {
+  // Seeded through repo.putAuditEntry exactly as the request middleware will write them.
+  const seedAudit = async (record: (a: typeof import('../src/audit.js')) => void) => {
+    const a = await import('../src/audit.js');
+    const scope = a.newAuditScope({
+      tenant: TENANT,
+      actor: { kind: 'user', key: 'u', sub: 'u', email: 'admin@test', via: 'console' },
+    });
+    a.runAudited(scope, () => record(a));
+    const set = a.buildEntry(scope, { status: 200 });
+    await repo.putAuditEntry(set);
+    return set.entry;
+  };
+
+  /** Every stored audit row of the tenant, as text. */
+  const auditText = async () => {
+    const { DynamoDBClient } = await import('@aws-sdk/client-dynamodb');
+    const { DynamoDBDocumentClient, QueryCommand } = await import('@aws-sdk/lib-dynamodb');
+    const doc = DynamoDBDocumentClient.from(
+      new DynamoDBClient({
+        endpoint: process.env.DYNAMO_ENDPOINT,
+        region: 'localhost',
+        credentials: { accessKeyId: 'local', secretAccessKey: 'local' },
+      }),
+    );
+    const pks = new Set((await repo.listAuditKeys(TENANT)).map((k) => k.pk));
+    const rows: unknown[] = [];
+    for (const pk of pks)
+      rows.push(
+        ...((
+          await doc.send(
+            new QueryCommand({
+              TableName: TABLE,
+              KeyConditionExpression: 'pk = :p',
+              ExpressionAttributeValues: { ':p': pk },
+            }),
+          )
+        ).Items ?? []),
+      );
+    return JSON.stringify(rows);
+  };
+
+  test('erase strips the person from every entry naming them; record id and others stay', async () => {
+    const id = 'u-aud-erase';
+    await repo.putUmpire(TENANT, umpire(id, { displayName: 'Thandi Auditname' }));
+    // The overwrite: one record edited from one person to another.
+    await seedAudit((a) =>
+      a.auditTarget({
+        type: 'umpire',
+        id,
+        label: 'Thandi Auditname',
+        op: 'update',
+        changes: a.diffFields(
+          { displayName: 'Thandi Auditname', email: 'thandi@example.org' },
+          { displayName: 'Zola Overwrite', email: 'zola@example.org' },
+        ),
+      }),
+    );
+    // A fixture naming them in a change, and a merge mentioning them next to someone else.
+    await seedAudit((a) => {
+      a.auditTarget({
+        type: 'fixture',
+        id: 's-aud#f1',
+        label: 'Home Club v Away Club',
+        op: 'update',
+        changes: a.diffFields(
+          { umpire: id, time: '09:00' },
+          { umpire: 'u-other', time: '10:00' },
+          { refs: { umpire: 'umpire' } },
+        ),
+      });
+      a.auditMention({ type: 'umpire', id, label: 'Thandi Auditname' });
+      a.auditMention({ type: 'umpire', id: 'u-other', label: 'Other Keep' });
+    });
+    const before = await auditText();
+    assert.ok(before.includes('Thandi Auditname') && before.includes(`"${id}"`));
+
+    const res = await call('DELETE', `/umpires/${id}`);
+    assert.equal(res.status, 200, await res.clone().text());
+
+    const text = await auditText();
+    for (const v of [
+      'Thandi Auditname',
+      'thandi@example.org',
+      'Zola Overwrite',
+      'zola@example.org',
+    ])
+      assert.ok(!text.includes(v), v);
+    assert.ok(text.includes('Other Keep'), 'another person is untouched');
+    assert.ok(text.includes('10:00'), 'unrelated values stay');
+    const history = await repo.listAuditForEntity(TENANT, 'umpire', id);
+    // The two seeded entries plus the DELETE's own entry (the audit middleware).
+    assert.equal(history.items.length, 3, 'the record id keeps its history (assumption 4)');
+    assert.equal(history.items[0].action, 'umpire.delete');
+  });
+
+  test('a repeated DELETE scrubs an entry recorded after the first erase', async () => {
+    const id = 'u-aud-late';
+    await repo.putUmpire(TENANT, umpire(id));
+    assert.equal((await call('DELETE', `/umpires/${id}`)).status, 200);
+    // Flushed while (or after) the erase ran, still carrying the name.
+    await seedAudit((a) =>
+      a.auditTarget({ type: 'umpire', id, label: 'Late Auditname', op: 'update' }),
+    );
+    assert.ok((await auditText()).includes('Late Auditname'));
+    assert.equal((await call('DELETE', `/umpires/${id}`)).status, 200);
+    assert.ok(!(await auditText()).includes('Late Auditname'));
+  });
+
+  test('a pending registration is scrubbed before it is hard-deleted (scorer)', async () => {
+    const id = 'sc-aud-pending';
+    await repo.putScorer(TENANT, scorer(id, { active: false, pending: true }));
+    await seedAudit((a) =>
+      a.auditTarget({
+        type: 'scorer',
+        id,
+        label: 'Pending Auditname',
+        op: 'create',
+        changes: a.diffFields(null, { fullName: 'Pending Auditname', phone: '+27820009999' }),
+      }),
+    );
+    const res = await call('DELETE', `/scorers/${id}`);
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as { hardDeleted: boolean }).hardDeleted, true);
+    assert.equal(await repo.getScorer(TENANT, id), null);
+    const text = await auditText();
+    for (const v of ['Pending Auditname', '+27820009999']) assert.ok(!text.includes(v), v);
+  });
+});
+
 describe('tenant erasure', () => {
-  test('removes OFFICIALERASE# audit rows', async () => {
+  test('removes OFFICIALERASE# audit rows and every audit-trail row', async () => {
     assert.ok((await repo.listOfficialEraseLogs(TENANT)).length > 0);
+    assert.ok((await repo.listAuditKeys(TENANT)).length > 0);
     await repo.eraseTenantData(TENANT);
     assert.equal((await repo.listOfficialEraseLogs(TENANT)).length, 0);
+    assert.equal((await repo.listAuditKeys(TENANT)).length, 0);
   });
 });

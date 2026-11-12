@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon, Btn, useEscapeClose, useNestedEscapeClose, playerStatusPill } from './atoms';
+import { HistoryButton } from './AuditLog';
 import { getPlayerIdDocViewUrl } from './api';
 import { docPreviewKind } from './data';
 import type { PlayerErasureCounts, PlayerRegistration, VeteransRequestPublic } from './types';
@@ -462,6 +463,7 @@ export function PlayerDetailModal({
   veteransEdit,
   veteransRequest,
   adminErase,
+  showHistory = false,
   onClose,
 }: {
   player: PlayerRegistration;
@@ -487,6 +489,9 @@ export function PlayerDetailModal({
   adminErase?: {
     onErase: () => Promise<unknown>;
   };
+  // Union admin only: a History button (who changed this player, and when). Needs the
+  // player's natural key, the id the audit trail files player changes under.
+  showHistory?: boolean;
   onClose: () => void;
 }) {
   useEscapeClose(onClose);
@@ -512,7 +517,20 @@ export function PlayerDetailModal({
           </button>
         </div>
         <div className="task-modal-body">
-          <div style={{ marginBottom: 4 }}>{playerStatusPill(player.status)}</div>
+          <div
+            style={{
+              marginBottom: 4,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 8,
+            }}
+          >
+            {playerStatusPill(player.status)}
+            {showHistory && player.naturalKey && (
+              <HistoryButton type="player" id={player.naturalKey} title={fullName} />
+            )}
+          </div>
 
           <SectionTitle>Identity</SectionTitle>
           <Row

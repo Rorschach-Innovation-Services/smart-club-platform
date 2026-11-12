@@ -4,6 +4,7 @@
 
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Btn, Icon, Pill } from './atoms';
+import { HistoryButton } from './AuditLog';
 import { ApiError, type OfficialListExtras, type OfficialsNotifyStatusRow } from './api';
 import {
   DeleteOfficialDialog,
@@ -1079,6 +1080,7 @@ export function AdminUmpiresView({
                             Merge…
                           </Btn>
                         )}
+                        <HistoryButton type="umpire" id={u.id} title={u.displayName} />
                         {onErase && loadErasePreview && (
                           <Btn
                             tone="ghost"

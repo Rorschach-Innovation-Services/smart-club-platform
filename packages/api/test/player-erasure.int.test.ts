@@ -15,7 +15,9 @@
  *  - a cached scorecard that keeps changing under its scrub (forced perpetual
  *    conditional failure) → 409 with NOTHING deleted (rows, clearance, certificate, S3 docs),
  *    and a plain retry then completes the erasure;
- *  - unknown person → 404; a rep → 403.
+ *  - unknown person → 404; a rep → 403;
+ *  - a person already removed from every roster still has their audit-trail entries scrubbed
+ *    (200 with `auditEntries`, not 404).
  *
  * Run with the API package's test runner (tsx --test).
  */
@@ -355,6 +357,8 @@ describe('full erasure across every category', () => {
       scorecardsScrubbed: 0,
       reportScorecardFeedbackScrubbed: 0,
       reportOpenMarkers: 1,
+      // The clearance's create entry mentions the person (its pointer is how it was found).
+      auditEntries: 1,
     });
   });
 
@@ -659,5 +663,150 @@ describe('gates', () => {
     await repo.createPlayer(TENANT, p);
     assert.equal((await erase(p.naturalKey, rep('alpha'))).status, 403);
     assert.ok(await repo.getPlayer(TENANT, 'alpha', p.naturalKey));
+  });
+});
+
+describe('audit trail', () => {
+  // Seeded through repo.putAuditEntry exactly as the request middleware will write them.
+  const seedAudit = async (record: (a: typeof import('../src/audit.js')) => void) => {
+    const a = await import('../src/audit.js');
+    const scope = a.newAuditScope({
+      tenant: TENANT,
+      actor: {
+        kind: 'user',
+        key: 'admin-1',
+        sub: 'admin-1',
+        email: 'admin@union.test',
+        via: 'console',
+      },
+    });
+    a.runAudited(scope, () => record(a));
+    const set = a.buildEntry(scope, { status: 200 });
+    await repo.putAuditEntry(set);
+    return set.entry;
+  };
+
+  /** Every stored audit row of the tenant (sort keys included), as text. */
+  const auditText = async () => {
+    const { DynamoDBClient } = await import('@aws-sdk/client-dynamodb');
+    const { DynamoDBDocumentClient, QueryCommand } = await import('@aws-sdk/lib-dynamodb');
+    const doc = DynamoDBDocumentClient.from(
+      new DynamoDBClient({
+        endpoint: process.env.DYNAMO_ENDPOINT,
+        region: 'localhost',
+        credentials: { accessKeyId: 'local', secretAccessKey: 'local' },
+      }),
+    );
+    const rows: unknown[] = [];
+    for (const pk of new Set((await repo.listAuditKeys(TENANT)).map((k) => k.pk)))
+      rows.push(
+        ...((
+          await doc.send(
+            new QueryCommand({
+              TableName: TABLE,
+              KeyConditionExpression: 'pk = :p',
+              ExpressionAttributeValues: { ':p': pk },
+            }),
+          )
+        ).Items ?? []),
+      );
+    return JSON.stringify(rows);
+  };
+
+  test('erasure leaves no name, contact or natural key of the person in any audit row', async () => {
+    const p = mkPlayer('alpha', { firstName: 'Lindiwe', lastName: 'Auditrow' });
+    const other = mkPlayer('alpha', { firstName: 'Bongani', lastName: 'Staysput' });
+    await repo.createPlayer(TENANT, p);
+    await repo.createPlayer(TENANT, other);
+    const name = `${p.firstName} ${p.lastName}`;
+    await seedAudit((a) =>
+      a.auditTarget({
+        type: 'player',
+        id: p.naturalKey,
+        label: name,
+        op: 'update',
+        clubId: 'alpha',
+        changes: a.diffFields(
+          { email: 'old@player.test', cell: '0820000000', idNumber: 'x' },
+          { email: p.email, cell: p.cell, idNumber: p.idNumber },
+        ),
+      }),
+    );
+    // Named inside another record's change, and mentioned next to someone who stays.
+    await seedAudit((a) => {
+      a.auditTarget({
+        type: 'squad-request',
+        id: 'sq-1',
+        label: 'Alpha CC 1st XI',
+        op: 'update',
+        clubId: 'alpha',
+        changes: a.diffFields(
+          { captain: other.naturalKey },
+          { captain: p.naturalKey },
+          { refs: { captain: 'player' } },
+        ),
+      });
+      a.auditMention({ type: 'player', id: p.naturalKey, label: name });
+      a.auditMention({ type: 'player', id: other.naturalKey, label: 'Bongani Staysput' });
+    });
+    const before = await auditText();
+    assert.ok(before.includes(p.naturalKey) && before.includes(name), 'precondition');
+    const feedBefore = (await repo.listAuditFeed(TENANT, { limit: 200 })).items.length;
+
+    assert.equal((await erase(p.naturalKey)).status, 200);
+
+    const text = await auditText();
+    for (const v of [p.naturalKey, p.lastName, p.email!, p.idNumber!, name])
+      assert.ok(!text.includes(v), `audit rows must not carry ${v}`);
+    assert.ok(text.includes('Bongani Staysput'), 'another person is untouched');
+    assert.equal((await repo.listAuditForEntity(TENANT, 'player', p.naturalKey)).items.length, 0);
+    assert.equal(
+      (await repo.listAuditForEntity(TENANT, 'player', other.naturalKey)).items.length,
+      1,
+      "the other person's pointer survives",
+    );
+    // The entries themselves stay; the erasure adds its own (natural key redacted).
+    const feed = (await repo.listAuditFeed(TENANT, { limit: 200 })).items;
+    assert.equal(feed.length, feedBefore + 1, 'the entries themselves stay');
+    assert.equal(feed[0].action, 'player.erase');
+  });
+
+  test('after a roster removal the erasure still scrubs the audit trail (200, not 404)', async () => {
+    const p = mkPlayer('beta', { firstName: 'Thandeka', lastName: 'Removedfirst' });
+    await repo.createPlayer(TENANT, p);
+    await seedAudit((a) =>
+      a.auditTarget({
+        type: 'player',
+        id: p.naturalKey,
+        label: `${p.firstName} ${p.lastName}`,
+        op: 'update',
+        clubId: 'beta',
+      }),
+    );
+    // The club removes them: no PLAYER# row anywhere now, but the removal's own entry (and the
+    // edit above) still carry the natural key.
+    const removed = await call('DELETE', `/clubs/beta/players/${p.naturalKey}`, ADMIN);
+    assert.equal(removed.status, 200, await removed.clone().text());
+    assert.equal(await repo.getPlayer(TENANT, 'beta', p.naturalKey), null);
+    const before = await auditText();
+    assert.ok(before.includes(p.naturalKey) && before.includes(p.lastName), 'precondition');
+    const logsBefore = (await repo.listPlayerEraseLogs(TENANT)).length;
+
+    const res = await erase(p.naturalKey);
+    assert.equal(res.status, 200, await res.clone().text());
+    const { counts } = (await res.json()) as { counts: PlayerErasureCounts };
+    assert.equal(counts.playerRows, 0);
+    assert.equal(counts.auditEntries, 2, 'the edit and the removal');
+
+    const text = await auditText();
+    for (const v of [p.naturalKey, p.lastName])
+      assert.ok(!text.includes(v), `audit rows must not carry ${v}`);
+    assert.equal((await repo.listAuditForEntity(TENANT, 'player', p.naturalKey)).items.length, 0);
+    // A truthful PLAYERERASE# row (counts only), and a re-run is a clean 404.
+    const logs = await repo.listPlayerEraseLogs(TENANT);
+    assert.equal(logs.length, logsBefore + 1);
+    assert.ok(logs.some((l) => l.counts.auditEntries === 2 && l.counts.playerRows === 0));
+    assert.ok(!JSON.stringify(logs).includes(p.naturalKey));
+    assert.equal((await erase(p.naturalKey)).status, 404);
   });
 });

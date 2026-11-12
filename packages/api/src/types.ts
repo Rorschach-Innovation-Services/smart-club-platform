@@ -723,6 +723,11 @@ export interface PlayerErasureCounts {
   squadsRepushed?: number;
   /** Document requests (DOCREQ# + pointer + ledger) deleted. Absent when none. */
   docRequests?: number;
+  /**
+   * Audit-trail entries that named the person: names, values and the natural key scrubbed, the
+   * person's pointers dropped. Absent when none.
+   */
+  auditEntries?: number;
 }
 
 /**
@@ -2155,4 +2160,113 @@ export interface PendingSquadSync {
   /** A short sanitised note (error name / built message) — never raw provider text. */
   lastError?: string;
   lastAttemptAt?: string;
+}
+
+// ── Platform audit trail (docs/architecture/0023-audit-trail.md; contract docs/api/audit.md) ──
+
+/**
+ * Who made a change. Signed-in users are keyed on the Cognito `sub` (emails change) with a
+ * snapshot of email and role; an empty email is never stored. Public links are keyed on the link
+ * kind + the recipient's opaque member id (never the token), so a forwarded link still names
+ * the person it was sent to. `system` is reserved for later (scheduled jobs, CLIs).
+ */
+export interface AuditActor {
+  kind: 'user' | 'link' | 'system';
+  /** Stable key for the actor pointer (`U#`): the sub, or a link/system key. */
+  key: string;
+  sub?: string;
+  email?: string;
+  role?: string;
+  /** True when the signed-in user holds the platform operator membership. */
+  operator?: boolean;
+  /** 'console' | 'platform' | the link kind. */
+  via: string;
+  recipientKind?: string;
+  recipientId?: string;
+}
+
+/** A pointer to another record named inside an entry (a person on a fixture, a merge side). */
+export interface AuditRef {
+  type: string;
+  id: string;
+}
+
+/** A capped, JSON-safe value: strings ≤ 200 chars, arrays ≤ 20 items, objects as JSON text. */
+export type AuditValue = string | number | boolean | null | AuditValue[];
+
+/**
+ * One field change. `masked` ⇒ recorded as changed without a value (ID number, address, free
+ * text…). `ref` names the record the `to` value refers to (or the `from` value when there is no
+ * `to`); `fromRef` names the record the `from` value refers to when that differs. Both carry
+ * their own `E#` pointer so an erasure finds and scrubs the value. `scrubbed` ⇒ the values were
+ * removed by an erasure.
+ */
+export interface AuditChange {
+  field: string;
+  from?: AuditValue;
+  to?: AuditValue;
+  masked?: true;
+  ref?: AuditRef;
+  fromRef?: AuditRef;
+  scrubbed?: true;
+}
+
+/** A record named by an entry outside a change (both sides of a merge, say). */
+export interface AuditMention extends AuditRef {
+  label?: string;
+}
+
+/** What the headline row says about one affected record (no field values). */
+export interface AuditTargetHead {
+  type: string;
+  /** The record id; '' once an erasure blanked it (a player's natural key). */
+  id: string;
+  label?: string;
+  op: string;
+  clubId?: string;
+  changeCount: number;
+  /** Set when an erasure stripped this target's label/values. */
+  scrubbed?: true;
+}
+
+/** Items dropped by the caps; absent when nothing was dropped. */
+export interface AuditTruncation {
+  targets?: number;
+  changes?: number;
+  mentions?: number;
+  /** Values shortened (strings) or cut (arrays). */
+  values?: number;
+  /** Pointer-bearing items dropped to keep an entry within its row budget. */
+  rows?: number;
+  /** Changes dropped to keep the detail row within its byte budget. */
+  detail?: number;
+}
+
+export type AuditOutcome = 'started' | 'ok' | 'failed';
+export type AuditVisibility = 'tenant' | 'operator';
+
+/** The headline row: one per request. Small and value-free (labels only). */
+export interface AuditEntry {
+  id: string;
+  at: string;
+  /** Tenant slug, or PLATFORM_TENANT ('*') for platform actions with no tenant. */
+  tenant: string;
+  requestId?: string;
+  actor: AuditActor;
+  action: string;
+  route?: { method: string; pattern: string };
+  status: number;
+  outcome: AuditOutcome;
+  visibility: AuditVisibility;
+  targets: AuditTargetHead[];
+  counts?: Record<string, number>;
+  truncated?: AuditTruncation;
+  /** TTL (epoch seconds): at + 730 days. */
+  expiresAt: number;
+}
+
+/** The detail row: per-target field changes plus mentions. Loaded when an entry is expanded. */
+export interface AuditDetail {
+  targets: Array<{ type: string; id: string; changes: AuditChange[] }>;
+  mentions: AuditMention[];
 }
