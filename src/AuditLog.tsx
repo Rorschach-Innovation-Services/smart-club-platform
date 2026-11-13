@@ -29,6 +29,7 @@ import {
   auditActorDisplay,
   auditChangeRow,
   auditCountsText,
+  auditDetailHeads,
   auditInProgress,
   auditOutcomeLabel,
   auditTargetLabel,
@@ -231,13 +232,15 @@ function EntryDetail({
     );
   const detail = q.data?.detail;
   const head = q.data?.entry ?? entry;
-  const withChanges = (detail?.targets ?? []).filter((t) => t.changes.length > 0);
+  // Joined to their headline targets by position: an erasure blanks ids, so several targets of
+  // one type can share `type:id`.
+  const detailTargets = detail?.targets ?? [];
+  const headsOf = auditDetailHeads(head.targets, detailTargets);
+  const withChanges = detailTargets
+    .map((t, i) => ({ ...t, label: auditTargetLabel(headsOf[i] ?? t, resolve) }))
+    .filter((t) => t.changes.length > 0);
   const mentions = detail?.mentions ?? [];
   const truncated = head.truncated && Object.values(head.truncated).some((n) => !!n);
-  const labelFor = (type: string, id: string) => {
-    const t = head.targets.find((x) => x.type === type && x.id === id);
-    return auditTargetLabel(t ?? { type, id }, resolve);
-  };
   return (
     <div style={{ display: 'grid', gap: 12 }}>
       {withChanges.length === 0 && (
@@ -250,12 +253,12 @@ function EntryDetail({
         <div key={`${t.type}:${t.id}:${i}`}>
           {(withChanges.length > 1 || head.targets.length > 1) && (
             <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>
-              {auditTypeLabel(t.type)} · {labelFor(t.type, t.id)}
+              {auditTypeLabel(t.type)} · {t.label}
             </div>
           )}
           <table
             className="audit-changes"
-            aria-label={`Changes to ${auditTypeLabel(t.type)} ${labelFor(t.type, t.id)}`}
+            aria-label={`Changes to ${auditTypeLabel(t.type)} ${t.label}`}
             style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}
           >
             <thead>

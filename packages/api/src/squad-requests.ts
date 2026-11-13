@@ -1431,7 +1431,15 @@ export async function loadLinkedSquadRequest(
   nowMs: number,
   secret: string,
 ): Promise<
-  | { ok: true; tenant: string; request: SquadRequest; memberId: string; isChairLink: boolean }
+  | {
+      ok: true;
+      tenant: string;
+      request: SquadRequest;
+      memberId: string;
+      isChairLink: boolean;
+      /** The series read to check the fixture (reused by the caller's audit label). */
+      series: Series | null;
+    }
   | { ok: false; status: 404 | 410; error: string; kind?: SquadLink410Kind }
 > {
   const check = verifySquadLinkToken(token, secret, nowMs);
@@ -1467,7 +1475,7 @@ export async function loadLinkedSquadRequest(
     };
   }
   const isChairLink = isKeptChairLink || (isCurrent && request.recipient.kind === 'chair');
-  return { ok: true, tenant, request, memberId, isChairLink };
+  return { ok: true, tenant, request, memberId, isChairLink, series };
 }
 
 /** The squad page payload: the request (roster ids, never keys) + the club roster, names only. */
@@ -1678,6 +1686,18 @@ export async function squadForwardCandidates(
 ): Promise<
   Array<{ id: string; name: string; contact: { name: string; email?: string; cell?: string } }>
 > {
+  return (await squadForwardCandidatesWithKeys(repo, tenant, request, secret)).map(
+    ({ key: _key, ...c }) => c,
+  );
+}
+
+/** {@link squadForwardCandidates} plus each player's natural key — server-only, never served. */
+async function squadForwardCandidatesWithKeys(
+  repo: RepoModule,
+  tenant: string,
+  request: SquadRequest,
+  secret: string,
+) {
   const roster = await squadRoster(repo, tenant, request, secret);
   return roster
     .filter((e) => !e.row.isMinor)
@@ -1689,13 +1709,20 @@ export async function squadForwardCandidates(
         email: e.row.email?.trim() || undefined,
         cell: e.row.cell?.trim() || undefined,
       },
+      key: e.key,
     }))
     .filter((c) => hasContact(c.contact));
 }
 
 export async function forwardSquadRequest(
   deps: SquadRequestDeps,
-  input: { tenant: string; request: SquadRequest; candidateId: string },
+  input: {
+    tenant: string;
+    request: SquadRequest;
+    candidateId: string;
+    /** Filled with the picked player's natural key (server-only: the audit trail's `ref`). */
+    out?: { recipientKey?: string };
+  },
 ): Promise<SquadRequest> {
   const { repo } = deps;
   const now = deps.now ?? (() => new Date());
@@ -1707,10 +1734,11 @@ export async function forwardSquadRequest(
       'forward_limit',
     );
   const secret = (deps.linkSecret ?? captainsReportLinkSecret)();
-  const picked = (await squadForwardCandidates(repo, tenant, request, secret)).find(
+  const picked = (await squadForwardCandidatesWithKeys(repo, tenant, request, secret)).find(
     (c) => c.id === input.candidateId,
   );
   if (!picked) throw new SquadFlowError(404, 'that player cannot be sent the squad link');
+  if (input.out) input.out.recipientKey = picked.key;
   const [club, config] = await Promise.all([
     repo.getClub(tenant, request.clubId),
     repo.getTenantConfig(tenant),

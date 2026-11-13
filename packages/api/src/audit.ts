@@ -7,8 +7,9 @@
  * {@link buildEntry} turns the scope into the rows `repo.putAuditEntry` writes in ONE
  * transaction: headline (`A#`), detail (`D#`, only when there are values), and the `E#` / `C#` /
  * `U#` pointers. Invariant: every value that names a record (a target label, a change naming a
- * person, a mention) is stored together with that record's `E#` pointer, so an erasure can find
- * it — when the row budget runs out the VALUE is dropped, never the pointer.
+ * person, a mention) is stored together with that record's `E#` pointer — and a label naming
+ * clubs (`clubIds`) with each club's `C#` pointer — so an erasure can find it; when the row
+ * budget runs out the VALUE (or label) is dropped, never the pointer.
  *
  * Caps: 25 targets, 40 changes per target, 40 mentions per entry, 200 characters per value,
  * 20 items per array, detail row ≤ 100 KB, ≤ 100 rows per entry (the TransactWriteItems limit).
@@ -19,6 +20,7 @@
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
+import * as Sentry from '@sentry/aws-serverless';
 import {
   auditActorPointerKey,
   auditClubPointerKey,
@@ -59,7 +61,7 @@ export const AUDIT_CAPS = {
  * Record types whose audit entries `clearCohort` removes (assumption 6): the records the cohort
  * clear itself deletes. Config, user, link, umpire, scorer and venue entries stay.
  */
-export const AUDIT_COHORT_TYPES: ReadonlySet<string> = new Set([
+const AUDIT_COHORT_TYPES: ReadonlySet<string> = new Set([
   'club',
   'player',
   'clearance',
@@ -87,6 +89,8 @@ export interface AuditScopeTarget {
   label?: string;
   op: string;
   clubId?: string;
+  /** The club behind each side of a `<a> v <b>` label, in label order ('' = no club record). */
+  clubIds?: string[];
   changes: AuditChange[];
   /** Set by {@link redactScopeFor}: an erasing request's own target of the erased type. */
   scrubbed?: true;
@@ -132,7 +136,7 @@ export function newAuditScope(
   };
 }
 
-export const auditScope = new AsyncLocalStorage<AuditScope>();
+const auditScope = new AsyncLocalStorage<AuditScope>();
 
 /** Run `fn` with `scope` as the current audit scope. */
 export function runAudited<T>(scope: AuditScope, fn: () => T): T {
@@ -141,6 +145,71 @@ export function runAudited<T>(scope: AuditScope, fn: () => T): T {
 
 /** The current request's scope, or undefined outside one. */
 export const currentAuditScope = (): AuditScope | undefined => auditScope.getStore();
+
+/**
+ * Audit code runs between a handler's write and its response, so it must never fail the
+ * request: run `fn`, and on an error (thrown, or a rejected promise) report it to Sentry, log
+ * one line naming only the error class, and return undefined. The write has already happened;
+ * the entry simply records less.
+ */
+export function safeAudit<T>(fn: () => Promise<T>): Promise<T | undefined>;
+export function safeAudit<T>(fn: () => T): T | undefined;
+export function safeAudit<T>(fn: () => T | Promise<T>): T | Promise<T | undefined> | undefined {
+  try {
+    const out = fn();
+    if (out && typeof (out as Promise<T>).then === 'function')
+      return (out as Promise<T>).catch((err: unknown) => reportAuditFailure(err));
+    return out;
+  } catch (err) {
+    return reportAuditFailure(err);
+  }
+}
+
+function reportAuditFailure(err: unknown, what = 'recording'): undefined {
+  try {
+    Sentry.captureException(err);
+  } catch {
+    /* reporting must not fail the request either */
+  }
+  // PII-free: the error class only — never its message (it may quote a value).
+  console.error(`audit: ${what} failed (${err instanceof Error ? err.name : typeof err})`);
+  return undefined;
+}
+
+/** What {@link auditOnlyRead} returns when its read failed: the value is unknown, not absent. */
+export const AUDIT_UNKNOWN: unique symbol = Symbol('audit-unknown');
+export type AuditUnknown = typeof AUDIT_UNKNOWN;
+
+/** True when an {@link auditOnlyRead} result is known (it may still be null: "not there"). */
+export const auditKnown = <T>(v: T | AuditUnknown): v is T => v !== AUDIT_UNKNOWN;
+
+/**
+ * A read made only for the audit trail (a record's "before", a label): it must never fail the
+ * request. On a failure it reports like {@link safeAudit} (Sentry + one PII-free line) and
+ * returns {@link AUDIT_UNKNOWN}. Callers then record the target with NO diff — never a diff
+ * from null, which would read as a create with every field newly set.
+ */
+export async function auditOnlyRead<T>(fn: () => Promise<T>): Promise<T | AuditUnknown> {
+  try {
+    return await fn();
+  } catch (err) {
+    reportAuditFailure(err, 'a read for the record');
+    return AUDIT_UNKNOWN;
+  }
+}
+
+/**
+ * True when `type`/`id` is already a target of the current request or another target still
+ * fits under the cap (always true outside a scope). A caller recording many rows (a roster
+ * commit) checks it to skip building diffs that would only be counted as truncated.
+ */
+export function auditTargetRoom(type: string, id: string): boolean {
+  const s = auditScope.getStore();
+  if (!s) return true;
+  return (
+    s.targets.length < AUDIT_CAPS.targets || s.targets.some((x) => x.type === type && x.id === id)
+  );
+}
 
 const bump = (t: AuditTruncation, k: keyof AuditTruncation, n = 1) => {
   t[k] = (t[k] ?? 0) + n;
@@ -160,25 +229,31 @@ export function auditSet(patch: {
   visibility?: AuditVisibility;
   counts?: Record<string, number>;
 }): void {
-  const s = auditScope.getStore();
-  if (!s) return;
-  if (patch.tenant && !s.pinned) s.tenant = patch.tenant;
-  if (patch.actor && !s.pinned) s.actor = patch.actor;
-  if (patch.visibility) s.visibility = patch.visibility;
-  if (patch.action) {
-    s.action = patch.action;
-    s.recorded = true;
-  }
-  if (patch.counts) {
-    s.counts = { ...(s.counts ?? {}), ...patch.counts };
-    s.recorded = true;
-  }
+  safeAudit(() => {
+    const s = auditScope.getStore();
+    if (!s) return;
+    if (patch.tenant && !s.pinned) s.tenant = patch.tenant;
+    if (patch.actor && !s.pinned) s.actor = patch.actor;
+    if (patch.visibility) s.visibility = patch.visibility;
+    if (patch.action) {
+      s.action = patch.action;
+      s.recorded = true;
+    }
+    if (patch.counts) {
+      s.counts = { ...(s.counts ?? {}), ...patch.counts };
+      s.recorded = true;
+    }
+  });
 }
 
 /**
- * Record one affected record. A repeat (same type + id) merges: label/op/clubId update, changes
- * append. Beyond 25 targets, 40 changes per target or 40 mentions the overflow is counted in
- * `truncated`. Values are capped here. No-op outside a scope.
+ * Record one affected record. A repeat (same type + id) merges: label/op/clubId/clubIds update
+ * (a new label replaces its `clubIds` too — set when given, cleared when not), changes append. Beyond 25 targets, 40 changes per target or 40 mentions the overflow is
+ * counted in `truncated`. Values are capped here. No-op outside a scope.
+ *
+ * `clubIds` is for a label that names clubs (`<home> v <away>`): the club behind each side, in
+ * label order, '' for a side with no club record (a typed opponent). Each club gets a `C#`
+ * pointer, so deleting it rewrites its side of the label ({@link redactAuditClub}).
  */
 export function auditTarget(t: {
   type: string;
@@ -186,9 +261,14 @@ export function auditTarget(t: {
   label?: string;
   op: string;
   clubId?: string;
+  clubIds?: string[];
   changes?: AuditChange[];
   mentions?: AuditMention[];
 }): void {
+  safeAudit(() => recordTarget(t));
+}
+
+function recordTarget(t: Parameters<typeof auditTarget>[0]): void {
   const s = auditScope.getStore();
   if (!s) return;
   s.recorded = true;
@@ -203,8 +283,14 @@ export function auditTarget(t: {
   }
   if (target) {
     target.op = t.op;
-    if (t.label !== undefined) target.label = capString(t.label, s.truncated);
     if (t.clubId) target.clubId = t.clubId;
+    // `clubIds` describes the label it came with: a new label sets or clears them, so the clubs
+    // of a replaced label are never kept (a club delete would rewrite the wrong side).
+    if (t.label !== undefined) {
+      target.label = capString(t.label, s.truncated);
+      if (t.clubIds?.some(Boolean)) target.clubIds = [...t.clubIds];
+      else delete target.clubIds;
+    } else if (t.clubIds?.some(Boolean)) target.clubIds = [...t.clubIds];
     for (const c of t.changes ?? []) {
       if (target.changes.length >= AUDIT_CAPS.changesPerTarget) {
         bump(s.truncated, 'changes');
@@ -222,23 +308,32 @@ export function auditTarget(t: {
  * target, or for an empty label.
  */
 export function auditLabel(type: string, id: string, label: string | undefined): void {
-  const s = auditScope.getStore();
-  const target = s?.targets.find((x) => x.type === type && x.id === id);
-  if (s && target && label?.trim()) target.label = capString(label.trim(), s.truncated);
+  safeAudit(() => {
+    const s = auditScope.getStore();
+    const target = s?.targets.find((x) => x.type === type && x.id === id);
+    if (s && target && label?.trim()) {
+      target.label = capString(label.trim(), s.truncated);
+      // The label's sides changed, so any per-side club ids no longer describe it.
+      delete target.clubIds;
+    }
+  });
 }
 
 /** Record a mention without a target (e.g. the other side of a merge). No-op outside a scope. */
 export function auditMention(m: AuditMention): void {
-  const s = auditScope.getStore();
-  if (!s) return;
-  s.recorded = true;
-  addMention(s, m);
+  safeAudit(() => {
+    const s = auditScope.getStore();
+    if (!s) return;
+    s.recorded = true;
+    addMention(s, m);
+  });
 }
 
 function addMention(s: AuditScope, m: AuditMention): void {
   const existing = s.mentions.find((x) => x.type === m.type && x.id === m.id);
   if (existing) {
     if (m.label !== undefined) existing.label = capString(m.label, s.truncated);
+    if (m.clubId) existing.clubId = m.clubId;
     return;
   }
   if (s.mentions.length >= AUDIT_CAPS.mentions) {
@@ -249,7 +344,16 @@ function addMention(s: AuditScope, m: AuditMention): void {
     type: m.type,
     id: m.id,
     ...(m.label !== undefined ? { label: capString(m.label, s.truncated) } : {}),
+    ...(m.clubId ? { clubId: m.clubId } : {}),
   });
+}
+
+/**
+ * Run `fn` outside any audit scope: every helper inside it is a no-op, so nothing it writes is
+ * attributed to the current request (e.g. the Match Centre sync an admin triggers).
+ */
+export function runUnaudited<T>(fn: () => T): T {
+  return auditScope.exit(fn);
 }
 
 // ── Values, masking, diffs ──
@@ -272,11 +376,7 @@ const safeJson = (v: unknown): string => {
  * A JSON-safe, capped copy of `v`: strings ≤ 200 chars, top-level arrays ≤ 20 items (nested
  * arrays and objects become JSON text, itself capped). undefined stays undefined.
  */
-export function capValue(
-  v: unknown,
-  t: AuditTruncation = {},
-  nested = false,
-): AuditValue | undefined {
+function capValue(v: unknown, t: AuditTruncation = {}, nested = false): AuditValue | undefined {
   if (v === undefined) return undefined;
   if (v === null) return null;
   if (typeof v === 'boolean') return v;
@@ -353,8 +453,8 @@ const DEFAULT_IGNORE: ReadonlySet<string> = new Set([
   'updatedAt',
 ]);
 
-/** JSON with sorted object keys, so key order never reads as a change. */
-function stable(v: unknown): string {
+/** JSON with sorted object keys, so key order never reads as a change (bigint-safe). */
+export function stable(v: unknown): string {
   if (v === undefined) return 'undefined';
   if (v === null || typeof v !== 'object') return safeJson(v);
   if (Array.isArray(v)) return `[${v.map(stable).join(',')}]`;
@@ -459,14 +559,16 @@ const refKey = (type: string, id: string) => `${type}\u0000${id}`;
 const byteLength = (v: unknown) => new TextEncoder().encode(JSON.stringify(v)).length;
 
 /** TTL for an entry recorded at `at` (epoch seconds). */
-export const auditExpiresAt = (at: string) =>
+const auditExpiresAt = (at: string) =>
   Math.floor(Date.parse(at) / 1000) + AUDIT_RETENTION_DAYS * 86_400;
 
 /**
  * Turn a scope into the rows of ONE entry. Pure (no I/O). Enforces every cap, including the
- * 100-row budget: targets (and their clubs) always fit (≤ 25 + 25); mentions, then change refs,
- * take what is left, and an item whose pointer does not fit is dropped (a mention) or loses its
- * values (a change) — never stored without its pointer.
+ * 100-row budget: targets (and their own clubs) always fit (≤ 25 + 25); the clubs a target's
+ * label names (`clubIds`), then mentions, then change refs, take what is left — one `C#` row
+ * per distinct club per entry, however many targets name it. An item whose pointer does not
+ * fit loses its label (a target), is dropped (a mention) or loses its values (a change) —
+ * never stored without its pointer.
  */
 export function buildEntry(scope: AuditScope, req: AuditRequestInfo): AuditRowSet {
   const truncated: AuditTruncation = { ...scope.truncated };
@@ -523,14 +625,27 @@ export function buildEntry(scope: AuditScope, req: AuditRequestInfo): AuditRowSe
   }));
   for (const t of targets) take([t], clubsOf(t));
 
-  // 2. Mentions.
+  // 2. The clubs each target's label names.
+  for (const t of targets) {
+    const named = (t.clubIds ?? []).filter(Boolean);
+    if (!named.length) {
+      delete t.clubIds;
+      continue;
+    }
+    if (take([], named)) continue;
+    delete t.label;
+    delete t.clubIds;
+    bump(truncated, 'rows');
+  }
+
+  // 3. Mentions.
   const mentions: AuditMention[] = [];
   for (const m of scope.mentions.slice(0, AUDIT_CAPS.mentions)) {
     if (take([m], clubsOf(m))) mentions.push({ ...m });
     else bump(truncated, 'rows');
   }
 
-  // 3. Change refs.
+  // 4. Change refs.
   for (const t of targets) {
     for (const c of t.changes) {
       const refs = [c.ref, c.fromRef].filter((r): r is AuditRef => !!r);
@@ -544,7 +659,7 @@ export function buildEntry(scope: AuditScope, req: AuditRequestInfo): AuditRowSe
     }
   }
 
-  // 4. Detail, within its byte budget (drop trailing changes until it fits).
+  // 5. Detail, within its byte budget (drop trailing changes until it fits).
   let detail: AuditDetail | null = null;
   const withChanges = targets.filter((t) => t.changes.length > 0);
   if (withChanges.length || mentions.length) {
@@ -565,8 +680,9 @@ export function buildEntry(scope: AuditScope, req: AuditRequestInfo): AuditRowSe
     detail.targets = detail.targets.filter((t) => t.changes.length > 0);
     if (!detail.targets.length && !detail.mentions.length) detail = null;
   }
-  const changeCountOf = (t: { type: string; id: string }) =>
-    detail?.targets.find((d) => d.type === t.type && d.id === t.id)?.changes.length ?? 0;
+  // A target's changes ARE its detail changes (same array, trimmed above), so count them
+  // directly: joining by type + id would collide on ids an erasure blanked.
+  const changeCountOf = (t: { changes: AuditChange[] }) => (detail ? t.changes.length : 0);
 
   const heads: AuditTargetHead[] = targets.map((t) => ({
     type: t.type,
@@ -574,6 +690,7 @@ export function buildEntry(scope: AuditScope, req: AuditRequestInfo): AuditRowSe
     ...(t.label !== undefined ? { label: t.label } : {}),
     op: t.op,
     ...(t.clubId ? { clubId: t.clubId } : {}),
+    ...(t.clubIds ? { clubIds: t.clubIds } : {}),
     changeCount: changeCountOf(t),
     ...(t.scrubbed ? { scrubbed: true as const } : {}),
   }));
@@ -755,10 +872,46 @@ function scrubAuditWhere(
 }
 
 /**
+ * The headline target each detail target belongs to, by position: the detail lists the targets
+ * that recorded changes, in headline order, so the k-th detail target is the k-th headline
+ * target with a `changeCount`. Unlike a type + id join this survives an erasure that blanked
+ * several ids of one type. A position whose type or id disagrees (an entry shaped otherwise)
+ * falls back to the first headline target with that type and id.
+ */
+export function auditDetailHeads(
+  heads: readonly AuditTargetHead[],
+  details: ReadonlyArray<{ type: string; id: string }>,
+): Array<AuditTargetHead | undefined> {
+  const withChanges = heads.filter((h) => (h.changeCount ?? 0) > 0);
+  return details.map((d, k) => {
+    const h = withChanges[k];
+    if (h && h.type === d.type && h.id === d.id) return h;
+    return heads.find((x) => x.type === d.type && x.id === d.id);
+  });
+}
+
+/** What a deleted club's side of a match label, or of a two-club change, reads as. */
+const REMOVED_CLUB_LABEL = 'Removed club';
+
+/**
+ * A `<a> v <b>` label with the deleted club's side replaced, or undefined when the label does
+ * not split into exactly one part per `clubIds` entry (it cannot be rewritten safely: drop it).
+ */
+function relabelWithout(label: string, clubIds: readonly string[], clubId: string) {
+  const parts = label.split(' v ');
+  if (parts.length !== clubIds.length) return undefined;
+  return parts.map((p, i) => (clubIds[i] === clubId ? REMOVED_CLUB_LABEL : p)).join(' v ');
+}
+
+/**
  * Redact a deleted club's side of an entry (assumption 5): targets OF that club (their `clubId`,
- * or the club itself) lose label and values; club mentions read `placeholder`; changes naming
- * the club lose their values. Targets of any other club are untouched, so a two-club entry keeps
- * the surviving side.
+ * or the club itself) lose label and values; another target whose label names it (`clubIds`, a
+ * match label) has that side rewritten to "Removed club" (or loses a label that cannot be split
+ * safely); club mentions — and mentions of records that were that club's (a player mention's
+ * `clubId`) — read `placeholder`; changes naming the club lose their values, except that a
+ * change naming two different clubs, one per side (`fromRef` names `from`, `ref` names `to`),
+ * only has the deleted club's side replaced. Everything naming any other club is untouched, so
+ * a two-club entry keeps the surviving side.
  */
 export function redactAuditClub(
   entry: AuditEntry,
@@ -766,33 +919,43 @@ export function redactAuditClub(
   clubId: string,
   opts: { placeholder: string },
 ): ScrubResult {
-  const ofClub = (t: AuditTargetHead) =>
-    t.clubId === clubId || (t.type === 'club' && t.id === clubId);
-  const matched = new Set(entry.targets.filter(ofClub).map((t) => refKey(t.type, t.id)));
+  const ofClub = (t: AuditTargetHead | undefined) =>
+    !!t && (t.clubId === clubId || (t.type === 'club' && t.id === clubId));
+  const heads = detail ? auditDetailHeads(entry.targets, detail.targets) : [];
   const isClub = (r: AuditRef | undefined) => !!r && r.type === 'club' && r.id === clubId;
+  const fixChange = (c: AuditChange, inTarget: boolean): AuditChange => {
+    const toHit = isClub(c.ref);
+    const fromHit = isClub(c.fromRef);
+    if (!inTarget && !toHit && !fromHit) return c;
+    if (!inTarget && !c.masked && c.fromRef && toHit !== fromHit) {
+      const out = { ...c };
+      if (toHit && out.to !== undefined) out.to = REMOVED_CLUB_LABEL;
+      if (fromHit && out.from !== undefined) out.from = REMOVED_CLUB_LABEL;
+      return out;
+    }
+    return c.masked ? { ...c, scrubbed: true as const } : stripValues(c);
+  };
   const nextEntry: AuditEntry = {
     ...entry,
     targets: entry.targets.map((t) => {
-      if (!ofClub(t)) return t;
-      const { label: _l, ...rest } = t;
-      return { ...rest, scrubbed: true as const };
+      if (ofClub(t)) {
+        const { label: _l, ...rest } = t;
+        return { ...rest, scrubbed: true as const };
+      }
+      if (!t.label || !t.clubIds?.includes(clubId)) return t;
+      const { label, ...rest } = t;
+      const next = relabelWithout(label, t.clubIds, clubId);
+      return next === undefined ? rest : { ...rest, label: next };
     }),
   };
   const nextDetail: AuditDetail | null = detail && {
-    targets: detail.targets.map((t) => {
-      const inTarget = matched.has(refKey(t.type, t.id));
-      return {
-        ...t,
-        changes: t.changes.map((c) =>
-          inTarget || isClub(c.ref) || isClub(c.fromRef)
-            ? c.masked
-              ? { ...c, scrubbed: true as const }
-              : stripValues(c)
-            : c,
-        ),
-      };
+    targets: detail.targets.map((t, i) => {
+      const inTarget = ofClub(heads[i]);
+      return { ...t, changes: t.changes.map((c) => fixChange(c, inTarget)) };
     }),
-    mentions: detail.mentions.map((m) => (isClub(m) ? { ...m, label: opts.placeholder } : m)),
+    mentions: detail.mentions.map((m) =>
+      isClub(m) || m.clubId === clubId ? { ...m, label: opts.placeholder } : m,
+    ),
   };
   return {
     entry: nextEntry,

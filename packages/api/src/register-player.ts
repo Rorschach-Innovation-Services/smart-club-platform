@@ -36,6 +36,7 @@ import type {
   DirectoryClub,
   PlayerClearance,
   PlayerRegistration,
+  RegistrationReview,
   TenantConfig,
 } from './types.js';
 
@@ -203,7 +204,13 @@ export interface RegisterPlayerOptions {
  */
 export type RegisterPlayerOutcome =
   | { outcome: 'created'; player: PlayerRegistration }
-  | { outcome: 'review-opened'; player: PlayerRegistration; reviewId: string }
+  | {
+      outcome: 'review-opened';
+      player: PlayerRegistration;
+      reviewId: string;
+      /** The review as written (the audit trail records it; never part of a response). */
+      review: RegistrationReview;
+    }
   | { outcome: 'clearance-opened'; player: PlayerRegistration; clearance: PlayerClearance }
   | { outcome: 'duplicate'; player: PlayerRegistration }
   | { outcome: 'clearance-already-open'; player: PlayerRegistration }
@@ -454,23 +461,24 @@ export async function registerPlayerForClub(
   if (hasModule(tenantConfig, 'clearances') && !lastClubId && typed && typed !== '—') {
     const reviewId = randomUUID();
     const link = opts.linkClub ?? { id: destClub.id, name: destClub.name };
+    const review: RegistrationReview = {
+      id: reviewId,
+      kind: 'off-system-alert',
+      playerNaturalKey: player.naturalKey,
+      playerName: `${player.firstName} ${player.lastName}`,
+      idNumber: player.idNumber,
+      destClubId: destClub.id,
+      destClubName: destClub.name,
+      linkClubId: link.id,
+      linkClubName: link.name,
+      typedPreviousClub: typed,
+      createdAt: now(),
+      status: 'open',
+      version: 0,
+    };
     try {
-      await repo.createRegistrationReview(tenant, {
-        id: reviewId,
-        kind: 'off-system-alert',
-        playerNaturalKey: player.naturalKey,
-        playerName: `${player.firstName} ${player.lastName}`,
-        idNumber: player.idNumber,
-        destClubId: destClub.id,
-        destClubName: destClub.name,
-        linkClubId: link.id,
-        linkClubName: link.name,
-        typedPreviousClub: typed,
-        createdAt: now(),
-        status: 'open',
-        version: 0,
-      });
-      return { outcome: 'review-opened', player, reviewId };
+      await repo.createRegistrationReview(tenant, review);
+      return { outcome: 'review-opened', player, reviewId, review };
     } catch (err) {
       console.warn('failed to create off-system registration alert', err);
     }

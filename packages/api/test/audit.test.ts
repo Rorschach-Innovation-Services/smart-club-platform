@@ -103,6 +103,27 @@ describe('request scope', () => {
       ['a', 'b'],
     );
   });
+
+  test('a new label without clubIds clears the clubIds of the label it replaces', async () => {
+    const { scope } = await scoped(() => {
+      auditTarget({
+        type: 'fixture',
+        id: 's1#sf',
+        label: 'Home CC v Away CC',
+        clubIds: ['c-home', 'c-away'],
+        op: 'update',
+      });
+      // A later call that only adds changes keeps the label and its clubs.
+      auditTarget({ type: 'fixture', id: 's1#sf', op: 'update', changes: [{ field: 'a', to: 1 }] });
+      assert.deepEqual(currentAuditScope()!.targets[0].clubIds, ['c-home', 'c-away']);
+      auditTarget({ type: 'fixture', id: 's1#sf', label: 'Winner SF1 v Winner SF2', op: 'update' });
+    });
+    assert.equal(scope.targets[0].label, 'Winner SF1 v Winner SF2');
+    assert.equal(scope.targets[0].clubIds, undefined, 'stale clubIds kept');
+    const { entry, rows } = buildEntry(scope, { status: 200 });
+    assert.equal(entry.targets[0].clubIds, undefined);
+    assert.ok(!rows.some((r) => r.sk.includes('c-home')), 'a C# pointer for a club not named');
+  });
 });
 
 describe('diffFields', () => {
@@ -487,6 +508,43 @@ describe('review fixes', () => {
     assert.ok(!text.includes('Sipho') && !text.includes('nk-1'), text);
     assert.ok(text.includes('Alpha 1st XI'), 'another record keeps its label');
     assert.ok(!set.rows.some((r) => r.sk.startsWith('E#player#')), 'no pointer for a blank id');
+  });
+
+  test('three blanked player targets keep their own change counts, and a club delete strips only its own', async () => {
+    const { scope } = await scoped(() => {
+      for (const [i, clubId] of ['c-del', 'c-keep', 'c-keep'].entries())
+        auditTarget({
+          type: 'player',
+          id: `nk-${i}`,
+          clubId,
+          op: 'update',
+          changes: Array.from({ length: i + 1 }, (_, k) => ({ field: `f${k}`, to: `v${i}${k}` })),
+        });
+    });
+    redactScopeFor(scope, 'player', { blankIds: true });
+    const { entry, detail } = buildEntry(scope, { status: 200 });
+    assert.deepEqual(
+      entry.targets.map((t) => [t.id, t.changeCount]),
+      [
+        ['', 1],
+        ['', 2],
+        ['', 3],
+      ],
+    );
+    // Values back in place (as an entry whose ids an earlier club delete blanked would hold).
+    const stored: AuditDetail = {
+      mentions: [],
+      targets: detail!.targets.map((t, i) => ({
+        ...t,
+        changes: t.changes.map((c, k) => ({ field: c.field, to: `v${i}${k}` })),
+      })),
+    };
+    const out = redactAuditClub(entry, stored, 'c-del', { placeholder: '[removed]' });
+    assert.deepEqual(
+      out.detail!.targets.map((t) => t.changes.map((c) => c.to ?? null)),
+      [[null], ['v10', 'v11'], ['v20', 'v21', 'v22']],
+      'only the deleted club’s player loses its values',
+    );
   });
 
   test('headlineOnly keeps who/when/what and nothing naming a record', async () => {

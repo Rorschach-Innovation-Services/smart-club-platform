@@ -5300,7 +5300,12 @@ export async function acceptVeteransRequest(
   primaryClubId: string,
   id: string,
   opts: { at: string; by: string; via: 'portal' | 'admin'; expectedVersion?: number },
-): Promise<{ request: VeteransRequest; player: PlayerRegistration }> {
+): Promise<{
+  request: VeteransRequest;
+  player: PlayerRegistration;
+  /** The request and the player row as read before the accept (the audit trail's "before"). */
+  previous: { request: VeteransRequest; player: PlayerRegistration };
+}> {
   const current = await getVeteransRequest(tenant, primaryClubId, id);
   if (!current) throw new VeteransRequestNotFoundError();
   if (current.status !== 'pending') {
@@ -5365,7 +5370,7 @@ export async function acceptVeteransRequest(
     }
     throw err;
   }
-  return { request, player: updatedPlayer };
+  return { request, player: updatedPlayer, previous: { request: current, player } };
 }
 
 /**
@@ -9524,6 +9529,73 @@ export async function clearCohort(tenant: string): Promise<number> {
 }
 
 /**
+ * A club delete stopped before anything irreversible because its audit erasure could not finish
+ * (a player-existence read stayed unprocessed, or the scrub ran past its time budget). The club,
+ * its roster and its META still exist, so the delete can simply be retried; the work already done
+ * is idempotent and is not redone (dropped pointers are not found again). The message is
+ * PII-free (counts only).
+ */
+export class AuditErasureIncompleteError extends Error {
+  constructor(message: string) {
+    super(`${message}; nothing irreversible was deleted, retry the delete`);
+    this.name = 'AuditErasureIncompleteError';
+  }
+}
+
+/**
+ * Time a club delete may spend on its player audit scrub before it stops and asks for a retry
+ * (the Lambda allows 30 s and the irreversible deletes still have to run after it).
+ */
+const CLUB_AUDIT_SCRUB_BUDGET_MS = 15_000;
+
+/**
+ * Of `naturalKeys` (players on `clubId`'s roster), those with NO player row at any other club of
+ * the tenant. One BatchGet per 100 (club, player) keys with a key-only projection, a few in
+ * flight — point reads by primary key, never a scan. A key whose read stays unprocessed after
+ * the retries throws {@link AuditErasureIncompleteError}: guessing "exists elsewhere" would let
+ * the delete finish with that player's name and natural key left in earlier-club entries, and
+ * once the roster is gone nothing could find them again.
+ */
+async function playersOnlyAt(
+  tenant: string,
+  clubId: string,
+  naturalKeys: string[],
+): Promise<string[]> {
+  const nks = [...new Set(naturalKeys.filter(Boolean))];
+  if (!nks.length) return [];
+  const others = (await listClubs(tenant)).filter((c) => c.id !== clubId).map((c) => c.id);
+  const elsewhere = new Set<string>();
+  const probe = others.flatMap((cid) => nks.map((nk) => playerKey(tenant, cid, nk)));
+  const chunks: Array<typeof probe> = [];
+  for (let i = 0; i < probe.length; i += 100) chunks.push(probe.slice(i, i + 100));
+  const nkOf = (sk: unknown) => String(sk).slice('PLAYER#'.length);
+  let unprocessed = 0;
+  await runBounded(
+    chunks.map((chunk) => async () => {
+      let batch = chunk;
+      for (let attempt = 0; batch.length && attempt <= BATCH_DELETE_RETRIES; attempt++) {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, 100 * attempt));
+        const res = await ddb.send(
+          new BatchGetCommand({
+            RequestItems: { [TABLE]: { Keys: batch, ProjectionExpression: 'pk, sk' } },
+          }),
+        );
+        for (const item of res.Responses?.[TABLE] ?? []) elsewhere.add(nkOf(item.sk));
+        batch = (res.UnprocessedKeys?.[TABLE]?.Keys ?? []) as typeof batch;
+      }
+      unprocessed += batch.length;
+    }),
+    AUDIT_POINTER_CONCURRENCY,
+  );
+  // PII-free: a count only. The route's onError reports it (Sentry + one log line) as a 500.
+  if (unprocessed)
+    throw new AuditErasureIncompleteError(
+      `club delete: ${unprocessed} player existence keys stayed unprocessed after retries`,
+    );
+  return nks.filter((nk) => !elsewhere.has(nk));
+}
+
+/**
  * Erase ONE club's data (admin club deletion — junk/abandoned signups, POPIA
  * "right to erasure" for the club's players). The caller passes the already-read
  * club so this never re-reads or guesses; user memberships are the ROUTE's job
@@ -9547,6 +9619,8 @@ export async function clearCohort(tenant: string): Promise<number> {
 export async function eraseClubData(
   tenant: string,
   club: Club,
+  /** Tests: the clock the audit scrubs read months by, and the scrub's time budget. */
+  opts: { now?: Date; auditScrubBudgetMs?: number } = {},
 ): Promise<{ players: number; clearances: number; series: number; seriesFailed: number }> {
   // Revoke the reg-link token FIRST so the public registration route dies before the
   // cascade runs (same order eraseTenantData uses for the club-signup token).
@@ -9721,6 +9795,31 @@ export async function eraseClubData(
   const clubDocRequests = (await listDocRequests(tenant)).filter((r) => r.clubId === club.id);
   keys.push(...(await docRequestErasureKeys(tenant, clubDocRequests)));
 
+  // Audit trail: a player on this roster with no row at any other club is about to exist
+  // nowhere, yet entries written while they were at an earlier club still name them (those sit
+  // under that club's C# pointers, which the club scrub below never reads). Through their own
+  // E# pointers, strip their names and values AND their natural key (derived from the ID
+  // number): ids blanked, pointers dropped — as erasePlayerData does, since no record of them
+  // remains to hold it. A player still registered elsewhere keeps their pointers, id and the
+  // entries of other clubs (entries recorded AT this club lose their names in the club scrub
+  // below). Before the batchDelete, so a re-delete (which re-lists this roster) re-runs it: an
+  // unprocessed existence read or a scrub past its time budget throws
+  // AuditErasureIncompleteError here, before anything irreversible, and the retry converges
+  // (players already done have no pointers left to find).
+  const deadline = Date.now() + (opts.auditScrubBudgetMs ?? CLUB_AUDIT_SCRUB_BUDGET_MS);
+  const gone = await playersOnlyAt(
+    tenant,
+    club.id,
+    players.map((p) => p.naturalKey),
+  );
+  if (gone.length)
+    await scrubAuditForEntity(tenant, 'player', gone, {
+      placeholder: ERASED_NAME,
+      dropPointers: true,
+      deadline,
+      ...(opts.now ? { now: opts.now } : {}),
+    });
+
   await batchDelete(uniqueKeys(keys));
   // S3 purge BEFORE the META delete: the objectKeys are only derivable while the
   // club/player records exist, so a crash after META landed would strand the doc
@@ -9774,7 +9873,10 @@ export async function eraseClubData(
 
   // Audit trail: redact this club's side of every entry concerning it (its C# pointers); a
   // surviving club's side stays. Before META, so a re-delete re-runs it.
-  await scrubAuditForClub(tenant, club.id, { placeholder: ERASED_NAME });
+  await scrubAuditForClub(tenant, club.id, {
+    placeholder: ERASED_NAME,
+    ...(opts.now ? { now: opts.now } : {}),
+  });
 
   // META last, and only after everything else succeeded (see doc): the META item is
   // the re-deletability anchor — while it exists, the delete can always be retried.
@@ -11771,6 +11873,15 @@ async function batchGetAuditRows(
 
 /** Concurrent conditional rewrites per scrub (bounded: one Lambda, one table). */
 const AUDIT_REWRITE_CONCURRENCY = 16;
+/** Concurrent existence BatchGets when a club delete checks its roster against other clubs. */
+const AUDIT_POINTER_CONCURRENCY = 8;
+/**
+ * Concurrent pointer Queries per scrub, shared across every (record, month) pair it reads, so
+ * the cost of a many-player scrub over two years of month partitions stays bounded.
+ */
+const AUDIT_QUERY_CONCURRENCY = 32;
+/** Records whose pointers one scrub step reads, rewrites and drops before the next step. */
+const AUDIT_SCRUB_STEP = 25;
 
 /** Run `jobs` with at most `n` in flight; the first failure rejects (the rest still settle). */
 async function runBounded(jobs: Array<() => Promise<void>>, n: number): Promise<void> {
@@ -11980,24 +12091,33 @@ export async function listAuditKeys(
   return keys;
 }
 
-/** Every pointer row with one sk prefix, across all live month partitions. */
-async function auditPointersWithPrefix(
+/**
+ * Every pointer row under any of `prefixes`, across all live month partitions: one Query per
+ * (prefix, month), {@link AUDIT_QUERY_CONCURRENCY} in flight.
+ */
+async function auditPointersWithPrefixes(
   tenant: string,
-  prefix: string,
+  prefixes: readonly string[],
   now: Date,
 ): Promise<Record<string, unknown>[]> {
+  const months = auditMonths(now);
   const out: Record<string, unknown>[] = [];
-  for (const m of auditMonths(now)) {
-    out.push(
-      ...(await queryAll({
-        TableName: TABLE,
-        KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
-        ExpressionAttributeValues: { ':p': auditPartitionPk(tenant, m), ':s': prefix },
-        ProjectionExpression: 'pk, sk, entryId, #at',
-        ExpressionAttributeNames: { '#at': 'at' },
-      })),
-    );
-  }
+  await runBounded(
+    prefixes.flatMap((prefix) =>
+      months.map((m) => async () => {
+        out.push(
+          ...(await queryAll({
+            TableName: TABLE,
+            KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+            ExpressionAttributeValues: { ':p': auditPartitionPk(tenant, m), ':s': prefix },
+            ProjectionExpression: 'pk, sk, entryId, #at',
+            ExpressionAttributeNames: { '#at': 'at' },
+          })),
+        );
+      }),
+    ),
+    AUDIT_QUERY_CONCURRENCY,
+  );
   return out;
 }
 
@@ -12097,7 +12217,7 @@ export async function scrubAuditForEntity(
   tenant: string,
   type: string,
   ids: Iterable<string>,
-  opts: { placeholder: string; dropPointers?: boolean; now?: Date },
+  opts: { placeholder: string; dropPointers?: boolean; now?: Date; deadline?: number },
 ): Promise<number> {
   return (await scrubAuditForEntityCounted(tenant, type, ids, opts)).changed;
 }
@@ -12106,30 +12226,46 @@ export async function scrubAuditForEntity(
  * {@link scrubAuditForEntity} with its counts: `entries` the pointers named (and that still
  * exist), `changed` the entries rewritten, `pointers` the pointer rows found (dropped with
  * `dropPointers`).
+ *
+ * Records are done {@link AUDIT_SCRUB_STEP} at a time — pointers read, entries rewritten,
+ * pointers dropped — so work finished before a failure is not repeated by a re-run. With a
+ * `deadline` (epoch ms) a step that would start after it throws
+ * {@link AuditErasureIncompleteError} instead; the first step always runs, so every re-run
+ * makes progress.
  */
 async function scrubAuditForEntityCounted(
   tenant: string,
   type: string,
   ids: Iterable<string>,
-  opts: { placeholder: string; dropPointers?: boolean; now?: Date },
+  opts: { placeholder: string; dropPointers?: boolean; now?: Date; deadline?: number },
 ): Promise<{ entries: number; changed: number; pointers: number }> {
-  const idSet = new Set([...ids].filter(Boolean));
-  if (!idSet.size) return { entries: 0, changed: 0, pointers: 0 };
+  const all = [...new Set([...ids].filter(Boolean))];
+  const total = { entries: 0, changed: 0, pointers: 0 };
   const now = opts.now ?? new Date();
-  const pointers: Record<string, unknown>[] = [];
-  for (const id of idSet)
-    pointers.push(
-      ...(await auditPointersWithPrefix(tenant, auditEntityPointerPrefix(type, id), now)),
+  for (let i = 0; i < all.length; i += AUDIT_SCRUB_STEP) {
+    if (i > 0 && opts.deadline !== undefined && Date.now() > opts.deadline)
+      throw new AuditErasureIncompleteError(
+        `audit scrub: ${all.length - i} of ${all.length} records left after the time budget`,
+      );
+    const idSet = new Set(all.slice(i, i + AUDIT_SCRUB_STEP));
+    const pointers = await auditPointersWithPrefixes(
+      tenant,
+      [...idSet].map((id) => auditEntityPointerPrefix(type, id)),
+      now,
     );
-  const { entries, changed } = await rewriteAuditEntries(tenant, pointers, (entry, detail) =>
-    scrubAuditEntity(entry, detail, type, idSet, {
-      placeholder: opts.placeholder,
-      blankIds: opts.dropPointers === true,
-    }),
-  );
-  if (opts.dropPointers && pointers.length)
-    await batchDelete(pointers.map((p) => ({ pk: p.pk as string, sk: p.sk as string })));
-  return { entries, changed, pointers: pointers.length };
+    const { entries, changed } = await rewriteAuditEntries(tenant, pointers, (entry, detail) =>
+      scrubAuditEntity(entry, detail, type, idSet, {
+        placeholder: opts.placeholder,
+        blankIds: opts.dropPointers === true,
+      }),
+    );
+    if (opts.dropPointers && pointers.length)
+      await batchDelete(pointers.map((p) => ({ pk: p.pk as string, sk: p.sk as string })));
+    total.entries += entries;
+    total.changed += changed;
+    total.pointers += pointers.length;
+  }
+  return total;
 }
 
 /**
@@ -12143,9 +12279,9 @@ export async function scrubAuditForClub(
   clubId: string,
   opts: { placeholder: string; now?: Date },
 ): Promise<number> {
-  const pointers = await auditPointersWithPrefix(
+  const pointers = await auditPointersWithPrefixes(
     tenant,
-    auditClubPointerPrefix(clubId),
+    [auditClubPointerPrefix(clubId)],
     opts.now ?? new Date(),
   );
   const { changed } = await rewriteAuditEntries(tenant, pointers, (entry, detail) =>

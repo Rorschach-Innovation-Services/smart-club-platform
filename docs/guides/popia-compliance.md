@@ -212,6 +212,10 @@ erased record to finish an interrupted erase.
 Define a retention period per season and schedule deletion of stale player registrations.
 Not automated in v1 — flagged as an operational follow-up.
 
+**Audit trail:** every audit row (headline, detail and pointers) expires **2 years (730 days)**
+after the change it records, through DynamoDB TTL; reads hide expired rows before TTL
+deletes them. Erasing a union deletes all of its audit rows at once.
+
 ### Retired document types
 
 When a compliance document type is removed from `REQUIRED_DOCS`, already-uploaded PDFs
@@ -234,6 +238,73 @@ the union office if reports were already circulated.
 
 ## Auditability
 
-Affiliation changes record `changedBy`/`changedAt`, and self-registered clubs carry
-`onboardedVia`/`signupConsentAt`. Consider extending
-audit coverage (who viewed/exported personal data) before onboarding paying unions at scale.
+The platform keeps an audit trail of every change a person makes through the API (ADR 0023;
+contract: `docs/api/audit.md`). Affiliation changes also record `changedBy`/`changedAt`, and
+self-registered clubs carry `onboardedVia`/`signupConsentAt`.
+
+**What is recorded.** One entry per change: who (the signed-in person by account, or the public
+link and the opaque id of the person it was sent to), when, the action, the records it touched
+and — for every area — the fields that changed, old → new: officials, team & access, union
+settings, clubs and club documents, players and registration, clearances, series and fixtures,
+competitions, seasons, venues, postponements, captain's reports, squads and team captains,
+document requests, Match Centre console decisions and the operator portal's imports. Link
+copies and message sends a person triggers are recorded with send counts.
+
+**What is masked** (recorded as "changed", never the value): ID and passport numbers, dates of
+birth, addresses (a player's, a club ground's, a venue's; a club's named sides are recorded by
+name only), emergency and guardian contacts, a player's contacts and demographics, club
+committee members' details (names, contacts, ID numbers — an entry says which office changed,
+never who holds it; term dates are kept), document keys, file names and metadata, and all free
+text — notes, reasons, comments, report remarks, scorecard feedback, a captain's name typed
+into a report, a free-text umpire's name and squad guest names. A setting's value is masked
+when its name, or a key name inside it, reads as a credential (token, secret, password, API
+key, webhook). Tokens, query strings and raw paths are never stored.
+
+**Retention.** 2 years (see Retention), then deleted by TTL.
+
+**Who can see it.** Union admins see their own union's entries (Activity, and History on each
+record). Platform operators see every union's entries, including operator-only ones (the
+operator portal's settings and imports). Club reps cannot read the trail.
+
+**What erasure removes.** Every player, umpire, scorer and club named by value carries a
+pointer, so erasure finds it without a scan (staff and the union's published contacts are the
+exceptions — see Residuals):
+
+- erasing a player strips their name and values from every entry and blanks their natural key;
+- erasing an umpire or scorer strips their name, contacts and the captain's-report ratings
+  given to them (the registry id, a name slug, stays);
+- deleting a club redacts that club's side of every entry, including the names of its players
+  mentioned in clearances, veterans requests, registration reviews and document requests, and
+  its name where other records carry it (match labels read "Removed club v …", fixture sides,
+  competition team lists); entries about a surviving club keep that side. A player on its
+  roster who is registered at no other club is erased from the trail as a player erase would
+  (name, values and natural key), including entries written at an earlier club. A player
+  still registered elsewhere keeps their natural key and the entries recorded at other clubs,
+  but entries recorded at the deleted club lose their name. A player removed from the roster
+  before the club delete keeps their natural key in entry ids and pointers until they are
+  erased (`DELETE /admin/players/:nk`, which works even when no player row is left). The
+  player scrub runs before anything is deleted; if it cannot finish (a read DynamoDB left
+  unprocessed, or it runs past about 15 seconds) the delete fails with a 500 before any
+  delete and can simply be retried. A delete that fails after the scrub leaves the club in
+  place with those players already out of the trail; retrying it completes the erasure;
+- erasing a union removes all its audit rows; clearing a cohort removes the cohort's entries
+  and strips cohort records from those that stay.
+
+**Not covered.** Changes nobody made through the API in person: scheduled jobs (reminders, the
+Match Centre sync, report and squad openings), the sync a "Sync now" starts (only who started
+it is recorded), command-line scripts and direct table edits. History before 12 November 2026
+is not reconstructed. Views and exports of personal data are not part of this trail (exports
+keep their own `EXPORT#` record).
+
+**Residuals.** Staff emails (who acted, team members' records, the operator who marked setup
+complete) stay on entries until they expire or the union is erased (owner's decision); so do
+the union's published contact details (support line, officials contact line, organisation
+phone and email). Names typed with no record behind them are stored as typed: an unlisted
+match's opponent on a captain's report or squad, and a fixture's typed venue. After a club
+delete its id (a slug of its name) stays in record ids and pointers, the operator's club
+directory in settings entries keeps club names, and a report's or squad's opponent whose
+club could not be resolved when it was recorded keeps its name. A
+forwarded captain's report or squad link names the new recipient (erasable with that player)
+but not the previous one. A survivor keeps values a merge gave it until the survivor is
+erased. The trail is an application record, not tamper-proof against someone with direct AWS
+access to the table.

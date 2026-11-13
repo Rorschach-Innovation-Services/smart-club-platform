@@ -29,8 +29,10 @@ export async function addAdminMembership(
   sub: string,
   email: string,
   tenant: string,
-): Promise<{ sub: string; adminCount: number }> {
+): Promise<{ sub: string; adminCount: number; previous?: Membership; existed: boolean }> {
   const existing = await repo.getUser(sub);
+  // What this tenant's membership was before the grant (the audit trail's "before").
+  const previous = existing?.memberships.find((m) => m.tenantId === tenant);
   const memberships = (existing?.memberships ?? []).filter((m) => m.tenantId !== tenant);
   memberships.push({ tenantId: tenant, role: 'admin', clubIds: [] });
   await repo.putUser({
@@ -44,7 +46,7 @@ export async function addAdminMembership(
   // Keep the transactional last-admin counter on CONFIG consistent. Recount (rather
   // than +1) so re-running is idempotent and repairs a drifted/absent count.
   const adminCount = await repo.recountAdmins(tenant);
-  return { sub, adminCount };
+  return { sub, adminCount, ...(previous ? { previous } : {}), existed: !!existing };
 }
 
 export async function grantTenantAdmin(
@@ -52,7 +54,7 @@ export async function grantTenantAdmin(
   userPoolId: string,
   tenant: string,
   email: string,
-): Promise<{ sub: string; adminCount: number }> {
+): Promise<{ sub: string; adminCount: number; previous?: Membership; existed: boolean }> {
   const sub = await ensurePasswordlessUser(cognito, userPoolId, email);
   return addAdminMembership(sub, email, tenant);
 }

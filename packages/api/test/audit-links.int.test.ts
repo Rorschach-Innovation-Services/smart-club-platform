@@ -557,7 +557,17 @@ describe('secrets', () => {
     const dump = JSON.stringify(await auditRows());
     assert.ok(tokens.length >= 7, `collected ${tokens.length} tokens`);
     for (const t of tokens) assert.ok(!dump.includes(t), `token ${t.slice(0, 12)}… stored`);
-    assert.ok(!dump.includes(K(1)), 'natural key stored');
+    // A natural key is never an actor (a link is keyed on its opaque member / request id). It
+    // may name the PLAYER record itself — a mention, a target or a change `ref`, as everywhere
+    // else in the trail — which is how a player erasure finds and blanks it.
+    const rows = await auditRows();
+    const actors = JSON.stringify(rows.map((r) => r.actor ?? null));
+    assert.ok(!actors.includes(K(1)), 'natural key used as an actor');
+    const outsidePlayerRefs = JSON.stringify(rows)
+      .replaceAll(`"type":"player","id":"${K(1)}"`, '')
+      .replaceAll(`"id":"${K(1)}","type":"player"`, '')
+      .replaceAll(`#player#${K(1)}#`, '');
+    assert.ok(!outsidePlayerRefs.includes(K(1)), 'natural key stored outside a player reference');
     assert.ok(!dump.includes('?t='), 'query string stored');
   });
 });

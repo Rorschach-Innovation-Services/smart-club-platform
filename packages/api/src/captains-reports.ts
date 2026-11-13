@@ -2024,6 +2024,18 @@ export async function forwardCandidates(
   report: CaptainsReport,
   secret: string,
 ): Promise<ForwardCandidate[]> {
+  return (await forwardCandidatesWithKeys(repo, tenant, report, secret)).map(
+    ({ naturalKey: _nk, ...c }) => c,
+  );
+}
+
+/** {@link forwardCandidates} plus each player's natural key — server-only, never served. */
+async function forwardCandidatesWithKeys(
+  repo: RepoModule,
+  tenant: string,
+  report: CaptainsReport,
+  secret: string,
+): Promise<Array<ForwardCandidate & { naturalKey: string }>> {
   const players = await repo.listPlayers(tenant, report.clubId);
   return players
     .filter((p) => (p.status ?? 'active') === 'active' && !p.isMinor)
@@ -2033,10 +2045,14 @@ export async function forwardCandidates(
         email: p.email?.trim() || undefined,
         cell: p.cell?.trim() || undefined,
       };
-      return { id: forwardCandidateId(secret, tenant, report.id, p.naturalKey), contact };
+      return {
+        id: forwardCandidateId(secret, tenant, report.id, p.naturalKey),
+        contact,
+        naturalKey: p.naturalKey,
+      };
     })
     .filter((c) => c.contact.name && hasContact(c.contact))
-    .map((c) => ({ id: c.id, name: c.contact.name, contact: c.contact }))
+    .map((c) => ({ id: c.id, name: c.contact.name, contact: c.contact, naturalKey: c.naturalKey }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -2053,6 +2069,8 @@ export async function forwardReport(
     report: CaptainsReport;
     candidateId: string;
     via: 'link' | 'portal';
+    /** Filled with the picked player's natural key (server-only: the audit trail's `ref`). */
+    out?: { recipientKey?: string };
   },
 ): Promise<CaptainsReport> {
   const { repo } = deps;
@@ -2067,10 +2085,11 @@ export async function forwardReport(
       'forward_limit',
     );
   const secret = (deps.linkSecret ?? captainsReportLinkSecret)();
-  const picked = (await forwardCandidates(repo, tenant, report, secret)).find(
+  const picked = (await forwardCandidatesWithKeys(repo, tenant, report, secret)).find(
     (c) => c.id === input.candidateId,
   );
   if (!picked) throw new ReportFlowError(404, 'that player cannot be sent the report');
+  if (input.out) input.out.recipientKey = picked.naturalKey;
   const [club, config] = await Promise.all([
     repo.getClub(tenant, report.clubId),
     repo.getTenantConfig(tenant),

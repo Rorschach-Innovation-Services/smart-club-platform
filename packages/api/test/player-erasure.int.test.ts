@@ -357,8 +357,9 @@ describe('full erasure across every category', () => {
       scorecardsScrubbed: 0,
       reportScorecardFeedbackScrubbed: 0,
       reportOpenMarkers: 1,
-      // The clearance's create entry mentions the person (its pointer is how it was found).
-      auditEntries: 1,
+      // The clearance's create and issue entries mention the person (their pointers are how
+      // they were found).
+      auditEntries: 2,
     });
   });
 

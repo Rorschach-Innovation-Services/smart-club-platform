@@ -117,8 +117,22 @@ All rows of a tenant's entries for a month share one partition,
   rows left, the erase still runs this scrub when pointers exist and answers 200
   (`counts.auditEntries`); only with no pointers either is it a 404.
 - Clubs (`repo.eraseClubData`): via `C#` pointers; an entry also about a surviving club keeps
-  that side. Reads are batched (BatchGet, 100 keys) and the conditional rewrites run 16 at a
-  time, inside the 30 s club delete.
+  that side. A mention may carry the club its record was on (`clubId`: a player's club when the
+  entry was written — clearances, veterans requests, registration reviews, document requests);
+  it gets its own `C#` pointer and its label goes with that club, while a player of the
+  surviving club keeps theirs. A target whose label names clubs (`<home> v <away>`: fixtures,
+  result confirmations, captain's reports, squads) carries `clubIds`, the club behind each
+  side, each with a `C#` pointer (one row per distinct club per entry); the deleted club's
+  side reads `Removed club` and a label that cannot be split is dropped. Changes naming clubs
+  carry club `ref`s (fixture `home` / `away`, competition `teams`, one per team); a change
+  naming two clubs, one per side, keeps the surviving side. Before the roster rows go, every
+  roster player with no player row at any other club (BatchGet key probes, 100 keys a call, 8
+  in flight) is erased from the trail through `scrubAuditForEntity` with `dropPointers` (names,
+  values and natural key out, pointers dropped — no record of them remains), so entries
+  written at an earlier club lose them too; re-runnable (a re-delete re-lists the roster).
+  Pointer queries run 8 at a time; reads are batched (BatchGet, 100 keys) and the conditional
+  rewrites run 16 at a time, inside the 30 s club delete (200 roster players with 500 entries:
+  about 0.5 s against local dynalite).
 - Tenants (`repo.eraseTenantData`): every month partition from launch to now.
 - Cohort clear (`repo.clearCohort`): entries about cohort records only are deleted; entries
   that stay but name a cohort record have its labels and values stripped.
@@ -130,7 +144,19 @@ All rows of a tenant's entries for a month share one partition,
 
 Fail-open. The change is already committed when the entry is written, so an audit failure
 never changes the response. On failure: `Sentry.captureException` and one `console.error`
-JSON line with the PII-free skeleton (actor key, instant, method, pattern, action).
+JSON line with the PII-free skeleton (actor key, instant, method, pattern, action). The
+capture inside handlers fails open too: `auditTarget` / `auditSet` / `auditLabel` /
+`auditMention`, the local record helpers and every call site that computes a diff run inside
+`safeAudit` (Sentry, one `console.error` line naming only the error class, then on), and
+reads made only for the trail (a "before" the write does not need) run through
+`auditOnlyRead`: a failure is reported the same way and returns an "unknown" marker, and the
+target is then recorded with no diff (never a diff from `null`, which would read as a create)
+— the entry records less, the route answers exactly as it would without the trail.
+
+Club delete is the exception where the trail can fail the request, on purpose and before
+anything irreversible: if the roster players' audit scrub cannot finish (a player-existence
+read left unprocessed, or the scrub past its ~15 s budget) the delete answers 500 with the club
+intact, and a retry finishes it without redoing what was done.
 
 ### Read API
 
@@ -152,8 +178,8 @@ falls back to the headlines, kept when the entry's actor email snapshot matches
   `TransactWriteItems` of a few rows; about 1.3 ms against local dynalite when measured).
   Bulk routes get a second, earlier write.
 - A new mutating route fails the coverage test until it has a registry decision.
-- Until Phases 2–3 add field diffs for an area, a save that changed nothing is still recorded
-  as a save, with no old/new values.
+- Phase 3 is complete: every audited area records field-level old → new values (contract:
+  `docs/api/audit.md`). A save that changes nothing is recorded with zero changes.
 - One suite that counts every item in the test table (`resolve-duplicate-players`) ignores
   `#AUDIT#` partitions; the captain's-report suites' "stored nowhere" scans include them.
 
@@ -195,8 +221,22 @@ falls back to the headlines, kept when the entry's actor email snapshot matches
   register stub and `OFFICIALERASE#`. If a record was overwritten with another person and the
   first person is later erased under a different record, their old name inside the first
   record's history is not found until that record is erased or the entry expires.
-- Deleting a club does not blank the natural keys of that club's players in the audit trail
-  (only player erasure does); a per-player scrub inside the 30 s club delete would cost one
-  query per player per month. A later `DELETE /admin/players/:nk` for such a player still
-  finds and scrubs them through their pointers.
+- Typed names with no record behind them stay as typed: an unlisted match's opponent in a
+  captain's report or squad label, and a fixture's `venueOverride`. A report's or squad's
+  opponent whose club the audit-only series read cannot resolve (a failed read, a fixture no
+  longer in the series, or a fixture whose current opponent no longer carries the name the
+  report or squad snapshotted — the opponent's club id is not stored on the record) is
+  labelled without its club and survives that club's delete.
+- A deleted club's id (a name slug) stays in record ids, `ref`s, `clubIds`, pointer keys and a
+  series' `teams` values; the operator club directory (`knownClubs`) in settings entries keeps
+  club names as values.
+- Committee members (`exco`, the club's `chair`) have no record an erasure could find them by,
+  so their details are always masked; only the term dates are values.
+- Organisation contacts in tenant settings (`support`, `officialsContactLine`,
+  `orgContact.phone` / `.email`) and the operator's `setupCompletedBy` are stored as values.
+  Credential masking checks key names (at any depth inside a value), not the text of values.
 - A self-registration through a shared link is attributed to the link, not to a named person.
+- Captain's reports and squads: a forward names the new recipient (with a `ref` to the player)
+  but not the previous one (a chair or a portal user has no player record to scrub it by);
+  a free-text umpire's name is masked until an admin attributes it to a registry umpire. The
+  link's member id appears only as the actor's `recipientId`.

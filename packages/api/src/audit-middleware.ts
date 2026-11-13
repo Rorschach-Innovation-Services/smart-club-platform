@@ -88,7 +88,7 @@ function matchedPattern(c: Context<HonoEnv>): string | undefined {
 }
 
 /** The signed-in caller, keyed on the Cognito sub. Undefined for a public request. */
-export function actorFromContext(c: Context<HonoEnv>, pattern?: string): AuditActor | undefined {
+function actorFromContext(c: Context<HonoEnv>, pattern?: string): AuditActor | undefined {
   const auth = c.get('auth');
   if (!auth?.sub) return undefined;
   const ra = c.get('requestAuth');

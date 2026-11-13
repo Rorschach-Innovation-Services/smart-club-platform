@@ -513,7 +513,7 @@ export const AUDIT_ROUTES: Record<string, AuditRouteSpec> = {
 
 export const MUTATING_METHODS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
-export const auditRouteKey = (method: string, pattern: string) => `${method} ${pattern}`;
+const auditRouteKey = (method: string, pattern: string) => `${method} ${pattern}`;
 
 export const auditRouteSpec = (method: string, pattern: string): AuditRouteSpec | undefined =>
   AUDIT_ROUTES[auditRouteKey(method, pattern)];

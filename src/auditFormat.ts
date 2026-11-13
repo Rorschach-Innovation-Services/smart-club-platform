@@ -15,7 +15,7 @@ import type { AuditActor, AuditChange, AuditEntry, AuditTargetHead, AuditValue }
 /* ─── Record types ─── */
 
 /** Singular display name per record type (the API's AUDIT_ENTITY_TYPES). */
-export const AUDIT_TYPE_LABELS: Record<string, string> = {
+const AUDIT_TYPE_LABELS: Record<string, string> = {
   club: 'Club',
   player: 'Player',
   clearance: 'Clearance',
@@ -108,7 +108,7 @@ export function auditActorDisplay(actor: AuditActor | undefined): ActorDisplay {
 /* ─── Action sentence ─── */
 
 /** Every registry action, as a short past-tense sentence without the record's name. */
-const ACTION_SENTENCES: Record<string, string> = {
+export const AUDIT_ACTION_SENTENCES: Readonly<Record<string, string>> = {
   // Public links
   'player.register': 'Registered a player',
   'official.signup': 'Registered as an official',
@@ -148,6 +148,15 @@ const ACTION_SENTENCES: Record<string, string> = {
   // Series, fixtures, competitions, seasons, venues
   'series.create': 'Added series',
   'series.patch': 'Edited series',
+  // A generic series PATCH, classified by what it did
+  'series.update': 'Edited series',
+  'series.fixtures.edit': 'Edited fixtures',
+  'series.approve': 'Approved fixtures',
+  'series.unapprove': 'Withdrew fixture approval',
+  'series.release': 'Released fixtures to clubs',
+  'series.recall': 'Recalled fixtures to draft',
+  'series.reveal': 'Revealed withheld venues or times',
+  'series.set-side': 'Set a knockout team',
   'series.delete': 'Deleted series',
   'series.duplicate': 'Duplicated series',
   'fixture-officials.set': 'Set fixture officials',
@@ -290,7 +299,12 @@ export function auditActionSentence(entry: Pick<AuditEntry, 'action' | 'targets'
     const s = linkSentence(entry);
     if (s) return s;
   }
-  const known = ACTION_SENTENCES[action];
+  // A save that submitted reads as a submission (the target's op says so).
+  if (entry.targets?.some((t) => t.op === 'submit')) {
+    if (action === 'captains-report.save') return "Submitted a captain's report";
+    if (action === 'squad-request.save') return 'Submitted a squad';
+  }
+  const known = AUDIT_ACTION_SENTENCES[action];
   if (known) return known;
   return fallbackSentence(action);
 }
@@ -312,7 +326,7 @@ export function fallbackSentence(action: string): string {
  * How long a long change's "started" headline reads as still running. A started row older
  * than this was never replaced by its final entry (e.g. the request timed out).
  */
-export const AUDIT_IN_PROGRESS_MS = 60_000;
+const AUDIT_IN_PROGRESS_MS = 60_000;
 
 /** A started entry younger than {@link AUDIT_IN_PROGRESS_MS}: the change may still be running. */
 export function auditInProgress(
@@ -333,12 +347,15 @@ export function auditOutcomeLabel(
   return null;
 }
 
-/** `{ sent: 12, failed: 1 }` → "12 sent, 1 failed"; zero counts are left out. */
+/**
+ * `{ sent: 12, failed: 1 }` → "12 sent, 1 failed"; `fixturesChanged` reads "fixtures changed";
+ * zero counts are left out.
+ */
 export function auditCountsText(counts?: Record<string, number>): string {
   if (!counts) return '';
   return Object.entries(counts)
     .filter(([, n]) => typeof n === 'number' && n > 0)
-    .map(([k, n]) => `${n} ${k.replace(/[-_]+/g, ' ')}`)
+    .map(([k, n]) => `${n} ${splitWords(k)}`)
     .join(', ');
 }
 
@@ -362,8 +379,27 @@ export function auditTargetLabel(
   return readableId(target.id);
 }
 
+/**
+ * The headline target each detail target belongs to, by position: the detail lists the targets
+ * that recorded changes, in headline order, so the k-th detail target is the k-th headline
+ * target with a `changeCount`. An erasure can blank several ids of one type, so a type + id join
+ * would give every one of them the first one's head. A position whose type or id disagrees
+ * falls back to the first head with that type and id. Mirrors the API's `auditDetailHeads`.
+ */
+export function auditDetailHeads(
+  heads: readonly AuditTargetHead[],
+  details: ReadonlyArray<{ type: string; id: string }>,
+): Array<AuditTargetHead | undefined> {
+  const withChanges = heads.filter((h) => (h.changeCount ?? 0) > 0);
+  return details.map((d, k) => {
+    const h = withChanges[k];
+    if (h && h.type === d.type && h.id === d.id) return h;
+    return heads.find((x) => x.type === d.type && x.id === d.id);
+  });
+}
+
 /** `s1#f1` → "s1 · f1"; `a.ngubane` stays; very long ids are shortened. */
-export function readableId(id: string): string {
+function readableId(id: string): string {
   const s = id.split('#').join(' · ');
   return s.length > 40 ? `${s.slice(0, 37)}…` : s;
 }
@@ -386,7 +422,7 @@ export function auditWhen(
 /* ─── Field changes ─── */
 
 /** Names the API uses for fields, as people say them. */
-const FIELD_LABELS: Record<string, string> = {
+export const AUDIT_FIELD_LABELS: Readonly<Record<string, string>> = {
   displayName: 'Name',
   fullName: 'Full name',
   firstName: 'First name',
@@ -429,14 +465,246 @@ const FIELD_LABELS: Record<string, string> = {
   support: 'Support contact',
   branding: 'Branding',
   features: 'Features',
+  // Team & access
+  note: 'Note',
+  // Tenant settings
+  title: 'Title',
+  logoUrl: 'Logo',
+  faviconUrl: 'Browser icon',
+  colors: 'Colours',
+  copy: 'Wording',
+  sport: 'Sport',
+  seasonLabel: 'Season label',
+  districts: 'Districts',
+  knownClubs: 'Club directory',
+  calendars: 'Season calendars',
+  structures: 'Competition structures',
+  requiredDocs: 'Required documents',
+  tutorials: 'Tutorial videos',
+  tutorialsNoFallback: 'No default tutorials',
+  transferWindows: 'Transfer windows',
+  fixtureReminders: 'Fixture reminders',
+  captainsReportsExcludedSeriesPrefixes: "Series excluded from captain's reports",
+  officialsContactLine: 'Officials contact line',
+  scorecardCorrectionRecipients: 'Scorecard correction recipients',
+  orgContact: 'Organisation contact',
+  clearanceCertTemplate: 'Clearance certificate layout',
+  integrations: 'Integrations',
+  competitionDefaults: 'Competition defaults',
+  setupCompletedAt: 'Setup completed',
+  setupCompletedBy: 'Setup completed by',
+  // Clubs
+  affiliation: 'Affiliation',
+  cqi: 'CQI score',
+  cqiAnswers: 'CQI answers',
+  teams: 'Teams',
+  women: "Women's teams",
+  juniors: 'Junior teams',
+  color: 'Colour',
+  teamRosters: 'Named teams',
+  coaches: 'Coaches',
+  remindersOptIn: 'Receives fixture reminders',
+  amendmentPending: 'Amendment awaiting review',
+  nameChangePending: 'Rename awaiting review',
+  previousName: 'Previous name',
+  playerRegLink: 'Player registration link',
+  ground: 'Ground',
+  secondaryVenue: 'Second venue',
+  pitchCount: 'Pitches',
+  sec: 'Secretary',
+  tre: 'Treasurer',
+  termStart: 'Term start',
+  termEnd: 'Term end',
+  // Club documents
+  docs: 'Documents',
+  docMeta: 'Document',
+  fileCount: 'Files',
+  files: 'Stored files',
+  objectKey: 'Stored file',
+  size: 'File size',
+  contentType: 'File type',
+  uploadedAt: 'Uploaded',
+  uploadedByRole: 'Uploaded by',
+  markedCompliant: 'Marked compliant',
+  courseBooked: 'Course booked',
+  courseDate: 'Course date',
+  meetingBooked: 'Meeting booked',
+  meetingDate: 'Meeting date',
+  expiry: 'Expiry',
+  expiryDate: 'Expiry date',
+  expiresAt: 'Expires',
+  unavailable: 'Declared unavailable',
+  at: 'Recorded',
+  // Players and registration
+  position: 'Position',
+  battingHand: 'Batting hand',
+  bowlingHand: 'Bowling hand',
+  battingType: 'Batting style',
+  bowlerType: 'Bowling style',
+  isAllRounder: 'All-rounder',
+  isWk: 'Wicketkeeper',
+  registeredVia: 'Registered through',
+  veteransClub: 'Veterans club',
+  isMinor: 'Minor',
+  nationality: 'Nationality',
+  gender: 'Gender',
+  race: 'Race',
+  guardianName: 'Guardian',
+  postalAddress: 'Postal address',
+  postalCode: 'Postal code',
+  lastClub: 'Previous club',
+  transferNote: 'Transfer note',
+  clearanceRejectedReason: 'Clearance rejection reason',
+  idDocMeta: 'ID document',
+  previousIdDocMeta: 'Previous ID document',
+  // Clearances, veterans requests, registration reviews
+  fromClub: 'From club',
+  toClub: 'To club',
+  origin: 'Started by',
+  feesCleared: 'Fees cleared',
+  misconductCleared: 'Misconduct cleared',
+  rejectOutcome: 'Outcome of the rejection',
+  certificateDeclined: 'No certificate',
+  certificate: 'Certificate',
+  certificateStatus: 'Certificate status',
+  rejectReason: 'Rejection reason',
+  overrideReason: 'Override reason',
+  reason: 'Reason',
+  primaryClub: "Player's club",
+  leagueKey: 'League',
+  declineReason: 'Decline reason',
+  kind: 'Kind',
+  resolution: 'Resolution',
+  destClub: 'Registering club',
+  typedPreviousClub: 'Previous club (typed)',
+  previousClub: 'Previous club',
+  // Series and fixtures
+  startDate: 'Start date',
+  endDate: 'End date',
+  dateMode: 'Date spacing',
+  activateFrom: 'Visible to clubs from',
+  seriesType: 'Format',
+  maxOvers: 'Overs',
+  schedule: 'Schedule',
+  seasonRunId: 'Season',
+  stageSpecId: 'Stage',
+  groupId: 'Group',
+  withheld: 'Withheld from clubs',
+  slot: 'Slot',
+  round: 'Round',
+  venueOverride: 'Venue (typed)',
+  venueStatus: 'Venue status',
+  originalDate: 'Original date',
+  dateTbc: 'Date to be confirmed',
+  homeScore: 'Home score',
+  awayScore: 'Away score',
+  winner: 'Winner',
+  confirmed: 'Confirmed',
+  recordedAt: 'Result recorded',
+  // Competitions
+  type: 'Type',
+  overs: 'Overs',
+  format: 'Format',
+  points: 'Points',
+  seed: 'Draw seed',
+  // Season runs
+  calendarFrozenAt: 'Calendar fixed',
+  structure: 'Structure',
+  calendar: 'Calendar',
+  stages: 'Stages',
+  groups: 'Groups',
+  pairingOverride: 'Knockout pairing',
+  staleSchedule: 'Needs regenerating',
+  formatChanged: 'Format changed',
+  carriedPoints: 'Carried points',
+  // Venues
+  suburb: 'Suburb',
+  lat: 'Latitude',
+  lon: 'Longitude',
+  homeClubIds: 'Home clubs',
+  surfaces: 'Matches a day',
+  unavailableWeekdays: 'Unavailable weekdays',
+  // Postponements
+  awaiting: 'Whose turn',
+  requestingClub: 'Asked by',
+  opposingClub: 'Other club',
+  originalTime: 'Original time',
+  proposedDate: 'Proposed date',
+  proposedTime: 'Proposed time',
+  proposedVenue: 'Proposed venue',
+  proposedBy: 'Proposed by',
+  proposals: 'Proposals',
+  agreedDate: 'Agreed date',
+  acknowledged: 'Acknowledged',
+  // Captain's reports
+  submittedVia: 'Submitted through',
+  ref: 'Report number',
+  declaration: 'Declaration',
+  scorecard: 'Scorecard answer',
+  scorecardFeedback: 'Scorecard feedback',
+  recipientKind: 'Sent to',
+  recipient: 'Recipient',
+  recipientContact: 'Recipient contact',
+  forwardCount: 'Times passed on',
+  captainName: 'Captain',
+  general: 'General comments',
+  umpire: 'Umpire',
+  substitute: 'Different umpire stood',
+  ratings: 'Ratings',
+  concerns: 'Concerns',
+  otherConcern: 'Other concern',
+  comments: 'Comments',
+  attribution: 'Matched in the register',
+  // Squads and team captains
+  selection: 'Squad',
+  players: 'Players',
+  player: 'Player',
+  guests: 'Guests',
+  captain: 'Captain',
+  voidReason: 'Cancelled because',
+  // Document requests
+  document: 'Document',
+  // Match Centre console
+  medicoach: 'Match Centre',
+  conflict: 'Held change',
+  conflictRef: 'Held change ref',
+  outbox: 'Queued update',
+  outboxRef: 'Queued update ref',
+  review: 'Player review',
+  playerId: 'Match Centre player',
+  candidatesAcknowledged: 'Candidates shown',
 };
+
+/** A captain's report umpire card: `umpires.2.ratings` → "Umpire 2 › Ratings". */
+const UMPIRE_CARD_RE = /^umpires\.(\d+)\.(\w+)$/;
+
+/** A committee field: `exco.vc.name` → "Vice chair · name" (its value is never recorded). */
+const EXCO_FIELD_RE = /^exco\.([^.]+)(?:\.(\w+))?$/;
+const EXCO_ROLE_LABELS: Record<string, string> = {
+  chair: 'Chair',
+  sec: 'Secretary',
+  tre: 'Treasurer',
+  vc: 'Vice chair',
+  additionalMembers: 'Other committee members',
+};
+
+/** "Name" → "name", "Term start" → "term start"; an acronym ("ID number") keeps its case. */
+const lowerFirst = (s: string) =>
+  /^[A-Z]{2}/.test(s) ? s : s.charAt(0).toLowerCase() + s.slice(1);
 
 /** `displayName` → "Name", `homeGround.venue` → "Home ground › Venue", `last_seen` → "Last seen". */
 export function auditFieldLabel(field: string): string {
-  if (FIELD_LABELS[field]) return FIELD_LABELS[field];
+  if (AUDIT_FIELD_LABELS[field]) return AUDIT_FIELD_LABELS[field];
+  const card = UMPIRE_CARD_RE.exec(field);
+  if (card) return `Umpire ${card[1]} › ${auditFieldLabel(card[2])}`;
+  const exco = EXCO_FIELD_RE.exec(field);
+  if (exco) {
+    const role = EXCO_ROLE_LABELS[exco[1]] ?? sentenceCase(splitWords(exco[1]));
+    return exco[2] ? `${role} · ${lowerFirst(auditFieldLabel(exco[2]))}` : role;
+  }
   return field
     .split('.')
-    .map((part) => FIELD_LABELS[part] ?? sentenceCase(splitWords(part)))
+    .map((part) => AUDIT_FIELD_LABELS[part] ?? sentenceCase(splitWords(part)))
     .join(' › ');
 }
 

@@ -58,7 +58,52 @@ import {
 } from './auth.js';
 import * as repo from './repo.js';
 import { auditMiddleware, auditStartedMiddleware } from './audit-middleware.js';
-import { auditLabel, auditSet, auditTarget, diffFields } from './audit.js';
+import {
+  auditKnown,
+  auditLabel,
+  auditMention,
+  auditOnlyRead,
+  auditSet,
+  auditTarget,
+  auditTargetRoom,
+  currentAuditScope,
+  diffFields,
+  runUnaudited,
+  safeAudit,
+  type AuditUnknown,
+} from './audit.js';
+import {
+  TENANT_CONFIG_ADMIN_FIELDS,
+  TENANT_CONFIG_OPERATOR_FIELDS,
+  captainsReportChanges,
+  clearanceChanges,
+  clubAuditView,
+  clubChanges,
+  competitionChanges,
+  competitionTeams,
+  competitionViewOfSeries,
+  fixtureChanges,
+  matchLabel,
+  membershipChanges,
+  playerChanges,
+  playerLabel,
+  postponementChanges,
+  recipientForwardChanges,
+  registrationReviewChanges,
+  seasonRunAuditView,
+  seasonRunChanges,
+  seriesChanges,
+  seriesPatchAction,
+  seriesTeamClub,
+  seriesTeamName,
+  squadRequestChanges,
+  teamCaptainChange,
+  tenantConfigChanges,
+  umpireAttributionChanges,
+  venueChanges,
+  veteransRequestChanges,
+  type CompetitionAuditView,
+} from './audit-records.js';
 import { PLATFORM_TENANT } from './types.js';
 import {
   joinFixtureResults,
@@ -304,6 +349,7 @@ import type {
   PostponementProposal,
   PostponementRequest,
   PlayerClearance,
+  SquadRequest,
   AdminClearanceView,
   CertificateMeta,
   WithheldField,
@@ -313,6 +359,7 @@ import type {
   PlayerSyncReview,
   Umpire,
   Scorer,
+  FixtureResultView,
 } from './types.js';
 import { teamIdsForClub, resolveTeam } from './teams.js';
 import { applySetSide, orphanSides, parseSetSide } from './set-side.js';
@@ -652,23 +699,169 @@ function linkActor(
 
 /** Record a person-triggered send's outcome counts on the request's audit entry. */
 function auditSendCounts(results: ReadonlyArray<{ status: string }>): void {
-  const n = (s: string) => results.filter((r) => r.status === s).length;
-  auditSet({ counts: { sent: n('sent'), failed: n('failed'), skipped: n('skipped') } });
+  safeAudit(() => {
+    const n = (s: string) => results.filter((r) => r.status === s).length;
+    auditSet({ counts: { sent: n('sent'), failed: n('failed'), skipped: n('skipped') } });
+  });
 }
 
-/** Record what a registration created: the player row, and the clearance or review it opened. */
+/**
+ * Record what a registration created: the player row (label: their name; the registered fields
+ * from nothing, identity and contacts masked — audit-records.ts), and the clearance or review it
+ * opened with its fields (each naming the player by a `player` mention, so erasure finds it).
+ */
 function auditRegistration(clubId: string, result: RegisterPlayerOutcome): void {
-  if (
-    result.outcome !== 'created' &&
-    result.outcome !== 'review-opened' &&
-    result.outcome !== 'clearance-opened'
-  )
-    return;
-  auditTarget({ type: 'player', id: result.player.naturalKey, clubId, op: 'create' });
-  if (result.outcome === 'clearance-opened')
-    auditTarget({ type: 'clearance', id: result.clearance.id, clubId, op: 'create' });
-  if (result.outcome === 'review-opened')
-    auditTarget({ type: 'registration-review', id: result.reviewId, clubId, op: 'create' });
+  safeAudit(() => {
+    if (
+      result.outcome !== 'created' &&
+      result.outcome !== 'review-opened' &&
+      result.outcome !== 'clearance-opened'
+    )
+      return;
+    auditPlayer(clubId, null, result.player, 'create');
+    if (result.outcome === 'clearance-opened')
+      auditClearance(null, result.clearance, 'create', { clubId });
+    if (result.outcome === 'review-opened')
+      auditTarget({
+        type: 'registration-review',
+        id: result.reviewId,
+        clubId,
+        op: 'create',
+        changes: registrationReviewChanges(null, result.review),
+        mentions: [playerMention(result.player.naturalKey, playerLabel(result.player), clubId)],
+      });
+  });
+}
+
+/**
+ * A `player` mention (natural key + name): puts the entry in the player's history. `clubId` is
+ * the player's club at that moment, so deleting that club strips the name (audit.redactAuditClub).
+ */
+const playerMention = (naturalKey: string, name: string | undefined, clubId: string) => ({
+  type: 'player',
+  id: naturalKey,
+  ...(name ? { label: name } : {}),
+  clubId,
+});
+
+/**
+ * The club whose roster a clearance's player sits on: the destination when a registration
+ * opened it (the row was created there) or once it resolved in the destination's favour, else
+ * the source club (a rep's request names a player still on the source roster).
+ */
+const clearancePlayerClubId = (c: PlayerClearance): string =>
+  c.origin === 'registration' || c.status === 'approved' || c.status === 'admin-override'
+    ? c.toClubId
+    : c.fromClubId;
+
+/**
+ * Record a player row as a target of its club (label: the name), with its field changes
+ * (`before` null ⇒ registered, `after` null ⇒ removed). See audit-records.ts `playerChanges`.
+ */
+function auditPlayer(
+  clubId: string,
+  /** AUDIT_UNKNOWN (a failed audit-only read): the target is recorded with no diff. */
+  before: PlayerRegistration | null | AuditUnknown,
+  after: PlayerRegistration | null,
+  op: string,
+): void {
+  safeAudit(() => {
+    const known = auditKnown(before);
+    const row = after ?? (known ? before : null);
+    if (!row) return;
+    // Past the target cap (a large roster commit) the row is only counted as truncated: no
+    // label or diff is built for it.
+    if (!auditTargetRoom('player', row.naturalKey)) {
+      auditTarget({ type: 'player', id: row.naturalKey, op });
+      return;
+    }
+    auditTarget({
+      type: 'player',
+      id: row.naturalKey,
+      clubId,
+      label: playerLabel(row),
+      op,
+      changes: known ? playerChanges(before, after) : [],
+    });
+  });
+}
+
+/**
+ * Record a clearance (no label: the player is named only by the `player` mention, which erasure
+ * scrubs), its changes (status, both clubs with `ref`s, reasons masked), and mentions of the
+ * player and both clubs — so the entry sits in the player's and both clubs' histories.
+ */
+function auditClearance(
+  before: PlayerClearance | null,
+  after: PlayerClearance,
+  op: string,
+  opts: { clubId?: string; changes?: AuditChange[] } = {},
+): void {
+  safeAudit(() => {
+    auditTarget({
+      type: 'clearance',
+      id: after.id,
+      clubId: opts.clubId ?? after.fromClubId,
+      op,
+      // Past the target cap the target is only counted: skip building its diff.
+      changes: auditTargetRoom('clearance', after.id)
+        ? [...clearanceChanges(before, after), ...(opts.changes ?? [])]
+        : [],
+      mentions: [
+        playerMention(after.playerNaturalKey, after.playerName, clearancePlayerClubId(after)),
+        { type: 'club', id: after.fromClubId, label: after.fromClubName },
+        { type: 'club', id: after.toClubId, label: after.toClubName },
+      ],
+    });
+  });
+}
+
+/**
+ * An accepted veterans request: the request and the player row's veterans club, each before
+ * (as the repo read them) → after, on the primary club.
+ */
+function auditVeteransAccept(accepted: {
+  request: VeteransRequest;
+  player: PlayerRegistration;
+  previous: { request: VeteransRequest; player: PlayerRegistration };
+}): void {
+  const { request, player, previous } = accepted;
+  auditVeteransRequest(previous.request, request, 'accept', request.primaryClubId);
+  safeAudit(() =>
+    auditTarget({
+      type: 'player',
+      id: player.naturalKey,
+      clubId: request.primaryClubId,
+      label: playerLabel(player),
+      op: 'update',
+      changes: playerChanges(previous.player, player),
+    }),
+  );
+}
+
+/** Record a veterans request (status, both clubs, note / reason masked) and its player. */
+function auditVeteransRequest(
+  before: VeteransRequest | null,
+  after: VeteransRequest,
+  op: string,
+  clubId: string,
+): void {
+  safeAudit(() => {
+    auditTarget({
+      type: 'veterans-request',
+      id: after.id,
+      clubId,
+      op,
+      changes: veteransRequestChanges(before, after),
+      mentions: [
+        ...(after.playerNaturalKey
+          ? [playerMention(after.playerNaturalKey, after.playerName, after.primaryClubId)]
+          : []),
+        { type: 'club', id: after.primaryClubId, label: after.primaryClubName },
+        { type: 'club', id: after.veteransClubId, label: after.veteransClubName },
+      ],
+    });
+  });
 }
 
 /**
@@ -1636,7 +1829,7 @@ app.post('/club-signup', async (c) => {
     }
     throw err;
   }
-  auditTarget({ type: 'club', id: club.id, label: club.name, op: 'create' });
+  auditClub(null, club, 'create');
   await ensureSignupMembership(tenant, sub, email, club.id);
   return c.json({ clubId: club.id, clubName: club.name, email }, 201);
 });
@@ -2287,6 +2480,22 @@ app.get('/clubs/:id', async (c) => {
   return c.json(withPlayerCount(club));
 });
 
+/**
+ * Audit trail: record a club as the target (labelled with its name) with its field changes
+ * (`before` null ⇒ a create). See audit-records.ts for what is diffed and masked.
+ */
+function auditClub(before: Club | null, after: Club, op: string): void {
+  safeAudit(() => {
+    auditTarget({
+      type: 'club',
+      id: after.id,
+      label: after.name,
+      op,
+      changes: clubChanges(before, after),
+    });
+  });
+}
+
 /** Patch a club (affiliation, cqi+cqiAnswers, ground incl. lat/lon, leagues, coaches). */
 app.patch('/clubs/:id', async (c) => {
   const ra = c.get('requestAuth')!;
@@ -2307,6 +2516,7 @@ app.patch('/clubs/:id', async (c) => {
   delete (patch as { players?: unknown }).players;
   const current = await repo.getClub(ra.tenant, id);
   if (!current) throw new HttpError(404, 'club not found');
+  const auditBefore = safeAudit(() => clubAuditView(current)) ?? {};
   // Rename handling: normalise, drop no-ops, and enforce the SAME name/slug uniqueness
   // the signup path guards — two clubs must never share a display name or collide on id
   // (length/emptiness is checked later by validateClubPatch). Applies to admin and rep.
@@ -2490,7 +2700,15 @@ app.patch('/clubs/:id', async (c) => {
       console.error('rename audit-note append failed (rename still applied)', noteErr);
     }
   }
-  auditLabel('club', id, updated.name);
+  safeAudit(() =>
+    auditTarget({
+      type: 'club',
+      id,
+      label: updated.name,
+      op: 'update',
+      changes: clubChanges(null, updated, { beforeView: auditBefore }),
+    }),
+  );
   return c.json(withPlayerCount(updated));
 });
 
@@ -2665,6 +2883,8 @@ app.delete('/clubs/:id', requireAdmin, async (c) => {
   }
 
   const removed = await repo.eraseClubData(ra.tenant, club);
+  // PII-free counts only: this entry is flushed after the club's redaction.
+  auditSet({ counts: { ...removed, users } });
   return c.json({ ok: true, removed: { ...removed, users } });
 });
 
@@ -2998,7 +3218,7 @@ async function registerChairRows(
       }
     }
   }
-  auditSet({ counts: summarizeChairResults(results) });
+  safeAudit(() => auditSet({ counts: summarizeChairResults(results) }));
   await notifyClearanceAdminSummary(ra.tenant, club.name, adminBatch, adminEmails);
   const { actual } = await repo.reconcilePlayerCount(ra.tenant, club.id);
   return { results, playerCount: actual };
@@ -3473,6 +3693,7 @@ app.patch('/clubs/:id/players/:nk/id-doc', async (c) => {
       },
       version: current.version,
     });
+    auditPlayer(id, current, updated, 'update');
     // The document arrived by the console: any pending link request for it dies now.
     await repo.completeDocRequest(ra.tenant, nk, 'idDoc', { at: now(), via: 'console' });
     return c.json(updated);
@@ -3532,6 +3753,7 @@ app.delete('/clubs/:id/players/:nk', async (c) => {
     }
     throw err;
   }
+  auditPlayer(id, player, null, 'remove');
   await purgePlayerCertificates(ra.tenant, id, player.naturalKey);
   return c.json({ ok: true });
 });
@@ -3571,8 +3793,12 @@ app.put('/clubs/:id/players/:nk/veterans-club', async (c) => {
   }
   const vet = await resolveVeteransClub(ra.tenant, body.veteransClubId, id);
   const source = ra.membership.role === 'admin' ? 'admin' : 'portal';
+  // Audit "before", read only to record it: a failed read is reported and records no diff, never
+  // fails the request (a missing player still 404s from the write below).
+  const before = await auditOnlyRead(() => repo.getPlayer(ra.tenant, id, nk));
   try {
     const updated = await repo.setPlayerVeteransClub(ra.tenant, id, nk, vet!, source);
+    auditPlayer(id, before, updated, 'set');
     return c.json(updated);
   } catch (err) {
     if (err instanceof Error && err.message === 'player not found') {
@@ -3590,8 +3816,12 @@ app.delete('/clubs/:id/players/:nk/veterans-club', async (c) => {
   const nk = c.req.param('nk');
   assertClubAccess(ra, id);
   const source = ra.membership.role === 'admin' ? 'admin' : 'portal';
+  // Audit "before" (audit-only read: a failure is reported and records no diff, never fails the
+  // request).
+  const before = await auditOnlyRead(() => repo.getPlayer(ra.tenant, id, nk));
   try {
     const updated = await repo.setPlayerVeteransClub(ra.tenant, id, nk, null, source);
+    auditPlayer(id, before, updated, 'remove');
     return c.json(updated);
   } catch (err) {
     if (err instanceof Error && err.message === 'player not found') {
@@ -3876,7 +4106,7 @@ app.post('/clubs/:id/veterans-requests', async (c) => {
     version: 0,
   };
   await repo.createVeteransRequest(ra.tenant, request);
-  auditTarget({ type: 'veterans-request', id: request.id, clubId: vetsClubId, op: 'create' });
+  auditVeteransRequest(null, request, 'create', vetsClubId);
   await notifyVeteransRequestOpened(ra.tenant, request, ra.email);
   return c.json(publicVeteransRequest(request), 201);
 });
@@ -3908,12 +4138,14 @@ app.post('/clubs/:id/veterans-requests/:rid/accept', async (c) => {
   const body = await c.req.json<{ version?: number }>().catch(() => ({}) as { version?: number });
   const via = ra.membership.role === 'admin' ? 'admin' : 'portal';
   try {
-    const { request } = await repo.acceptVeteransRequest(ra.tenant, id, rid, {
+    const accepted = await repo.acceptVeteransRequest(ra.tenant, id, rid, {
       at: now(),
       by: ra.email,
       via,
       expectedVersion: body.version,
     });
+    const { request } = accepted;
+    auditVeteransAccept(accepted);
     await notifyVeteransRequestResolved(ra.tenant, request, 'accepted', ra.email, {
       both: via === 'admin',
     });
@@ -3948,6 +4180,7 @@ app.post('/clubs/:id/veterans-requests/:rid/decline', async (c) => {
       ...(body.reason ? { declineReason: body.reason } : {}),
       expectedVersion: body.version,
     });
+    auditVeteransRequest(current, request, 'decline', id);
     await notifyVeteransRequestResolved(ra.tenant, request, 'declined', ra.email, {
       both: via === 'admin',
     });
@@ -3976,6 +4209,7 @@ app.post('/clubs/:id/veterans-requests/:rid/withdraw', async (c) => {
       via,
       expectedVersion: body.version,
     });
+    auditVeteransRequest(mirror, request, 'withdraw', id);
     return c.json(publicVeteransRequest(request));
   } catch (err) {
     throwVeteransRequestError(err);
@@ -4058,16 +4292,7 @@ app.post('/clubs/:id/clearances', async (c) => {
     if (err instanceof repo.DestinationClubGoneError) throw new HttpError(409, err.message);
     throw err;
   }
-  auditTarget({
-    type: 'clearance',
-    id: clearance.id,
-    clubId: toClubId,
-    op: 'create',
-    mentions: [
-      { type: 'player', id: clearance.playerNaturalKey },
-      { type: 'club', id: clearance.fromClubId },
-    ],
-  });
+  auditClearance(null, clearance, 'create', { clubId: toClubId });
   // Best-effort chairman heads-up (never throws). This route doesn't otherwise need the
   // tenant config — it's read only for the whatsappInvites gate, and a read fault just
   // degrades to the flag's default inside notifyClearanceOpened.
@@ -4123,6 +4348,7 @@ app.patch('/clubs/:id/clearances/:cid', async (c) => {
         by: ra.email,
         expectedVersion: body.version,
       });
+      auditClearance(current, resolved, 'issue');
       return c.json({ ...resolved, ...(await issueOnResolve(ra.tenant, resolved)) });
     }
     const updated = await repo.updateClearanceFlags(ra.tenant, id, cid, {
@@ -4130,6 +4356,7 @@ app.patch('/clubs/:id/clearances/:cid', async (c) => {
       misconductCleared: body.misconductCleared,
       expectedVersion: body.version,
     });
+    auditClearance(current, updated, 'update');
     return c.json(updated);
   } catch (err) {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'clearance changed; refetch');
@@ -4311,6 +4538,7 @@ app.post('/clubs/:id/exco', async (c) => {
     },
     ra.email,
   );
+  auditClub(current, updated, 'update');
   return c.json(updated);
 });
 
@@ -4426,6 +4654,7 @@ app.patch('/clubs/:id/docs/:key', async (c) => {
       },
       ra.email,
     );
+    auditClub(current, updated, 'update');
     return c.json(updated);
   }
   const prev = docMeta[key] as { objectKey?: string } | undefined;
@@ -4455,6 +4684,7 @@ app.patch('/clubs/:id/docs/:key', async (c) => {
     },
     ra.email,
   );
+  auditClub(current, updated, 'update');
   // Replacing a wrongly-uploaded file: best-effort delete the previous S3 object so a
   // stale PDF (PII) isn't orphaned in the bucket (POPIA data-minimisation). AFTER the
   // write lands — deleting first would strand a live docMeta pointer at a missing object
@@ -4532,6 +4762,7 @@ app.delete('/clubs/:id/docs/:key/file', async (c) => {
       },
       ra.email,
     );
+    auditClub(current, updated, 'delete-file');
     // Delete AFTER the write lands — a delete before a failed/409'd write would strand a
     // live docMeta pointer at a missing object. Best-effort; never fails the removal.
     if (!objectKey.startsWith('local/')) {
@@ -4574,6 +4805,7 @@ app.delete('/clubs/:id/docs/:key/file', async (c) => {
     },
     ra.email,
   );
+  auditClub(current, updated, 'delete-file');
   // Best-effort S3 delete (PII minimisation), AFTER the record write lands — deleting
   // first would strand the remaining docMeta entry at a missing object on a 409.
   if (!objectKey.startsWith('local/')) {
@@ -4665,6 +4897,14 @@ app.post('/clubs/:id/notes', requireAdmin, async (c) => {
     // appendClubNote's ConditionExpression (attribute_exists) is the existence
     // check — no separate read, so there's no delete-race window.
     const updated = await repo.appendClubNote(ra.tenant, id, note);
+    // "Note added": free text, so recorded as changed with no value.
+    auditTarget({
+      type: 'club',
+      id,
+      label: updated.name,
+      op: 'add',
+      changes: [{ field: 'note', masked: true }],
+    });
     return c.json(withPlayerCount(updated));
   } catch (err) {
     if ((err as { name?: string }).name === 'ConditionalCheckFailedException')
@@ -4928,9 +5168,66 @@ app.get('/series', async (c) => {
 app.post('/series', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
   const series = await createSeries(tenant, await c.req.json<Series>());
-  auditTarget({ type: 'series', id: series.id, label: series.name, op: 'create' });
+  safeAudit(() =>
+    auditTarget({
+      type: 'series',
+      id: series.id,
+      label: series.name,
+      op: 'create',
+      changes: seriesChanges(null, series),
+    }),
+  );
+  auditSet({ counts: { fixturesAdded: (series.fixtures ?? []).length } });
   return c.json(series, 201);
 });
+
+/**
+ * Audit trail for one series write (`applySeriesPatch`): the series target (label: its name)
+ * with its top-level field changes, one `fixture` target per added / removed / changed fixture
+ * (id `<seriesId>#<fixtureId>`, as fixture officials; the scope keeps the first 25 targets and
+ * 40 changes each, the rest counted in `truncated`), and `counts` of the fixtures touched
+ * (summed over every series one request writes). Returns the action a generic series PATCH
+ * reads as (audit-records.ts `seriesPatchAction`). No-op outside a request scope.
+ */
+function auditSeriesWrite(
+  before: Series,
+  after: Series,
+  kind: { reveal: boolean; setSide: boolean; fixtures: boolean },
+): string | undefined {
+  return safeAudit(() => {
+    const scope = currentAuditScope();
+    if (!scope) return undefined;
+    auditTarget({
+      type: 'series',
+      id: String(after.id),
+      label: after.name,
+      op: 'update',
+      changes: seriesChanges(before, after),
+    });
+    const fx = kind.fixtures
+      ? fixtureChanges(before, after)
+      : { fixtures: [], added: 0, removed: 0, changed: 0 };
+    for (const f of fx.fixtures)
+      auditTarget({
+        type: 'fixture',
+        id: `${after.id}#${f.id}`,
+        ...(f.label ? { label: f.label, ...(f.clubIds ? { clubIds: f.clubIds } : {}) } : {}),
+        op: f.op,
+        changes: f.changes,
+      });
+    if (kind.fixtures) {
+      const prev = scope.counts ?? {};
+      auditSet({
+        counts: {
+          fixturesChanged: (prev.fixturesChanged ?? 0) + fx.changed,
+          fixturesAdded: (prev.fixturesAdded ?? 0) + fx.added,
+          fixturesRemoved: (prev.fixturesRemoved ?? 0) + fx.removed,
+        },
+      });
+    }
+    return seriesPatchAction(kind, before, after, fx.fixtures.length);
+  });
+}
 
 /**
  * The whole of `POST /series`: validate, force the server-owned draft state, store. Shared
@@ -5019,7 +5316,9 @@ app.patch('/series/:id', requireAdmin, async (c) => {
     'admin',
     out,
   );
-  auditLabel('series', c.req.param('id'), written.name);
+  // The generic series PATCH reads as what it did (release, approve, a fixtures edit …); the
+  // routes that share applySeriesPatch keep their own, more specific action.
+  if (out.auditAction) auditSet({ action: out.auditAction });
   // Response-only: fixtures this save added that medicoach can't be sent as creates (they
   // await a carry — the connection console). Absent when there are none / no sync.
   return c.json(
@@ -5031,6 +5330,8 @@ app.patch('/series/:id', requireAdmin, async (c) => {
 interface SeriesPatchOutcome {
   /** Fixture ids queued as awaiting a medicoach carry (MCAWAIT#) by this write. */
   awaitingCarry?: string[];
+  /** The audit action this write reads as (`series.release`, …); set inside a request only. */
+  auditAction?: string;
 }
 
 /**
@@ -5041,7 +5342,9 @@ interface SeriesPatchOutcome {
  * the same `HttpError`s (structured `venue_clash` bodies included) the route answers with.
  *
  * `actor` names who is writing; the series record keeps no per-write audit today, so it is
- * accepted for parity with the other shared write paths and not yet stored.
+ * accepted for parity with the other shared write paths and not yet stored. Inside a request
+ * the write is recorded on the audit trail (auditSeriesWrite: the series and every fixture it
+ * touched; a season-stage generate records the series only).
  */
 async function applySeriesPatch(
   tenant: string,
@@ -5057,6 +5360,22 @@ async function applySeriesPatch(
   delete (patch as Record<string, unknown>).medicoachAwaitingCarry;
   const current = await repo.getSeries(tenant, id);
   if (!current) throw new HttpError(404, 'series not found');
+  // Audit trail: what the caller asked for (the action keys are rewritten below) and the series
+  // as stored. A season-stage generate records its series without per-fixture diffs.
+  const auditKind = {
+    reveal: patch.reveal !== undefined,
+    setSide: patch.setSide !== undefined,
+    fixtures:
+      (patch.fixtures !== undefined || patch.setSide !== undefined) && origin !== 'generate',
+  };
+  const auditBefore = currentAuditScope()
+    ? (safeAudit(() => structuredClone(current)) ?? current)
+    : current;
+  const audited = (written: Series): Series => {
+    const action = auditSeriesWrite(auditBefore, written, auditKind);
+    if (out && action) out.auditAction = action;
+    return written;
+  };
   // A whole-series PATCH echoes GET /series' response-only fixture keys (the joined
   // medicoach result, `syncMapped`, the FIXOFFICIALS# `officials` join); they never belong
   // in the series item (ADR 0016).
@@ -5140,7 +5459,7 @@ async function applySeriesPatch(
       throw err;
     }
     await requeue.enqueue();
-    return revealed;
+    return audited(revealed);
   }
 
   // ── Version pre-check before ANY clash gate ──
@@ -5447,7 +5766,7 @@ async function applySeriesPatch(
       ...removedFixtureIds.map((fid) => repo.deleteResultConfirmation(tenant, id, fid)),
     ]).catch((err) => console.warn(`[series] cleanup of removed fixtures in ${id} failed`, err));
   }
-  return written;
+  return audited(written);
 }
 
 /**
@@ -5507,13 +5826,17 @@ app.post('/integrations/medicoach/sync-now', async (c) => {
   const { tenant } = c.get('requestAuth')!;
   try {
     // Outbox first, then the pull, then pending captain's reports — the cron's sequence.
-    const summary = await runTenantSync(tenant, 'manual', {
-      repo,
-      url: medicoachSyncUrl(),
-      secret: medicoachSyncSecret(),
-      // Behind the 30 s gateway limit: the report drain stops after ~20 s; the cron does the rest.
-      deadlineMs: Date.now() + SYNC_NOW_REPORT_BUDGET_MS,
-    });
+    // Outside the audit scope: this entry records only who triggered the sync; nothing the
+    // sync itself writes is attributed to the admin (ADR 0023: syncs are not covered).
+    const summary = await runUnaudited(() =>
+      runTenantSync(tenant, 'manual', {
+        repo,
+        url: medicoachSyncUrl(),
+        secret: medicoachSyncSecret(),
+        // Behind the 30 s gateway limit: the report drain stops after ~20 s; the cron does the rest.
+        deadlineMs: Date.now() + SYNC_NOW_REPORT_BUDGET_MS,
+      }),
+    );
     if (summary.status === 'disabled')
       throw new HttpError(409, 'the medicoach sync is not enabled for this tenant');
     return c.json(summary);
@@ -5674,6 +5997,34 @@ app.get('/integrations/medicoach/conflicts', async (c) => {
   );
 });
 
+/**
+ * Audit trail for an admin's Match Centre console decision on one held item (a schedule
+ * conflict or an outbox row): the fixture it is about, with what was decided (`conflict` /
+ * `outbox` → applied, discarded, unchanged, retried, dropped) and the item's ref. An applied
+ * conflict also carries the fixture's own change (recorded by `applySeriesPatch`).
+ */
+function auditMedicoachDecision(
+  item: { seriesId: string; fixtureId: string },
+  kind: 'conflict' | 'outbox',
+  ref: string,
+  decision: string,
+): void {
+  safeAudit(() => {
+    const id = `${item.seriesId}#${item.fixtureId}`;
+    // An applied conflict's fixture is already a target (its `update`): keep that op.
+    const existing = currentAuditScope()?.targets.find((t) => t.type === 'fixture' && t.id === id);
+    auditTarget({
+      type: 'fixture',
+      id,
+      op: existing?.op ?? (kind === 'conflict' ? 'medicoach-conflict' : 'medicoach-outbox'),
+      changes: [
+        { field: `medicoach.${kind}`, to: decision },
+        { field: `medicoach.${kind}Ref`, to: ref },
+      ],
+    });
+  });
+}
+
 /** The `ref` of a conflict action body (refs carry `:`, so they ride in the body). */
 async function conflictRefOf(c: Context<HonoEnv>): Promise<string> {
   const body = await c.req.json<{ ref?: unknown }>().catch(() => ({}) as { ref?: unknown });
@@ -5717,6 +6068,7 @@ app.post('/integrations/medicoach/conflicts/apply', async (c) => {
       });
     if (!built.changed.length) {
       await repo.deleteSyncConflict(tenant, ref);
+      auditMedicoachDecision(conflict, 'conflict', ref, 'unchanged');
       return c.json({ status: 'unchanged' });
     }
     const next = fixtures.map((f, j) => (j === i ? built.fixture : f));
@@ -5728,6 +6080,7 @@ app.post('/integrations/medicoach/conflicts/apply', async (c) => {
         email ?? 'unknown',
       );
       await repo.deleteSyncConflict(tenant, ref);
+      auditMedicoachDecision(conflict, 'conflict', ref, 'applied');
       return c.json({ status: 'applied', series: written });
     } catch (err) {
       // A concurrent edit: re-read and rebuild. Anything structured (a clash) is the answer.
@@ -5782,6 +6135,7 @@ app.post('/integrations/medicoach/conflicts/discard', async (c) => {
     break;
   }
   await repo.deleteSyncConflict(tenant, ref);
+  auditMedicoachDecision(conflict, 'conflict', ref, 'discarded');
   return c.json({ status: 'discarded' });
 });
 
@@ -5804,6 +6158,7 @@ app.post('/integrations/medicoach/outbox/retry', async (c) => {
   const { tenant } = c.get('requestAuth')!;
   const row = await outboxRowOf(c, tenant);
   await repo.resetPendingSyncAttempts(tenant, row.ref, row.schedule.changedAt);
+  auditMedicoachDecision(row, 'outbox', row.ref, 'retried');
   const flushed = await flushScheduleOutbox(tenant, 'manual', {
     repo,
     url: medicoachSyncUrl(),
@@ -5833,6 +6188,7 @@ app.post('/integrations/medicoach/outbox/drop', async (c) => {
   const row = await outboxRowOf(c, tenant);
   if (!(await repo.deletePendingSyncIfUnchanged(tenant, row.ref, row.schedule.changedAt)))
     throw new HttpError(409, 'a newer change for that fixture was queued meanwhile; refresh');
+  auditMedicoachDecision(row, 'outbox', row.ref, 'dropped');
   return c.json({ status: 'dropped' });
 });
 
@@ -5891,6 +6247,8 @@ app.post('/integrations/medicoach/players/retry', async (c) => {
     if (scope === 'all' && !r.parked && !stuck) continue;
     if (await repo.retryPendingPlayerSync(tenant, r.naturalKey)) requeued++;
   }
+  // Counts only: which people were re-queued is not named (bulk, operational).
+  auditSet({ counts: { requeued } });
   return c.json({ requeued });
 });
 
@@ -5977,9 +6335,18 @@ app.post('/integrations/medicoach/player-reviews/:nk/resolve', async (c) => {
     .catch(() => ({}) as Record<string, unknown>);
   const action = body?.action;
   const at = now();
+  // Audit trail: the review's reason → what the admin chose, on the player (natural key).
+  const audited = (decision: string, extra: AuditChange[] = []) =>
+    auditTarget({
+      type: 'player',
+      id: nk,
+      op: 'resolve',
+      changes: [{ field: 'medicoach.review', from: review.reason, to: decision }, ...extra],
+    });
   if (action === 'dismiss') {
     await repo.deletePlayerReview(tenant, nk);
     await repo.deletePendingPlayerSync(tenant, nk);
+    audited('dismiss');
     return c.json({ status: 'dismissed' });
   }
   const config = await requirePlayerSync(tenant);
@@ -6007,7 +6374,17 @@ app.post('/integrations/medicoach/player-reviews/:nk/resolve', async (c) => {
       });
     }
     await repo.deletePlayerReview(tenant, nk);
-    return c.json(await deliverResolvedPlayers(tenant, config, [nk]));
+    audited(
+      action,
+      action === 'link'
+        ? [{ field: 'medicoach.playerId', to: String(body.medicoachPlayerId) }]
+        : [{ field: 'medicoach.candidatesAcknowledged', to: ids.length }],
+    );
+    const delivered = await deliverResolvedPlayers(tenant, config, [nk]);
+    auditSet({
+      counts: { sent: delivered.sent, queued: delivered.queued, review: delivered.review },
+    });
+    return c.json(delivered);
   }
   if (action === 'distinct') {
     if (review.reason !== 'smartclub-possible-duplicate')
@@ -6029,7 +6406,14 @@ app.post('/integrations/medicoach/player-reviews/:nk/resolve', async (c) => {
     }
     for (const x of [nk, ...others])
       await repo.putPendingPlayerSync(tenant, x, at, { requeued: true });
-    return c.json(await deliverResolvedPlayers(tenant, config, [nk, ...others]));
+    audited('distinct');
+    // The other people in the pair, by natural key (erasure finds them); no names.
+    for (const other of others) auditMention({ type: 'player', id: other });
+    const delivered = await deliverResolvedPlayers(tenant, config, [nk, ...others]);
+    auditSet({
+      counts: { sent: delivered.sent, queued: delivered.queued, review: delivered.review },
+    });
+    return c.json(delivered);
   }
   throw new HttpError(400, 'action must be link, create, distinct or dismiss');
 });
@@ -6635,6 +7019,44 @@ const isSeriesVersionConflict = (err: unknown): boolean =>
   err.message === 'series changed; refetch';
 
 /**
+ * Audit trail for one postponement request write (audit-records.ts `postponementChanges`): the
+ * request (a target of `clubId`; no label) with its field changes, both clubs as mentions, and
+ * the fixture + series as mentions unless the entry already targets them — an accept or a
+ * ruling patches the fixture through `applySeriesPatch`, which records the fixture's own
+ * change, so the one entry shows both. No-op outside a request scope (no club reads either).
+ */
+async function auditPostponement(
+  tenant: string,
+  before: PostponementRequest | null,
+  after: PostponementRequest,
+  op: string,
+  clubId: string,
+): Promise<void> {
+  await safeAudit(async () => {
+    const scope = currentAuditScope();
+    if (!scope) return;
+    const name = await auditClubNames(tenant, [], [after.requestingClubId, after.opposingClubId]);
+    const targeted = (type: string, id: string) =>
+      scope.targets.some((t) => t.type === type && t.id === id);
+    const fixture = `${after.seriesId}#${after.fixtureId}`;
+    auditTarget({
+      type: 'postponement',
+      id: after.id,
+      clubId,
+      op,
+      changes: postponementChanges(before, after, name),
+      mentions: [
+        ...[after.requestingClubId, after.opposingClubId]
+          .filter((id) => !targeted('club', id))
+          .map((id) => ({ type: 'club', id, label: name(id) })),
+        ...(targeted('fixture', fixture) ? [] : [{ type: 'fixture', id: fixture }]),
+        ...(targeted('series', after.seriesId) ? [] : [{ type: 'series', id: after.seriesId }]),
+      ],
+    });
+  });
+}
+
+/**
  * Apply a chair-agreed proposal to its fixture. Every attempt re-reads the series and re-runs
  * the full check chain before patching — never a stale patch:
  *  1. series still released + visible, fixture still present;
@@ -6813,13 +7235,7 @@ app.post('/clubs/:id/postponements', async (c) => {
     version: 0,
   };
   await repo.createPostponementRequest(ra.tenant, request);
-  auditTarget({
-    type: 'postponement',
-    id: request.id,
-    clubId,
-    op: 'create',
-    mentions: [{ type: 'club', id: opposingClubId }],
-  });
+  await auditPostponement(ra.tenant, null, request, 'create', clubId);
   await notifyPostponement(ra.tenant, request, 'postponement-request', ra.email, ['opposing']);
   return c.json(projectPostponementForClub(request, series, today), 201);
 });
@@ -6878,6 +7294,7 @@ app.post('/clubs/:id/postponements/:reqId/counter', async (c) => {
       },
       expectedVersion: body.version,
     });
+    await auditPostponement(ra.tenant, request, updated, 'counter', id);
     await notifyPostponement(ra.tenant, updated, 'postponement-counter', ra.email, [
       side === 'requesting' ? 'opposing' : 'requesting',
     ]);
@@ -6927,6 +7344,7 @@ app.post('/clubs/:id/postponements/:reqId/accept', async (c) => {
       via: ra.membership.role === 'admin' ? 'admin' : 'portal',
       expectedVersion: request.version,
     });
+    await auditPostponement(ra.tenant, request, updated, 'accept', id);
     await notifyPostponement(ra.tenant, updated, 'postponement-agreed', ra.email, [
       'requesting',
       'opposing',
@@ -6983,6 +7401,13 @@ async function closePostponement(
       ...(declineReason ? { declineReason } : {}),
       expectedVersion: body.version,
     });
+    await auditPostponement(
+      ra.tenant,
+      request,
+      updated,
+      outcome === 'declined' ? 'decline' : 'withdraw',
+      id,
+    );
     await notifyPostponement(
       ra.tenant,
       updated,
@@ -7020,6 +7445,7 @@ app.post('/clubs/:id/postponements/:reqId/acknowledge', async (c) => {
       by: ra.email,
       expectedVersion: body.version,
     });
+    await auditPostponement(ra.tenant, request, updated, 'acknowledge', id);
     return c.json(
       projectPostponementForClub(
         updated,
@@ -7149,6 +7575,7 @@ app.post('/admin/postponements/:reqId/override', requireAdmin, async (c) => {
       fromStatuses: ['open', 'applied', 'admin-final', 'declined'],
       expectedVersion: request.version,
     });
+    await auditPostponement(ra.tenant, request, updated, 'override', request.opposingClubId);
     await notifyPostponement(ra.tenant, updated, 'postponement-admin-final', ra.email, [
       'requesting',
       'opposing',
@@ -7259,7 +7686,14 @@ function queueSeriesDeletes(tenant: string, rows: PendingScheduleSync[]): Promis
 
 app.delete('/series/:id', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
+  // Audit: the series' name and fixture count, read before it goes (audit-only: a failed read
+  // is reported and records less, never fails the delete).
+  const doomed = await auditOnlyRead(() => repo.getSeries(tenant, c.req.param('id')));
   await queueSeriesDeletes(tenant, await deleteSeriesWithSync(tenant, c.req.param('id')));
+  if (auditKnown(doomed) && doomed) {
+    auditLabel('series', c.req.param('id'), doomed.name);
+    auditSet({ counts: { fixturesRemoved: (doomed.fixtures ?? []).length } });
+  }
   return c.json({ ok: true });
 });
 
@@ -7352,8 +7786,23 @@ app.post('/competitions', async (c) => {
     );
     throw err;
   }
-  auditTarget({ type: 'competition', id: spec.id, label: spec.name, op: 'create' });
-  auditSet({ counts: { series: written.length } });
+  safeAudit(() =>
+    auditTarget({
+      type: 'competition',
+      id: spec.id,
+      label: spec.name,
+      op: 'create',
+      changes: competitionChanges(null, competitionSpecView(spec)),
+    }),
+  );
+  safeAudit(() =>
+    auditSet({
+      counts: {
+        series: written.length,
+        fixturesAdded: plan.series.reduce((n, s) => n + (s.fixtures ?? []).length, 0),
+      },
+    }),
+  );
   return c.json(
     {
       id: spec.id,
@@ -7363,6 +7812,19 @@ app.post('/competitions', async (c) => {
     },
     201,
   );
+});
+
+/** A competition spec as the audit trail compares it (audit-records.ts `competitionChanges`). */
+const competitionSpecView = (spec: CompetitionSpec): CompetitionAuditView => ({
+  name: spec.name,
+  type: spec.type,
+  ...(spec.leagueKey ? { leagueKey: spec.leagueKey } : {}),
+  overs: spec.overs,
+  teams: competitionTeams(spec.teams),
+  format: spec.format,
+  schedule: spec.schedule,
+  ...(spec.points !== undefined ? { points: spec.points } : {}),
+  ...(spec.seed !== undefined ? { seed: spec.seed } : {}),
 });
 
 const competitionOr404 = (all: Series[], id: string) => {
@@ -7406,7 +7868,7 @@ app.patch('/competitions/:id', async (c) => {
       problems: probe.problems,
     });
   const name = typeof body.name === 'string' ? body.name.trim() : meta0.name;
-  const out = [];
+  const out: Series[] = [];
   for (const s of series) {
     const meta = {
       ...s.competition!,
@@ -7422,7 +7884,15 @@ app.patch('/competitions/:id', async (c) => {
       ),
     );
   }
-  auditLabel('competition', meta0.id, name);
+  safeAudit(() =>
+    auditTarget({
+      type: 'competition',
+      id: meta0.id,
+      label: name,
+      op: 'update',
+      changes: competitionChanges(competitionViewOfSeries(series), competitionViewOfSeries(out)),
+    }),
+  );
   return c.json({ id: meta0.id, series: out });
 });
 
@@ -7508,7 +7978,26 @@ app.post('/competitions/:id/regenerate', async (c) => {
     );
   }
   await queueSeriesDeletes(tenant, oldDeletes);
-  auditLabel('competition', id, spec.name);
+  // Config before → after and counts; the regenerated fixtures are not diffed one by one.
+  safeAudit(() =>
+    auditTarget({
+      type: 'competition',
+      id,
+      label: spec.name,
+      op: 'regenerate',
+      changes: competitionChanges(competitionViewOfSeries(current), competitionSpecView(spec)),
+    }),
+  );
+  safeAudit(() =>
+    auditSet({
+      counts: {
+        seriesRemoved: oldIds.length,
+        series: written.length,
+        fixturesRemoved: current.reduce((n, s) => n + (s.fixtures ?? []).length, 0),
+        fixturesAdded: plan.series.reduce((n, s) => n + (s.fixtures ?? []).length, 0),
+      },
+    }),
+  );
   return c.json({
     id,
     series: await Promise.all(plan.series.map((s) => repo.getSeries(tenant, s.id))),
@@ -7532,7 +8021,23 @@ app.delete('/competitions/:id', async (c) => {
       tenant,
       await deleteSeriesWithSync(tenant, String(s.id), { config, pending }),
     );
-  auditLabel('competition', c.req.param('id'), series[0].competition?.name);
+  safeAudit(() =>
+    auditTarget({
+      type: 'competition',
+      id: c.req.param('id'),
+      label: series[0].competition?.name,
+      op: 'delete',
+      changes: competitionChanges(competitionViewOfSeries(series), null),
+    }),
+  );
+  safeAudit(() =>
+    auditSet({
+      counts: {
+        series: series.length,
+        fixturesRemoved: series.reduce((n, s) => n + (s.fixtures ?? []).length, 0),
+      },
+    }),
+  );
   return c.json({ ok: true, deleted: series.map((s) => s.id) });
 });
 
@@ -7571,6 +8076,8 @@ app.post('/competitions/:id/advance', async (c) => {
   });
   auditLabel('competition', c.req.param('id'), series[0].competition?.name);
   if (!filled) return c.json({ filled: 0, waiting });
+  // The knockout series' write (applySeriesPatch) records the fixtures it filled.
+  auditSet({ counts: { filled } });
   const written = await applySeriesPatch(
     ra.tenant,
     String(ko.id),
@@ -7690,13 +8197,15 @@ function auditOfficial(
   op: string,
   mentions?: AuditMention[],
 ): void {
-  auditTarget({
-    type: role,
-    id: after.id,
-    label: after.displayName,
-    op,
-    changes: officialChanges(role, before, after),
-    ...(mentions ? { mentions } : {}),
+  safeAudit(() => {
+    auditTarget({
+      type: role,
+      id: after.id,
+      label: after.displayName,
+      op,
+      changes: officialChanges(role, before, after),
+      ...(mentions ? { mentions } : {}),
+    });
   });
 }
 
@@ -7799,12 +8308,14 @@ app.put('/series/:id/fixtures/:fixtureId/officials', requireAdmin, async (c) => 
   // `stored` (read above) also feeds the notice ledger's removals. A race with another admin
   // PUT can leave a stale queued row; the cron re-checks current officials before sending.
   await repo.putFixtureOfficials(ra.tenant, seriesId, fixtureId, officials);
-  auditTarget({
-    type: 'fixture-officials',
-    id: `${seriesId}#${fixtureId}`,
-    op: 'set',
-    changes: fixtureOfficialsChanges(stored, officials),
-  });
+  safeAudit(() =>
+    auditTarget({
+      type: 'fixture-officials',
+      id: `${seriesId}#${fixtureId}`,
+      op: 'set',
+      changes: fixtureOfficialsChanges(stored, officials),
+    }),
+  );
   await queueOfficialsNotices(ra.tenant, [
     { seriesId, fixtureId, previous: stored, next: officials },
   ]);
@@ -7974,10 +8485,12 @@ async function mergePendingOfficial<T extends Umpire | Scorer>(
   else await repo.putScorer(tenant, next as Scorer);
   // Recorded before the source delete: a 409 there still leaves the committed target write.
   // The source is named WITHOUT a label: this entry is flushed after the scrub below.
-  auditOfficial(role, target, next, 'merge', [
-    { type: role, id: source.id },
-    officialMention(role, target),
-  ]);
+  safeAudit(() =>
+    auditOfficial(role, target, next, 'merge', [
+      { type: role, id: source.id },
+      officialMention(role, target),
+    ]),
+  );
   auditTarget({ type: role, id: source.id, op: 'delete' });
   auditSet({ counts: { repointed: 0 } });
   // The submission is hard-deleted, so it never joins an erase set: its audit entries (the
@@ -8014,11 +8527,13 @@ async function eraseOfficialRoute(c: Context<HonoEnv>, role: OfficialRoleKind) {
       ra.email ?? 'admin',
     );
     // PII-free: the op and counts only (the middleware strips labels on erasing routes).
-    auditTarget({
-      type: role,
-      id: c.req.param('id')!,
-      op: result.hardDeleted ? 'delete' : 'erase',
-    });
+    safeAudit(() =>
+      auditTarget({
+        type: role,
+        id: c.req.param('id')!,
+        op: result.hardDeleted ? 'delete' : 'erase',
+      }),
+    );
     auditSet({ counts: { ...counts } });
     // Never the registry id (a name slug): role, outcome, counts and the audit row id.
     console.info(
@@ -8236,15 +8751,90 @@ app.post('/series/:id/fixtures/:fixtureId/result/confirm', requireAdmin, async (
     confirmedBy: ra.email ?? 'unknown',
     ...(typeof body.note === 'string' && body.note.trim() ? { note: body.note.trim() } : {}),
   });
+  auditResultConfirmation(series, fixtureId, view.confirmation ? view : null, {
+    ...view,
+    confirmation: conf,
+  });
   return c.json(conf);
 });
 
 /** Withdraw a confirmation (confirmed by mistake). Idempotent. */
 app.delete('/series/:id/fixtures/:fixtureId/result/confirm', requireAdmin, async (c) => {
   const ra = c.get('requestAuth')!;
+  // Audit only: what was confirmed (the "before"), and the series for the match label — read
+  // side by side, each failure reported and recording less (an unknown "before": no diff),
+  // never failing the request (the delete stays idempotent, whatever the reads find).
+  const [previous, series] = await Promise.all([
+    auditOnlyRead(() =>
+      repo.getResultConfirmation(ra.tenant, c.req.param('id'), c.req.param('fixtureId')),
+    ),
+    auditOnlyRead(() => repo.getSeries(ra.tenant, c.req.param('id'))),
+  ]);
   await repo.deleteResultConfirmation(ra.tenant, c.req.param('id'), c.req.param('fixtureId'));
+  auditResultConfirmation(
+    auditKnown(series) && series ? series : { id: c.req.param('id') },
+    c.req.param('fixtureId'),
+    !auditKnown(previous)
+      ? previous
+      : previous
+        ? { recordedAt: previous.recordedAt, confirmation: previous }
+        : null,
+    null,
+  );
   return c.json({ ok: true });
 });
+
+/**
+ * Audit a result confirmation (target `fixture-result`, id `<seriesId>#<fixtureId>`, labelled
+ * `<home> v <away>` with the club behind each side when the series could be read):
+ * `confirmed` and the confirmed result's `recordedAt` and scores before → after (the note is
+ * free text: masked); the series is mentioned so it sits in the series' history.
+ */
+function auditResultConfirmation(
+  series: Pick<Series, 'id'> & Partial<Pick<Series, 'name' | 'fixtures' | 'participants'>>,
+  fixtureId: string,
+  /** AUDIT_UNKNOWN (a failed audit-only read): the target is recorded with no diff. */
+  before: { recordedAt?: string; confirmation?: { note?: string } | null } | null | AuditUnknown,
+  after: (Partial<FixtureResultView> & { confirmation?: { note?: string } | null }) | null,
+): void {
+  safeAudit(() => {
+    const fixture = ((series.fixtures ?? []) as Array<Record<string, unknown>>).find(
+      (f) => f?.id === fixtureId,
+    );
+    const team = seriesTeamName(series);
+    const club = seriesTeamClub(series);
+    const match = fixture
+      ? matchLabel([
+          [team(fixture.home), club(fixture.home)],
+          [team(fixture.away), club(fixture.away)],
+        ])
+      : { label: '' };
+    const side = (
+      x: typeof after | { recordedAt?: string; confirmation?: { note?: string } | null } | null,
+    ) =>
+      x
+        ? {
+            confirmed: true,
+            recordedAt: x.recordedAt,
+            ...('homeScore' in x ? { homeScore: x.homeScore, awayScore: x.awayScore } : {}),
+            ...('winner' in x ? { winner: x.winner } : {}),
+            note: x.confirmation?.note,
+          }
+        : { confirmed: false };
+    auditTarget({
+      type: 'fixture-result',
+      id: `${series.id}#${fixtureId}`,
+      ...(match.label ? match : {}),
+      op: after ? 'confirm' : 'unconfirm',
+      changes: auditKnown(before)
+        ? diffFields(side(before), side(after), {
+            fields: ['confirmed', 'recordedAt', 'homeScore', 'awayScore', 'winner', 'note'],
+          })
+        : [],
+      mentions: [{ type: 'series', id: String(series.id), label: series.name }],
+    });
+  });
+}
 
 /**
  * Appointment-notice status per official for one series (the editor's badges). Whitelisted
@@ -8546,11 +9136,13 @@ app.post('/umpires/appointments/confirm', requireAdmin, async (c) => {
     for (const u of plan.toCreate) auditTarget({ type: 'umpire', id: u.id, op: 'create' });
     for (const w of plan.plan.writes)
       if (w.action !== 'unchanged')
-        auditTarget({
-          type: 'fixture-officials',
-          id: `${w.match.seriesId}#${w.match.fixtureId}`,
-          op: w.action === 'new' ? 'create' : 'update',
-        });
+        safeAudit(() =>
+          auditTarget({
+            type: 'fixture-officials',
+            id: `${w.match.seriesId}#${w.match.fixtureId}`,
+            op: w.action === 'new' ? 'create' : 'update',
+          }),
+        );
     return c.json(out);
   } finally {
     // Notices only for fixtures this confirm changed (resulting officials per fixture). Also on
@@ -8636,20 +9228,98 @@ async function reportFieldsFrom(
   }
 }
 
-/** Save a draft or submit (first submit wins → 409 for the loser). */
+/**
+ * Audit trail for a captain's report (audit-records.ts `captainsReportChanges`): the report, a
+ * target of its club (label: the match), with its field changes — status, the ratings per
+ * registry umpire (`ref`), every comment masked — plus `extra` changes (a forward's recipient).
+ */
+async function auditCaptainsReport(
+  tenant: string,
+  before: CaptainsReport | null,
+  after: CaptainsReport,
+  op: string,
+  extra: AuditChange[] = [],
+): Promise<void> {
+  await safeAudit(async () => {
+    const clubIds = await auditMatchClubIds(tenant, after, after.side);
+    auditTarget({
+      type: 'captains-report',
+      id: after.id,
+      clubId: after.clubId,
+      label: `${after.clubName} v ${after.opponentName}`,
+      clubIds,
+      op,
+      changes: [...captainsReportChanges(before, after), ...extra],
+    });
+  });
+}
+
+/**
+ * Audit only: the club behind each side of a report's or squad's `<own> v <opponent>` label,
+ * resolved against the label's own snapshot. The own side is the record's stored `clubId`. The
+ * opponent's club id is not stored, so it comes from the fixture as it is NOW — and is attached
+ * only when the fixture's current opponent still carries the snapshot's `opponentName`
+ * (participant name, or for a team with no participant entry, its club's name). Otherwise
+ * (the fixture changed since the snapshot, a failed read, an unlisted match's typed opponent)
+ * that side stays unresolved (''): a club delete then cannot rewrite it, but it never names the
+ * wrong club. `series` reuses a read the caller already made (undefined: read it here). No
+ * read outside a request scope.
+ */
+async function auditMatchClubIds(
+  tenant: string,
+  rec: { seriesId: string; fixtureId: string; clubId: string; opponentName: string },
+  side: 'home' | 'away',
+  series?: Series | null,
+): Promise<string[]> {
+  if (!currentAuditScope() || rec.seriesId === UNLISTED_SERIES_ID) return [rec.clubId, ''];
+  let s = series;
+  if (s === undefined) {
+    const read = await auditOnlyRead(() => repo.getSeries(tenant, rec.seriesId));
+    s = auditKnown(read) ? read : null;
+  }
+  const fixture = ((s?.fixtures ?? []) as Array<Record<string, unknown>>).find(
+    (f) => f?.id === rec.fixtureId,
+  );
+  const team = fixture ? (side === 'home' ? fixture.away : fixture.home) : undefined;
+  const opponent = fixture ? seriesTeamClub(s)(team) : undefined;
+  if (!opponent) return [rec.clubId, ''];
+  const named = (s?.participants ?? []).find((p) => p?.teamId === team)?.name;
+  let current = named;
+  if (current === undefined) {
+    const club = await auditOnlyRead(() => repo.getClub(tenant, opponent));
+    current = auditKnown(club) ? club?.name : undefined;
+  }
+  return [rec.clubId, current === rec.opponentName ? opponent : ''];
+}
+
+/**
+ * Save a draft or submit (first submit wins → 409 for the loser). Recorded on the audit trail
+ * as `save` / `submit`, or `create` (from nothing) for a report filed by hand.
+ */
 async function writeReport(
   tenant: string,
   report: CaptainsReport,
   fields: repo.CaptainsReportFields,
   submit: boolean,
   meta: { submittedBy: string; via: 'portal' | 'link'; memberId?: string },
+  auditOp?: 'create',
 ): Promise<CaptainsReport> {
+  const audited = async (saved: CaptainsReport) => {
+    await auditCaptainsReport(
+      tenant,
+      auditOp === 'create' ? null : report,
+      saved,
+      auditOp ?? (submit ? 'submit' : 'save'),
+    );
+    return saved;
+  };
   try {
-    if (!submit) return await repo.saveCaptainsReportDraft(tenant, report, fields, meta);
+    if (!submit)
+      return await audited(await repo.saveCaptainsReportDraft(tenant, report, fields, meta));
     if (report.status !== 'pending')
       throw new repo.CaptainsReportStateError("captain's report already submitted");
     // The CR number is allocated only once the first-submit-wins write landed (repo).
-    const saved = await repo.submitCaptainsReport(tenant, report, fields, meta);
+    const saved = await audited(await repo.submitCaptainsReport(tenant, report, fields, meta));
     if (saved.scorecard?.action === 'correction') await notifyScorecardCorrection(tenant, saved);
     return saved;
   } catch (err) {
@@ -8774,10 +9444,18 @@ app.post('/club/captains-reports/:id/forward', async (c) => {
   const body = ((await c.req.json().catch(() => null)) ?? {}) as { candidateId?: unknown };
   if (typeof body.candidateId !== 'string' || !body.candidateId)
     throw new HttpError(400, 'candidateId is required');
+  const out: { recipientKey?: string } = {};
   const updated = await forwardReport(
     { repo },
-    { tenant: ra.tenant, report, candidateId: body.candidateId, via: 'portal' },
+    { tenant: ra.tenant, report, candidateId: body.candidateId, via: 'portal', out },
   ).catch(flowError);
+  await auditCaptainsReport(
+    ra.tenant,
+    report,
+    updated,
+    'forward',
+    recipientForwardChanges(updated.recipient.name, out.recipientKey),
+  );
   return c.json(await clubView(ra, updated));
 });
 
@@ -8835,10 +9513,14 @@ app.post('/club/captains-reports/unlisted', async (c) => {
   if (!(await repo.createCaptainsReport(ra.tenant, report)))
     throw new HttpError(409, 'a report already exists for this match', { code: 'report_exists' });
   auditTarget({ type: 'captains-report', id: report.id, clubId, op: 'create' });
-  const saved = await writeReport(ra.tenant, report, fields, true, {
-    submittedBy: ra.email ?? 'portal',
-    via: 'portal',
-  });
+  const saved = await writeReport(
+    ra.tenant,
+    report,
+    fields,
+    true,
+    { submittedBy: ra.email ?? 'portal', via: 'portal' },
+    'create',
+  );
   return c.json(reportView(saved), 201);
 });
 
@@ -8931,10 +9613,14 @@ app.post('/club/captains-reports', async (c) => {
       id: report.id,
     });
   auditTarget({ type: 'captains-report', id: report.id, clubId: report.clubId, op: 'create' });
-  const saved = await writeReport(ra.tenant, report, fields, true, {
-    submittedBy: ra.email ?? 'portal',
-    via: 'portal',
-  });
+  const saved = await writeReport(
+    ra.tenant,
+    report,
+    fields,
+    true,
+    { submittedBy: ra.email ?? 'portal', via: 'portal' },
+    'create',
+  );
   return c.json(await clubView(ra, saved), 201);
 });
 
@@ -9035,6 +9721,17 @@ app.post('/captains-reports/:id/umpires/:index/attribute', requireAdmin, async (
       name: reg.displayName,
       attributed: { action, by: ra.email ?? 'admin', at: now(), freeTextName: entry.name },
     });
+    await safeAudit(async () =>
+      auditTarget({
+        type: 'captains-report',
+        id: report.id,
+        clubId: report.clubId,
+        label: `${report.clubName} v ${report.opponentName}`,
+        clubIds: await auditMatchClubIds(ra.tenant, report, report.side),
+        op: 'attribute-umpire',
+        changes: umpireAttributionChanges(index, entry.name, reg, action),
+      }),
+    );
     return c.json(reportView(saved));
   } catch (err) {
     if (err instanceof repo.CaptainsReportStateError) throw new HttpError(409, err.message);
@@ -9132,11 +9829,18 @@ app.post('/captains-report-link/:token/forward', async (c) => {
   const body = ((await c.req.json().catch(() => null)) ?? {}) as { candidateId?: unknown };
   if (typeof body.candidateId !== 'string' || !body.candidateId)
     throw new HttpError(400, 'candidateId is required');
+  const out: { recipientKey?: string } = {};
   const updated = await forwardReport(
     { repo },
-    { tenant, report, candidateId: body.candidateId, via: 'link' },
+    { tenant, report, candidateId: body.candidateId, via: 'link', out },
   ).catch(flowError);
-  auditTarget({ type: 'captains-report', id: report.id, clubId: report.clubId, op: 'forward' });
+  await auditCaptainsReport(
+    tenant,
+    report,
+    updated,
+    'forward',
+    recipientForwardChanges(updated.recipient.name, out.recipientKey),
+  );
   return c.json(await linkPayload(tenant, updated, true, tokenExpiresAt));
 });
 
@@ -9151,12 +9855,6 @@ app.put('/captains-report-link/:token', async (c) => {
     submittedBy: `link:${report.recipient.kind}`,
     via: 'link',
     memberId,
-  });
-  auditTarget({
-    type: 'captains-report',
-    id: report.id,
-    clubId: report.clubId,
-    op: submit ? 'submit' : 'save',
   });
   return c.json(await linkPayload(tenant, saved, isChairLink, tokenExpiresAt));
 });
@@ -9190,6 +9888,34 @@ async function linkedSquadOr410(c: Context<HonoEnv>) {
   return found;
 }
 
+/**
+ * Audit trail for a squad request (audit-records.ts `squadRequestChanges`): the request, a
+ * target of its club (label: the match), with status, recipient kind, counts, the captain and
+ * each player added or removed (`ref` the player), plus `extra` (a forward's recipient).
+ */
+async function auditSquadRequest(
+  tenant: string,
+  before: SquadRequest | null,
+  after: SquadRequest,
+  op: string,
+  extra: AuditChange[] = [],
+  /** The series the caller already read (a squad link's), so it is not read again. */
+  series?: Series | null,
+): Promise<void> {
+  await safeAudit(async () => {
+    const clubIds = await auditMatchClubIds(tenant, after, after.side, series);
+    auditTarget({
+      type: 'squad-request',
+      id: after.id,
+      clubId: after.clubId,
+      label: `${after.teamName} v ${after.opponentName}`,
+      clubIds,
+      op,
+      changes: [...squadRequestChanges(before, after), ...extra],
+    });
+  });
+}
+
 /** The best-effort post-submit push of ONE squad (the cron drains whatever this misses). */
 const flushSquadNow = (tenant: string, requestId: string) =>
   flushSquadOutbox(tenant, {
@@ -9208,12 +9934,19 @@ app.get('/squad-link/:token', async (c) => {
 });
 
 app.put('/squad-link/:token', async (c) => {
-  const { tenant, request, isChairLink } = await linkedSquadOr410(c);
-  const saved = await saveSquad(
-    { repo, flushNow: flushSquadNow },
-    { tenant, request, body: await c.req.json().catch(() => null) },
-  ).catch(squadFlowError);
-  auditTarget({ type: 'squad-request', id: request.id, clubId: request.clubId, op: 'save' });
+  const { tenant, request, isChairLink, series } = await linkedSquadOr410(c);
+  const body: unknown = await c.req.json().catch(() => null);
+  const saved = await saveSquad({ repo, flushNow: flushSquadNow }, { tenant, request, body }).catch(
+    squadFlowError,
+  );
+  await auditSquadRequest(
+    tenant,
+    request,
+    saved,
+    (body as { submit?: unknown } | null)?.submit === true ? 'submit' : 'save',
+    [],
+    series,
+  );
   return c.json(
     await squadLinkPayload(repo, tenant, saved, isChairLink, captainsReportLinkSecret()),
   );
@@ -9236,16 +9969,24 @@ app.get('/squad-link/:token/forward-candidates', async (c) => {
 });
 
 app.post('/squad-link/:token/forward', async (c) => {
-  const { tenant, request, isChairLink } = await linkedSquadOr410(c);
+  const { tenant, request, isChairLink, series } = await linkedSquadOr410(c);
   if (!isChairLink) throw new HttpError(403, 'only the club chair can send this squad link on');
   const body = ((await c.req.json().catch(() => null)) ?? {}) as { candidateId?: unknown };
   if (typeof body.candidateId !== 'string' || !body.candidateId)
     throw new HttpError(400, 'candidateId is required');
+  const out: { recipientKey?: string } = {};
   const updated = await forwardSquadRequest(
     { repo },
-    { tenant, request, candidateId: body.candidateId },
+    { tenant, request, candidateId: body.candidateId, out },
   ).catch(squadFlowError);
-  auditTarget({ type: 'squad-request', id: request.id, clubId: request.clubId, op: 'forward' });
+  await auditSquadRequest(
+    tenant,
+    request,
+    updated,
+    'forward',
+    recipientForwardChanges(updated.recipient.name, out.recipientKey),
+    series,
+  );
   return c.json(await squadLinkPayload(repo, tenant, updated, true, captainsReportLinkSecret()));
 });
 
@@ -9372,12 +10113,16 @@ app.post('/doc-request-link/:token/complete', async (c) => {
     found,
     body.objectKey,
   );
-  auditTarget({
-    type: 'doc-request',
-    id: found.request.requestId,
-    clubId: found.request.clubId,
-    op: 'complete',
-  });
+  safeAudit(() =>
+    auditTarget({
+      type: 'doc-request',
+      id: found.request.requestId,
+      clubId: found.request.clubId,
+      label: found.request.docName,
+      op: 'complete',
+      changes: [{ field: 'status', from: found.request.status, to: 'completed' }],
+    }),
+  );
   return c.json({ state: 'completed' });
 });
 
@@ -9479,8 +10224,32 @@ app.put('/clubs/:id/teams/:teamId/captain', async (c) => {
   const comps = await teamCaptainCompetitions(repo, ra.tenant, id, teamId);
   const comp = comps.find((x) => x.scope === scope);
   if (!comp) throw new HttpError(400, 'this team does not play in that competition');
+  // Audit trail: the designation this replaces (name + natural key), read inside a request only.
+  // Audit-only: a failed read is reported and records no diff, never fails the request.
+  const prevCaptain = currentAuditScope()
+    ? await auditOnlyRead(() =>
+        repo
+          .getTeamCaptain(ra.tenant, id, teamId, scope)
+          .then(async (d) =>
+            d
+              ? { key: d.playerKey, name: (await teamCaptainView(ra.tenant, id, teamId, d)).name }
+              : null,
+          ),
+      )
+    : null;
+  const auditCaptain = (next: { key: string; name: string } | null) =>
+    auditTarget({
+      type: 'club',
+      id,
+      label: club.name,
+      op: 'set',
+      changes: auditKnown(prevCaptain)
+        ? teamCaptainChange(`${teamId}.${scope}`, prevCaptain, next)
+        : [],
+    });
   if (body.candidateId === null) {
     await repo.deleteTeamCaptain(ra.tenant, id, teamId, scope);
+    safeAudit(() => auditCaptain(null));
     return c.json({ teamId, ...comp, captain: null });
   }
   // Candidates are deliberately TEAM-wide, not per competition: the club's roster (plus the
@@ -9498,6 +10267,7 @@ app.put('/clubs/:id/teams/:teamId/captain', async (c) => {
     setAt: new Date().toISOString(),
   };
   await repo.putTeamCaptain(ra.tenant, d);
+  safeAudit(() => auditCaptain({ key: hit.key, name: hit.name }));
   return c.json({
     teamId,
     ...comp,
@@ -9544,6 +10314,17 @@ app.post('/admin/squad-requests/:id/resend', requireAdmin, async (c) => {
     { repo },
     { tenant: ra.tenant, request },
   ).catch(squadFlowError);
+  await auditSquadRequest(ra.tenant, request, updated, 'resend');
+  auditSendCounts([
+    {
+      status:
+        notice === 'sent'
+          ? 'sent'
+          : notice === 'failed' || notice === 'undelivered'
+            ? 'failed'
+            : 'skipped',
+    },
+  ]);
   return c.json({ request: squadRequestView(updated), notice });
 });
 
@@ -9579,6 +10360,7 @@ app.post('/admin/squad-requests/:id/void', requireAdmin, async (c) => {
   const res = await adminVoidSquadRequest(repo, ra.tenant, request, new Date().toISOString());
   if (res === 'none') throw new HttpError(409, 'this squad request is already void');
   const after = await adminSquadRequestOr404(ra.tenant, request.id);
+  await auditSquadRequest(ra.tenant, request, after, 'void');
   return c.json({
     request: squadRequestView(after),
     voidPushQueued: request.status === 'submitted',
@@ -9797,7 +10579,15 @@ app.post('/season-runs', requireAdmin, async (c) => {
   const { tenant, email } = c.get('requestAuth')!;
   const run = await c.req.json<SeasonRun>();
   const created = await createSeasonRun(tenant, run, email ?? undefined);
-  auditTarget({ type: 'season-run', id: created.id, label: seasonRunLabel(created), op: 'create' });
+  safeAudit(() =>
+    auditTarget({
+      type: 'season-run',
+      id: created.id,
+      label: seasonRunLabel(created),
+      op: 'create',
+      changes: seasonRunChanges(null, created),
+    }),
+  );
   return c.json(created, 201);
 });
 
@@ -9814,8 +10604,8 @@ app.get('/season-runs/:id', requireAdmin, async (c) => {
 app.patch('/season-runs/:id', requireAdmin, async (c) => {
   const { tenant, email } = c.get('requestAuth')!;
   const patch = await c.req.json<Partial<SeasonRun>>();
+  // applySeasonRunPatch records the run's label and changes.
   const run = await applySeasonRunPatch(tenant, c.req.param('id'), patch, email ?? 'unknown');
-  auditLabel('season-run', run.id, seasonRunLabel(run));
   return c.json(run);
 });
 
@@ -9843,6 +10633,8 @@ async function applySeasonRunPatch(
 ): Promise<SeasonRun> {
   const current = await repo.getSeasonRun(tenant, id);
   if (!current) throw new HttpError(404, 'season run not found');
+  // Audit "before", captured before anything below can edit the record in place.
+  const auditBefore = safeAudit(() => seasonRunAuditView(current)) ?? {};
   // The snapshots are immutable for the life of the run — that is what makes them
   // snapshots. Strip rather than reject so an admin round-tripping a whole run object
   // (the obvious client implementation) doesn't get a confusing 400.
@@ -9923,13 +10715,25 @@ async function applySeasonRunPatch(
         code: 'season_exists',
       });
   }
+  let written: SeasonRun;
   try {
-    return await repo.updateSeasonRun(tenant, id, patch);
+    written = await repo.updateSeasonRun(tenant, id, patch);
   } catch (err) {
     if (err instanceof VersionConflictError)
       throw new HttpError(409, 'season run changed; refetch');
     throw err;
   }
+  safeAudit(() =>
+    auditTarget({
+      type: 'season-run',
+      id,
+      label: seasonRunLabel(written),
+      // Only the stage generate route passes `internal`.
+      op: internal ? 'generate' : 'update',
+      changes: seasonRunChanges(null, written, { beforeView: auditBefore }),
+    }),
+  );
+  return written;
 }
 
 /** Body of `POST /season-runs/:id/stages/:specId/generate` — mirrors `GenerateStageRequest` in src/api.ts. */
@@ -10070,7 +10874,7 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
 
   const run = await repo.getSeasonRun(tenant, id);
   if (!run) throw new HttpError(404, 'season run not found');
-  auditLabel('season-run', id, seasonRunLabel(run));
+  safeAudit(() => auditLabel('season-run', id, seasonRunLabel(run)));
   if (!run.structureSnapshot.stages.some((s) => s.id === specId))
     throw new HttpError(404, 'stage not found');
   // Checked before any series is written: the run write at the end is conditional too, but
@@ -10206,8 +11010,20 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
     for (const [i, series] of result.series.entries()) {
       const stored = existing[i];
       if (!stored) {
-        written.push(await createSeries(tenant, series, runCalendar));
+        const created = await createSeries(tenant, series, runCalendar);
+        written.push(created);
         writtenIds.push(series.id);
+        // A new series is a target of this entry (its top-level fields; fixtures are only
+        // counted). Past the 25-target cap it is counted in `truncated`.
+        safeAudit(() =>
+          auditTarget({
+            type: 'series',
+            id: created.id,
+            label: created.name,
+            op: 'create',
+            changes: seriesChanges(null, created),
+          }),
+        );
         continue;
       }
       written.push(
@@ -10330,7 +11146,7 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
     throw new HttpError(400, 'allowResync must be true when present');
   const current = await repo.getSeasonRun(tenant, id);
   if (!current) throw new HttpError(404, 'season run not found');
-  auditLabel('season-run', id, seasonRunLabel(current));
+  safeAudit(() => auditLabel('season-run', id, seasonRunLabel(current)));
   // Checked up front, not only by the conditional write below: the no-op return further
   // down would otherwise answer 200 to a caller whose view of the run is stale.
   if (current.version !== body.version) throw new HttpError(409, 'season run changed; refetch');
@@ -10467,6 +11283,15 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
       stages: [...survivors, ...added],
       ...freeze,
     });
+    safeAudit(() =>
+      auditTarget({
+        type: 'season-run',
+        id,
+        label: seasonRunLabel(next),
+        op: 'rebase',
+        changes: seasonRunChanges(current, next),
+      }),
+    );
     // Same additive shape as PUT /platform/tenants: `warnings` only when non-empty.
     return c.json({
       ...next,
@@ -10487,7 +11312,22 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
  */
 app.delete('/season-runs/:id', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
+  // Audit: the run's label and how many series it had produced (they are kept), read first
+  // (audit-only: a failed read is reported and records less, never fails the delete).
+  const doomed = await auditOnlyRead(() => repo.getSeasonRun(tenant, c.req.param('id')));
   await repo.deleteSeasonRun(tenant, c.req.param('id'));
+  if (auditKnown(doomed) && doomed) {
+    safeAudit(() => auditLabel('season-run', doomed.id, seasonRunLabel(doomed)));
+    safeAudit(() =>
+      auditSet({
+        counts: {
+          seriesKept: (doomed.stages ?? []).flatMap((s) =>
+            (s?.groups ?? []).filter((g) => g.seriesId),
+          ).length,
+        },
+      }),
+    );
+  }
   return c.json({ ok: true });
 });
 
@@ -10541,8 +11381,19 @@ app.put('/venues/:id', requireAdmin, async (c) => {
   const venue = { ...body, id };
   validateVenue(venue);
   venue.name = venue.name.trim();
+  // Audit "before" (audit-only: a failed read is reported and records no diff — never a diff
+  // from null, which would read as a create — and never fails the save).
+  const before = await auditOnlyRead(() => repo.getVenue(tenant, id));
   const saved = await repo.putVenue(tenant, venue);
-  auditLabel('venue', id, venue.name);
+  safeAudit(() =>
+    auditTarget({
+      type: 'venue',
+      id,
+      label: venue.name,
+      op: 'save',
+      changes: auditKnown(before) ? venueChanges(before, saved) : [],
+    }),
+  );
   return c.json(saved);
 });
 
@@ -10553,7 +11404,20 @@ app.put('/venues/:id', requireAdmin, async (c) => {
  */
 app.delete('/venues/:id', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
+  // Audit "before" (audit-only: a failed read is reported and leaves the route's own target with
+  // no diff, never fails the delete).
+  const before = await auditOnlyRead(() => repo.getVenue(tenant, c.req.param('id')));
   await repo.deleteVenue(tenant, c.req.param('id'));
+  if (auditKnown(before) && before)
+    safeAudit(() =>
+      auditTarget({
+        type: 'venue',
+        id: before.id,
+        label: before.name,
+        op: 'delete',
+        changes: venueChanges(before, null),
+      }),
+    );
   return c.json({ ok: true });
 });
 
@@ -10583,7 +11447,18 @@ app.post('/series/:id/duplicate', requireAdmin, async (c) => {
     return rest;
   });
   await repo.putSeries(tenant, copy);
-  auditTarget({ type: 'series', id: String(copy.id), label: copy.name, op: 'create' });
+  safeAudit(() =>
+    auditTarget({
+      type: 'series',
+      id: String(copy.id),
+      label: copy.name,
+      op: 'create',
+      changes: seriesChanges(null, copy),
+    }),
+  );
+  // The original (the route's default target) is named; the copy's fixtures are counted.
+  auditLabel('series', String(orig.id), orig.name);
+  auditSet({ counts: { fixturesAdded: copy.fixtures.length } });
   return c.json(copy, 201);
 });
 
@@ -10603,7 +11478,11 @@ const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/;
 async function applyTenantConfigPatch(
   tenant: string,
   patch: Partial<TenantConfig>,
-  opts: { preserveOperatorBindings?: boolean } = {},
+  opts: {
+    preserveOperatorBindings?: boolean;
+    /** Record the `tenant-config` target's changes over these fields (audit-records.ts). */
+    audit?: readonly string[];
+  } = {},
 ): Promise<TenantConfig> {
   const current = await repo.getTenantConfig(tenant);
   if (!current) throw new HttpError(404, 'tenant not found');
@@ -10706,6 +11585,16 @@ async function applyTenantConfigPatch(
     }
     throw err;
   }
+  const auditFields = opts.audit;
+  if (auditFields)
+    safeAudit(() =>
+      auditTarget({
+        type: 'tenant-config',
+        id: tenant,
+        op: 'update',
+        changes: tenantConfigChanges(current, next, auditFields),
+      }),
+    );
   return next;
 }
 
@@ -10728,7 +11617,7 @@ async function applyTenantConfigPatch(
 export async function writeTenantConfigAsOperator(
   tenant: string,
   patch: Partial<TenantConfig>,
-  opts: { by: string; current?: TenantConfig },
+  opts: { by: string; current?: TenantConfig; audit?: readonly string[] },
 ): Promise<{ config: TenantConfig; warnings: string[] }> {
   let currentCfg = opts.current;
   const getCurrent = async (): Promise<TenantConfig> => {
@@ -10884,7 +11773,11 @@ export async function writeTenantConfigAsOperator(
       for (const line of await setupRepointWarnings(tenant, current, nextLeagues))
         if (!warnings.includes(line)) warnings.push(line);
   }
-  const config = await applyTenantConfigPatch(tenant, patch);
+  const config = await applyTenantConfigPatch(
+    tenant,
+    patch,
+    opts.audit ? { audit: opts.audit } : {},
+  );
   if (patch.calendars !== undefined || patch.structures !== undefined)
     console.info(`tenant config ${tenant}: calendars/structures written by ${opts.by}`);
   return { config, warnings };
@@ -11235,7 +12128,12 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   delete (patch as { sport?: unknown }).sport;
   delete (patch as { seasonLabel?: unknown }).seasonLabel;
   delete (patch as { integrations?: unknown }).integrations;
-  const next = await applyTenantConfigPatch(tenant, patch, { preserveOperatorBindings: true });
+  // Audited over the tenant-writable fields only: this entry is visible to tenant admins, so
+  // it must never carry a field tenantConfigView holds back.
+  const next = await applyTenantConfigPatch(tenant, patch, {
+    preserveOperatorBindings: true,
+    audit: TENANT_CONFIG_ADMIN_FIELDS,
+  });
   return c.json(tenantConfigView(next));
 });
 
@@ -11253,6 +12151,9 @@ app.put('/tenant/support', requireAdmin, async (c) => {
   if (!officeName) throw new HttpError(400, 'office name required');
   if (!EMAIL_RE.test(addr)) throw new HttpError(400, 'valid email required');
   const support = `${officeName} · ${addr}`;
+  // Audit "before", audit-only (a failed read is reported and records no diff; a missing tenant
+  // still 404s on the conditional write below).
+  const previous = await auditOnlyRead(() => repo.getTenantConfig(tenant));
   try {
     await repo.updateSupportCopy(tenant, support);
   } catch (err: unknown) {
@@ -11261,6 +12162,20 @@ app.put('/tenant/support', requireAdmin, async (c) => {
     }
     throw err;
   }
+  safeAudit(() =>
+    auditTarget({
+      type: 'tenant-config',
+      id: tenant,
+      op: 'update',
+      changes: auditKnown(previous)
+        ? diffFields(
+            { support: previous?.branding?.copy?.support },
+            { support },
+            { fields: ['support'] },
+          )
+        : [],
+    }),
+  );
   return c.json({ support });
 });
 
@@ -11594,6 +12509,13 @@ app.post('/platform/tenants/:slug/medicoach/reconcile', async (c) => {
       'A reconciliation is already running for this client — try again in a moment.',
       { code: 'reconcile_busy' },
     );
+  auditSet({
+    counts: {
+      checkedRefs: result.checkedRefs ?? 0,
+      unmapped: result.unmappedTotal ?? 0,
+      unreachable: result.mcReachable ? 0 : 1,
+    },
+  });
   return c.json(await buildConnectionView(repo, slug, config, medicoachSyncDryRun()));
 });
 
@@ -11977,6 +12899,7 @@ app.put('/platform/tenants/:slug', async (c) => {
   const { config: next, warnings } = await writeTenantConfigAsOperator(slug, patch, {
     by: c.get('auth')?.email ?? 'operator',
     current: currentCfg,
+    audit: TENANT_CONFIG_OPERATOR_FIELDS,
   });
   if (body.tutorials !== undefined) {
     await cleanupOrphanTutorialAssets(slug, currentCfg?.tutorials ?? [], body.tutorials);
@@ -12011,8 +12934,28 @@ app.post('/platform/tenants/:slug/admins', async (c) => {
   if (!email) throw new HttpError(400, 'email required');
   if (!EMAIL_RE.test(email)) throw new HttpError(400, 'valid email required');
   try {
-    const { sub, adminCount } = await grantTenantAdmin(cognito, USER_POOL_ID, slug, email);
-    auditTarget({ type: 'user', id: sub, label: email, op: 'create' });
+    const { sub, adminCount, previous, existed } = await grantTenantAdmin(
+      cognito,
+      USER_POOL_ID,
+      slug,
+      email,
+    );
+    await safeAudit(async () =>
+      auditTarget({
+        type: 'user',
+        id: sub,
+        label: email,
+        op: 'create',
+        changes: [
+          ...(existed ? [] : diffFields(null, { email }, { fields: ['email'] })),
+          ...membershipChanges(
+            previous,
+            { role: 'admin', clubIds: [] },
+            await auditClubNames(slug, previous?.clubIds ?? [], []),
+          ),
+        ],
+      }),
+    );
     return c.json({ tenant: slug, email, sub, adminCount }, 201);
   } catch (err: unknown) {
     // Same mapping as provisionInviteUser: an address Cognito rejects is a 400, not a 500.
@@ -12248,6 +13191,9 @@ app.post('/platform/tenants/:slug/tutorial-upload/complete', async (c) => {
       MultipartUpload: { Parts: parts.map((p) => ({ ETag: p.etag, PartNumber: p.partNumber })) },
     }),
   );
+  // The tenant's settings gain an uploadable video (the key itself is not recorded).
+  auditTarget({ type: 'tenant-config', id: slug, op: 'upload' });
+  auditSet({ counts: { parts: parts.length } });
   return c.json({ publicUrl: `${TUTORIALS_BASE_URL}/${objectKey}` });
 });
 
@@ -12567,11 +13513,24 @@ async function commitClubDocIntake(
   // captured here so the winning attempt's value survives past commitClubWithRetry's
   // return, for the delete pass below.
   let supersededKeys: string[] = [];
+  // Audit trail: the club as the winning attempt read it (document fields masked but keys,
+  // file names and uploader details never valued — audit-records.ts clubFieldMasked).
+  let auditBefore: Record<string, unknown> = {};
   const updated = await commitClubWithRetry(tenant, clubId, operatorEmail, (current) => {
     const built = buildDocIntakePatch(tenant, clubId, current, items, catalogue, operatorEmail);
     supersededKeys = built.supersededKeys;
+    if (currentAuditScope()) auditBefore = safeAudit(() => clubAuditView(current)) ?? {};
     return { docs: built.docs, docMeta: built.docMeta };
   });
+  safeAudit(() =>
+    auditTarget({
+      type: 'club',
+      id: clubId,
+      label: updated.name,
+      op: 'update',
+      changes: clubChanges(null, updated, { beforeView: auditBefore }),
+    }),
+  );
   // Only now that the record is durable: drop the objects this commit replaced.
   // Deleting earlier would orphan a live docMeta pointer if the write then failed
   // (a retry that also fails leaves the club with an unviewable document). A failed
@@ -12625,6 +13584,15 @@ app.post('/platform/tenants/:slug/doc-intake/commit', async (c) => {
           err instanceof HttpError ? err.message : 'failed to save this club’s documents';
         return { clubId, ok: false as const, error };
       }
+    }),
+  );
+  safeAudit(() =>
+    auditSet({
+      counts: {
+        items: items.length,
+        clubs: clubs.filter((x) => x.ok).length,
+        clubsFailed: clubs.filter((x) => !x.ok).length,
+      },
     }),
   );
   return c.json({ clubs });
@@ -13118,6 +14086,8 @@ app.post('/platform/tenants/:slug/roster-intake/commit', async (c) => {
         // deterministic sequence (idempotent re-commit checks each row independently)
         await repo.createPlayer(slug, player);
         created++;
+        // The first 25 players are named (the scope counts the rest in `truncated`).
+        auditPlayer(clubId, null, player, 'create');
       } catch (err) {
         if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
           alreadyPresent++;
@@ -13134,6 +14104,14 @@ app.post('/platform/tenants/:slug/roster-intake/commit', async (c) => {
   console.log(
     `roster-intake commit: batch=${registeredBy} created=${created} alreadyPresent=${alreadyPresent} clubs=${byClub.size}`,
   );
+  auditSet({
+    counts: {
+      created,
+      alreadyPresent,
+      crossClubConflicts: crossClubConflicts.length,
+      clubs: byClub.size,
+    },
+  });
 
   return c.json(
     { batchId: registeredBy, created, alreadyPresent, crossClubConflicts, playerCount },
@@ -13404,8 +14382,17 @@ app.post('/platform/tenants/:slug/structure-intake/commit', async (c) => {
   let leaguesAppended: string[] = [];
   if (newLeagues.length > 0) {
     const combined = [...(cfg.leagues ?? []), ...newLeagues];
+    const cfgBefore = cfg;
     cfg = await applyTenantConfigPatch(slug, { leagues: combined });
     leaguesAppended = newLeagues.map((l) => l.key);
+    safeAudit(() =>
+      auditTarget({
+        type: 'tenant-config',
+        id: slug,
+        op: 'update',
+        changes: tenantConfigChanges(cfgBefore, cfg, ['leagues']),
+      }),
+    );
   }
 
   const runNow = now();
@@ -13443,7 +14430,9 @@ app.post('/platform/tenants/:slug/structure-intake/commit', async (c) => {
           }
         }
         let counts = { teams: 1, women: 0, juniors: 0 };
-        await commitClubWithRetry(slug, clubId, auth.email, (current) => {
+        let auditBefore: Record<string, unknown> = {};
+        const written = await commitClubWithRetry(slug, clubId, auth.email, (current) => {
+          if (currentAuditScope()) auditBefore = safeAudit(() => clubAuditView(current)) ?? {};
           const patch = buildStructureIntakePatch(clubId, current, item);
           const err = validateClubPatch(
             patch,
@@ -13458,6 +14447,15 @@ app.post('/platform/tenants/:slug/structure-intake/commit', async (c) => {
           counts = { teams: patch.teams!, women: patch.women!, juniors: patch.juniors! };
           return patch;
         });
+        safeAudit(() =>
+          auditTarget({
+            type: 'club',
+            id: clubId,
+            label: written.name,
+            op: 'update',
+            changes: clubChanges(null, written, { beforeView: auditBefore }),
+          }),
+        );
         // Provenance note — best-effort, never fails the commit.
         try {
           await repo.appendClubNote(slug, clubId, {
@@ -13491,6 +14489,15 @@ app.post('/platform/tenants/:slug/structure-intake/commit', async (c) => {
     }),
   );
 
+  safeAudit(() =>
+    auditSet({
+      counts: {
+        leaguesAppended: leaguesAppended.length,
+        clubs: clubs.filter((x) => x.ok).length,
+        clubsFailed: clubs.filter((x) => !x.ok).length,
+      },
+    }),
+  );
   return c.json({ batchId, leaguesAppended, clubs });
 });
 
@@ -13603,7 +14610,22 @@ app.post('/platform/tenants/:slug/reps', async (c) => {
   // adminCount delta is always 0 — a rep invite never touches the admin tier (the
   // admin-membership 409 above is what stops a silent demote, not a delta of -1 here).
   await writeUserGuarded(slug, next, 0);
-  auditTarget({ type: 'user', id: sub, label: email, op: 'create' });
+  await safeAudit(async () =>
+    auditTarget({
+      type: 'user',
+      id: sub,
+      label: email,
+      op: 'create',
+      changes: [
+        ...(existing ? [] : diffFields(null, { email }, { fields: ['email'] })),
+        ...membershipChanges(
+          prior,
+          membership,
+          await auditClubNames(slug, prior?.clubIds ?? [], clubIds),
+        ),
+      ],
+    }),
+  );
 
   let results: SendResult[] | undefined;
   if (body.channels && body.channels.length > 0) {
@@ -13823,7 +14845,7 @@ app.post('/platform/tenants/:slug/clubs', async (c) => {
     .json<{ name?: string; district?: string }>()
     .catch(() => ({}) as { name?: string; district?: string });
   const club = await createOperatorClub(slug, cfg, body);
-  auditTarget({ type: 'club', id: club.id, label: club.name, op: 'create' });
+  auditClub(null, club, 'create');
   return c.json(club, 201);
 });
 
@@ -13858,6 +14880,14 @@ app.get('/platform/captains-report-scorecards', async (c) => {
   return c.json(payload);
 });
 
+/** The setup milestone, before → after (operator-only entries: who stamped it is kept). */
+const setupChanges = (before: TenantConfig, after: TenantConfig) =>
+  diffFields(
+    before as unknown as Record<string, unknown>,
+    after as unknown as Record<string, unknown>,
+    { fields: ['setupCompletedAt', 'setupCompletedBy'] },
+  );
+
 /**
  * POST /platform/tenants/:slug/setup-complete — stamp the operator's "setup done"
  * milestone (informational only; the client is already publicly live and every setting
@@ -13872,6 +14902,14 @@ app.post('/platform/tenants/:slug/setup-complete', async (c) => {
   if (!config) throw new HttpError(404, 'tenant not found');
   const next: TenantConfig = { ...config, setupCompletedAt: now(), setupCompletedBy: auth.email };
   await repo.putTenantConfig(next);
+  safeAudit(() =>
+    auditTarget({
+      type: 'tenant',
+      id: slug,
+      op: 'setup-complete',
+      changes: setupChanges(config, next),
+    }),
+  );
   return c.json(next);
 });
 
@@ -13884,6 +14922,14 @@ app.delete('/platform/tenants/:slug/setup-complete', async (c) => {
   delete next.setupCompletedAt;
   delete next.setupCompletedBy;
   await repo.putTenantConfig(next);
+  safeAudit(() =>
+    auditTarget({
+      type: 'tenant',
+      id: slug,
+      op: 'setup-reopen',
+      changes: setupChanges(config, next),
+    }),
+  );
   return c.json(next);
 });
 
@@ -14091,6 +15137,28 @@ app.post('/platform/tenants/:slug/fixture-amendments/confirm', async (c) => {
     origin: 'operator-upload',
   });
   const written = new Set(out.results.filter((r) => r.status === 'written').map((r) => r.seriesId));
+  // Audit trail: each written series and every fixture it changed, as planned (the scope keeps
+  // the first 25 targets and counts the rest).
+  if (currentAuditScope())
+    for (const next of rp.plan.next)
+      if (written.has(String(next.id)) && byId.has(String(next.id)))
+        safeAudit(() =>
+          auditSeriesWrite(byId.get(String(next.id))!, next, {
+            reveal: false,
+            setSide: false,
+            fixtures: true,
+          }),
+        );
+  safeAudit(() =>
+    auditSet({
+      counts: {
+        fixturesAmended: rp.plan.diffs.filter((d) => d.kind === 'patch' && written.has(d.seriesId))
+          .length,
+        draftMoves: rp.plan.moves.filter((m) => written.has(m.seriesId)).length,
+        clashesOverridden: preview.gate.introduced.length,
+      },
+    }),
+  );
   return c.json({
     backupKey,
     // Sheet amendments only; draft relocations are reported solely as draftMoves.
@@ -14104,6 +15172,31 @@ app.post('/platform/tenants/:slug/fixture-amendments/confirm', async (c) => {
     clubsNotified: false,
   });
 });
+
+/**
+ * Audit trail: the names of the clubs a membership change adds or removes (only those —
+ * the symmetric difference of `before` and `after`), for membershipChanges. A club that is
+ * gone reads as its id.
+ */
+async function auditClubNames(
+  tenant: string,
+  before: readonly string[],
+  after: readonly string[],
+): Promise<(id: string) => string> {
+  const changed = [
+    ...before.filter((id) => !after.includes(id)),
+    ...after.filter((id) => !before.includes(id)),
+  ];
+  const names = new Map<string, string>();
+  await Promise.all(
+    [...new Set(changed)].map(async (id) => {
+      // Audit-only: a failed read is reported; the change then shows the id.
+      const club = await auditOnlyRead(() => repo.getClub(tenant, id));
+      if (auditKnown(club) && club?.name) names.set(id, club.name);
+    }),
+  );
+  return (id) => names.get(id) ?? id;
+}
 
 /**
  * GET /admin/users — list every user in the tenant for the Team & Access roster.
@@ -14204,7 +15297,22 @@ app.post('/admin/users', async (c) => {
   const delta: -1 | 0 | 1 =
     role === 'admin' && !wasAdmin ? 1 : role !== 'admin' && wasAdmin ? -1 : 0;
   await writeUserGuarded(ra.tenant, next, delta);
-  auditTarget({ type: 'user', id: sub, label: email, op: 'create' });
+  await safeAudit(async () =>
+    auditTarget({
+      type: 'user',
+      id: sub,
+      label: email,
+      op: 'create',
+      changes: [
+        ...(existing ? [] : diffFields(null, { email }, { fields: ['email'] })),
+        ...membershipChanges(
+          prior,
+          membership,
+          await auditClubNames(ra.tenant, prior?.clubIds ?? [], clubIds),
+        ),
+      ],
+    }),
+  );
 
   let results: SendResult[] | undefined;
   if (body.channels && body.channels.length > 0) {
@@ -14252,6 +15360,18 @@ app.patch('/admin/users/:sub', async (c) => {
   const promote = current.role === 'rep' && role === 'admin';
   const delta: -1 | 0 | 1 = demote ? -1 : promote ? 1 : 0;
   await writeUserGuarded(ra.tenant, next, delta);
+  await safeAudit(async () =>
+    auditTarget({
+      type: 'user',
+      id: sub,
+      op: 'update',
+      changes: membershipChanges(
+        current,
+        updated,
+        await auditClubNames(ra.tenant, current.clubIds, clubIds),
+      ),
+    }),
+  );
 
   // Kill refresh tokens after a demote so no NEW elevated token can be minted (the
   // current one stays valid until it expires — bounded ≤ pool TTL window).
@@ -14301,6 +15421,18 @@ app.delete('/admin/users/:sub', async (c) => {
     const next: UserProfile = { ...profile, memberships: remaining };
     await writeUserGuarded(ra.tenant, next, wasAdmin ? -1 : 0);
   }
+  await safeAudit(async () =>
+    auditTarget({
+      type: 'user',
+      id: sub,
+      op: 'delete',
+      changes: membershipChanges(
+        current,
+        undefined,
+        await auditClubNames(ra.tenant, current.clubIds, []),
+      ),
+    }),
+  );
   // Revoke refresh tokens so removed access can't be re-minted on the next refresh.
   await adminGlobalSignOut(cognito, USER_POOL_ID, profile.email);
   return c.json({ ok: true });
@@ -14391,7 +15523,15 @@ app.patch('/admin/users/:sub/email', async (c) => {
 
   // Persist the new email; reconcileUserMarkers refreshes every tenant marker (gsi1sk + email).
   await repo.putUser({ ...profile, email });
-  auditLabel('user', sub, email);
+  safeAudit(() =>
+    auditTarget({
+      type: 'user',
+      id: sub,
+      label: email,
+      op: 'email-change',
+      changes: diffFields({ email: profile.email }, { email }, { fields: ['email'] }),
+    }),
+  );
 
   // Re-send the invite to the corrected address so they receive a working link.
   const { results } = await sendStaffInvite({
@@ -14718,6 +15858,7 @@ app.post('/admin/clearances/:cid/override', async (c) => {
       certificateDeclined: declineCertificate,
       expectedVersion: body.version,
     });
+    auditClearance(current, resolved, 'override');
     // Best-effort: email BOTH clubs' chairmen that the union issued the transfer (never fails
     // the request). See notifyClearanceResolved re: email-only, no daily cap, destination chair.
     await notifyClearanceResolved(
@@ -14770,6 +15911,12 @@ app.post('/admin/clearances/:cid/certificate/revoke', async (c) => {
   await ensureCertificateRecord(ra.tenant, clearance);
   const record = await repo.revokeCertificate(meta.serial, { by: ra.email, reason, at: now() });
   if (!record) throw new HttpError(409, 'certificate already revoked');
+  auditClearance(clearance, clearance, 'revoke-certificate', {
+    changes: [
+      { field: 'certificateStatus', from: 'issued', to: 'revoked' },
+      { field: 'reason', masked: true },
+    ],
+  });
   return c.json({ serial: record.serial, status: record.status, revokedAt: record.revokedAt });
 });
 
@@ -14844,6 +15991,7 @@ app.post('/admin/clearances/:cid/reassign', async (c) => {
         expectedVersion: body.version,
       },
     );
+    auditClearance(current, reassigned, 'reassign');
     // The clearance just landed in a NEW club's queue — often a directory clearance
     // finally reaching a real club — so its chairman gets the same heads-up a freshly
     // created clearance would have produced. Best-effort; never fails the reassign.
@@ -14898,6 +16046,7 @@ app.post('/admin/clearances/:cid/reject', async (c) => {
       reason: body.reason?.trim() || undefined,
       expectedVersion: body.version,
     });
+    auditClearance(current, rejected, 'reject');
     // Best-effort: email BOTH clubs' chairmen that the union declined the transfer (never fails
     // the request). The reject reason rides the email — see notifyClearanceResolved.
     await notifyClearanceResolved(
@@ -14948,6 +16097,7 @@ app.post('/admin/clearances/:cid/reopen', async (c) => {
       by: ra.email,
       expectedVersion: body.version,
     });
+    auditClearance(current, reopened, 'reopen');
     // Best-effort: tell BOTH clubs' chairmen the union reopened the clearance (never fails the
     // request). Source and destination get different copy — see notifyClearanceReopened.
     const tenantConfig = await getTenantConfigCached(c, ra.tenant).catch(() => null);
@@ -15027,6 +16177,7 @@ app.post('/admin/clearances/:cid/remind', async (c) => {
   }
   const reminded = results.some((r) => r.status === 'sent');
   auditSendCounts(results);
+  auditClearance(clearance, clearance, 'remind');
   if (reminded) {
     await repo.completeInviteSend(ra.tenant, fromClub.id, key, results);
   } else {
@@ -15173,13 +16324,22 @@ app.post('/admin/doc-requests', async (c) => {
       ...(reuse && existing.lastSentAt ? { lastSentAt: existing.lastSentAt } : {}),
     };
     await repo.putDocRequest(ra.tenant, request);
-    auditTarget({
-      type: 'doc-request',
-      id: requestId,
-      clubId: t.clubId,
-      op: reuse ? 'resend' : 'create',
-      mentions: [{ type: 'player', id: t.naturalKey }],
-    });
+    safeAudit(() =>
+      auditTarget({
+        type: 'doc-request',
+        id: requestId,
+        clubId: t.clubId,
+        label: doc.name,
+        op: reuse ? 'resend' : 'create',
+        changes: reuse
+          ? []
+          : [
+              { field: 'status', to: 'pending' },
+              { field: 'document', to: doc.name },
+            ],
+        mentions: [playerMention(t.naturalKey, displayName, t.clubId)],
+      }),
+    );
     const token = signDocRequestLinkToken(
       { t: ra.tenant, q: requestId, e: Math.floor(Date.parse(linkExpiresAt) / 1000) },
       secret,
@@ -15244,7 +16404,14 @@ app.post('/admin/doc-requests', async (c) => {
   }
 
   auditSendCounts([...perClub.values()].flat());
-  auditSet({ counts: { players: results.length } });
+  safeAudit(() =>
+    auditSet({
+      counts: {
+        players: results.length,
+        playersSkipped: results.filter((r) => r.status.startsWith('skipped')).length,
+      },
+    }),
+  );
   return c.json({ results: results.map(({ naturalKey: _nk, ...r }) => r) });
 });
 
@@ -15299,7 +16466,16 @@ app.post('/admin/doc-requests/link', async (c) => {
   );
   const url = `${docRequestLinkOrigin(ra.tenant)}/d/${token}`;
   assertLiveLinkBase(url);
-  auditTarget({ type: 'doc-request', id: requestId, clubId, op: 'copy' });
+  safeAudit(() =>
+    auditTarget({
+      type: 'doc-request',
+      id: requestId,
+      clubId,
+      label: doc.name,
+      op: 'copy',
+      mentions: [playerMention(naturalKey, playerLabel(player), clubId)],
+    }),
+  );
   return c.json({ url, linkExpiresAt }, 200, { 'Cache-Control': 'no-store' });
 });
 
@@ -15321,6 +16497,7 @@ app.post('/admin/registration-reviews/:rid/ack', async (c) => {
   const rid = c.req.param('rid');
   const body = await c.req.json<{ destClubId?: string; version?: number }>();
   if (!body.destClubId) throw new HttpError(400, 'destClubId required');
+  const destClubId = body.destClubId;
   const current = await repo.getRegistrationReview(ra.tenant, body.destClubId, rid);
   if (!current) throw new HttpError(404, 'registration review not found');
   if (current.kind !== 'off-system-alert')
@@ -15333,6 +16510,16 @@ app.post('/admin/registration-reviews/:rid/ack', async (c) => {
       by: ra.email,
       expectedVersion: body.version,
     });
+    safeAudit(() =>
+      auditTarget({
+        type: 'registration-review',
+        id: rid,
+        clubId: destClubId,
+        op: 'ack',
+        changes: registrationReviewChanges(current, resolved),
+        mentions: [playerMention(current.playerNaturalKey, current.playerName, destClubId)],
+      }),
+    );
     return c.json(resolved);
   } catch (err) {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'review changed; refetch');
@@ -15359,12 +16546,14 @@ app.post('/admin/veterans-requests/:rid/accept', async (c) => {
   const body = await c.req.json<{ primaryClubId?: string; version?: number }>();
   if (!body.primaryClubId) throw new HttpError(400, 'primaryClubId required');
   try {
-    const { request } = await repo.acceptVeteransRequest(ra.tenant, body.primaryClubId, rid, {
+    const accepted = await repo.acceptVeteransRequest(ra.tenant, body.primaryClubId, rid, {
       at: now(),
       by: ra.email,
       via: 'admin',
       expectedVersion: body.version,
     });
+    const { request } = accepted;
+    auditVeteransAccept(accepted);
     await notifyVeteransRequestResolved(ra.tenant, request, 'accepted', ra.email, { both: true });
     return c.json(publicVeteransRequest(request));
   } catch (err) {
@@ -15393,6 +16582,7 @@ app.post('/admin/veterans-requests/:rid/decline', async (c) => {
       ...(body.reason ? { declineReason: body.reason } : {}),
       expectedVersion: body.version,
     });
+    auditVeteransRequest(current, request, 'decline', body.primaryClubId);
     await notifyVeteransRequestResolved(ra.tenant, request, 'declined', ra.email, { both: true });
     return c.json(publicVeteransRequest(request));
   } catch (err) {
@@ -15840,13 +17030,20 @@ async function auditRead<T>(fn: () => Promise<T>): Promise<T> {
 
 const tenantOnly = (items: AuditEntry[]) => items.filter((e) => e.visibility === 'tenant');
 
+/**
+ * One record's history. A club's reads its `C#` pointers — every entry naming it as a record,
+ * in a label or in a value (each `E#club` pointer is written with a `C#` pointer in the same
+ * take, so `C#` is a superset); other types read `E#` only.
+ */
 async function auditEntityPage(c: Context<HonoEnv>, tenant: string, all: boolean) {
   const { cursor, limit } = auditQuery(c);
+  const type = c.req.param('type')!;
+  const id = c.req.param('id')!;
+  const opts = { ...(cursor ? { cursor } : {}), ...(limit ? { limit } : {}) };
   const page = await auditRead(() =>
-    repo.listAuditForEntity(tenant, c.req.param('type')!, c.req.param('id')!, {
-      ...(cursor ? { cursor } : {}),
-      ...(limit ? { limit } : {}),
-    }),
+    type === 'club'
+      ? repo.listAuditForClub(tenant, id, opts)
+      : repo.listAuditForEntity(tenant, type, id, opts),
   );
   return { ...page, items: all ? page.items : tenantOnly(page.items) };
 }

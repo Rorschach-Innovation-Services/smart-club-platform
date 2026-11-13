@@ -779,3 +779,37 @@ describe('fixture amendments upload — confirm', () => {
     assert.equal((await repo.getSeries('fa-nobackup', SERIES_ID))!.version, 5);
   });
 });
+
+describe('fixture amendments upload — audit trail', () => {
+  test('the confirm entry is operator-only: invisible through /admin/audit*', async () => {
+    const slug = 'fa-audit';
+    await seedTenant(slug);
+    const dataBase64 = await baseline();
+    const pv = (await (await post(slug, 'preview', { dataBase64 })).json()) as Preview;
+    assert.equal((await post(slug, 'confirm', { dataBase64, planHash: pv.planHash })).status, 200);
+
+    type Page = { items: Array<{ id: string; at: string; action: string; visibility: string }> };
+    const opPage = (await (
+      await app.request(`/platform/tenants/${slug}/audit/entity/series/${SERIES_ID}?limit=200`, {
+        headers: headers(),
+      })
+    ).json()) as Page;
+    const entry = opPage.items.find((e) => e.action === 'fixture-amendments.confirm');
+    assert.ok(entry, JSON.stringify(opPage.items.map((e) => e.action)));
+    assert.equal(entry.visibility, 'operator');
+
+    const tenantAdmin = devAuthAs('adm-audit', 'admin@audit', [
+      { tenantId: slug, role: 'admin', clubIds: [] },
+    ]);
+    const asAdmin = (p: string) =>
+      app.request(p, { headers: { ...headers(tenantAdmin), 'x-tenant': slug } });
+    const feed = (await (await asAdmin('/admin/audit?limit=200')).json()) as Page;
+    assert.ok(!feed.items.some((e) => e.id === entry.id), 'in the tenant feed');
+    const hist = (await (
+      await asAdmin(`/admin/audit/entity/series/${SERIES_ID}?limit=200`)
+    ).json()) as Page;
+    assert.ok(!hist.items.some((e) => e.id === entry.id), 'in the series history');
+    const read = await asAdmin(`/admin/audit/entry/${encodeURIComponent(entry.at)}/${entry.id}`);
+    assert.equal(read.status, 404);
+  });
+});

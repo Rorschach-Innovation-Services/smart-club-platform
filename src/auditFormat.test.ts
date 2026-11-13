@@ -4,6 +4,7 @@ import {
   auditActorDisplay,
   auditChangeRow,
   auditCountsText,
+  auditDetailHeads,
   auditFieldLabel,
   auditInProgress,
   auditOutcomeLabel,
@@ -26,6 +27,29 @@ describe('auditActionSentence', () => {
     expect(auditActionSentence(entry('player.erase'))).toBe("Erased a player's data");
     expect(auditActionSentence(entry('clearance.certificate.issue'))).toBe(
       'Issued a clearance certificate',
+    );
+  });
+
+  it('reads a classified series edit as what it did', () => {
+    expect(auditActionSentence(entry('series.fixtures.edit'))).toBe('Edited fixtures');
+    expect(auditActionSentence(entry('series.approve'))).toBe('Approved fixtures');
+    expect(auditActionSentence(entry('series.release'))).toBe('Released fixtures to clubs');
+    expect(auditActionSentence(entry('series.recall'))).toBe('Recalled fixtures to draft');
+    expect(auditActionSentence(entry('series.reveal'))).toBe('Revealed withheld venues or times');
+    expect(auditActionSentence(entry('series.set-side'))).toBe('Set a knockout team');
+    expect(auditActionSentence(entry('series.update'))).toBe('Edited series');
+  });
+
+  it('reads a save that submitted as a submission', () => {
+    const t = (type: string, op: string) => [{ type, id: 'x', op, changeCount: 0 }];
+    expect(auditActionSentence(entry('captains-report.save', t('captains-report', 'submit')))).toBe(
+      "Submitted a captain's report",
+    );
+    expect(auditActionSentence(entry('captains-report.save', t('captains-report', 'save')))).toBe(
+      "Saved a captain's report",
+    );
+    expect(auditActionSentence(entry('squad-request.save', t('squad-request', 'submit')))).toBe(
+      'Submitted a squad',
     );
   });
 
@@ -166,6 +190,11 @@ describe('changes', () => {
       field: 'Full name',
       note: 'Removed',
     });
+    // A committee member's details are never recorded: the row names the office only.
+    expect(auditChangeRow({ field: 'exco.vc.name', masked: true })).toEqual({
+      field: 'Vice chair · name',
+      note: 'Changed (hidden)',
+    });
   });
 
   it('joins arrays and spells out booleans and blanks', () => {
@@ -185,6 +214,62 @@ describe('changes', () => {
     expect(auditFieldLabel('fullName')).toBe('Full name');
     expect(auditFieldLabel('homeGround.venue')).toBe('Home ground › Venue');
     expect(auditFieldLabel('last_seen_at')).toBe('Last seen at');
+  });
+
+  it('names the Phase 3 fields: team access, settings, clubs and documents', () => {
+    expect(auditFieldLabel('clubIds')).toBe('Clubs');
+    expect(auditFieldLabel('branding.name')).toBe('Branding › Name');
+    expect(auditFieldLabel('officialsContactLine')).toBe('Officials contact line');
+    expect(auditFieldLabel('features.captainsReports')).toBe('Features › Captains reports');
+    expect(auditFieldLabel('setupCompletedBy')).toBe('Setup completed by');
+    expect(auditFieldLabel('ground.venue')).toBe('Ground › Venue');
+    expect(auditFieldLabel('exco.sec.name')).toBe('Secretary · name');
+    expect(auditFieldLabel('exco.vc.email')).toBe('Vice chair · email');
+    expect(auditFieldLabel('exco.chair.idNumber')).toBe('Chair · ID number');
+    expect(auditFieldLabel('exco.chair.termStart')).toBe('Chair · term start');
+    expect(auditFieldLabel('exco.additionalMembers')).toBe('Other committee members');
+    expect(auditFieldLabel('teamRosters.premier')).toBe('Named teams › Premier');
+    expect(auditFieldLabel('leagueTeams.premier')).toBe('Teams per league › Premier');
+    expect(auditFieldLabel('docs.constitution')).toBe('Documents › Constitution');
+    expect(auditFieldLabel('docMeta.constitution.objectKey')).toBe(
+      'Document › Constitution › Stored file',
+    );
+    expect(auditFieldLabel('docMeta.safeguarding.fileCount')).toBe(
+      'Document › Safeguarding › Files',
+    );
+    expect(auditFieldLabel('note')).toBe('Note');
+  });
+
+  it('names the Phase 3 fields: players, clearances, fixtures, seasons and venues', () => {
+    expect(auditFieldLabel('veteransClub')).toBe('Veterans club');
+    expect(auditFieldLabel('idDocMeta')).toBe('ID document');
+    expect(auditFieldLabel('fromClub')).toBe('From club');
+    expect(auditFieldLabel('rejectReason')).toBe('Rejection reason');
+    expect(auditFieldLabel('feesCleared')).toBe('Fees cleared');
+    expect(auditFieldLabel('venueStatus')).toBe('Venue status');
+    expect(auditFieldLabel('originalDate')).toBe('Original date');
+    expect(auditFieldLabel('certificateStatus')).toBe('Certificate status');
+    expect(auditFieldLabel('stages.pools.status')).toBe('Stages › Pools › Status');
+    expect(auditFieldLabel('stages.pools.pairingOverride')).toBe(
+      'Stages › Pools › Knockout pairing',
+    );
+    expect(auditFieldLabel('seasonLabel')).toBe('Season label');
+    expect(auditFieldLabel('homeClubIds')).toBe('Home clubs');
+  });
+
+  it('names the Phase 3 fields: postponements, reports, squads, documents, Match Centre', () => {
+    expect(auditFieldLabel('proposedDate')).toBe('Proposed date');
+    expect(auditFieldLabel('agreedDate')).toBe('Agreed date');
+    expect(auditFieldLabel('acknowledged.umzinto')).toBe('Acknowledged › Umzinto');
+    expect(auditFieldLabel('umpires.1.ratings')).toBe('Umpire 1 › Ratings');
+    expect(auditFieldLabel('umpires.2.otherConcern')).toBe('Umpire 2 › Other concern');
+    expect(auditFieldLabel('recipientKind')).toBe('Sent to');
+    expect(auditFieldLabel('general')).toBe('General comments');
+    expect(auditFieldLabel('selection.players')).toBe('Squad › Players');
+    expect(auditFieldLabel('selection.captain')).toBe('Squad › Captain');
+    expect(auditFieldLabel('document')).toBe('Document');
+    expect(auditFieldLabel('medicoach.conflict')).toBe('Match Centre › Held change');
+    expect(auditFieldLabel('medicoach.review')).toBe('Match Centre › Player review');
   });
 });
 
@@ -209,6 +294,9 @@ describe('outcome, counts and time', () => {
   it('lists non-zero counts', () => {
     expect(auditCountsText({ sent: 12, failed: 1, skipped: 0 })).toBe('12 sent, 1 failed');
     expect(auditCountsText(undefined)).toBe('');
+    expect(auditCountsText({ fixturesChanged: 3, fixturesAdded: 0, seriesRemoved: 2 })).toBe(
+      '3 fixtures changed, 2 series removed',
+    );
   });
 
   it('gives relative and absolute time', () => {
@@ -216,5 +304,27 @@ describe('outcome, counts and time', () => {
     const w = auditWhen(at, Date.parse('2026-11-12T10:30:00.000Z'));
     expect(w.relative).toBe('2h ago');
     expect(w.absolute).toMatch(/^12 Nov 2026, \d\d:\d\d$/);
+  });
+});
+
+describe('auditDetailHeads', () => {
+  const head = (id: string, changeCount: number, label?: string) => ({
+    type: 'player',
+    id,
+    op: 'update',
+    changeCount,
+    ...(label ? { label } : {}),
+  });
+
+  it('joins detail targets to heads by position, so blanked ids do not collide', () => {
+    const heads = [head('', 1, 'A'), head('', 0, 'skip'), head('', 2, 'B'), head('', 3, 'C')];
+    const details = [1, 2, 3].map(() => ({ type: 'player', id: '' }));
+    expect(auditDetailHeads(heads, details).map((h) => h?.label)).toEqual(['A', 'B', 'C']);
+  });
+
+  it('falls back to type + id where the position disagrees', () => {
+    const heads = [head('p1', 0, 'One'), head('p2', 0, 'Two')];
+    expect(auditDetailHeads(heads, [{ type: 'player', id: 'p2' }])[0]?.label).toBe('Two');
+    expect(auditDetailHeads(heads, [{ type: 'player', id: 'p9' }])[0]).toBeUndefined();
   });
 });

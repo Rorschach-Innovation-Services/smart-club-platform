@@ -1827,6 +1827,8 @@ export interface AuditChange {
 
 export interface AuditMention extends AuditRef {
   label?: string;
+  /** The club the record belonged to when it was named (deleting that club strips the label). */
+  clubId?: string;
 }
 
 export interface AuditTargetHead {
@@ -1836,6 +1838,8 @@ export interface AuditTargetHead {
   label?: string;
   op: string;
   clubId?: string;
+  /** The club behind each side of a `<home> v <away>` label ('' = no club record). */
+  clubIds?: string[];
   changeCount: number;
   scrubbed?: true;
 }

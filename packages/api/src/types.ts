@@ -2024,9 +2024,13 @@ export interface CaptainsReport {
 
 export type SquadRequestStatus = 'pending' | 'submitted' | 'void';
 
-/** One selected registered player: an opaque roster key (never served) + the display name. */
+/** One selected registered player: their roster key + the display name. */
 export interface SquadSelectionPlayer {
-  /** The player's natural key (a hashed ID number) — server-only, never served or logged. */
+  /**
+   * The player's natural key (a hashed ID number). Never served by the squad routes or logged;
+   * the audit trail stores it as the `ref` of a selection change, so union admins reading an
+   * entry see it as an opaque record id (a player erasure blanks it there).
+   */
   key: string;
   name: string;
 }
@@ -2109,7 +2113,11 @@ export interface TeamCaptainDesignation {
   clubId: string;
   teamId: string;
   scope: string;
-  /** The player's natural key — server-only, never served. */
+  /**
+   * The player's natural key. Never served by the captain routes; the audit trail stores it as
+   * the `ref` of a team-captain change, so union admins reading an entry see it as an opaque
+   * record id (a player erasure blanks it there).
+   */
   playerKey: string;
   setBy: string;
   setAt: string;
@@ -2214,6 +2222,11 @@ export interface AuditChange {
 /** A record named by an entry outside a change (both sides of a merge, say). */
 export interface AuditMention extends AuditRef {
   label?: string;
+  /**
+   * The club the record belonged to when it was named (a player mention: the player's club at
+   * that moment). Gets its own `C#` pointer, so deleting that club strips the label.
+   */
+  clubId?: string;
 }
 
 /** What the headline row says about one affected record (no field values). */
@@ -2224,6 +2237,11 @@ export interface AuditTargetHead {
   label?: string;
   op: string;
   clubId?: string;
+  /**
+   * A label naming clubs (`<home> v <away>`): the club behind each side, in label order ('' for
+   * a side with no club record). Each has a `C#` pointer; deleting one rewrites its side.
+   */
+  clubIds?: string[];
   changeCount: number;
   /** Set when an erasure stripped this target's label/values. */
   scrubbed?: true;

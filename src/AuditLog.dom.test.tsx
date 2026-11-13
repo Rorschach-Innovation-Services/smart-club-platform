@@ -217,6 +217,55 @@ describe('AuditActivityView', () => {
     );
   });
 
+  it('three blanked player targets each show their own changes, with no key warning', async () => {
+    const blanked: AuditEntry = {
+      ...edit,
+      id: 'b1',
+      action: 'player.update',
+      // Ids blanked by an erasure; labels differ only so the test can tell the heads apart.
+      targets: [1, 2, 3].map((n) => ({
+        type: 'player',
+        id: '',
+        label: `Removed ${'ABC'[n - 1]}`,
+        op: 'update',
+        changeCount: n,
+        scrubbed: true as const,
+      })),
+    };
+    vi.mocked(api.getAuditFeed).mockResolvedValue({ items: [blanked] });
+    vi.mocked(api.getAuditEntry).mockResolvedValue({
+      entry: blanked,
+      detail: {
+        targets: [1, 2, 3].map((n) => ({
+          type: 'player',
+          id: '',
+          changes: Array.from({ length: n }, (_, k) => ({ field: `f${n}${k}`, to: `v${n}${k}` })),
+        })),
+        mentions: [],
+      },
+    });
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const user = renderActivity();
+      await waitFor(() => expect(rows()).toHaveLength(1));
+      await user.click(screen.getByRole('button', { name: /Show changes/ }));
+      for (const [i, name] of ['A', 'B', 'C'].entries()) {
+        const table = await screen.findByRole('table', {
+          name: new RegExp(`Changes to Player Removed ${name}$`),
+        });
+        const values = within(table)
+          .getAllByRole('row')
+          .slice(1)
+          .map((r) => r.textContent);
+        expect(values).toHaveLength(i + 1);
+        values.forEach((v, k) => expect(v).toContain(`v${i + 1}${k}`));
+      }
+      expect(errors.mock.calls.filter((c) => String(c[0]).includes('key'))).toEqual([]);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   it('loads older entries with the cursor', async () => {
     vi.mocked(api.getAuditFeed)
       .mockResolvedValueOnce({ items: [edit], cursor: 'c-1' })

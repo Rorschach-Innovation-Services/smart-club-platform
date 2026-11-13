@@ -5,7 +5,8 @@
  */
 import { test, before, after, afterEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import type { Server } from 'node:http';
+import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+import { Readable } from 'node:stream';
 import type { AuditEntry } from '../src/types.js';
 
 const DDB_PORT = 4851; // unique
@@ -95,6 +96,55 @@ before(async () => {
 
 after(() => new Promise<void>((resolve) => ddbServer.close(() => resolve())));
 afterEach(() => mw.setAuditWriterForTests(null));
+
+async function json200(res: Response | Promise<Response>): Promise<unknown> {
+  const r = await res;
+  const text = await r.text();
+  assert.equal(r.status, 200, text);
+  return JSON.parse(text);
+}
+
+/**
+ * Fail the next GetItem whose sort key `match` accepts (a 400 the SDK throws, as a throttled or
+ * refused read would); every other request reaches dynalite. Returns the undo.
+ */
+function failNextGet(match: (sk: string) => boolean): () => void {
+  type Listener = (req: IncomingMessage, res: ServerResponse) => void;
+  const original = ddbServer.listeners('request')[0] as Listener;
+  let armed = true;
+  ddbServer.removeAllListeners('request');
+  ddbServer.on('request', (req: IncomingMessage, res: ServerResponse) => {
+    if (!armed || req.headers['x-amz-target'] !== 'DynamoDB_20120810.GetItem')
+      return original(req, res);
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks);
+      const sk = (JSON.parse(raw.toString('utf8')) as { Key?: { sk?: { S?: string } } }).Key?.sk?.S;
+      if (sk && match(sk)) {
+        armed = false;
+        res.writeHead(400, { 'content-type': 'application/x-amz-json-1.0' });
+        res.end(
+          JSON.stringify({
+            __type: 'com.amazonaws.dynamodb.v20120810#ProvisionedThroughputExceededException',
+            message: 'read refused by the test',
+          }),
+        );
+        return;
+      }
+      const replay = Object.assign(Readable.from([raw]), {
+        headers: req.headers,
+        method: req.method,
+        url: req.url,
+      });
+      original(replay as unknown as IncomingMessage, res);
+    });
+  });
+  return () => {
+    ddbServer.removeAllListeners('request');
+    ddbServer.on('request', original);
+  };
+}
 
 /** Every row of the tenant's current audit month partition. */
 async function auditRows(tenant = TENANT): Promise<Record<string, unknown>[]> {
@@ -771,6 +821,78 @@ describe('secrets and failures', () => {
     assert.ok(!line!.includes('Fail Ground'));
   });
 
+  test('a failed before-read on PUT /venues/:id records the update with no diff; the save answers as normal', async () => {
+    await json200(call('PUT', '/venues/v-before', { id: 'v-before', name: 'Old Ground' }));
+    const errors: string[] = [];
+    const orig = console.error;
+    console.error = (...a: unknown[]) => void errors.push(a.map(String).join(' '));
+    const restore = failNextGet((sk) => sk === 'VENUE#v-before');
+    let res!: Response;
+    let added: Awaited<ReturnType<typeof headlines>> = [];
+    try {
+      added = await newHeadlines(async () => {
+        res = await call('PUT', '/venues/v-before', { id: 'v-before', name: 'New Ground' });
+      });
+    } finally {
+      restore();
+      console.error = orig;
+    }
+    assert.equal(res.status, 200, await res.clone().text());
+    assert.equal(((await res.json()) as { name: string }).name, 'New Ground');
+    assert.equal(added.length, 1);
+    assert.equal(added[0].action, 'venue.save');
+    assert.deepEqual(
+      added[0].targets.map((t) => [t.type, t.id, t.op, t.changeCount]),
+      [['venue', 'v-before', 'save', 0]],
+      'an unknown "before" is not a create: no diff',
+    );
+    assert.ok(
+      errors.some((l) => l.startsWith('audit: a read for the record failed')),
+      errors.join('\n'),
+    );
+  });
+
+  test('an async audit helper that rejects still returns the handler response', async () => {
+    const { Hono } = await import('hono');
+    const audit = await import('../src/audit.js');
+    const mini = new Hono();
+    mini.use('*', mw.auditMiddleware as never);
+    mini.post('/async-helper', async (c) => {
+      audit.auditSet({ tenant: TENANT, action: 'test.async-helper' });
+      await audit.safeAudit(async () => {
+        await new Promise((r) => setTimeout(r, 1));
+        audit.auditTarget({ type: 'venue', id: 'v-async', op: 'save' });
+        throw new RangeError('helper failed after an await');
+      });
+      return c.json({ ok: true }, 201);
+    });
+    const errors: string[] = [];
+    const orig = console.error;
+    console.error = (...a: unknown[]) => void errors.push(a.map(String).join(' '));
+    let res!: Response;
+    let added: Awaited<ReturnType<typeof headlines>> = [];
+    try {
+      added = await newHeadlines(async () => {
+        res = await mini.request('/async-helper', { method: 'POST' });
+      });
+    } finally {
+      console.error = orig;
+    }
+    assert.equal(res.status, 201);
+    assert.deepEqual(await res.json(), { ok: true });
+    assert.deepEqual(
+      errors.filter((l) => l.startsWith('audit:')),
+      ['audit: recording failed (RangeError)'],
+    );
+    // The entry still flushes with what was recorded before the failure.
+    assert.equal(added.length, 1);
+    assert.equal(added[0].action, 'test.async-helper');
+    assert.deepEqual(
+      added[0].targets.map((t) => t.id),
+      ['v-async'],
+    );
+  });
+
   test('cost: a plain change request makes exactly one audit write of a few rows', async () => {
     const sizes: number[] = [];
     mw.setAuditWriterForTests(async (set) => {
@@ -779,7 +901,8 @@ describe('secrets and failures', () => {
     });
     for (let i = 0; i < 5; i++)
       await call('PUT', `/venues/v-cost-${i}`, { id: `v-cost-${i}`, name: 'Cost' });
-    // Headline + entity pointer + actor pointer, one write per request.
-    assert.deepEqual(sizes, [3, 3, 3, 3, 3]);
+    // Headline + detail (the venue's field values, Phase 3) + entity pointer + actor pointer,
+    // one write per request.
+    assert.deepEqual(sizes, [4, 4, 4, 4, 4]);
   });
 });
