@@ -8,6 +8,10 @@
  *   npx sst shell --stage dev -- npm --prefix packages/api run audit-player-duplicates -- \
  *     --tenant dolphins
  *
+ * Also lists registrations whose stored ID number contains spaces or dashes ("S 0556434"):
+ * registration now compacts IDs at input, but rows stored before that keep their key — a
+ * spaced and a clean entry of one document are two people to the sync. Report only.
+ *
  * Writes nothing. Output masks names (initials), never prints a natural key, an ID number or
  * a full date of birth — only the birth year, club names and row statuses.
  */
@@ -93,6 +97,29 @@ export function duplicateGroups(snap: PlayerSyncSnapshot): DuplicateGroup[] {
   return groups.sort((a, b) => b.persons.length - a.persons.length);
 }
 
+export interface SpacedIdRow {
+  maskedName: string;
+  birthYear: string;
+  club: string;
+  status: string;
+}
+
+/** Rows whose stored idNumber has inner whitespace or dashes. Never returns the ID itself. */
+export function spacedIdRows(snap: PlayerSyncSnapshot): SpacedIdRow[] {
+  const out: SpacedIdRow[] = [];
+  for (const rows of snap.rowsByNk.values())
+    for (const r of rows) {
+      if (r.placeholder === true || !/[\s-]/.test((r.idNumber ?? '').trim())) continue;
+      out.push({
+        maskedName: maskName(`${r.firstName} ${r.lastName}`),
+        birthYear: String(r.dob ?? '').slice(0, 4),
+        club: snap.clubsById.get(r.clubId)?.name ?? r.clubId,
+        status: r.status ?? 'active',
+      });
+    }
+  return out.sort((a, b) => a.club.localeCompare(b.club));
+}
+
 async function main(): Promise<void> {
   const { tenant } = parseArgs(process.argv.slice(2));
   const repo = await import('../repo.js');
@@ -110,6 +137,11 @@ async function main(): Promise<void> {
         `    ${p.maskedName} (${p.birthYear}) — ${p.rows.map((r) => `${r.club} [${r.status}]`).join(', ')}`,
       );
   });
+  const spaced = spacedIdRows(snap);
+  console.log(`\nstored ID numbers with spaces or dashes — ${tenant} (read-only)`);
+  console.log(`  rows                           ${spaced.length}`);
+  for (const r of spaced)
+    console.log(`    ${r.maskedName} (${r.birthYear}) — ${r.club} [${r.status}]`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

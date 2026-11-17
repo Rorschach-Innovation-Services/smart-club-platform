@@ -13,6 +13,7 @@ vi.mock('./api', async (importActual) => {
     ...actual,
     getMedicoachSyncStatus: vi.fn(),
     getMedicoachPlayerReviews: vi.fn(),
+    getMedicoachPlayerOptOuts: vi.fn(),
     resolveMedicoachPlayerReview: vi.fn(),
     retryMedicoachPlayers: vi.fn(),
     getMatchMonitor: vi.fn(),
@@ -153,12 +154,20 @@ describe('Players panel', () => {
     });
   });
 
-  it('a review with no candidates shows medicoach’s message and only Dismiss', async () => {
+  it('a review with no candidates explains it plainly (code under Details) and offers only Dismiss', async () => {
     await renderPage(status(on({ reviews: 1 })), [
       { ...MEDICOACH_REVIEW, message: 'out-of-tenant-identity-conflict', candidates: [] },
     ]);
     const list = await screen.findByTestId('mcs-player-reviews');
-    expect(within(list).getByRole('note')).toHaveTextContent('out-of-tenant-identity-conflict');
+    const note = within(list).getByRole('note');
+    expect(note).toHaveTextContent('already exists in the Match Centre under another organisation');
+    expect(note).not.toHaveTextContent('out-of-tenant-identity-conflict');
+    expect(
+      within(list).getByText('out-of-tenant-identity-conflict').closest('details'),
+    ).not.toBeNull();
+    expect(list).toHaveTextContent(
+      'Dismiss sends nothing: it drops this review and the queued change',
+    );
     expect(within(list).queryByRole('button', { name: /create new/ })).toBeNull();
     expect(within(list).queryByRole('button', { name: 'Link to this player' })).toBeNull();
     await userEvent.click(within(list).getByRole('button', { name: 'Dismiss' }));
@@ -191,6 +200,97 @@ describe('Players panel', () => {
     expect(note).toHaveTextContent('1 player(s) are not sent to the Match Centre at their request');
     expect(note).toHaveTextContent('Their registration here is unchanged');
     expect(within(note).queryByRole('button')).toBeNull();
+  });
+
+  it('the opted-out note opens into who, why, by whom and when', async () => {
+    vi.mocked(api.getMedicoachPlayerOptOuts).mockResolvedValue([
+      {
+        name: 'Sophie Groves',
+        club: 'Simplex CC',
+        reason: 'medicoach-account-deleted',
+        note: 'deleted own MC account',
+        by: 'carlton',
+        at: '2026-10-09T10:00:00.000Z',
+      },
+    ]);
+    await renderPage(status(on({ optedOut: 1 })));
+    const note = await screen.findByTestId('mcs-players-opted-out');
+    expect(api.getMedicoachPlayerOptOuts).not.toHaveBeenCalled();
+    await userEvent.click(within(note).getByText('Details'));
+    const list = await within(note).findByRole('list', { name: 'Opted-out players' });
+    expect(list).toHaveTextContent('Sophie Groves');
+    expect(list).toHaveTextContent(
+      'Simplex CC · deleted their Match Centre account · deleted own MC account',
+    );
+    expect(list).toHaveTextContent('Since 2026-10-09 · by carlton');
+  });
+
+  it('possible duplicate with a checksum typo: side by side, ID row highlighted, typo advice', async () => {
+    await renderPage(status(on({ reviews: 1 })), [
+      {
+        ...DUPLICATE_REVIEW,
+        clubName: 'Tongaat CC',
+        subject: {
+          idLast4: '5083',
+          idValid: true,
+          registeredAt: '2026-02-01T00:00:00.000Z',
+          legacyKey: false,
+        },
+        candidates: [
+          {
+            name: 'Thabo Nkosi',
+            dob: '2004-04-04',
+            institutionName: 'Tongaat CC',
+            idLast4: '5038',
+            idValid: false,
+            registeredAt: '2026-03-05T00:00:00.000Z',
+            legacyKey: false,
+            sameIdIgnoringSpaces: false,
+            diff: ['id'],
+          },
+        ],
+      },
+    ]);
+    const list = await screen.findByTestId('mcs-player-reviews');
+    const table = within(list).getByRole('table', { name: 'Compared with Thabo Nkosi' });
+    const idRow = within(table).getByRole('row', { name: /^ID/ });
+    expect(idRow).toHaveClass('mcs-diff');
+    expect(idRow).toHaveTextContent('••••5083 · valid SA ID');
+    expect(idRow).toHaveTextContent('••••5038 · checksum fails');
+    expect(within(table).getByRole('row', { name: /^Club/ })).not.toHaveClass('mcs-diff');
+    expect(within(table).getByRole('row', { name: /^Registered/ })).toHaveTextContent(
+      '2026-02-012026-03-05',
+    );
+    expect(within(list).getByTestId('mcs-suggested-action')).toHaveTextContent(
+      'Probably a typo: one ID fails the SA ID checksum. Ask the office to merge',
+    );
+  });
+
+  it('possible duplicate with an older same-ID registration says so', async () => {
+    await renderPage(status(on({ reviews: 1 })), [
+      {
+        ...DUPLICATE_REVIEW,
+        subject: { idLast4: '5083', idValid: true, registeredAt: null, legacyKey: false },
+        candidates: [
+          {
+            name: 'Thabo Nkosi',
+            dob: '2004-04-04',
+            institutionName: 'Savages CC',
+            idLast4: '5083',
+            idValid: true,
+            registeredAt: '2025-01-10T00:00:00.000Z',
+            legacyKey: true,
+            sameIdIgnoringSpaces: true,
+            diff: [],
+          },
+        ],
+      },
+    ]);
+    const list = await screen.findByTestId('mcs-player-reviews');
+    expect(within(list).getByTestId('mcs-suggested-action')).toHaveTextContent(
+      'Older registration from before IDs were used',
+    );
+    expect(within(list).getByRole('table').querySelectorAll('tr.mcs-diff')).toHaveLength(0);
   });
 
   it('shows no opted-out note when nobody opted out', async () => {

@@ -40,6 +40,7 @@ export const qk = {
   medicoachSync: () => ['medicoach-sync', t()],
   matchMonitor: (date: string) => ['match-monitor', t(), date],
   medicoachPlayerReviews: () => ['medicoach-sync', t(), 'player-reviews'],
+  medicoachPlayerOptOuts: () => ['medicoach-sync', t(), 'player-opt-outs'],
   clubCaptainsReports: (clubId: string) => ['club-captains-reports', t(), clubId],
   clubCaptainsReport: (id: string) => ['club-captains-report', t(), id],
   // Every clubCaptainsReport entry, for invalidation; must match its first element.

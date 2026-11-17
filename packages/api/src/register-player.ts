@@ -29,6 +29,7 @@ import {
   resolvePlayerDob,
   normalizeId,
   computeIsMinor,
+  compactIdNumber,
 } from './player-identity.js';
 import { nameDobKey } from './medicoach-sync/player-placement.js';
 import type {
@@ -100,7 +101,9 @@ export function isDummyId(normalised: string): boolean {
 export function idIndexKey(
   p: Pick<PlayerRegistration, 'idNumber' | 'idType' | 'nationality'>,
 ): string | null {
-  const id = normalizeId(p.idNumber);
+  // Compacted so a row stored before input compaction ("S 0556434") still collides with the
+  // same ID typed cleanly — otherwise the guard misses it and the person is duplicated.
+  const id = normalizeId(compactIdNumber(p.idNumber));
   if (isDummyId(id)) return null;
   return (p.idType ?? 'sa-id') === 'passport'
     ? `passport:${normalizeId(p.nationality)}:${id}`
@@ -385,21 +388,23 @@ export async function registerPlayerForClub(
   if (!input.firstName?.trim() || !input.lastName?.trim()) {
     throw new HttpError(400, 'firstName and lastName are required');
   }
-  if (!normalizeId(input.idNumber)) throw new HttpError(400, IDENTITY_ERROR);
-  const dob = resolvePlayerDob(input);
+  // Compact the ID before it is stored AND hashed: "S 0556434" and "S0556434" are one person.
+  const idNumber = compactIdNumber(input.idNumber);
+  if (!normalizeId(idNumber)) throw new HttpError(400, IDENTITY_ERROR);
+  const dob = resolvePlayerDob({ ...input, idNumber });
   if (!dob) throw new HttpError(400, IDENTITY_ERROR);
 
   const ts = now();
   const player: PlayerRegistration = {
     ...input,
-    naturalKey: playerNaturalKey({ ...input, dob }),
+    naturalKey: playerNaturalKey({ ...input, idNumber, dob }),
     clubId: destClub.id,
     firstName: input.firstName,
     lastName: input.lastName,
     dob,
     isMinor: computeIsMinor(dob),
     idType: input.idType ?? 'sa-id',
-    idNumber: normalizeId(input.idNumber),
+    idNumber: normalizeId(idNumber),
     status: 'active',
     registeredVia: opts.registeredVia,
     ...(opts.registeredBy ? { registeredBy: opts.registeredBy } : {}),
