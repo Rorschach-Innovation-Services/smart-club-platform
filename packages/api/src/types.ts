@@ -1989,6 +1989,8 @@ export interface CaptainsReport {
   submittedVia?: 'portal' | 'link';
   submittedAt?: string;
   voidedAt?: string;
+  /** Why a sync-driven void happened (e.g. 'match abandoned in medicoach'), when recorded. */
+  voidReason?: string;
   /** Set when the result behind a SUBMITTED report was cleared — the admin should look. */
   flagged?: { reason: string; at: string };
   /**

@@ -12,7 +12,7 @@
  *      even when the pull failed, since it needs nothing from medicoach;
  *   3b. open the reports of every fixture played today/yesterday, result or not
  *      (`openMatchDayReports`; both sides to the chair when there is no result) — after the
- *      retry, so a result pulled in this run keeps its captain recipient. Inside the 18:00
+ *      retry, so a result pulled in this run keeps its captain recipient. Inside the 20:00
  *      window only; never fails the run; counted apart from the result tally (`matchDay`);
  *   4. send the one reminder for pending reports whose link expires within 2 days.
  *
@@ -23,7 +23,7 @@
  * the report steps, SQUADOPEN# retries run and tomorrow's fixtures open their squad requests
  * (`openPreMatchSquadRequests`, 08:00 SAST squad window, deadline-bounded). None fails the run.
  *
- * Captain's report notices (steps 2–4) go out only from 18:00 SAST (REPORT_NOTICE_HOUR):
+ * Captain's report notices (steps 2–4) go out only from 20:00 SAST (REPORT_NOTICE_HOUR):
  * before that the REPORTOPEN# markers stay queued and reminders stay due. `deadlineMs` (set
  * by the cron and "Sync now" handlers) bounds the drain; leftovers wait for the next run.
  *
@@ -88,7 +88,7 @@ export interface TenantSyncSummary extends SyncRunSummary {
   scorecards?: ScorecardSweepSummary;
   /** This run's captain's-report notice tally (pull + retry). */
   reportNotices?: { deferred: number; opened: number; notified: number; failed: number };
-  /** Plain-language note for "Sync now" when reports were queued for 18:00. */
+  /** Plain-language note for "Sync now" when reports were queued for 20:00. */
   reportsMessage?: string;
   /** Captain squad links: voids / self-heals / expiries, the §8 flush, retries and the opener. */
   squads?: {
@@ -101,7 +101,7 @@ export interface TenantSyncSummary extends SyncRunSummary {
   };
 }
 
-/** The "Sync now" note when notices are being held for the 18:00 SAST window. */
+/** The "Sync now" note when notices are being held for the 20:00 SAST window. */
 export const REPORTS_QUEUED_MESSAGE = `Captain's reports queued — sent from ${REPORT_NOTICE_HOUR}:00`;
 
 export interface TenantSyncDeps extends PullerDeps {

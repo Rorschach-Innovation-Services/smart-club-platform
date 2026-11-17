@@ -434,6 +434,34 @@ describe('--confirm', () => {
     assert.equal(notices.length, 0);
   });
 
+  test('an abandoned match is skipped at selection: row untouched, nothing sent', async () => {
+    await openPending('umzinto');
+    const old = (await get('umzinto'))!;
+    const at = new Date(Date.now() - DAY).toISOString();
+    await repo.putFixtureResultIfNewer('dolphins', {
+      seriesId: SERIES,
+      fixtureId: 'f-now',
+      ref: `smartclub:dolphins:fixture:${SERIES}:f-now`,
+      orderAt: at,
+      recordedAt: at,
+      storedAt: at,
+      summary: 'Abandoned, points shared',
+      winner: 'tie',
+      method: 'abandoned',
+      noResult: false,
+      resultSource: 'manual',
+    });
+    assert.equal(await run(), 0);
+    assert.match(logLines.join('\n'), new RegExp(`\\[${old.id}\\] match abandoned`));
+    assert.doesNotMatch(logLines.join('\n'), /PLAN → captain/);
+
+    logLines.length = 0;
+    assert.equal(await run({ confirm: true }), 0);
+    assert.deepEqual(await get('umzinto'), old, 'the row is not re-addressed');
+    assert.equal(notices.length, 0);
+    assert.match(logLines.join('\n'), /done: sent=0 failed=0/);
+  });
+
   test('a report that changes mid-run is a reported conflict: exit 1, nothing sent', async () => {
     await openPending('umzinto');
     const old = (await get('umzinto'))!;

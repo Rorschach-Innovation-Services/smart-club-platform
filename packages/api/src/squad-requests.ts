@@ -2,7 +2,7 @@
  * Pre-match captain squad-selection links (2026-10-27 plan, Group A).
  *
  * On the morning of the day before a synced fixture (the 08:00–midnight SAST squad notice
- * window, `SQUAD_NOTICE_HOUR` — earlier than captain's reports' 18:00; no match-day sends),
+ * window, `SQUAD_NOTICE_HOUR` — earlier than captain's reports' 20:00; no match-day sends),
  * each side's recipient gets a link (`/sq/<token>`) to tick the match squad from the club's
  * registered roster. The submission is pushed to medicoach as contract §8 (`medicoach-sync/squads.ts`),
  * where it prefills the scorer's start-scoring squad.
@@ -103,7 +103,7 @@ const DAY_MS = 24 * 3600 * 1000;
  * Squad links go out from this hour, SAST wall clock, until midnight on the day BEFORE the
  * match (the first sync at/after 08:00 delivers): the morning gives a captain the whole day to
  * pick. Match-day sends are deliberately never attempted. Captain's reports keep their own
- * 18:00 gate (`REPORT_NOTICE_HOUR`). Global, not per tenant — every tenant is South African
+ * 20:00 gate (`REPORT_NOTICE_HOUR`). Global, not per tenant — every tenant is South African
  * (TENANT_UTC_OFFSET_MINUTES, no DST).
  */
 export const SQUAD_NOTICE_HOUR = 8;

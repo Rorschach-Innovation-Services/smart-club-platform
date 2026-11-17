@@ -7,7 +7,8 @@
  *     [--backup-dir=<dir>] [--link-base=<url>] [--confirm]
  *
  * Selection: one Query of the tenant's CAPREPORT partition (no scan) → pending, source=auto,
- * matchDate in --dates (+ --series / --only). A report is skipped as already handled only when
+ * matchDate in --dates (+ --series / --only). A report of an ABANDONED match (stored result) is
+ * skipped ("match abandoned") before anything is planned or re-addressed. A report is skipped as already handled only when
  * its CURRENT recipient (memberId) was actually reached: the NOTIFY# slot for that memberId is
  * completed AND a `sent` delivery was recorded after the slot was claimed. A captain recipient
  * reached that way is done; a chair recipient only counts when reached today (SAST) — i.e. a
@@ -23,7 +24,7 @@
  * `readdressCaptainsReport` (fresh memberId ⇒ new link, new NOTIFY# slot; never bumps
  * forwardCount; clears reminderSentAt; refreshes an expired linkExpiresAt), then the send path
  * of reset-captains-reports --send: `openReportsForFixture` with `result: null` for that side,
- * the 18:00 window forced open. The chair's old link is kept (`chairMemberId`) when the chair
+ * the notice window forced open. The chair's old link is kept (`chairMemberId`) when the chair
  * was the recipient. `notifiedAt` is first-send-only (if_not_exists), so success is judged on
  * the deliveries recorded after the re-address.
  *
@@ -174,6 +175,21 @@ export async function runResend(
 
   const skipped: Array<{ id: string; why: string }> = [];
   const targets: CaptainsReport[] = [];
+  // One stored-result read per distinct fixture. Judged HERE, before anything is planned: on
+  // --confirm the row is re-addressed before the core runs, so leaving it to the core's own
+  // abandoned guard would kill the old link and send nothing.
+  const abandoned = new Map<string, boolean>();
+  const isAbandoned = async (r: CaptainsReport) => {
+    const key = `${r.seriesId}#${r.fixtureId}`;
+    if (!abandoned.has(key))
+      abandoned.set(
+        key,
+        reports.isAbandonedResult(
+          await repo.getFixtureResult(args.tenant, r.seriesId, r.fixtureId),
+        ),
+      );
+    return abandoned.get(key)!;
+  };
   for (const r of selected) {
     if (args.only?.length && !args.only.includes(r.id)) {
       skipped.push({ id: r.id, why: 'not in --only' });
@@ -181,6 +197,10 @@ export async function runResend(
     }
     if (args.exclude?.includes(r.id)) {
       skipped.push({ id: r.id, why: 'in --exclude' });
+      continue;
+    }
+    if (await isAbandoned(r)) {
+      skipped.push({ id: r.id, why: 'match abandoned' });
       continue;
     }
     const slot = await repo.getCaptainsReportNotify(

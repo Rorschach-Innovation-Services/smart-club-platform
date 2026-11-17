@@ -108,7 +108,7 @@ async function main(): Promise<void> {
       const { pathname } = new URL(req.url);
       if (pathname === '/__local/stack')
         return Response.json({ root: STACK_ROOT, pid: process.pid });
-      // e2e only: force the notice windows (captain's reports 18:00, squad links 08:00 SAST)
+      // e2e only: force the notice windows (captain's reports 20:00, squad links 08:00 SAST)
       // open/closed, or back to the real clock. Optional `scope` ('all' default | 'reports' |
       // 'squads') targets one window. Lives here (outside the Hono app), so the Lambda never has it.
       if (pathname === '/__e2e/report-notice-window' && req.method === 'POST')

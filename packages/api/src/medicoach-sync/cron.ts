@@ -1,6 +1,6 @@
 /**
  * Cron entry point for the medicoach sync (ADR 0016): one `sst.aws.Cron` at
- * `cron(0/15 * * * ? *)` (on the quarter hour, so a run lands at 18:00 SAST), all day. For every tenant with `features.medicoachSync`, one after
+ * `cron(0/15 * * * ? *)` (on the quarter hour, so a run lands at 20:00 SAST), all day. For every tenant with `features.medicoachSync`, one after
  * another: flush the schedule outbox, pull, retry pending captain's reports (`runTenantSync`).
  * A failing tenant never stops the others.
  *

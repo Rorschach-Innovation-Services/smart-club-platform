@@ -1,5 +1,6 @@
 /**
- * One-off: redo submitted captain's reports from scratch, by CR number. Two separate phases.
+ * One-off: redo submitted captain's reports from scratch, by CR number. Two separate phases —
+ * plus a third, unrelated mode that voids the pending reports of abandoned matches.
  *
  *   sst shell --stage <stage> -- npx tsx packages/api/scripts/reset-captains-reports.ts \
  *     --stage=<stage> --tenant=dolphins --refs=CR-2026-0132,CR-2026-0133 --reset   (dry run)
@@ -7,6 +8,8 @@
  *   … --send                 (dry run: shows who would get the notice)
  *   … --send --confirm       notify the chair of each reopened report (email + WhatsApp)
  *   … --backup-dir=<dir>     (default packages/api/)   … --link-base=<https url> (non-prod)
+ *   … --void-abandoned --dates=2026-11-14,2026-11-15   (dry run; NO --refs)
+ *   … --void-abandoned --dates=… --confirm             void them — SENDS NOTHING
  *
  * --reset: one Query of the tenant's CAPREPORT partition (no scan) resolves the refs; every
  * ref must exist and be `submitted`. A JSON backup of the full items is written (dry run too —
@@ -24,7 +27,16 @@
  * --reset (`--refs` then holds report ids, `<series>~<fixture>~<club>`, or old CR numbers are
  * looked up in the backup file via `--backup=<file>`). Each must be pending, source=auto,
  * never notified. The notice goes through `openReportsForFixture` (its existing-pending branch
- * → `notifyRecipient`), with the 18:00 window forced open.
+ * → `notifyRecipient`), with the notice window forced open.
+ *
+ * --reset refuses a fixture whose stored result is ABANDONED (before any write): the reopen
+ * would be refused by the opener, leaving the submitted report void.
+ *
+ * --void-abandoned: one Query of the CAPREPORT partition (no scan) → pending, source=auto,
+ * matchDate in --dates; one stored-result read per distinct fixture; those whose match is
+ * abandoned are voided (`voidPendingCaptainsReport`, voidReason 'match abandoned in
+ * medicoach' — pending-only, so a report submitted meanwhile is left alone). A JSON backup of
+ * the rows to void is written (dry run too). Sends nothing: no notify module is loaded.
  *
  * Exit status: 1 for a bad flag, a stage mismatch, a failed guard or a failed notice; else 0.
  */
@@ -38,14 +50,18 @@ import { confirmRefusals, resolveLinkBase, sstStage } from './backfill-captains-
 const DEFAULT_BACKUP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const USAGE =
-  'usage: reset-captains-reports --stage=<stage> [--tenant=<id>] --refs=<CR-…|report id,…> ' +
-  '(--reset | --send) [--confirm] [--backup=<file>] [--backup-dir=<dir>] [--link-base=<url>]';
+  'usage: reset-captains-reports --stage=<stage> [--tenant=<id>] ' +
+  '(--refs=<CR-…|report id,…> (--reset | --send) | --void-abandoned --dates=<YYYY-MM-DD,…>) ' +
+  '[--confirm] [--backup=<file>] [--backup-dir=<dir>] [--link-base=<url>]';
 
 export interface ResetArgs {
   stage: string;
   tenant: string;
+  /** --reset / --send only (empty for --void-abandoned). */
   refs: string[];
-  mode: 'reset' | 'send';
+  mode: 'reset' | 'send' | 'void-abandoned';
+  /** --void-abandoned only: the match dates to sweep. */
+  dates?: string[];
   confirm: boolean;
   backup?: string;
   backupDir?: string;
@@ -58,13 +74,18 @@ const list = (v: string) =>
     .map((x) => x.trim())
     .filter(Boolean);
 
+const validDate = (d: string) =>
+  /^\d{4}-\d{2}-\d{2}$/.test(d) &&
+  !Number.isNaN(Date.parse(`${d}T00:00:00Z`)) &&
+  new Date(`${d}T00:00:00Z`).toISOString().slice(0, 10) === d;
+
 /** Parse the CLI flags; throws (message = the reason) on anything bad or unknown. Pure. */
 export function parseResetArgs(argv: string[]): ResetArgs {
   const out: Partial<ResetArgs> & { confirm: boolean; tenant: string } = {
     confirm: false,
     tenant: 'dolphins',
   };
-  const modes = new Set<'reset' | 'send'>();
+  const modes = new Set<ResetArgs['mode']>();
   for (const arg of argv) {
     const [flag, ...rest] = arg.split('=');
     const value = rest.join('=').trim();
@@ -72,18 +93,32 @@ export function parseResetArgs(argv: string[]): ResetArgs {
     else if (arg === '--dry-run') out.confirm = false;
     else if (arg === '--reset') modes.add('reset');
     else if (arg === '--send') modes.add('send');
+    else if (arg === '--void-abandoned') modes.add('void-abandoned');
     else if (flag === '--stage' && value) out.stage = value;
     else if (flag === '--tenant' && value) out.tenant = value;
     else if (flag === '--refs' && value) out.refs = list(value);
-    else if (flag === '--backup' && value) out.backup = value;
+    else if (flag === '--dates' && value) {
+      const dates = list(value);
+      const bad = dates.filter((d) => !validDate(d));
+      if (bad.length) throw new Error(`--dates: not YYYY-MM-DD: ${bad.join(', ')}`);
+      out.dates = dates;
+    } else if (flag === '--backup' && value) out.backup = value;
     else if (flag === '--backup-dir' && value) out.backupDir = value;
     else if (flag === '--link-base' && value) out.linkBase = value;
     else throw new Error(`unknown or empty flag "${arg}"`);
   }
   if (!out.stage) throw new Error('--stage is required');
-  if (!out.refs?.length) throw new Error('--refs is required');
-  if (modes.size !== 1) throw new Error('exactly one of --reset | --send is required');
+  if (modes.size !== 1)
+    throw new Error('exactly one of --reset | --send | --void-abandoned is required');
   out.mode = [...modes][0];
+  if (out.mode === 'void-abandoned') {
+    if (out.refs) throw new Error('--refs is not allowed with --void-abandoned (use --dates)');
+    if (!out.dates?.length) throw new Error('--dates is required with --void-abandoned');
+    out.refs = [];
+  } else {
+    if (out.dates) throw new Error('--dates is only for --void-abandoned');
+    if (!out.refs?.length) throw new Error('--refs is required');
+  }
   return out as ResetArgs;
 }
 
@@ -156,13 +191,18 @@ export async function runReset(
     const fx = (series?.fixtures as Array<{ id?: string; date?: string }> | undefined)?.find(
       (f) => f?.id === r.fixtureId,
     );
+    const abandoned = reports.isAbandonedResult(
+      await repo.getFixtureResult(args.tenant, r.seriesId, r.fixtureId),
+    );
     const why = !club
       ? 'club not found'
       : !series || !fx?.date
         ? 'fixture not found in series'
         : !goLive || fx.date < goLive
           ? 'fixture before tenant go-live (reopen would be skipped)'
-          : null;
+          : abandoned
+            ? 'match abandoned (reopen would be refused)'
+            : null;
     log(
       `  ${r.ref} [${r.id}] ${r.clubName} v ${r.opponentName} ${r.matchDate} ` +
         `submittedBy=${r.submittedBy ?? '?'} via=${r.submittedVia ?? '?'}`,
@@ -253,6 +293,81 @@ export async function runReset(
   }
   log(`done: reset=${targets.length - failed} failed=${failed}`);
   return failed ? 1 : 0;
+}
+
+// ───────────────────────── --void-abandoned ─────────────────────────
+
+/**
+ * Void the pending auto reports of abandoned matches on `args.dates` (dry run unless
+ * `confirm`). Sends nothing. Returns the exit status.
+ */
+export async function runVoidAbandoned(
+  args: ResetArgs,
+  repo: RepoModule,
+  reports: ReportsModule,
+  log: (l: string) => void = console.log,
+): Promise<number> {
+  const config = await repo.getTenantConfig(args.tenant);
+  if (!config) {
+    log(`tenant "${args.tenant}" not found`);
+    return 1;
+  }
+  const dates = new Set(args.dates ?? []);
+  // One Query of the single CAPREPORT partition.
+  const candidates = (await repo.listCaptainsReports(args.tenant))
+    .filter((r) => r.status === 'pending' && r.source === 'auto' && dates.has(r.matchDate))
+    .sort((a, b) => a.matchDate.localeCompare(b.matchDate) || a.id.localeCompare(b.id));
+  // One stored-result read per distinct fixture.
+  const abandoned = new Map<string, boolean>();
+  const targets: CaptainsReport[] = [];
+  for (const r of candidates) {
+    const key = `${r.seriesId}#${r.fixtureId}`;
+    if (!abandoned.has(key))
+      abandoned.set(
+        key,
+        reports.isAbandonedResult(
+          await repo.getFixtureResult(args.tenant, r.seriesId, r.fixtureId),
+        ),
+      );
+    if (abandoned.get(key)) targets.push(r);
+  }
+
+  log(
+    `${args.confirm ? 'CONFIRM' : 'DRY RUN'} --void-abandoned tenant=${args.tenant} ` +
+      `stage=${args.stage} dates=${[...dates].join(',')} pending=${candidates.length} ` +
+      `abandoned=${targets.length}`,
+  );
+  for (const r of targets)
+    log(
+      `  [${r.id}] ${r.clubName} v ${r.opponentName} ${r.matchDate} → ${r.recipient.kind} ` +
+        `${r.notifiedAt ? 'notified' : 'never notified'} — would void`,
+    );
+
+  const dir = args.backupDir ? resolve(args.backupDir) : DEFAULT_BACKUP_DIR;
+  await mkdir(dir, { recursive: true });
+  const file = join(
+    dir,
+    `captains-report-void-abandoned-backup-${args.tenant}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
+  );
+  await writeFile(
+    file,
+    JSON.stringify({ tenant: args.tenant, stage: args.stage, reports: targets }, null, 2),
+  );
+  log(`backup: ${file}`);
+
+  if (!args.confirm) {
+    log(`DRY RUN done: ${targets.length} would be voided; nothing written, no notice sent.`);
+    return 0;
+  }
+  let voided = 0;
+  for (const r of targets) {
+    if (await repo.voidPendingCaptainsReport(args.tenant, r, reports.ABANDONED_VOID_REASON)) {
+      voided++;
+      log(`  [${r.id}] voided`);
+    } else log(`  [${r.id}] no longer pending — left alone`);
+  }
+  log(`done: voided=${voided} left=${targets.length - voided}; no notice sent`);
+  return 0;
 }
 
 // ───────────────────────── --send ─────────────────────────
@@ -399,13 +514,15 @@ export async function main(argv: string[]): Promise<number> {
     console.error(`REFUSED: --stage=${args.stage} but sst shell stage is ${actual ?? '(none)'}`);
     return 1;
   }
-  if (args.mode === 'reset') {
+  if (args.mode === 'reset' || args.mode === 'void-abandoned') {
     // NO notify bootstrap: the notify modules load dry-run, so nothing can go out.
     const [repo, reports] = await Promise.all([
       import('../src/repo.js'),
       import('../src/captains-reports.js'),
     ]);
-    return runReset(args, repo, reports);
+    return args.mode === 'reset'
+      ? runReset(args, repo, reports)
+      : runVoidAbandoned(args, repo, reports);
   }
   // FIRST: notify env from the SST secrets, before any notify module can load.
   const filled = bootstrapNotifyEnvFromSst();

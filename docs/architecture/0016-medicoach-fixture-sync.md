@@ -114,17 +114,20 @@ importer's `putSeries`) would overwrite them or lose them to a version conflict.
   that reached nobody (every channel tried failed) releases its claim and is retried; one
   delivered channel is done. The admin sync page shows "notices failed" for retries waiting
   on that.
-- **Notices go out from 18:00 SAST** (user decision, 10–11 Oct 2026) — nothing is sent
-  before `REPORT_NOTICE_HOUR` (18:00 SAST, a global gate: every tenant is South African, one
-  fixed offset). A result stored earlier in the day is stored as usual, but the puller does
-  NOT call the hook and does NOT delete its `REPORTOPEN#` marker: the marker is the queue.
-  The first run at or after 18:00 drains it (the puller cron runs on fixed quarter hours,
-  `cron(0/15 * * * ? *)`, so one lands at 16:00 UTC); a result stored after 18:00 sends at
-  once, and one arriving after midnight waits for 18:00 that day. A deferral is never an
-  attempt (it does not count toward `REPORT_OPEN_MAX_ATTEMPTS`). Because the opening itself
-  is deferred, a corrected result's summary update on pending reports also waits until 18:00.
-  "Sync now" follows the same rule and says the reports are queued; the one reminder is held
-  until 18:00 too (it stays due — the window runs to midnight). Each invocation drains within
+- **Notices go out from 20:00 SAST** (user decision, 10–11 Oct 2026, moved from 18:00 on
+  17 Nov 2026 so matches can finish and an abandonment can sync first) — nothing is sent
+  before `REPORT_NOTICE_HOUR` (20:00 SAST, a global gate: every tenant is South African, one
+  fixed offset). A league can set its own start hour (`captainsReport.noticeFromHour`; the
+  seeded premier league opens from 04:00), and a `deferMatchDayNotices` league's Monday 18:00
+  fallback (below) is unchanged. A result stored earlier in the day is stored as usual, but
+  the puller does NOT call the hook and does NOT delete its `REPORTOPEN#` marker: the marker
+  is the queue. The first run at or after 20:00 drains it (the puller cron runs on fixed
+  quarter hours, `cron(0/15 * * * ? *)`, so one lands at 18:00 UTC); a result stored after
+  20:00 sends at once, and one arriving after midnight waits for 20:00 that day. A deferral is
+  never an attempt (it does not count toward `REPORT_OPEN_MAX_ATTEMPTS`). Because the opening
+  itself is deferred, a corrected result's summary update on pending reports also waits until
+  20:00. "Sync now" follows the same rule and says the reports are queued; the one reminder is
+  held until 20:00 too (it stays due — the window runs to midnight). Each invocation drains within
   a deadline (cron ~4 min, "Sync now" ~20 s), checked before each marker and each `NOTIFY#`
   claim; leftovers stay queued. Never sent twice: every automatic send claims `NOTIFY#`
   first, a delivered channel (e.g. email-only) completes the claim, and nothing re-queues
@@ -132,6 +135,32 @@ importer's `putSeries`) would overwrite them or lose them to a version conflict.
   10 minutes is reported to Sentry, never re-sent. The gate covers the AUTOMATIC paths only:
   a chair's manual "Send to captain" forward is a deliberate human action and sends at any
   hour (still claim-protected, so never twice).
+- **Match-day opener** — inside the notice window each sync run (cron and "Sync now") also
+  opens the reports of every fixture played today or yesterday (SAST), result or not
+  (`openMatchDayReports`). With no result both sides go to the chair, the form shows the
+  fixture facts only, and a result that lands later fills in the summary without a second
+  notice. A side that already has a report row of any status is left alone, so a report voided
+  by a cleared or abandoned result is never resurrected here. Its counts are reported under
+  `matchDay`, apart from the result-driven `reportNotices`. A `deferMatchDayNotices` league
+  (premier) gets no result-less open: its reports open when the result lands, or card-less
+  from the Monday 18:00 SAST after the match if a fixture of the last 7 days still has none.
+- **Abandoned matches get no report** (owner decision, 17 Nov 2026) — a result whose `method`
+  is `'abandoned'` (`isAbandonedResult`) never opens or notifies a report, on any path: the
+  result hook, the match-day opener, the squad-captain retarget, the reminder and the CLIs.
+  Medicoach sends two shapes and the check keys on `method` alone: a host-recorded or scraped
+  abandonment (`winner: 'none'`, `noResult: true`) and the scorer's "abandoned, points shared"
+  (`winner: 'tie'`, `noResult: false`). A `'no-result'` or `'forfeit'` result still notifies.
+  When the abandonment arrives after the notice went out, each pending auto report of the
+  fixture is voided (`voidReason: 'match abandoned in medicoach'`; the link answers 410, no
+  reminder, off the Pending count) and a submitted report is kept as it is, never flagged. The
+  void happens straight away, outside the notice window (it sends nothing), and ahead of the
+  kill switch and series exclusion, like the cleared-result void (which now records
+  `voidReason: 'result cleared in medicoach'`). A reminder that finds a pending row of an
+  abandoned match voids it instead of sending. If the abandonment is later corrected to a real
+  result, the reports re-open with a new link and one notice per side. The admin page shows the
+  reason on a void row ("Match abandoned"). Rows left pending from before this rule are voided
+  with `reset-captains-reports.ts --void-abandoned --dates=YYYY-MM-DD,…` (dry run by default,
+  `--confirm` to write; sends nothing).
 - **Honest delivery** — every notice (the opening, a chair's forward, the reminder) records
   one `deliveries[]` entry per channel on the report: `sent | failed | skipped` with a reason
   (`no-contact`, `no-email`, `no-cell`, `dry-run`, `template-pending`, `send-failed`), the

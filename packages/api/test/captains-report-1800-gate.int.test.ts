@@ -1,11 +1,12 @@
 /**
- * The 18:00 SAST rule for captain's report notices, end to end against dynalite with the REAL
+ * The notice-hour rule (REPORT_NOTICE_HOUR, 20:00 SAST) for captain's report notices, end to end against dynalite with the REAL
  * puller and sync run (a stub medicoach serves the shared contract example):
  *
- *  - before 18:00 a pulled result is stored, its REPORTOPEN# marker kept, nothing sent;
- *  - the first run at/after 18:00 drains the queue, one notice per report; re-runs send zero;
+ *  - before the hour a pulled result is stored, its REPORTOPEN# marker kept, nothing sent;
+ *  - the first run at/after the hour drains the queue, one notice per report; re-runs send zero;
  *  - deferring is never an attempt, a cleared result sends nothing, a spent deadline leaves
- *    work queued, concurrent drains send once, reminders wait for 18:00 too;
+ *    work queued, concurrent drains send once, reminders wait for the hour too;
+ *  - an ABANDONED result is never queued: pulled before the hour it voids at once;
  *  - REGRESSION (11 Oct 2026): a report whose notice went out by email only (WhatsApp
  *    skipped/failed) has a COMPLETED claim and gets zero sends on every later path.
  *
@@ -25,6 +26,8 @@ const DDB_PORT = 4717;
 const TABLE = 'SmartClubReport1800Gate';
 dynaliteEnv(DDB_PORT, TABLE);
 process.env.NOTIFY_DRY_RUN = '1';
+/** The default notice hour (SAST): every in-window instant below is relative to it. */
+const { REPORT_NOTICE_HOUR: H } = await import('../src/captains-reports.js');
 
 const SECRET = 'stub-shared-secret';
 const EXAMPLES = path.resolve(
@@ -46,7 +49,7 @@ const MATCH_DATE = isoDay(-1);
  * Every rolling date here stays after it. */
 const GO_LIVE = '2026-09-01';
 /** Fixtures nobody pulls a result for: dated outside the match-day opener's lookback, so the
- * 18:00 run does not open (and notify) them on its own. */
+ * evening run does not open (and notify) them on its own. */
 const BYSTANDER = { date: isoDay(-4) };
 const CAPTAIN_KEY = '0'.repeat(64); // the example's captainRef natural key
 const CAPTAIN_REF = `smartclub:dolphins:player:${CAPTAIN_KEY}`;
@@ -279,7 +282,7 @@ const sastToday = (h: number, m = 0, s = 0) => {
   return new Date(Date.parse(`${day}T00:00:00.000Z`) - 2 * HOUR + ((h * 60 + m) * 60 + s) * 1000);
 };
 const AT_1400 = sastToday(14);
-const AT_1800 = sastToday(18);
+const AT_OPEN = sastToday(H);
 const LIVE_REF = 'smartclub:dolphins:fixture:s-planb-premier-men-t20-g1:f3';
 
 /** Capture every notice; `outcome` decides each channel's status (default: all sent). */
@@ -330,22 +333,25 @@ const syncNowAt = async (at: Date) =>
   });
 
 describe('isReportNoticeWindowOpen', () => {
-  test('17:59:59 SAST is closed, 18:00:00 is open, open to midnight, closed after', async () => {
+  test('a second before the hour is closed, the hour itself is open, open to midnight, closed after', async () => {
     const { isReportNoticeWindowOpen, REPORT_NOTICE_HOUR } =
       await import('../src/captains-reports.js');
-    assert.equal(REPORT_NOTICE_HOUR, 18);
-    assert.equal(isReportNoticeWindowOpen(new Date('2026-10-11T15:59:59.999Z')), false);
-    assert.equal(isReportNoticeWindowOpen(new Date('2026-10-11T16:00:00.000Z')), true);
+    assert.equal(REPORT_NOTICE_HOUR, 20, 'owner decision 17 Nov 2026: 20:00 SAST');
+    /** 11 Oct 2026 at hh:mm SAST plus `ms`, as a UTC instant. */
+    const oct11 = (h: number, ms = 0) =>
+      new Date(Date.parse('2026-10-11T00:00:00.000Z') - 2 * HOUR + h * HOUR + ms);
+    assert.equal(isReportNoticeWindowOpen(oct11(H, -1)), false);
+    assert.equal(isReportNoticeWindowOpen(oct11(H)), true);
     assert.equal(isReportNoticeWindowOpen(new Date('2026-10-11T21:59:59.999Z')), true);
     assert.equal(isReportNoticeWindowOpen(new Date('2026-10-11T22:00:00.000Z')), false); // 00:00
     assert.equal(isReportNoticeWindowOpen(new Date('2026-10-12T06:00:00.000Z')), false); // 08:00
-    assert.equal(isReportNoticeWindowOpen(sastToday(17, 59, 59)), false);
-    assert.equal(isReportNoticeWindowOpen(sastToday(18)), true);
+    assert.equal(isReportNoticeWindowOpen(sastToday(H - 1, 59, 59)), false);
+    assert.equal(isReportNoticeWindowOpen(sastToday(H)), true);
   });
 });
 
-describe('the 18:00 SAST gate', () => {
-  test('a 14:00 pull stores the result and keeps the marker with zero sends; 18:00 sends once; a re-run sends zero', async () => {
+describe('the notice-hour gate', () => {
+  test('a 14:00 pull stores the result and keeps the marker with zero sends; the hour sends once; a re-run sends zero', async () => {
     await seedCaptain();
     page = liveResultPage('live');
     const early = await pullAt(AT_1400);
@@ -353,14 +359,14 @@ describe('the 18:00 SAST gate', () => {
     assert.equal(early.counts.resultsStored, 1);
     assert.equal(early.reportsDeferred, 1);
     assert.equal(notices.length, 0);
-    assert.deepEqual(await reportsOf(), [], 'no report opened before 18:00');
+    assert.deepEqual(await reportsOf(), [], 'no report opened before the hour');
     const [marker] = await repo.listReportOpenMarkers('dolphins');
     assert.equal(marker.ref, LIVE_REF);
     assert.equal(marker.attempts, 0, 'a deferral is not an attempt');
-    assert.equal(marker.captainRef, CAPTAIN_REF, 'the captain is still addressable at 18:00');
+    assert.equal(marker.captainRef, CAPTAIN_REF, 'the captain is still addressable at the hour');
 
-    // The 18:00 run (same page replayed: nothing new pulled) drains the queue.
-    const run = await syncNowAt(AT_1800);
+    // The first in-window run (same page replayed: nothing new pulled) drains the queue.
+    const run = await syncNowAt(AT_OPEN);
     assert.equal(run.reports?.done, 1);
     assert.equal(run.reportsMessage, undefined);
     assert.deepEqual(run.reportNotices, { deferred: 0, opened: 2, notified: 2, failed: 0 });
@@ -369,25 +375,25 @@ describe('the 18:00 SAST gate', () => {
     assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
     assert.equal(await tableItemsContaining(CAPTAIN_REF), 0);
 
-    await syncNowAt(sastToday(18, 15));
-    await syncNowAt(sastToday(21));
+    await syncNowAt(sastToday(H, 15));
+    await syncNowAt(sastToday(H, 45));
     assert.equal(notices.length, 2, 'a re-run sends zero');
   });
 
-  test('a result pulled after 18:00 sends immediately', async () => {
+  test('a result pulled after the hour sends immediately', async () => {
     page = liveResultPage('live');
-    const s = await pullAt(sastToday(19, 30));
+    const s = await pullAt(sastToday(H, 30));
     assert.equal(s.reportsDeferred, undefined);
     assert.equal(notices.length, 2);
     assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
   });
 
-  test('"Sync now" before 18:00 says the reports are queued, and sends nothing', async () => {
+  test('"Sync now" before the hour says the reports are queued, and sends nothing', async () => {
     page = liveResultPage('live');
     const run = await syncNowAt(AT_1400);
     const { REPORTS_QUEUED_MESSAGE } = await import('../src/medicoach-sync/run.js');
     assert.equal(run.reportsMessage, REPORTS_QUEUED_MESSAGE);
-    assert.match(String(run.reportsMessage), /queued.*18:00/);
+    assert.match(String(run.reportsMessage), new RegExp(`queued.*${H}:00`));
     assert.equal(run.reportNotices?.deferred, 1, 'one queued report, counted once (not per pass)');
     assert.equal(run.reports?.deferred, 1);
     assert.equal(notices.length, 0);
@@ -402,16 +408,16 @@ describe('the 18:00 SAST gate', () => {
       const r = await retryAt(sastToday(8 + (i % 10), i));
       assert.deepEqual(r, { retried: 0, done: 0, failed: 0, gaveUp: 0, deferred: 1 });
     }
-    await syncNowAt(sastToday(17, 45));
+    await syncNowAt(sastToday(H - 1, 45));
     const [marker] = await repo.listReportOpenMarkers('dolphins');
     assert.equal(marker.attempts, 0);
     assert.equal(notices.length, 0);
-    const r = await retryAt(AT_1800);
+    const r = await retryAt(AT_OPEN);
     assert.equal(r.done, 1);
     assert.equal(notices.length, 2);
   });
 
-  test('a result cleared before 18:00 sends no notice', async () => {
+  test('a result cleared before the hour sends no notice', async () => {
     page = liveResultPage('live');
     await pullAt(AT_1400);
     await repo.putFixtureResultIfNewer('dolphins', {
@@ -423,7 +429,7 @@ describe('the 18:00 SAST gate', () => {
       clearedAt: '2099-01-01T00:00:00.000Z',
       storedAt: new Date().toISOString(),
     });
-    const r = await retryAt(AT_1800);
+    const r = await retryAt(AT_OPEN);
     assert.equal(r.retried, 0);
     assert.equal(notices.length, 0);
     assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
@@ -432,21 +438,21 @@ describe('the 18:00 SAST gate', () => {
 
   test('when the deadline is spent, leftovers stay queued and send on the next run, once each', async () => {
     page = liveResultPage('live');
-    // A pull at 18:00 already out of time: stored, deferred, marker kept.
-    const s = await pullAt(AT_1800, { deadlineMs: Date.now() - 1 });
+    // A pull at the hour already out of time: stored, deferred, marker kept.
+    const s = await pullAt(AT_OPEN, { deadlineMs: Date.now() - 1 });
     assert.equal(s.reportsDeferred, 1);
     assert.equal(notices.length, 0);
     // The drain out of time too: untouched, not an attempt.
-    const r1 = await retryAt(AT_1800, { deadlineMs: Date.now() - 1 });
+    const r1 = await retryAt(AT_OPEN, { deadlineMs: Date.now() - 1 });
     assert.deepEqual(r1, { retried: 0, done: 0, failed: 0, gaveUp: 0, deferred: 1 });
     const [marker] = await repo.listReportOpenMarkers('dolphins');
     assert.equal(marker.attempts, 0);
     // The next run has time: one notice per report.
-    const r2 = await retryAt(sastToday(18, 15), { deadlineMs: Date.now() + 60_000 });
+    const r2 = await retryAt(sastToday(H, 15), { deadlineMs: Date.now() + 60_000 });
     assert.equal(r2.done, 1);
     assert.equal(notices.length, 2);
-    await retryAt(sastToday(18, 30));
-    await pullAt(sastToday(18, 30));
+    await retryAt(sastToday(H, 30));
+    await pullAt(sastToday(H, 30));
     assert.equal(notices.length, 2);
   });
 
@@ -458,7 +464,7 @@ describe('the 18:00 SAST gate', () => {
     const { retryPendingReportOpens } = await import('../src/captains-reports.js');
     const deps = {
       repo,
-      now: () => AT_1800,
+      now: () => AT_OPEN,
       log: () => {},
       sendNotice: async (n: Notice) => {
         deadline = Date.now() - 1;
@@ -473,11 +479,11 @@ describe('the 18:00 SAST gate', () => {
     assert.equal(notices.length, 1);
     assert.equal((await repo.listReportOpenMarkers('dolphins')).length, 1);
     assert.equal((await reportsOf()).length, 2);
-    const r2 = await retryAt(sastToday(18, 15));
+    const r2 = await retryAt(sastToday(H, 15));
     assert.equal(r2.done, 1);
     assert.equal(notices.length, 2);
     assert.equal(new Set(notices.map((n) => n.reportId)).size, 2, 'each report notified once');
-    await retryAt(sastToday(18, 30));
+    await retryAt(sastToday(H, 30));
     assert.equal(notices.length, 2);
   });
 
@@ -485,7 +491,7 @@ describe('the 18:00 SAST gate', () => {
     await seedCaptain();
     page = liveResultPage('live');
     await pullAt(AT_1400);
-    await Promise.all([retryAt(AT_1800), retryAt(AT_1800), retryAt(AT_1800)]);
+    await Promise.all([retryAt(AT_OPEN), retryAt(AT_OPEN), retryAt(AT_OPEN)]);
     assert.equal(notices.length, 2);
     assert.equal(new Set(notices.map((n) => n.reportId)).size, 2);
     assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
@@ -494,39 +500,92 @@ describe('the 18:00 SAST gate', () => {
   test('a notice that failed on every channel is delivered exactly once in total', async () => {
     page = liveResultPage('live');
     outcome = () => 'failed';
-    await pullAt(AT_1800);
+    await pullAt(AT_OPEN);
     assert.equal(notices.length, 2, 'both tried, both failed (claims released)');
     assert.equal((await repo.listReportOpenMarkers('dolphins')).length, 1);
     outcome = () => 'sent';
-    await retryAt(sastToday(18, 15));
-    await retryAt(sastToday(18, 30));
-    await syncNowAt(sastToday(19));
+    await retryAt(sastToday(H, 15));
+    await retryAt(sastToday(H, 30));
+    await syncNowAt(sastToday(H, 45));
     const delivered = notices.slice(2);
     assert.equal(delivered.length, 2, 'one delivered notice per report, in total');
     assert.equal(new Set(delivered.map((n) => n.reportId)).size, 2);
   });
 
-  test('reminders: none before 18:00; one after; never a second', async () => {
+  test('reminders: none before the hour; one after; never a second', async () => {
     page = liveResultPage('live');
-    await pullAt(AT_1800);
+    await pullAt(AT_OPEN);
     assert.equal(notices.length, 2);
     const [r] = await reportsOf();
     const { reportExpirySeconds, isReportNoticeWindowOpen } =
       await import('../src/captains-reports.js');
     const expiryMs = reportExpirySeconds(r) * 1000; // 23:59:59 SAST on the last day
-    const dueClosed = new Date(expiryMs - 24 * HOUR - 7 * HOUR); // 16:59:59 SAST, inside lead
-    const dueOpen = new Date(expiryMs - 24 * HOUR - 6 * HOUR + 1000); // 18:00:00 SAST
+    // The day before the last: the hour itself (H:00:00 SAST) and an hour earlier, both
+    // inside the reminder lead.
+    const dueOpen = new Date(expiryMs - 24 * HOUR - (24 - H) * HOUR + 1000);
+    const dueClosed = new Date(dueOpen.getTime() - HOUR);
     assert.equal(isReportNoticeWindowOpen(dueClosed), false);
     assert.equal(isReportNoticeWindowOpen(dueOpen), true);
 
-    const before18 = await remindAt(dueClosed);
-    assert.deepEqual(before18, { due: 0, sent: 0, undelivered: 0 });
+    const beforeHour = await remindAt(dueClosed);
+    assert.deepEqual(beforeHour, { due: 0, sent: 0, undelivered: 0 });
     assert.equal(notices.length, 2);
-    const at18 = await remindAt(dueOpen);
-    assert.equal(at18.sent, 2);
+    const atHour = await remindAt(dueOpen);
+    assert.equal(atHour.sent, 2);
     assert.equal(notices.filter((n) => n.reminder).length, 2);
     await remindAt(new Date(dueOpen.getTime() + HOUR));
     assert.equal(notices.filter((n) => n.reminder).length, 2, 'at most one reminder each');
+  });
+});
+
+describe('an abandoned result is never queued', () => {
+  /** The live example re-recorded as abandoned, `minutes` after its recordedAt. */
+  const abandonedPage = (minutes: number) => {
+    const p = liveResultPage('manual');
+    const at = new Date(Date.parse(p.fixtures[0].result.recordedAt) + minutes * 60_000);
+    p.nextCursor = at.toISOString();
+    Object.assign(p.fixtures[0].result, {
+      homeScore: null,
+      awayScore: null,
+      summary: 'Abandoned, points shared',
+      winner: 'tie',
+      method: 'abandoned',
+      noResult: false,
+      scoringSide: null,
+      captainRef: null,
+      recordedAt: at.toISOString(),
+    });
+    return p;
+  };
+
+  test('pulled before the hour after the notices went out: voids at once, no marker, not deferred', async () => {
+    page = liveResultPage('live');
+    await pullAt(AT_OPEN);
+    assert.equal(notices.length, 2);
+    // The next morning, long before the hour, medicoach records the abandonment.
+    page = abandonedPage(60);
+    const s = await pullAt(new Date(AT_1400.getTime() + 24 * HOUR));
+    assert.equal(s.counts.resultsStored, 1);
+    assert.equal(s.reportsDeferred, undefined, 'not counted as deferred');
+    assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), [], 'no queued marker');
+    for (const r of await reportsOf()) {
+      assert.equal(r.status, 'void');
+      assert.equal(r.voidReason, 'match abandoned in medicoach');
+    }
+    // That evening's drain and reminder pass send nothing.
+    await syncNowAt(new Date(AT_OPEN.getTime() + 24 * HOUR));
+    assert.equal(notices.length, 2);
+  });
+
+  test('an abandoned first result before the hour opens nothing and queues nothing', async () => {
+    page = abandonedPage(0);
+    const s = await pullAt(AT_1400);
+    assert.equal(s.counts.resultsStored, 1);
+    assert.equal(s.reportsDeferred, undefined);
+    assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
+    await syncNowAt(AT_OPEN);
+    assert.deepEqual(await reportsOf(), []);
+    assert.equal(notices.length, 0);
   });
 });
 
@@ -538,7 +597,7 @@ describe('never sent twice: the email-only report (regression, 11 Oct 2026)', ()
     // other). The notice counts as delivered and its claim completes.
     outcome = (n, channel) =>
       channel === 'email' ? 'sent' : n.recipientKind === 'captain' ? 'skipped' : 'failed';
-    await pullAt(AT_1800);
+    await pullAt(AT_OPEN);
     assert.equal(notices.length, 2);
     const reports = await reportsOf();
     assert.ok(
@@ -566,19 +625,19 @@ describe('never sent twice: the email-only report (regression, 11 Oct 2026)', ()
       fixtureId: 'f3',
       recordedAt: (await repo.getFixtureResult('dolphins', 's-planb-premier-men-t20-g1', 'f3'))!
         .recordedAt!,
-      createdAt: AT_1800.toISOString(),
+      createdAt: AT_OPEN.toISOString(),
       attempts: 0,
       captainRef: CAPTAIN_REF,
     });
-    const drained = await retryAt(sastToday(19));
+    const drained = await retryAt(sastToday(H, 10));
     assert.equal(drained.done, 1);
     assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
-    // 2. "Sync now" and the cron pull (replayed page) after 18:00.
-    await syncNowAt(sastToday(20));
-    await pullAt(sastToday(21));
+    // 2. "Sync now" and the cron pull (replayed page) after the hour.
+    await syncNowAt(sastToday(H, 20));
+    await pullAt(sastToday(H, 30));
     // 3. Reminders when not yet due, and another evening's drain.
-    await remindAt(sastToday(22));
-    await retryAt(new Date(sastToday(18).getTime() + 24 * HOUR));
+    await remindAt(sastToday(H, 40));
+    await retryAt(new Date(sastToday(H).getTime() + 24 * HOUR));
     assert.equal(notices.length, 0, 'zero sends on every later path');
     const after = await reportsOf();
     assert.deepEqual(
@@ -591,7 +650,7 @@ describe('never sent twice: the email-only report (regression, 11 Oct 2026)', ()
 
 describe('markReportOpenFailed on a marker already gone', () => {
   test('returns 0 and writes nothing (no resurrected attempts row)', async () => {
-    const n = await repo.markReportOpenFailed('dolphins', LIVE_REF, 'boom', AT_1800.toISOString());
+    const n = await repo.markReportOpenFailed('dolphins', LIVE_REF, 'boom', AT_OPEN.toISOString());
     assert.equal(n, 0);
     assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
   });

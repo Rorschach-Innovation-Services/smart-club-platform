@@ -2,7 +2,8 @@
  * One-off backfill: open the captain's reports (and send the chair notices) for every fixture
  * played on the given dates that never got one — the 10–11 Oct 2026 weekend, where no
  * medicoach result arrived so nothing opened. A thin invocation of `openMatchDayReports` (the
- * same code path the 18:00 sync run uses), with the 18:00 window forced open.
+ * same code path the evening sync run uses), with the notice window (REPORT_NOTICE_HOUR,
+ * 20:00 SAST) forced open. An abandoned match (stored result) is skipped.
  *
  * Untouchable by construction: a side with ANY report row (portal-filed, submitted, void,
  * already notified) is left alone; the NOTIFY# per-recipient ledger stops a second send.
@@ -204,6 +205,11 @@ export async function runBackfill(args: BackfillArgs, deps: BackfillDeps): Promi
         log('    skipped (undated postponement / cancelled)');
         continue;
       }
+      // An abandoned match never gets a report (the opener refuses it too).
+      if (reports.isAbandonedResult(stored)) {
+        log('    skipped (abandoned)');
+        continue;
+      }
       if (!goLive || date < goLive) {
         log('    skipped (before the tenant go-live date)');
         continue;
@@ -260,7 +266,7 @@ export async function runBackfill(args: BackfillArgs, deps: BackfillDeps): Promi
   );
   log(`backup: ${file}`);
 
-  // The backfill sends outside 18:00 on purpose.
+  // The backfill sends outside the notice window on purpose.
   reports.setReportNoticeWindowOverride(() => true);
   try {
     const sum = await reports.openMatchDayReports(

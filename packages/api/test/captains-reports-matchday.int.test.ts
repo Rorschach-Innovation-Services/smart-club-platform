@@ -1,6 +1,6 @@
 /**
  * Match-day opening of captain's reports (`openMatchDayReports`) against dynalite with the REAL
- * repo: at/after 18:00 SAST every fixture played today (or yesterday — the lookback) opens its
+ * repo: at/after the notice hour (REPORT_NOTICE_HOUR, 20:00 SAST) every fixture played today (or yesterday — the lookback) opens its
  * two reports to the CHAIRS, result or not; a later result fills the summary in silently.
  *
  *  - idempotent (open-if-absent + NOTIFY# ledger): a re-run sends nothing;
@@ -8,6 +8,9 @@
  *    enumeration at all), a spent deadline (the rest waits for the next run);
  *  - a side with ANY report row is left alone — a portal-filed report, and a VOID one (the
  *    opener must never resurrect a report withdrawn by a cleared result);
+ *  - an ABANDONED match (stored result, either medicoach shape) opens nothing; no-result,
+ *    forfeit and a cleared abandonment still open; reports opened before the abandonment
+ *    arrived are voided (dead link, no reminder) and re-open on a corrected result;
  *  - inside `runTenantSync` its counts live under `matchDay`, never in `reportNotices`, and a
  *    result pulled in the same run keeps its captain recipient.
  *
@@ -20,7 +23,7 @@ import type { AddressInfo } from 'node:net';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { CaptainsReport, Series, TenantConfig } from '../src/types.js';
+import type { CaptainsReport, Series, StoredFixtureResult, TenantConfig } from '../src/types.js';
 import type { SyncResult } from '../src/medicoach-sync-contract.js';
 import { dynaliteEnv, startDynalite, stopDynalite } from './dynalite-harness.js';
 
@@ -28,6 +31,8 @@ const DDB_PORT = 4721;
 const TABLE = 'SmartClubReportMatchDay';
 dynaliteEnv(DDB_PORT, TABLE);
 process.env.NOTIFY_DRY_RUN = '1';
+/** The default notice hour (SAST): every evening instant below is relative to it. */
+const { REPORT_NOTICE_HOUR: H } = await import('../src/captains-reports.js');
 
 const SECRET = 'stub-shared-secret';
 const EXAMPLES = path.resolve(
@@ -45,9 +50,9 @@ const sastToday = (h: number, m = 0) => {
   return new Date(Date.parse(`${day}T00:00:00.000Z`) - 2 * HOUR + (h * 60 + m) * 60_000);
 };
 const AT_1400 = sastToday(14);
-const AT_1800 = sastToday(18);
+const AT_OPEN = sastToday(H);
 const sastDay = (offset: number) =>
-  new Date(AT_1800.getTime() + 2 * HOUR + offset * DAY).toISOString().slice(0, 10);
+  new Date(AT_OPEN.getTime() + 2 * HOUR + offset * DAY).toISOString().slice(0, 10);
 const TODAY = sastDay(0);
 const YESTERDAY = sastDay(-1);
 const GO_LIVE = sastDay(-30);
@@ -211,7 +216,7 @@ const reportDeps = () => ({
 });
 
 const open = async (
-  at: Date = AT_1800,
+  at: Date = AT_OPEN,
   extra: { deadlineMs?: number } = {},
   opts?: { targetDates?: string[]; seriesIds?: string[] },
 ) =>
@@ -233,7 +238,7 @@ const result = (over: Partial<SyncResult> = {}): SyncResult => ({
   method: 'normal',
   noResult: false,
   source: 'live',
-  recordedAt: new Date(AT_1800.getTime() + HOUR).toISOString(),
+  recordedAt: new Date(AT_OPEN.getTime() + HOUR).toISOString(),
   scoringSide: 'home',
   captainRef: CAPTAIN_REF,
   medicoachMatchUrl: null,
@@ -241,7 +246,7 @@ const result = (over: Partial<SyncResult> = {}): SyncResult => ({
 });
 
 /** The result path (puller hook) for fixture `fixtureId` of S1. */
-const resultEvent = async (fixtureId: string, r: SyncResult, at: Date = AT_1800) =>
+const resultEvent = async (fixtureId: string, r: SyncResult, at: Date = AT_OPEN) =>
   reports.openCaptainReports(
     {
       tenant: 'dolphins',
@@ -316,10 +321,10 @@ describe('no-result match-day open', () => {
     assert.equal(notices.length, 2);
     assert.ok(notices.every((n) => n.recipientKind === 'chair' && n.purpose === 'opened'));
 
-    const again = await open(sastToday(18, 15));
+    const again = await open(sastToday(H, 15));
     assert.equal(again.opened + again.notified, 0);
     assert.equal(again.skipped, 2, 'both sides already have a report');
-    await open(sastToday(21));
+    await open(sastToday(H, 40));
     assert.equal(notices.length, 2, 're-runs send nothing');
   });
 
@@ -328,7 +333,7 @@ describe('no-result match-day open', () => {
     await seedCaptain();
     await open();
     const before = await reportsOf();
-    await resultEvent('f3', result(), sastToday(19));
+    await resultEvent('f3', result(), sastToday(H, 20));
     const afterRs = await reportsOf();
     assert.equal(notices.length, 3, 'only the re-targeted captain is notified');
     assert.equal(notices[2].recipientKind, 'captain');
@@ -344,7 +349,7 @@ describe('no-result match-day open', () => {
         assert.equal(r.recipient.memberId, was.recipient.memberId, 'recipient unchanged');
       }
     }
-    await resultEvent('f3', result(), sastToday(20));
+    await resultEvent('f3', result(), sastToday(H, 30));
     assert.equal(notices.length, 3, 'a re-run is a no-op');
   });
 });
@@ -431,10 +436,10 @@ describe('skips', () => {
     await seed({
       fixtures: [fx('f3', 'umzinto', 'african-warriors'), fx('f4', 'c', 'd')],
     });
-    const spent = await open(AT_1800, { deadlineMs: Date.now() - 1 });
+    const spent = await open(AT_OPEN, { deadlineMs: Date.now() - 1 });
     assert.equal(spent.deferred, 2);
     assert.equal(spent.opened, 0);
-    const next = await open(sastToday(18, 15));
+    const next = await open(sastToday(H, 15));
     assert.equal(next.opened, 4);
     assert.equal(notices.length, 4);
   });
@@ -453,14 +458,14 @@ describe('skips', () => {
       ['y', 'y'],
     );
     // An explicit date list reaches further (the backfill's way).
-    const explicit = await open(AT_1800, {}, { targetDates: [sastDay(-2)] });
+    const explicit = await open(AT_OPEN, {}, { targetDates: [sastDay(-2)] });
     assert.equal(explicit.opened, 2);
   });
 
   test('seriesIds narrows the walk', async () => {
     await seed();
     await repo.putSeries('dolphins', series('s-other', ['c', 'd'], [fx('o1', 'c', 'd')]));
-    const sum = await open(AT_1800, {}, { seriesIds: ['s-other'] });
+    const sum = await open(AT_OPEN, {}, { seriesIds: ['s-other'] });
     assert.equal(sum.opened, 2);
     assert.ok((await reportsOf()).every((r) => r.seriesId === 's-other'));
   });
@@ -469,7 +474,7 @@ describe('skips', () => {
 describe('existing rows are left alone', () => {
   test('a portal-filed side is untouched; the other side opens to its chair', async () => {
     await seed();
-    const now = AT_1800.toISOString();
+    const now = AT_OPEN.toISOString();
     const filed: CaptainsReport = {
       id: reports.captainsReportId(S1, 'f3', 'umzinto'),
       seriesId: S1,
@@ -511,21 +516,21 @@ describe('existing rows are left alone', () => {
     // The result is cleared in medicoach: pending reports are voided.
     for (const r of await reportsOf())
       await repo.voidOrFlagCaptainsReport('dolphins', r, 'result cleared in medicoach');
-    const sum = await open(sastToday(19));
+    const sum = await open(sastToday(H, 20));
     assert.equal(sum.opened, 0);
     assert.equal(sum.skipped, 2);
     assert.ok(
       (await reportsOf()).every((r) => r.status === 'void'),
       'still withdrawn',
     );
-    await open(sastToday(20));
+    await open(sastToday(H, 30));
     assert.equal(notices.length, 2, 'no fresh notice, run after run');
 
     // The existing result path re-opens it (new recipient id ⇒ a new notice).
     await resultEvent(
       'f3',
-      result({ recordedAt: new Date(AT_1800.getTime() + 3 * HOUR).toISOString() }),
-      sastToday(21),
+      result({ recordedAt: new Date(AT_OPEN.getTime() + 3 * HOUR).toISOString() }),
+      sastToday(H, 40),
     );
     assert.ok((await reportsOf()).every((r) => r.status === 'pending'));
     assert.equal(notices.length, 4);
@@ -546,7 +551,7 @@ describe('existing rows are left alone', () => {
       `recipient#${r.recipient.memberId}`,
     );
     assert.notEqual(claim?.status, 'in_progress');
-    const again = await open(sastToday(19));
+    const again = await open(sastToday(H, 20));
     assert.equal(again.skipped, 2, 'settled: not walked again');
   });
 
@@ -558,11 +563,193 @@ describe('existing rows are left alone', () => {
     assert.equal(sum.failed, 1);
     assert.equal(sum.notified, 1);
     outcome = () => 'sent';
-    const next = await open(sastToday(18, 15));
+    const next = await open(sastToday(H, 15));
     assert.equal(next.notified, 1);
     assert.equal(next.opened, 0);
     assert.equal(notices.filter((n) => n.clubName === 'Umzinto CC').length, 2);
     assert.equal(notices.filter((n) => n.clubName === 'African Warriors').length, 1);
+  });
+});
+
+/** Store a result item for fixture `fixtureId` of S1, as the puller does (FIXRESULT#). */
+const storeResult = async (
+  fixtureId: string,
+  over: Partial<StoredFixtureResult>,
+  orderAt = new Date(AT_OPEN.getTime() - HOUR).toISOString(),
+) =>
+  assert.ok(
+    await repo.putFixtureResultIfNewer('dolphins', {
+      seriesId: S1,
+      fixtureId,
+      ref: `smartclub:dolphins:fixture:${S1}:${fixtureId}`,
+      orderAt,
+      recordedAt: orderAt,
+      storedAt: orderAt,
+      resultSource: 'manual',
+      ...over,
+    }),
+  );
+const ABANDONED = {
+  summary: 'Abandoned',
+  winner: 'none',
+  method: 'abandoned',
+  noResult: true,
+} as const;
+const ABANDONED_TIE = {
+  summary: 'Abandoned, points shared',
+  winner: 'tie',
+  method: 'abandoned',
+  noResult: false,
+} as const;
+
+describe('abandoned matches', () => {
+  test('a stored abandoned result — either medicoach shape — opens nothing and sends nothing', async () => {
+    await seed({ fixtures: [fx('f3', 'umzinto', 'african-warriors'), fx('f4', 'c', 'd')] });
+    await storeResult('f3', ABANDONED);
+    await storeResult('f4', ABANDONED_TIE);
+    const sum = await open();
+    assert.equal(sum.fixtures, 2);
+    assert.equal(sum.opened, 0);
+    assert.equal(sum.skipped, 4, 'both sides of both fixtures');
+    assert.deepEqual(await reportsOf(), []);
+    assert.equal(notices.length, 0);
+    await open(sastToday(H, 15));
+    assert.equal(notices.length, 0, 'run after run');
+  });
+
+  test('no-result, forfeit and a cleared abandoned result still open and notify', async () => {
+    await seed({
+      fixtures: [
+        fx('nr', 'umzinto', 'african-warriors'),
+        fx('ff', 'c', 'd'),
+        fx('cl', 'umzinto', 'c'),
+      ],
+    });
+    await storeResult('nr', {
+      summary: 'No result',
+      winner: 'none',
+      method: 'no-result',
+      noResult: true,
+    });
+    await storeResult('ff', { summary: 'C won by forfeit', winner: 'home', method: 'forfeit' });
+    await storeResult('cl', ABANDONED);
+    const clearedAt = new Date(AT_OPEN.getTime() - 30 * 60_000).toISOString();
+    await storeResult('cl', { cleared: true, clearedAt }, clearedAt);
+    const sum = await open();
+    assert.equal(sum.opened, 6);
+    assert.equal(sum.notified, 6);
+    assert.equal(notices.length, 6);
+  });
+
+  test('notice sent, then abandoned: pending reports void with a reason, link dead, never resurrected, no reminder; a corrected result re-opens them', async () => {
+    await seed();
+    await open();
+    const opened = await reportsOf();
+    assert.equal(opened.length, 2);
+    assert.equal(notices.length, 2);
+
+    // The abandonment arrives (the puller stores it, then calls the hook).
+    const abandoned = result({
+      ...ABANDONED_TIE,
+      homeScore: null,
+      awayScore: null,
+      scoringSide: null,
+      captainRef: null,
+    });
+    await storeResult('f3', ABANDONED_TIE, abandoned.recordedAt);
+    const out = await resultEvent('f3', abandoned, sastToday(H, 10));
+    assert.equal(out.skipped, 'abandoned');
+    assert.deepEqual(out.opened, []);
+    const voided = await reportsOf();
+    for (const r of voided) {
+      assert.equal(r.status, 'void');
+      assert.equal(r.voidReason, 'match abandoned in medicoach');
+      assert.ok(r.voidedAt);
+      assert.equal(r.flagged, undefined);
+    }
+    assert.equal(notices.length, 2, 'the abandonment notifies nobody');
+
+    // The old link is dead.
+    const env = await import('../src/env.js');
+    const r0 = opened[0]!;
+    const token = reports.signReportLinkToken(
+      {
+        t: 'dolphins',
+        r: r0.id,
+        m: r0.recipient.memberId,
+        e: Math.floor(Date.parse('2099-01-01') / 1000),
+      },
+      env.captainsReportLinkSecret(),
+    );
+    const link = await reports.loadLinkedReport(
+      repo,
+      token,
+      Date.now(),
+      env.captainsReportLinkSecret(),
+    );
+    assert.equal(link.ok, false);
+    assert.equal(!link.ok && link.status, 410);
+
+    // Not resurrected by the opener, and no reminder before the link would have expired.
+    const again = await open(sastToday(H, 20));
+    assert.equal(again.opened, 0);
+    const expiryMs = reports.reportExpirySeconds(opened[0]!) * 1000;
+    const reminded = await reports.sendReportReminders('dolphins', {
+      repo,
+      now: () => new Date(expiryMs - 24 * HOUR),
+      ...reportDeps(),
+    });
+    assert.equal(reminded.due, 0);
+    assert.ok((await reportsOf()).every((r) => r.status === 'void'));
+    assert.equal(notices.length, 2);
+
+    // Medicoach corrects it to a played result: the result path re-opens both, new links.
+    const played = result({
+      captainRef: null,
+      recordedAt: new Date(Date.parse(abandoned.recordedAt) + HOUR).toISOString(),
+    });
+    await storeResult(
+      'f3',
+      { summary: played.summary, winner: 'home', method: 'normal' },
+      played.recordedAt,
+    );
+    await resultEvent('f3', played, sastToday(H, 30));
+    const reopened = await reportsOf();
+    for (const r of reopened) {
+      assert.equal(r.status, 'pending');
+      assert.equal(r.voidReason, undefined);
+      const was = opened.find((o) => o.id === r.id)!;
+      assert.notEqual(r.recipient.memberId, was.recipient.memberId, 'a new link');
+    }
+    assert.equal(notices.length, 4);
+    assert.deepEqual(
+      notices
+        .slice(2)
+        .map((n) => n.clubName)
+        .sort(),
+      ['African Warriors', 'Umzinto CC'],
+    );
+  });
+
+  test('a pending report whose stored result is abandoned is voided by the reminder run, not reminded', async () => {
+    await seed();
+    await open();
+    assert.equal(notices.length, 2);
+    // The result was stored but the hook's void never landed (e.g. a gave-up marker).
+    await storeResult('f3', ABANDONED);
+    const r0 = (await reportsOf())[0]!;
+    const expiryMs = reports.reportExpirySeconds(r0) * 1000;
+    const sum = await reports.sendReportReminders('dolphins', {
+      repo,
+      now: () => new Date(expiryMs - 24 * HOUR),
+      ...reportDeps(),
+    });
+    assert.equal(sum.sent, 0);
+    assert.equal(notices.length, 2, 'no reminder');
+    for (const r of await reportsOf()) {
+      assert.equal(r.status, 'void');
+      assert.equal(r.voidReason, 'match abandoned in medicoach');
+    }
   });
 });
 
@@ -582,7 +769,7 @@ describe('inside runTenantSync', () => {
     await seed();
     page = { ...example('changes-live-result'), fixtures: [] };
     const outcomes: unknown[] = [];
-    const run = await syncAt(AT_1800, (o) => outcomes.push(o));
+    const run = await syncAt(AT_OPEN, (o) => outcomes.push(o));
     assert.deepEqual(run.reportNotices, { deferred: 0, opened: 0, notified: 0, failed: 0 });
     assert.equal(run.matchDay?.opened, 2);
     assert.equal(run.matchDay?.notified, 2);
@@ -597,7 +784,7 @@ describe('inside runTenantSync', () => {
     await seed();
     await seedCaptain();
     page = example('changes-live-result');
-    const run = await syncAt(AT_1800);
+    const run = await syncAt(AT_OPEN);
     const rs = await reportsOf();
     const own = rs.find((r) => r.clubId === 'umzinto')!;
     assert.equal(own.recipient.kind, 'captain');

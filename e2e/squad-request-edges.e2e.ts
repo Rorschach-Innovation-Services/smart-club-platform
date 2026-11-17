@@ -494,7 +494,7 @@ test('window gating: outside the 08:00 squad window a sync run opens nothing; ea
   await seedSeries(request, S, [
     { id: 'f1', date: TOMORROW, time: at('08'), home: 'berea', away: 'chatsworth' },
   ]);
-  // A fixture played today: its captain's reports ride their own (18:00) window. Which hour
+  // A fixture played today: its captain's reports ride their own (20:00) window. Which hour
   // each window opens at is int-level (real clock, no override); here each is forced alone.
   // The report series are 'promotion', not 'premier': the seeded premier league defers
   // card-less match-day opens to the Monday-noon fallback (deferMatchDayNotices).

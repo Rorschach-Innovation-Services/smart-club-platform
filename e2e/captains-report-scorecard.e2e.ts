@@ -281,7 +281,7 @@ async function rateUmpires(p: import('@playwright/test').Page, score: string) {
 test.describe.configure({ mode: 'serial' });
 
 test.beforeAll(async ({ request }) => {
-  // Notices go out from 18:00 SAST only; force the window open so the spec runs at any hour.
+  // Notices go out from 20:00 SAST only; force the window open so the spec runs at any hour.
   await setReportNoticeWindow(request, 'open');
   await startStub();
   const cfg = await request.get(`${API_BASE}/platform/tenants/${TENANT}`, { headers: operator() });

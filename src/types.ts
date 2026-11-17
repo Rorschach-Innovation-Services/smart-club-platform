@@ -124,6 +124,8 @@ export interface CaptainsReport {
   submittedVia?: 'portal' | 'link';
   submittedAt?: string;
   voidedAt?: string;
+  /** Why a void report was voided, as stored (e.g. 'match abandoned in medicoach'). */
+  voidReason?: string;
   flagged?: { reason: string; at: string };
   /** When the emailed/WhatsApp link stops working (ISO). */
   linkExpiresAt?: string;

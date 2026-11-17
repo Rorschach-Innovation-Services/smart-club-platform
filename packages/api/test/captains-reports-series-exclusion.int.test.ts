@@ -16,6 +16,8 @@ const DDB_PORT = 4793; // unique
 const TABLE = 'SmartClubReportSeriesExclusion';
 dynaliteEnv(DDB_PORT, TABLE);
 process.env.NOTIFY_DRY_RUN = '1';
+/** The default notice hour (SAST); the evening instant below is relative to it. */
+const { REPORT_NOTICE_HOUR: H } = await import('../src/captains-reports.js');
 
 const T = 'dolphins';
 const HOUR = 3600 * 1000;
@@ -24,11 +26,12 @@ const sastToday = (h: number) => {
   const day = new Date(Date.now() + 2 * HOUR).toISOString().slice(0, 10);
   return new Date(Date.parse(`${day}T00:00:00.000Z`) - 2 * HOUR + h * HOUR);
 };
-const AT_1900 = sastToday(19);
-const TODAY = new Date(AT_1900.getTime() + 2 * HOUR).toISOString().slice(0, 10);
-const GO_LIVE = new Date(AT_1900.getTime() - 30 * DAY).toISOString().slice(0, 10);
-const DEADLINE = new Date(AT_1900.getTime() + 30 * DAY).toISOString().slice(0, 10);
-const RELEASED_AT = new Date(AT_1900.getTime() - 60 * DAY).toISOString();
+/** Half an hour into today's default notice window (REPORT_NOTICE_HOUR, SAST). */
+const AT_EVENING = new Date(sastToday(H).getTime() + HOUR / 2);
+const TODAY = new Date(AT_EVENING.getTime() + 2 * HOUR).toISOString().slice(0, 10);
+const GO_LIVE = new Date(AT_EVENING.getTime() - 30 * DAY).toISOString().slice(0, 10);
+const DEADLINE = new Date(AT_EVENING.getTime() + 30 * DAY).toISOString().slice(0, 10);
+const RELEASED_AT = new Date(AT_EVENING.getTime() - 60 * DAY).toISOString();
 const S1 = 's1'; // "EMCU Division 1" (excluded)
 const S2 = 's2'; // "Premier" (not excluded)
 const SECRET = 'kill-switch-secret';
@@ -109,7 +112,7 @@ const OPERATOR = Buffer.from(
 ).toString('base64');
 
 const notices: unknown[] = [];
-const deps = (at: Date = AT_1900) => ({
+const deps = (at: Date = AT_EVENING) => ({
   repo,
   now: () => at,
   log: () => {},
@@ -129,7 +132,7 @@ const result = {
   method: 'normal' as const,
   noResult: false,
   source: 'live' as const,
-  recordedAt: AT_1900.toISOString(),
+  recordedAt: AT_EVENING.toISOString(),
   scoringSide: 'home' as const,
   captainRef: null,
   medicoachMatchUrl: null,
@@ -222,7 +225,7 @@ describe('captainsReportsExcludedSeriesPrefixes', () => {
     assert.equal((await reportsFor(S2)).length, 2);
   });
 
-  test('retry: excluded series marker is deleted unsent (even before 18:00); the other drains', async () => {
+  test('retry: excluded series marker is deleted unsent (even before the notice hour); the other drains', async () => {
     await seed(EMCU);
     await storeResultAndMarker(S1);
     await storeResultAndMarker(S2);
@@ -245,7 +248,7 @@ describe('captainsReportsExcludedSeriesPrefixes', () => {
     await reports.openMatchDayReports(T, (await repo.getTenantConfig(T))!, deps());
     assert.equal(notices.length, 4);
     await setPrefixes(['EMCU Division']);
-    const later = new Date(AT_1900.getTime() + 6 * DAY);
+    const later = new Date(AT_EVENING.getTime() + 6 * DAY);
     const rem = await reports.sendReportReminders(T, deps(later));
     assert.equal(rem.sent, 2, 'only the non-excluded series is reminded');
     const issuedTokens = (notices.slice(0, 4) as Array<{ token: string }>).map(tokenOf);

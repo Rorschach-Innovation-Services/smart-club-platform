@@ -29,11 +29,12 @@
  * A newly stored result is first marked `REPORTOPEN#<ref>`; the marker is deleted once the
  * hook succeeded, so a report/notify failure is retried by the next run
  * (`retryPendingReportOpens`, up to REPORT_OPEN_MAX_ATTEMPTS) instead of being lost — a
- * replay never re-fires the hook. Before 18:00 SAST (REPORT_NOTICE_HOUR; a league's own
+ * replay never re-fires the hook. Before 20:00 SAST (REPORT_NOTICE_HOUR; a league's own
  * `captainsReport.noticeFromHour` when it has one, judged per fixture) — or once the run's
  * `deadlineMs` has passed — the hook is NOT called and the marker is NOT deleted: the result
  * is stored and its reports wait, queued, for the first run in the window (counted as
- * `reportsDeferred`; a deferral is never an attempt). A notice counts as failed only when it reached nobody
+ * `reportsDeferred`; a deferral is never an attempt) — except an ABANDONED result, whose hook
+ * runs at once (it only voids; nothing is sent). A notice counts as failed only when it reached nobody
  * (every channel tried failed): its NOTIFY# claim is released and the hook throws, so the
  * retry re-sends it. One channel delivered is done; a delivered notice is never re-sent.
  *
@@ -55,6 +56,7 @@ import { isSlotRef } from '../../../engine/src/formats.js';
 import {
   captainsReportClearedHook,
   captainsReportResultHook,
+  isAbandonedResult,
   noticeLeagueResolver,
   pastDeadline,
   reportNoticeWindowOpenFor,
@@ -174,7 +176,7 @@ export interface SyncRunSummary {
   error?: string;
   /** What a dry run would have requested (path + query; no host, no secret). */
   wouldRequest?: string;
-  /** Stored results whose report opening was left queued (before 18:00 SAST, or deadline). */
+  /** Stored results whose report opening was left queued (before 20:00 SAST, or deadline). */
   reportsDeferred?: number;
 }
 
@@ -503,11 +505,14 @@ export async function runMedicoachSync(
           );
           if (stored) {
             counts.resultsStored++;
+            // An abandoned match sends nothing (its pending reports are voided), so the notice
+            // gate does not apply: the hook runs now and the marker is deleted, not queued.
             if (
-              !reportNoticeWindowOpenFor(now(), await noticeLeague.forSeries(target.series)) ||
-              pastDeadline(deps.deadlineMs)
+              !isAbandonedResult(change.result) &&
+              (!reportNoticeWindowOpenFor(now(), await noticeLeague.forSeries(target.series)) ||
+                pastDeadline(deps.deadlineMs))
             ) {
-              // Before 18:00 SAST — or the league's own hour — (or out of time): the hook is not called and the marker
+              // Before 20:00 SAST — or the league's own hour — (or out of time): the hook is not called and the marker
               // stays — it IS the queue. Never thrown: a throw would count as an attempt.
               summary.reportsDeferred = (summary.reportsDeferred ?? 0) + 1;
             } else {

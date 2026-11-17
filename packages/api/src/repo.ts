@@ -3546,6 +3546,39 @@ export async function updatePendingCaptainsReportSummary(
 }
 
 /**
+ * Void a PENDING report (its link dies with it), recording why. Any other status is left
+ * untouched — a submitted report is never changed here. True when it was voided.
+ */
+export async function voidPendingCaptainsReport(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+  reason: string,
+): Promise<boolean> {
+  const at = new Date().toISOString();
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression: 'SET #s = :void, voidedAt = :at, voidReason = :r, updatedAt = :at',
+        ConditionExpression: 'attribute_exists(pk) AND #s = :pending',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: {
+          ':void': 'void',
+          ':pending': 'pending',
+          ':r': reason,
+          ':at': at,
+        },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/**
  * A fixture's result was cleared: a PENDING report becomes void (its link dies with it); a
  * SUBMITTED one is kept and flagged for the admin. Returns what happened.
  */
@@ -3554,22 +3587,8 @@ export async function voidOrFlagCaptainsReport(
   key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
   reason: string,
 ): Promise<'voided' | 'flagged' | 'none'> {
+  if (await voidPendingCaptainsReport(tenant, key, reason)) return 'voided';
   const at = new Date().toISOString();
-  try {
-    await ddb.send(
-      new UpdateCommand({
-        TableName: TABLE,
-        Key: reportKeyOf(tenant, key),
-        UpdateExpression: 'SET #s = :void, voidedAt = :at, updatedAt = :at',
-        ConditionExpression: 'attribute_exists(pk) AND #s = :pending',
-        ExpressionAttributeNames: { '#s': 'status' },
-        ExpressionAttributeValues: { ':void': 'void', ':pending': 'pending', ':at': at },
-      }),
-    );
-    return 'voided';
-  } catch (err) {
-    if (!isCcf(err)) throw err;
-  }
   try {
     await ddb.send(
       new UpdateCommand({

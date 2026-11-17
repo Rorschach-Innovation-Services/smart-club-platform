@@ -240,6 +240,38 @@ describe('runBackfill', () => {
     assert.equal(reports.reportNoticeWindowOpen(new Date('2026-10-13T08:00:00.000Z')), false);
   });
 
+  test('an abandoned fixture is planned as skipped and opens nothing under --confirm', async () => {
+    const at = '2026-10-10T16:00:00.000Z';
+    await repo.putFixtureResultIfNewer('dolphins', {
+      seriesId: 's1',
+      fixtureId: 'f1',
+      ref: 'smartclub:dolphins:fixture:s1:f1',
+      orderAt: at,
+      recordedAt: at,
+      storedAt: at,
+      summary: 'Abandoned',
+      winner: 'none',
+      method: 'abandoned',
+      noResult: true,
+      resultSource: 'manual',
+    });
+    await script.runBackfill({ tenant: 'dolphins', dates: [DATE], confirm: false }, deps());
+    const out = lines.join('\n');
+    assert.match(out, /\[s1\/f1\][^\n]*\n {4}skipped \(abandoned\)/);
+    assert.match(out, /2 side\(s\) would open/, 'only s2');
+
+    const dir = await mkdtemp(join(tmpdir(), 'capbackfill-'));
+    assert.equal(
+      await script.runBackfill(
+        { tenant: 'dolphins', dates: [DATE], confirm: true, backupDir: dir },
+        deps(),
+      ),
+      0,
+    );
+    assert.deepEqual(sent.sort(), ['C', 'D']);
+    assert.deepEqual(await repo.listCaptainsReportsForFixture('dolphins', 's1', 'f1'), []);
+  });
+
   test('--confirm is refused on a localhost link base or a dry-run channel', async () => {
     const args = { tenant: 'dolphins', dates: [DATE], confirm: true };
     assert.equal(await script.runBackfill(args, deps({ linkBase: 'http://localhost:5173' })), 1);

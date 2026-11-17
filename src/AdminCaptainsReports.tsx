@@ -42,6 +42,14 @@ export function copyReportLinkBlockedReason(r: CaptainsReport, nowMs = Date.now(
   return canCopyReportLink(r, nowMs) ? null : 'Unavailable: the link has expired';
 }
 
+/** Stored void reasons in plain words (unknown ones shown as stored). */
+const VOID_REASON_LABELS: Record<string, string> = {
+  'match abandoned in medicoach': 'Match abandoned',
+  'result cleared in medicoach': 'Result cleared',
+  'series deleted': 'Series deleted',
+};
+const reportVoidReasonLabel = (reason: string) => VOID_REASON_LABELS[reason] ?? reason;
+
 const matchesStatus = (r: CaptainsReport, f: StatusFilter) => (f === 'all' ? true : r.status === f);
 
 const RECIPIENT_LINE: Record<CaptainsReport['recipient']['kind'], string> = {
@@ -440,6 +448,9 @@ export function AdminCaptainsReportsView({
                         </td>
                         <td data-label="Status">
                           <CaptainsReportStatusPill report={r} />
+                          {r.status === 'void' && r.voidReason && (
+                            <div className="ump-sub">{reportVoidReasonLabel(r.voidReason)}</div>
+                          )}
                           {r.ref && <div className="ump-sub">{r.ref}</div>}
                         </td>
                         <td data-label="Ratings">

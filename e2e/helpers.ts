@@ -701,7 +701,7 @@ export async function createReleasedVeteransSeries(
 }
 
 /**
- * Force the notice windows (captain's reports' 18:00 and squad links' 08:00 SAST) on the LOCAL
+ * Force the notice windows (captain's reports' 20:00 and squad links' 08:00 SAST) on the LOCAL
  * stack (local/server.ts test hook — never in the Lambda): 'open' / 'closed', or 'real' to
  * follow the clock again. `scope` targets one window ('reports' | 'squads'); the default 'all'
  * sets both.

@@ -3,7 +3,8 @@
  * dynalite with the REAL puller, retry, match-day opener and reminders.
  *
  * Dolphins' premier league defers its match-day notices to the CSA-scraped result (landing
- * ~04:30 Monday) and may notify from 04:00 SAST; every other league keeps 18:00 exactly:
+ * ~04:30 Monday) and may notify from 04:00 SAST; every other league keeps the default hour
+ * (REPORT_NOTICE_HOUR, 20:00) exactly:
  *
  *  - the result-hook path notifies a premier result at 04:45, a no-override tenant does not;
  *  - a mixed REPORTOPEN# batch at 05:00 drains ONLY the premier marker;
@@ -28,6 +29,8 @@ const DDB_PORT = 4761;
 const TABLE = 'SmartClubReportLeagueWindow';
 dynaliteEnv(DDB_PORT, TABLE);
 process.env.NOTIFY_DRY_RUN = '1';
+/** The default notice hour (SAST): every default-window instant below is relative to it. */
+const { REPORT_NOTICE_HOUR: H } = await import('../src/captains-reports.js');
 
 const SECRET = 'stub-shared-secret';
 const EXAMPLES = path.resolve(
@@ -262,10 +265,10 @@ const matchDayAt = async (now: Date) =>
   reports.openMatchDayReports('dolphins', await config(), deps(now));
 
 describe('reportNoticeWindowOpenFor (pure)', () => {
-  test('no league / no override is exactly the 18:00 rule; noticeFromHour moves the start', () => {
+  test('no league / no override is exactly the default-hour rule; noticeFromHour moves the start', () => {
     const { isReportNoticeWindowOpen, reportNoticeWindowOpenFor, isReportNoticeWindowOpenFor } =
       reports;
-    for (const h of [0, 3, 4, 12, 17, 18, 23]) {
+    for (const h of [0, 3, 4, 12, H - 1, H, 23]) {
       const t = at(MON, h, 30);
       assert.equal(isReportNoticeWindowOpenFor(t), isReportNoticeWindowOpen(t));
       assert.equal(isReportNoticeWindowOpenFor(t, PROMO_LEAGUE), isReportNoticeWindowOpen(t));
@@ -289,10 +292,11 @@ describe('reportNoticeWindowOpenFor (pure)', () => {
     assert.equal(reports.deferredFallbackAt(MON), at('2026-11-02', 18).getTime());
     assert.equal(reports.deferredFallbackAt('2026-11-08'), Date.parse('2026-11-09T16:00:00.000Z'));
     assert.equal(reports.deferredFallbackAt('2026-11-07'), Date.parse('2026-11-09T16:00:00.000Z'));
-    // At exactly 18:00 the fallback is due AND the default (18:00) window is open.
+    // At exactly 18:00 the fallback is due and the premier window is open; the default window
+    // opens only at REPORT_NOTICE_HOUR (20:00), so it is still shut then.
     const boundary = new Date('2026-11-09T16:00:00.000Z');
     assert.equal(boundary.getTime() < reports.deferredFallbackAt('2026-11-08'), false);
-    assert.equal(reports.isReportNoticeWindowOpen(boundary), true);
+    assert.equal(reports.isReportNoticeWindowOpen(boundary), reports.DEFERRED_FALLBACK_HOUR >= H);
     assert.equal(reports.isReportNoticeWindowOpenFor(boundary, PREMIER_LEAGUE), true);
   });
 });
@@ -316,7 +320,7 @@ describe('the result-hook path', () => {
     assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
   });
 
-  test('without the override the same 04:45 pull is deferred to 18:00 (default unchanged)', async () => {
+  test('without the override the same 04:45 pull is deferred to the default hour', async () => {
     await seed(false);
     page = example('changes-live-result');
     const s = await puller.runMedicoachSync('dolphins', 'cron', {
@@ -334,7 +338,7 @@ describe('the result-hook path', () => {
 });
 
 describe('retryPendingReportOpens', () => {
-  test('a mixed batch at 05:00 drains only the premier marker; 18:00 drains the rest', async () => {
+  test('a mixed batch at 05:00 drains only the premier marker; the default hour drains the rest', async () => {
     await seed();
     await storeResult(PREMIER, 'f3', PREMIER_REF, true);
     await storeResult(PROMO, 'f7', PROMO_REF, true);
@@ -350,7 +354,7 @@ describe('retryPendingReportOpens', () => {
     );
 
     notices.length = 0;
-    const evening = await reports.retryPendingReportOpens('dolphins', deps(at(MON, 18)));
+    const evening = await reports.retryPendingReportOpens('dolphins', deps(at(MON, H)));
     assert.equal(evening.done, 1);
     assert.deepEqual(seriesOfNotices(), [PROMO]);
     assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
@@ -367,16 +371,16 @@ describe('retryPendingReportOpens', () => {
 });
 
 describe('openMatchDayReports', () => {
-  test('premier is held for its result; promotion opens card-less at 18:00 as before', async () => {
+  test('premier is held for its result; promotion opens card-less at the default hour as before', async () => {
     await seed();
-    const satEvening = await matchDayAt(at(SAT, 18, 30));
+    const satEvening = await matchDayAt(at(SAT, H, 30));
     assert.equal(satEvening.opened, 2);
     assert.equal(satEvening.held, 1);
     assert.deepEqual(seriesOfNotices(), [PROMO]);
 
     notices.length = 0;
     // Sunday evening and Monday early (premier's window is open, the fallback is not due).
-    for (const t of [at(SUN, 18, 30), at(MON, 5), at(MON, 12, 15), at(MON, 17, 59)])
+    for (const t of [at(SUN, H, 30), at(MON, 5), at(MON, 12, 15), at(MON, 17, 59)])
       await matchDayAt(t);
     assert.equal(notices.length, 0);
     const premierReports = (await repo.listCaptainsReports('dolphins')).filter(
@@ -423,8 +427,8 @@ describe('openMatchDayReports', () => {
       skipped: 0,
       windowClosed: true,
     });
-    const evening = await matchDayAt(at(SAT, 18, 30));
-    assert.equal(evening.opened, 4, 'both leagues open card-less at 18:00 as before');
+    const evening = await matchDayAt(at(SAT, H, 30));
+    assert.equal(evening.opened, 4, 'both leagues open card-less at the default hour as before');
     assert.equal('held' in evening, false);
   });
 });
@@ -434,7 +438,7 @@ describe('sendReportReminders', () => {
     await seed();
     await storeResult(PREMIER, 'f3', PREMIER_REF, true);
     await storeResult(PROMO, 'f7', PROMO_REF, true);
-    await reports.retryPendingReportOpens('dolphins', deps(at(SAT, 18, 30)));
+    await reports.retryPendingReportOpens('dolphins', deps(at(SAT, H, 30)));
     assert.equal(notices.length, 4);
     // Links expire at the end of 31 Oct (match + 7); reminders are due from 29 Oct 23:59:59.
     notices.length = 0;
@@ -442,15 +446,15 @@ describe('sendReportReminders', () => {
     assert.equal(early.sent, 2);
     assert.deepEqual(seriesOfNotices(), [PREMIER]);
     notices.length = 0;
-    const evening = await reports.sendReportReminders('dolphins', deps(at('2026-10-30', 18)));
+    const evening = await reports.sendReportReminders('dolphins', deps(at('2026-10-30', H)));
     assert.equal(evening.sent, 2);
     assert.deepEqual(seriesOfNotices(), [PROMO]);
   });
 
-  test('without any override nothing is read or sent before 18:00', async () => {
+  test('without any override nothing is read or sent before the default hour', async () => {
     await seed(false);
     await storeResult(PREMIER, 'f3', PREMIER_REF, true);
-    await reports.retryPendingReportOpens('dolphins', deps(at(SAT, 18, 30)));
+    await reports.retryPendingReportOpens('dolphins', deps(at(SAT, H, 30)));
     notices.length = 0;
     const early = await reports.sendReportReminders('dolphins', deps(at('2026-10-30', 5)));
     assert.deepEqual(early, { due: 0, sent: 0, undelivered: 0 });
@@ -534,6 +538,6 @@ describe('read discipline and resolution', () => {
       ...deps(at(MON, 5)),
       repo: broken,
     });
-    assert.deepEqual([r.done, r.deferred], [0, 1], 'held for 18:00, loop not aborted');
+    assert.deepEqual([r.done, r.deferred], [0, 1], 'held for the default hour, loop not aborted');
   });
 });

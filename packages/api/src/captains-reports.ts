@@ -96,15 +96,15 @@ export const NOTICE_FAILED_ERROR = 'report notice failed on every channel';
 /**
  * Captain's report notices (opening notices and reminders) go out only from this hour, SAST
  * wall clock, until midnight: results stored earlier keep their REPORTOPEN# marker and are
- * drained by the first sync run at/after 18:00 (the cron fires on the quarter hour, so one
- * lands at 16:00 UTC). A result arriving after midnight waits for 18:00 that day.
+ * drained by the first sync run at/after 20:00 (the cron fires on the quarter hour, so one
+ * lands at 18:00 UTC). A result arriving after midnight waits for 20:00 that day.
  *
  * The gate is GLOBAL, not per tenant: every tenant is a South African union, so one fixed
  * offset (TENANT_UTC_OFFSET_MINUTES, no DST) is exact for all of them.
  */
-export const REPORT_NOTICE_HOUR = 18;
+export const REPORT_NOTICE_HOUR = 20;
 
-/** True from 18:00:00 to 23:59:59 SAST (pure). */
+/** True from 20:00:00 (REPORT_NOTICE_HOUR) to 23:59:59 SAST (pure). */
 export function isReportNoticeWindowOpen(now: Date): boolean {
   const local = new Date(now.getTime() + TENANT_UTC_OFFSET_MINUTES * 60_000);
   return local.getUTCHours() >= REPORT_NOTICE_HOUR;
@@ -127,7 +127,7 @@ export function reportNoticeWindowOpen(now: Date): boolean {
 /**
  * The notice window for one league (pure): from its `captainsReport.noticeFromHour` (SAST) to
  * midnight. A league without the override — or no league — is exactly
- * `isReportNoticeWindowOpen` (18:00).
+ * `isReportNoticeWindowOpen` (20:00).
  */
 export function isReportNoticeWindowOpenFor(now: Date, league?: League | null): boolean {
   const hour = league?.captainsReport?.noticeFromHour;
@@ -162,7 +162,7 @@ export function noticeLeagueResolver(
   const leagues = new Map((config?.leagues ?? []).map((l) => [l.key, l]));
   const seriesById = new Map<string, Promise<Series | null>>();
   const runLeague = new Map<string, Promise<string | undefined>>();
-  // A failed read falls back to the default (18:00) window — never aborts the caller's loop.
+  // A failed read falls back to the default (20:00) window — never aborts the caller's loop.
   // The failure is not cached as a rejection; it is logged and reported once per item.
   // Awaited (not fire-and-forget): a Lambda frozen right after the run would drop the capture.
   const resolveFailed = async (err: unknown, what: string): Promise<undefined> => {
@@ -215,8 +215,9 @@ export function noticeLeagueResolver(
 /**
  * When a deferred league's fixture played on `matchDate` falls back to a card-less open: the
  * first Monday strictly after it, DEFERRED_FALLBACK_HOUR (18:00) SAST (epoch ms). At exactly
- * that instant the fallback is due and the 18:00 notice window is open, so the 18:00 cron run
- * opens the reports.
+ * that instant the fallback is due; the league's own notice window (premier: from 04:00) is
+ * open, so that cron run opens the reports (a deferred league on the default window would wait
+ * for 20:00).
  */
 export function deferredFallbackAt(matchDate: string): number {
   const d = Date.parse(`${matchDate}T00:00:00Z`);
@@ -636,6 +637,23 @@ export async function checkUmpireIds(
 
 // ───────────────────────── Opening reports on a result ─────────────────────────
 
+/** Why a pending report of an abandoned match was voided (`voidReason`). */
+export const ABANDONED_VOID_REASON = 'match abandoned in medicoach';
+
+/**
+ * True when a result (wire `SyncResult` or stored `StoredFixtureResult`) records the match as
+ * ABANDONED: not cleared, and `method` is 'abandoned' (trimmed, any case). Keyed on `method`
+ * alone — medicoach sends both winner 'none' + noResult true and the abandoned-tie shape
+ * (winner 'tie', noResult false). A 'no-result' or 'forfeit' result is NOT abandoned: those
+ * matches still get captain's report notices. (Not `outcomeOf`: it also matches no-result.)
+ */
+export function isAbandonedResult(
+  r: { method?: string | null; cleared?: boolean } | null | undefined,
+): boolean {
+  if (!r || r.cleared === true) return false;
+  return typeof r.method === 'string' && r.method.trim().toLowerCase() === 'abandoned';
+}
+
 /** What the puller hands the result hook (see medicoach-sync/puller.ts). */
 export interface ResultEventLike {
   tenant: string;
@@ -709,7 +727,14 @@ export interface CaptainsReportDeps {
 }
 
 export interface OpenOutcome {
-  skipped?: 'import' | 'no-go-live' | 'before-go-live' | 'too-old' | 'no-fixture' | 'disabled';
+  skipped?:
+    | 'import'
+    | 'no-go-live'
+    | 'before-go-live'
+    | 'too-old'
+    | 'no-fixture'
+    | 'disabled'
+    | 'abandoned';
   opened: string[];
   /** Reports whose notice actually reached someone (a channel sent). */
   notified: string[];
@@ -960,6 +985,9 @@ export async function retargetReportForSquadCaptain(
   if (!captainKey) return 'none';
   const report = await repo.getCaptainsReport(tenant, req.seriesId, req.fixtureId, req.clubId);
   if (!report || report.status !== 'pending' || report.source !== 'auto') return 'none';
+  // An abandoned match gets no notice (the result hook voids its pending reports).
+  if (isAbandonedResult(await repo.getFixtureResult(tenant, req.seriesId, req.fixtureId)))
+    return 'none';
   const config = await repo.getTenantConfig(tenant);
   if (!config || !captainsReportsEnabled(config)) return 'none';
   const series = await repo.getSeries(tenant, req.seriesId);
@@ -1032,6 +1060,17 @@ export async function openCaptainReports(
   const { repo } = deps;
   const { tenant, seriesId, fixtureId, result } = event;
 
+  // An abandoned match: nothing opens, and every still-pending auto report of the fixture is
+  // voided (its link dies, no reminder). Submitted reports are left exactly as they are — never
+  // flagged. Checked first on purpose: before the import skip (an imported abandonment voids
+  // too) and regardless of the kill switch / series exclusion (as the cleared-result hook).
+  if (isAbandonedResult(result)) {
+    for (const r of await repo.listCaptainsReportsForFixture(tenant, seriesId, fixtureId))
+      if (r.status === 'pending' && r.source === 'auto')
+        await repo.voidPendingCaptainsReport(tenant, r, ABANDONED_VOID_REASON);
+    return { opened: [], notified: [], skipped: 'abandoned' };
+  }
+
   if (result.source === 'import') return { opened: [], notified: [], skipped: 'import' };
 
   // A corrected result (same fixture, newer recordedAt): pending reports take the new
@@ -1094,6 +1133,10 @@ export async function openReportsForFixture(
   if (series && seriesExcludedFromCaptainsReports(config, series.name))
     return { ...out, skipped: 'disabled' };
   if (!series || !fixture?.date) return { ...out, skipped: 'no-fixture' };
+  // An abandoned match never gets a report (match-day opener, backfill, resend, reset --send):
+  // judged on the caller's result, else the stored one.
+  const judged = result ?? (await repo.getFixtureResult(tenant, seriesId, fixtureId));
+  if (isAbandonedResult(judged)) return { ...out, skipped: 'abandoned' };
   const matchDate = fixture.date;
   if (matchDate < goLive) return { ...out, skipped: 'before-go-live' };
   // Too old = the link would already be dead: its expiry (the later of match + 7 days and
@@ -1289,7 +1332,7 @@ export interface MatchDayOpenSummary {
   deferred: number;
   /** Fixtures or sides passed over: undated, cancelled, already reported, unopenable. */
   skipped: number;
-  /** The 18:00 window was shut: nothing was enumerated. */
+  /** The notice window (default 20:00) was shut: nothing was enumerated. */
   windowClosed?: true;
   /** The tenant's `captainsReports` kill switch is off: nothing was enumerated. */
   disabled?: true;
@@ -1306,7 +1349,7 @@ const daysBefore = (date: string, days: number) =>
 
 /**
  * Open the reports of every fixture PLAYED on the target dates (default today and the
- * MATCH_DAY_LOOKBACK_DAYS before it, SAST), result or not. Runs inside the 18:00 notice window
+ * MATCH_DAY_LOOKBACK_DAYS before it, SAST), result or not. Runs inside the 20:00 notice window
  * only. For a tenant with no league override, a shut window returns at once without reading
  * anything (`windowClosed`); with an override, the series are listed and each is judged against
  * its own league's window (`windowClosed` when none was open).
@@ -1325,7 +1368,8 @@ const daysBefore = (date: string, days: number) =>
  * window. A `deferMatchDayNotices` league gets no card-less match-day open — its report opens
  * when the result lands — except as a bounded fallback: a fixture of the last
  * DEFERRED_FALLBACK_LOOKBACK_DAYS still without a stored result once the following Monday
- * 18:00 SAST has passed opens card-less anyway (scrape failed, match abandoned). A tenant with
+ * 18:00 SAST has passed opens card-less anyway (scrape failed; an abandoned match has a stored
+ * result, so it never opens). A tenant with
  * no league override takes exactly the old path.
  */
 export async function openMatchDayReports(
@@ -1807,7 +1851,7 @@ export interface ReportRetrySummary {
   done: number;
   failed: number;
   gaveUp: number;
-  /** Markers left queued: the 18:00 window is closed, or the run's deadline passed. */
+  /** Markers left queued: the 20:00 window is closed, or the run's deadline passed. */
   deferred: number;
 }
 
@@ -1829,7 +1873,7 @@ export async function retryPendingReportOpens(
   const out: ReportRetrySummary = { retried: 0, done: 0, failed: 0, gaveUp: 0, deferred: 0 };
   let markers = await repo.listReportOpenMarkers(tenant);
   if (!markers.length) return out;
-  // Before 18:00 SAST nothing is sent: every marker stays queued, untouched (a deferral is
+  // Before 20:00 SAST nothing is sent: every marker stays queued, untouched (a deferral is
   // never an attempt — it must not count toward REPORT_OPEN_MAX_ATTEMPTS). A league with its
   // own `noticeFromHour` is judged per marker: a mixed batch drains only the open leagues.
   const config = opts?.config !== undefined ? opts.config : await repo.getTenantConfig(tenant);
@@ -2153,7 +2197,7 @@ export interface ReminderSummary {
   sent: number;
   /** Reminders recorded but not delivered (no contact, dry run, every channel failed). */
   undelivered: number;
-  /** Due reminders held back: before 18:00 SAST, or the run's deadline passed. */
+  /** Due reminders held back: before 20:00 SAST, or the run's deadline passed. */
   deferred?: number;
 }
 
@@ -2161,7 +2205,7 @@ export interface ReminderSummary {
  * Remind the current recipient of every PENDING report whose link expires within
  * REMINDER_LEAD_DAYS — once, at most (NOTIFY# audience `reminder#<memberId>`), on the same
  * channels with the same link. Runs in the 15-minute sync run (sync-enabled tenants only),
- * from 18:00 SAST only (REPORT_NOTICE_HOUR).
+ * from 20:00 SAST only (REPORT_NOTICE_HOUR).
  * A captain recipient is reached through the contact stored when the report was addressed
  * to them; a chair through the club's current chair contact.
  */
@@ -2174,7 +2218,7 @@ export async function sendReportReminders(
   const { repo } = deps;
   const now = deps.now ?? (() => new Date());
   const out: ReminderSummary = { due: 0, sent: 0, undelivered: 0 };
-  // Reminders follow the 18:00 SAST rule too: before it nothing is read or sent, and due
+  // Reminders follow the 20:00 SAST rule too: before it nothing is read or sent, and due
   // reminders stay due (the window runs to midnight, so none is lost to the gate alone).
   // A league with its own `noticeFromHour` is judged per report.
   const defaultOpen = reportNoticeWindowOpen(now());
@@ -2203,6 +2247,13 @@ export async function sendReportReminders(
     // Not yet this report's league's hour: it stays due for a later run.
     if (perLeague && !reportNoticeWindowOpenFor(now(), await leagueOf.forSeriesId(r.seriesId)))
       continue;
+    // The match was abandoned: no reminder, and the row is voided (self-heal for a pending
+    // report the result hook's void never reached — a gave-up marker, a run interleave).
+    if (isAbandonedResult(await repo.getFixtureResult(tenant, r.seriesId, r.fixtureId))) {
+      if (r.source === 'auto')
+        await repo.voidPendingCaptainsReport(tenant, r, ABANDONED_VOID_REASON);
+      continue;
+    }
     if (!clubs.has(r.clubId)) clubs.set(r.clubId, await repo.getClub(tenant, r.clubId));
     const club = clubs.get(r.clubId);
     if (!club) continue;

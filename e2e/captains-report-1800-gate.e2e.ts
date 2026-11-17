@@ -13,9 +13,9 @@ import {
 } from './helpers';
 
 /**
- * Captain's report notices go out from 18:00 SAST only, and never twice, end to end:
+ * Captain's report notices go out from 20:00 SAST only, and never twice, end to end:
  *  - window CLOSED: "Sync now" stores the pulled result but opens no report and sends nothing;
- *    the admin is told the reports are queued for 18:00.
+ *    the admin is told the reports are queued for 20:00.
  *  - window OPEN: the next "Sync now" drains the queue — one report per side, one notice each.
  *  - a third "Sync now" sends nothing new.
  *
@@ -210,7 +210,7 @@ test.afterAll(async ({ request }) => {
   });
 });
 
-test('report notices wait for 18:00, then go out once per side — never twice', async ({
+test('report notices wait for 20:00, then go out once per side — never twice', async ({
   page: browser,
   request,
 }) => {
@@ -223,21 +223,21 @@ test('report notices wait for 18:00, then go out once per side — never twice',
   await browser.getByRole('tab', { name: /Sync health/ }).click();
   await expect(browser.getByRole('heading', { name: /Medicoach sync/ })).toBeVisible();
 
-  // 1. Before 18:00: the result is stored, the reports are queued, nothing is sent.
+  // 1. Before 20:00: the result is stored, the reports are queued, nothing is sent.
   const closed = await syncNowInUi(browser);
   test.skip(
     closed.status === 'dry-run',
     'the running stack has no MEDICOACH_SYNC_URL/SECRET (reused without the config env)',
   );
-  expect(closed.reportsMessage).toBe("Captain's reports queued — sent from 18:00");
+  expect(closed.reportsMessage).toBe("Captain's reports queued — sent from 20:00");
   await expect(
-    browser.getByText("Sync finished. Captain's reports queued — sent from 18:00."),
+    browser.getByText("Sync finished. Captain's reports queued — sent from 20:00."),
   ).toBeVisible();
   expect(closed.reportNotices).toMatchObject({ opened: 0, notified: 0, failed: 0 });
   expect(closed.reportNotices!.deferred).toBeGreaterThan(0);
   expect(await seriesReports(request)).toEqual([]);
 
-  // 2. From 18:00: the next sync opens one report per side and notifies each exactly once.
+  // 2. From 20:00: the next sync opens one report per side and notifies each exactly once.
   await setReportNoticeWindow(request, 'open');
   const open = await syncNowInUi(browser);
   expect(open.reportsMessage).toBeUndefined();

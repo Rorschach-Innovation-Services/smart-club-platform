@@ -292,7 +292,7 @@ async function resetTable() {
 before(async () => {
   ddb = await startDynalite(DDB_PORT, TABLE);
   app = (await import('../src/index.js')).app;
-  // Dates here follow the real clock: hold the 18:00 SAST notice window open (the gate has
+  // Dates here follow the real clock: hold the 20:00 SAST notice window open (the gate has
   // its own tests in captains-report-1800-gate.int.test.ts).
   (await import('../src/captains-reports.js')).setReportNoticeWindowOverride(() => true);
   repo = await import('../src/repo.js');
@@ -900,6 +900,73 @@ describe('a cleared result', () => {
     assert.equal(flagged.status, 'submitted');
     assert.ok(flagged.flagged?.reason);
     assert.equal((await app.request(`/captains-report-link/${oppToken}`)).status, 410);
+  });
+});
+
+describe('an abandoned result', () => {
+  /** The live example re-recorded as abandoned, `minutes` after its recordedAt. */
+  const abandonedPage = (source: 'live' | 'manual' | 'import', minutes = 1) => {
+    const p = liveResultPage(source);
+    const at = new Date(Date.parse(p.fixtures[0].result.recordedAt) + minutes * 60_000);
+    p.nextCursor = at.toISOString();
+    Object.assign(p.fixtures[0].result, {
+      homeScore: null,
+      awayScore: null,
+      summary: 'Abandoned',
+      winner: 'none',
+      method: 'abandoned',
+      noResult: true,
+      scoringSide: null,
+      captainRef: null,
+      recordedAt: at.toISOString(),
+    });
+    return p;
+  };
+
+  test('voids the pending side, keeps the submitted side untouched and unflagged, leaves no marker', async () => {
+    await seedCaptain();
+    page = liveResultPage('live');
+    await runPull();
+    const own = (await reportsOf()).find((r) => r.clubId === 'umzinto')!;
+    const opp = (await reportsOf()).find((r) => r.clubId === 'african-warriors')!;
+    const oppToken = tokenOf(notices.find((n) => n.reportId === opp.id)!);
+    await app.request(`/club/captains-reports/${encodeURIComponent(own.id)}`, {
+      method: 'PUT',
+      headers: headers(REP_UMZINTO),
+      body: JSON.stringify({ ...completeBody, submit: true }),
+    });
+    const submitted = (await reportsOf()).find((r) => r.id === own.id)!;
+    assert.equal(submitted.status, 'submitted');
+
+    page = abandonedPage('manual');
+    await runPull();
+
+    const after = await reportsOf();
+    const kept = after.find((r) => r.id === own.id)!;
+    assert.deepEqual(kept, submitted, 'the submitted report is not touched at all');
+    assert.equal(kept.flagged, undefined);
+    const voided = after.find((r) => r.id === opp.id)!;
+    assert.equal(voided.status, 'void');
+    assert.equal(voided.voidReason, 'match abandoned in medicoach');
+    assert.equal((await app.request(`/captains-report-link/${oppToken}`)).status, 410);
+    assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
+    assert.equal(notices.length, 2, 'the abandonment notifies nobody');
+  });
+
+  test('an imported abandonment voids pending reports too', async () => {
+    page = liveResultPage('live');
+    await runPull();
+    assert.equal(notices.length, 2);
+    page = abandonedPage('import');
+    await runPull();
+    const after = await reportsOf();
+    assert.equal(after.length, 2);
+    for (const r of after) {
+      assert.equal(r.status, 'void');
+      assert.equal(r.voidReason, 'match abandoned in medicoach');
+    }
+    assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
+    assert.equal(notices.length, 2);
   });
 });
 

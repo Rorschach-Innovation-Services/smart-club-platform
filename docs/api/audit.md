@@ -708,6 +708,8 @@ outside the query's own key range.
 - **Not attributed to a person:** crons (reminders, the 15-minute Match Centre sync, captain's
   report openings, squad openings and sweeps), the sync a "Sync now" triggers, CLI scripts and
   direct table edits. History before the trail went live (12 Nov 2026) is not reconstructed.
+- **Abandoned-match voids:** a captain's report voided because Match Centre recorded the match
+  abandoned is a sync-driven change and is not attributed (the row keeps its `voidReason`).
 - **Staff emails** are kept (above), as are the operator's email in `setupCompletedBy` and
   organisation contact details in tenant settings (`support`, `officialsContactLine`,
   `orgContact.phone` / `.email`) — the union's published contacts, stored as values.

@@ -1,5 +1,5 @@
 /**
- * Test-only override state for the automatic-send notice windows (captain's reports 18:00,
+ * Test-only override state for the automatic-send notice windows (captain's reports 20:00,
  * squad links 08:00 SAST). Production never sets it; the local stack's `/__e2e/` hook and the
  * integration tests do. Each window has its own slot so a test can force one open while the
  * other stays closed (proving squads and reports gate independently).

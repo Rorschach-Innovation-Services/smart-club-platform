@@ -19,7 +19,10 @@ dynaliteEnv(DDB_PORT, TABLE);
 process.env.NOTIFY_DRY_RUN = '1';
 
 const T = 'dolphins';
-const NOW = new Date('2026-10-18T17:00:00.000Z'); // 19:00 SAST on match day
+/** The default notice hour (SAST); NOW sits half an hour into that window. */
+const { REPORT_NOTICE_HOUR: H } = await import('../src/captains-reports.js');
+/** H:30 SAST on match day, inside the default notice window. */
+const NOW = new Date(Date.parse('2026-10-18T00:00:00.000Z') + ((H - 2) * 60 + 30) * 60_000);
 const MATCH = '2026-10-18';
 const GO_LIVE = '2026-09-01';
 const SEEN = '2026-10-01T00:00:00.000Z';
@@ -596,6 +599,32 @@ describe('re-targeting an already-open pending report', () => {
     assert.equal((await reportOf('umzinto')).recipient.memberId, r.recipient.memberId);
     assert.equal(notices.length, sent);
   });
+
+  for (const [shape, over] of [
+    ['winner none, noResult true', { winner: 'none', noResult: true }],
+    ['winner tie, noResult false', { winner: 'tie', noResult: false }],
+  ] as const)
+    test(`a squad submit on an abandoned fixture (${shape}) re-targets nothing and sends nothing`, async () => {
+      await openFor(S1, null);
+      const r = await reportOf('umzinto');
+      await repo.putFixtureResultIfNewer(T, {
+        seriesId: S1,
+        fixtureId: 'f1',
+        ref: `smartclub:${T}:fixture:${S1}:f1`,
+        orderAt: SEEN,
+        recordedAt: SEEN,
+        summary: 'Abandoned',
+        method: 'abandoned',
+        storedAt: SEEN,
+        ...over,
+      });
+      await squadRequest('umzinto', K(2), 'submitted');
+      const req = (await repo.getSquadRequest(T, S1, 'f1', 'umzinto'))!;
+      const sent = notices.length;
+      assert.equal(await reports.retargetReportForSquadCaptain(reportDeps(), T, req), 'none');
+      assert.equal((await reportOf('umzinto')).recipient.memberId, r.recipient.memberId);
+      assert.equal(notices.length, sent);
+    });
 
   test('a squad-submit re-target outside the notice window returns window-closed and sends nothing', async () => {
     await openFor(S1, null);

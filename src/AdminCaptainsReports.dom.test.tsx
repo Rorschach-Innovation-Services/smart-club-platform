@@ -90,6 +90,37 @@ describe('AdminCaptainsReportsView', () => {
     expect(within(rows()[0]).getByText('CR-2026-0001')).toBeTruthy();
   });
 
+  it('says in plain words why a report was voided', () => {
+    renderWithProviders(
+      <AdminCaptainsReportsView
+        reports={[
+          report({
+            clubId: 'a',
+            clubName: 'A CC',
+            status: 'void',
+            voidReason: 'match abandoned in medicoach',
+          }),
+          report({
+            clubId: 'b',
+            clubName: 'B CC',
+            status: 'void',
+            voidReason: 'result cleared in medicoach',
+          }),
+          report({ clubId: 'c', clubName: 'C CC', status: 'void', voidReason: 'something else' }),
+          // A pending row never shows a reason, even if one is stored.
+          report({ clubId: 'd', clubName: 'D CC', voidReason: 'match abandoned in medicoach' }),
+        ]}
+      />,
+    );
+    const row = (club: string) =>
+      screen.getAllByRole('row').find((r) => within(r).queryByText(club))!;
+    expect(within(row('A CC')).getByText('Match abandoned')).toBeTruthy();
+    expect(within(row('A CC')).getByText('Void')).toBeTruthy();
+    expect(within(row('B CC')).getByText('Result cleared')).toBeTruthy();
+    expect(within(row('C CC')).getByText('something else')).toBeTruthy();
+    expect(within(row('D CC')).queryByText('Match abandoned')).toBeNull();
+  });
+
   it('opens a submitted report read-only', async () => {
     const user = userEvent.setup();
     renderWithProviders(<AdminCaptainsReportsView reports={REPORTS} />);

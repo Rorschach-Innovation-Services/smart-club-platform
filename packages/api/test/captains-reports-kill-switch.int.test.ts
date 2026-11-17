@@ -14,6 +14,8 @@ const DDB_PORT = 4745; // unique: 4599–4743 are taken
 const TABLE = 'SmartClubReportKillSwitch';
 dynaliteEnv(DDB_PORT, TABLE);
 process.env.NOTIFY_DRY_RUN = '1';
+/** The default notice hour (SAST); the evening instant below is relative to it. */
+const { REPORT_NOTICE_HOUR: H } = await import('../src/captains-reports.js');
 
 const T = 'dolphins';
 const HOUR = 3600 * 1000;
@@ -22,9 +24,10 @@ const sastToday = (h: number) => {
   const day = new Date(Date.now() + 2 * HOUR).toISOString().slice(0, 10);
   return new Date(Date.parse(`${day}T00:00:00.000Z`) - 2 * HOUR + h * HOUR);
 };
-const AT_1900 = sastToday(19);
-const TODAY = new Date(AT_1900.getTime() + 2 * HOUR).toISOString().slice(0, 10);
-const GO_LIVE = new Date(AT_1900.getTime() - 30 * DAY).toISOString().slice(0, 10);
+/** Half an hour into today's default notice window (REPORT_NOTICE_HOUR, SAST). */
+const AT_EVENING = new Date(sastToday(H).getTime() + HOUR / 2);
+const TODAY = new Date(AT_EVENING.getTime() + 2 * HOUR).toISOString().slice(0, 10);
+const GO_LIVE = new Date(AT_EVENING.getTime() - 30 * DAY).toISOString().slice(0, 10);
 const S1 = 's1';
 const SECRET = 'kill-switch-secret';
 
@@ -87,7 +90,7 @@ const setFeature = async (on: boolean) => {
 };
 
 const notices: unknown[] = [];
-const deps = (at: Date = AT_1900) => ({
+const deps = (at: Date = AT_EVENING) => ({
   repo,
   now: () => at,
   log: () => {},
@@ -107,7 +110,7 @@ const result = {
   method: 'normal' as const,
   noResult: false,
   source: 'live' as const,
-  recordedAt: AT_1900.toISOString(),
+  recordedAt: AT_EVENING.toISOString(),
   scoringSide: 'home' as const,
   captainRef: null,
   medicoachMatchUrl: null,
@@ -204,8 +207,8 @@ describe('captainsReports kill switch', () => {
     assert.equal(notices.length, 2);
     const token = (notices[0] as { token: string }).token;
     await setFeature(false);
-    // Six days on, 19:00: inside the reminder window.
-    const later = new Date(AT_1900.getTime() + 6 * DAY);
+    // Six days on, same evening time: inside the reminder window.
+    const later = new Date(AT_EVENING.getTime() + 6 * DAY);
     const rem = await reports.sendReportReminders(T, deps(later));
     assert.equal(rem.sent + rem.due, 0);
     assert.equal(notices.length, 2);

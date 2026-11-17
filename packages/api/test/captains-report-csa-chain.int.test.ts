@@ -6,7 +6,7 @@
  * corrected card of match 2f6d9c46). All three parse the v1 contract verbatim (pinned below);
  * the only adaptation is ids/refs/instants onto the seeded fixtures.
  *
- *  1. Monday 04:45: the premier result notifies at once, the promotion one waits for 18:00;
+ *  1. Monday 04:45: the premier result notifies at once, the promotion one waits for 20:00;
  *     the captured card is stored and served to the link with every innings detail, and the
  *     confirm answer is accepted against it.
  *  2. A correction (recordedAt bumped + corrected card) is refetched by the sweep and flags
@@ -16,7 +16,8 @@
  *  4. Old fixtures: the EXACT `too-old` rule, what it does NOT cover (a freshly pulled result
  *     for an old match still notifies — the go-live date is the guard), and what the backfill
  *     script does with such a fixture.
- *  5. Abandoned (`source: manual`, no result): opens + notifies card-less with "Abandoned".
+ *  5. Abandoned (`source: manual`, method 'abandoned'): the result is stored, but no report
+ *     opens, no notice goes out and no REPORTOPEN# marker is left.
  *
  * Every instant is fixed (Sat 24 / Mon 26 Oct 2026) and passed as `now`; link tokens for the
  * answer flow are minted with a far-future expiry so the wall clock never matters.
@@ -395,7 +396,7 @@ describe('the captured payloads', () => {
 });
 
 describe('1. the Monday 04:30 chain', () => {
-  test('premier notifies at 04:45 with its full card; promotion waits for 18:00', async () => {
+  test('premier notifies at 04:45 with its full card; promotion waits for 20:00', async () => {
     await seed();
     const recordedAt = at(MON, 4, 30).toISOString();
     page = changesPage(
@@ -406,7 +407,7 @@ describe('1. the Monday 04:30 chain', () => {
 
     const s = await pull(at(MON, 4, 45));
     assert.equal(s.counts.resultsStored, 2);
-    assert.equal(s.reportsDeferred, 1, 'the promotion result is queued for 18:00');
+    assert.equal(s.reportsDeferred, 1, 'the promotion result is queued for 20:00');
     assert.deepEqual(seriesOfNotices(), [PREMIER]);
     assert.equal(notices.length, 2, 'both premier sides');
     for (const n of notices) {
@@ -459,9 +460,12 @@ describe('1. the Monday 04:30 chain', () => {
     assert.equal(saved.status, 'submitted');
     assert.deepEqual(saved.scorecard, { action: 'confirmed', againstFetchedAt: stored!.fetchedAt });
 
-    // 18:00: the promotion marker drains.
+    // REPORT_NOTICE_HOUR (20:00): the promotion marker drains.
     notices.length = 0;
-    const evening = await reports.retryPendingReportOpens(T, reportDeps(at(MON, 18)));
+    const evening = await reports.retryPendingReportOpens(
+      T,
+      reportDeps(at(MON, reports.REPORT_NOTICE_HOUR)),
+    );
     assert.equal(evening.done, 1);
     assert.deepEqual(seriesOfNotices(), [PROMO]);
   });
@@ -708,37 +712,36 @@ describe('4. old fixtures', () => {
 });
 
 describe('5. abandoned', () => {
-  test('source manual, no result: opens + notifies card-less, the result line is "Abandoned"', async () => {
+  test('an abandoned result is stored but opens no report, sends no notice and leaves no marker', async () => {
     await seed();
-    page = changesPage(
-      adapt(
-        'e2e-csa-f-abandoned',
-        PREMIER_REF,
-        SAT,
-        at(MON, 4, 30).toISOString(),
-        'umzinto',
-        'african-warriors',
-      ),
+    const change = adapt(
+      'e2e-csa-f-abandoned',
+      PREMIER_REF,
+      SAT,
+      at(MON, 4, 30).toISOString(),
+      'umzinto',
+      'african-warriors',
     );
+    // The real captured payload is the host-recorded shape.
+    assert.equal(change.result?.method, 'abandoned');
+    page = changesPage(change);
     const s = await pull(at(MON, 4, 45));
-    assert.equal(s.counts.resultsStored, 1);
-    assert.equal(notices.length, 2, 'manual is not report-suppressed');
-    assert.deepEqual(seriesOfNotices(), [PREMIER]);
+    assert.equal(s.counts.resultsStored, 1, 'the result (and standings) still land');
+    assert.equal((await repo.getFixtureResult(T, PREMIER, 'f3'))?.method, 'abandoned');
+    assert.equal(notices.length, 0, 'an abandoned match gets no notice');
+    assert.deepEqual(await repo.listCaptainsReportsForFixture(T, PREMIER, 'f3'), []);
+    assert.deepEqual(await repo.listReportOpenMarkers(T), [], 'nothing left queued');
     assert.deepEqual(scorecardHits, [], 'no medicoach ids ⇒ no scorecard request');
-    assert.equal(await repo.getFixtureScorecard(T, PREMIER, 'f3'), null);
-    const view = (await (await linkGet(PREMIER, 'f3', 'umzinto')).json()) as LinkPayload;
-    assert.equal(view.report.resultSummary, 'Abandoned');
-    assert.equal(view.scorecard, undefined);
-    assert.deepEqual(view.result, {
-      homeScore: null,
-      awayScore: null,
-      summary: 'Abandoned',
-      winner: 'none',
-    });
-    // An abandoned match has no card to explain: no scorecard-absent note.
-    assert.equal((view as { scorecardAbsentNote?: unknown }).scorecardAbsentNote, undefined);
-    // Card-less ⇒ no scorecard answer is required.
-    const ok = await linkPut(PREMIER, 'f3', 'umzinto', complete());
-    assert.equal(ok.status, 200);
+
+    // Later runs (retry + the deferred league's Monday fallback) open nothing either.
+    await reports.retryPendingReportOpens(T, reportDeps(at(MON, reports.REPORT_NOTICE_HOUR, 15)));
+    await reports.openMatchDayReports(
+      T,
+      (await repo.getTenantConfig(T))!,
+      reportDeps(at(MON, reports.REPORT_NOTICE_HOUR, 15)),
+      { targetDates: [SAT], seriesIds: [PREMIER] },
+    );
+    assert.equal(notices.length, 0);
+    assert.deepEqual(await repo.listCaptainsReportsForFixture(T, PREMIER, 'f3'), []);
   });
 });
