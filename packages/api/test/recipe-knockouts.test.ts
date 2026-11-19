@@ -1,5 +1,5 @@
 /**
- * create-recipe-knockouts: the 13 dolphins T20 semis/finals medicoach built from the recipe
+ * create-recipe-knockouts: the 15 dolphins T20 semis/finals medicoach built from the recipe
  * are planned in smart club with the SAME refs, placeholder sides and a TBC date — and a
  * TBC fixture never takes part in a clash gate.
  *
@@ -13,7 +13,8 @@ import { planRecipeKnockouts, parseArgs } from '../src/create-recipe-knockouts.j
 import { DOLPHINS_RECIPES } from '../src/medicoach-recipes/dolphins.js';
 import { findClashes, isClashExempt } from '../src/venue-clash.js';
 
-/** The 13 `:fixture:recipe:` keys of medicoach's league-map.prod.json (checked by hand). */
+/** The 15 `:fixture:recipe:` keys medicoach holds: league-map.prod.json's 13 (checked by hand)
+ * plus the Veterans Promotion semis added for the 21 Nov 2026 play-offs. */
 const EXPECTED_REFS = [
   'smartclub:dolphins:fixture:recipe:premier:t20:final',
   'smartclub:dolphins:fixture:recipe:premier:t20:sf1',
@@ -28,6 +29,8 @@ const EXPECTED_REFS = [
   'smartclub:dolphins:fixture:recipe:veterans-premier:t20:sf1',
   'smartclub:dolphins:fixture:recipe:veterans-premier:t20:sf2',
   'smartclub:dolphins:fixture:recipe:veterans-promotion:t20:final',
+  'smartclub:dolphins:fixture:recipe:veterans-promotion:t20:sf1',
+  'smartclub:dolphins:fixture:recipe:veterans-promotion:t20:sf2',
 ];
 
 const group = (id: string, name: string, leagueKey: string, lastDate: string): Series =>
@@ -114,9 +117,9 @@ describe('planRecipeKnockouts (dolphins)', () => {
     ),
   );
 
-  test('exactly 13 fixtures, refs equal to the recipe refs medicoach holds', () => {
+  test('exactly 15 fixtures, refs equal to the recipe refs medicoach holds', () => {
     assert.deepEqual(plan.warnings, []);
-    assert.equal(fixtures.length, 13);
+    assert.equal(fixtures.length, 15);
     assert.deepEqual(fixtures.map((f) => f.syncRef).sort(), EXPECTED_REFS);
     for (const f of fixtures)
       assert.match(
@@ -161,12 +164,34 @@ describe('planRecipeKnockouts (dolphins)', () => {
     }
     const vets = plan.series.find((s) => s.id === 's-mc-ko-veterans-promotion-t20')!;
     assert.deepEqual(
-      (vets.fixtures as Array<Record<string, unknown>>).map((f) => [f.home, f.away, f.stage]),
+      (vets.fixtures as Array<Record<string, unknown>>).map((f) => [
+        f.id,
+        f.home,
+        f.away,
+        f.stage,
+        f.syncRef,
+      ]),
       [
         [
+          'f1',
           'pos:s-planb-veterans-promotion-t20-1:1',
           'pos:s-planb-veterans-promotion-t20-2:2',
+          'Semi-final 1',
+          'smartclub:dolphins:fixture:recipe:veterans-promotion:t20:sf1',
+        ],
+        [
+          'f2',
+          'pos:s-planb-veterans-promotion-t20-2:1',
+          'pos:s-planb-veterans-promotion-t20-1:2',
+          'Semi-final 2',
+          'smartclub:dolphins:fixture:recipe:veterans-promotion:t20:sf2',
+        ],
+        [
+          'f3',
+          'win:f1',
+          'win:f2',
           'Final',
+          'smartclub:dolphins:fixture:recipe:veterans-promotion:t20:final',
         ],
       ],
     );

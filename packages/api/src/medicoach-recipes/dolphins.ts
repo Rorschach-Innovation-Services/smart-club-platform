@@ -166,15 +166,17 @@ export const DOLPHINS_RECIPES: TenantRecipes = {
             rounds: 1,
             extraPhases: [],
             teamsPerGroup: 8,
-            // No advancePerGroup: only G1 1st and G2 2nd go through, which no per-group count
-            // expresses. The explicit final fixture below is the truth.
+            // No advancePerGroup: the explicit later fixtures below are the truth.
           },
           cricketMatchFormat: 'T20',
           expectedGroupSizes: [7, 8],
-          // Confirmed by the union 1 Oct 2026: the final G1 1st v G2 2nd (uneven 7+8 groups) is
-          // intended.
+          // The union changed the format for the 21 Nov 2026 play-offs (reminder sheet): crossed
+          // semis at Toti — G1 1st v G2 2nd and G2 1st v G1 2nd — and a final between the semi
+          // winners. (Until then a single final G1 1st v G2 2nd, confirmed 1 Oct 2026.)
           laterFixtures: [
-            { slotId: 'final', stage: 'Final', round: 1, home: gp(1, 1), away: gp(2, 2) },
+            { slotId: 'sf1', stage: 'Semi-final 1', round: 1, home: gp(1, 1), away: gp(2, 2) },
+            { slotId: 'sf2', stage: 'Semi-final 2', round: 1, home: gp(2, 1), away: gp(1, 2) },
+            { slotId: 'final', stage: 'Final', round: 2, home: win('sf1'), away: win('sf2') },
           ],
         },
         '30-over': {

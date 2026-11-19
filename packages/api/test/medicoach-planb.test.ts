@@ -63,7 +63,7 @@ describe('Plan-B backup → bundle', () => {
     );
   });
 
-  test('all 500 fixtures of the exported leagues are exported, plus 13 recipe placeholders', () => {
+  test('all 500 fixtures of the exported leagues are exported, plus 15 recipe placeholders', () => {
     // 620 in the source; the excluded Promotion Women's series carry the other 120.
     const total = series.reduce((n, s) => n + (s.fixtures?.length ?? 0), 0);
     const excludedPw = series
@@ -74,8 +74,8 @@ describe('Plan-B backup → bundle', () => {
     assert.equal(summary.fixtures.read, 500);
     assert.equal(summary.fixtures.cancelledSkipped, 0);
     assert.equal(summary.fixtures.unresolvedSideSkipped, 0);
-    assert.equal(bundle.counts.fixtures, 513);
-    assert.equal(bundle.counts.placeholderFixtures, 13);
+    assert.equal(bundle.counts.fixtures, 515);
+    assert.equal(bundle.counts.placeholderFixtures, 15);
   });
 
   test('one competition per (league, stream): 10 competitions, 20 groups', () => {
@@ -258,15 +258,30 @@ describe('flagship recipes (handover §9.3)', () => {
     assert.equal(c.fixtures.length, 66);
   });
 
-  test('Veterans Promotion: T20 uneven 7+8 with a single final G1 1st v G2 2nd; 30 Over one group of 15', () => {
+  test('Veterans Promotion: T20 uneven 7+8 with crossed semis + final (21 Nov 2026); 30 Over one group of 15', () => {
     const t20 = comp('veterans-promotion', 't20');
     assert.deepEqual(sizes(t20), [7, 8]);
     const ko = placeholders(t20);
-    assert.equal(ko.length, 1);
-    assert.equal(ko[0].stage, 'Final');
-    assert.deepEqual([ko[0].homeSlot, ko[0].awaySlot], [gpos(1, 1), gpos(2, 2)]);
+    assert.equal(ko.length, 3);
+    const byRef = (id: string) =>
+      ko.find(
+        (f) => f.externalRef === refs.recipeFixture('dolphins', 'veterans-promotion', 't20', id),
+      )!;
+    assert.equal(byRef('sf1').stage, 'Semi-final 1');
+    assert.deepEqual([byRef('sf1').homeSlot, byRef('sf1').awaySlot], [gpos(1, 1), gpos(2, 2)]);
+    assert.equal(byRef('sf2').stage, 'Semi-final 2');
+    assert.deepEqual([byRef('sf2').homeSlot, byRef('sf2').awaySlot], [gpos(2, 1), gpos(1, 2)]);
+    assert.equal(byRef('final').stage, 'Final');
+    assert.equal(byRef('final').round, 2);
+    assert.deepEqual(
+      [byRef('final').homeSlot, byRef('final').awaySlot],
+      [
+        { kind: 'winner', ofFixtureRef: byRef('sf1').externalRef },
+        { kind: 'winner', ofFixtureRef: byRef('sf2').externalRef },
+      ],
+    );
     assert.equal(t20.confirm, undefined);
-    // Only G1 1st and G2 2nd qualify: no per-group advance count, the final carries the rule.
+    // The explicit later fixtures carry the rule; no per-group advance count.
     assert.equal(t20.format.advancePerGroup, undefined);
     assert.deepEqual(sizes(comp('veterans-promotion', '30-over')), [15]);
   });
