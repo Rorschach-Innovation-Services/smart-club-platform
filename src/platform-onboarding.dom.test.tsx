@@ -311,6 +311,7 @@ describe('TenantEditPage card swap', () => {
             signOutUser={vi.fn()}
             hasTenantConsole={false}
             hostSlug="acme"
+            hostTenantId="acme"
           />
         </MemoryRouter>
       </QueryClientProvider>,
@@ -340,6 +341,7 @@ describe('TenantEditPage setup card', () => {
             signOutUser={vi.fn()}
             hasTenantConsole={false}
             hostSlug="acme"
+            hostTenantId="acme"
           />
         </MemoryRouter>
       </QueryClientProvider>,
@@ -410,6 +412,7 @@ describe('TenantEditPage league catalogue — Setup column', () => {
             signOutUser={vi.fn()}
             hasTenantConsole={false}
             hostSlug="acme"
+            hostTenantId="acme"
           />
         </MemoryRouter>
       </QueryClientProvider>,

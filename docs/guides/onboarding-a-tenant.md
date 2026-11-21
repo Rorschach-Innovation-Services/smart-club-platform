@@ -30,9 +30,13 @@ They sign in via the normal email OTP from any configured host and open **`/plat
 
 `/platform` → **New client**. The wizard walks through:
 
-1. **Slug** — short, unique, lowercase (`^[a-z][a-z0-9-]{1,31}$`; `www`, `api`, `platform`,
-   `admin` are reserved). It becomes the `TENANT#<slug>#` key prefix and (usually) the
-   vanity subdomain. A duplicate slug is rejected with a 409 — never silently merged.
+1. **Slug** — short, unique, lowercase (`^[a-z][a-z0-9-]{0,30}[a-z0-9]$`; `www`, `api`,
+   `platform`, `admin` are reserved). It is the client's **fixed internal ID**: the
+   `TENANT#<slug>#` key prefix, S3 prefixes, memberships, signed links and Medicoach refs all
+   carry it, so it can never change. It is also the client's first web address label
+   (`<slug>.club.medicoach.co.za`), which **can** change later (§1b). A duplicate slug is
+   rejected with a 409 — never silently merged — and so is a slug that is, or was, any
+   client's web address.
 2. **Identity** — organisation name (required) + display title.
 3. **Logo** — PNG/SVG/WebP, ≤ 1 MB. Uploaded to the public assets bucket under
    `branding/<slug>/`; a failed upload just warns (retry from the client's settings page).
@@ -47,6 +51,31 @@ edited later from the client's settings page. When setup is finished, the operat
 informational and reversible — nothing about the client depends on it. Branding editing is
 operator-only for now (tenant-admin self-service is reserved behind the `selfServeBranding`
 flag; see ADR 0006).
+
+## 1b. Changing a client's web address (rebrand)
+
+The web address label is separate from the slug
+([ADR 0024](../architecture/0024-public-address-separate-from-slug.md)). On the client's
+settings page, **Web address → Change** moves it, e.g. `westernprovincecricket` →
+`cobras` serves the client at `https://cobras.club.medicoach.co.za`. The internal ID stays
+`westernprovincecricket`. Under the hood this is
+`PUT /platform/tenants/<slug>/address { publicSlug, expectedCurrent }` (contract in
+[tenant.md](../api/tenant.md)).
+
+Before you confirm, tell the client:
+
+- **The old address is retired.** It stops working at once (other API instances may honour it
+  for up to a minute) and shows "This club isn't available". It is never given to another
+  client. The client can move back to one of its own old addresses later.
+- **Everyone signs in again** on the new address; sessions and unsent drafts are per-address.
+- **Links already sent to the old address stop working**: player-registration and club-signup
+  links, invites, clearance notices. Re-share the registration and signup links from the new
+  address. Captain's-report, squad, document-request and certificate links are unaffected
+  (they live on `platform.club.medicoach.co.za`), as are the Medicoach sync and stored files.
+
+The change is refused (409) for a client with a vanity domain (its address is set in
+`infra/tenants.ts`), for an address another client uses or used, for another client's slug, and
+when someone else changed the address since you loaded the page (reload and retry).
 
 ## 2. Optional: a vanity domain
 
@@ -234,6 +263,8 @@ To remove a client (contract end / POPIA erasure), see
 the tenant from the platform registry (the GSI entry lives on the same item), and its
 `<slug>.club.medicoach.co.za` URL immediately shows the "club isn't available" screen.
 
-> **Slug reuse:** because the wildcard URL is derived purely from the slug, re-creating a
-> deleted slug resurrects that URL for a **different** client. Operator-only, low risk — but
-> avoid reusing a slug that was ever public.
+> **Slug reuse:** erasing a client retires every web address it ever used (ADR 0024); those
+> labels are tombstones and cannot become a new client's slug. A client that **never changed**
+> its address has no tombstones, so its slug can be created again after an erase — and that
+> resurrects its URL for a **different** client. Operator-only, low risk — but avoid reusing a
+> slug that was ever public.

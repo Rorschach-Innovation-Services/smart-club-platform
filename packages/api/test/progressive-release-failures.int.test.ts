@@ -13,6 +13,7 @@ import type { Server } from 'node:http';
 import dayjs from 'dayjs';
 import dayjsUtc from 'dayjs/plugin/utc.js';
 import type { Series, Club } from '../src/types.js';
+import { minimalTenantConfig } from './dynalite-harness.js';
 
 // Env must be set BEFORE importing repo/app — repo reads TABLE_NAME at module load.
 const DDB_PORT = 4631; // distinct from api.int (4599) … progressive-release (4625); ≥4631 to
@@ -184,6 +185,8 @@ before(async () => {
   app = mod.app;
   buildClubSchedule = mod.buildClubSchedule;
   repo = await import('../src/repo.js');
+  // A presented x-tenant label resolves only to a tenant with a CONFIG row (ADR 0024).
+  await repo.putTenantConfig(minimalTenantConfig('dolphins'));
 });
 
 after(() => new Promise<void>((resolve) => ddbServer.close(() => resolve())));

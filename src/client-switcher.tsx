@@ -33,7 +33,8 @@ export function ClientSwitcher({
   currentSlug,
   enabled = true,
 }: {
-  currentSlug: string;
+  /** The current tenant's INTERNAL ID (GET /tenant `tenant`; useTenantId), matched against registry rows. */
+  currentSlug: string | null;
   /** Gate the registry fetch — only operators may call /platform/*. */
   enabled?: boolean;
 }) {
@@ -225,7 +226,10 @@ export function ClientSwitcher({
             ) : (
               tenants.map((t) => {
                 const current = t.tenant === currentSlug;
-                const unreachable = !current && tenantConsoleUrl(t.tenant) === null;
+                // Console links use the public address label (ADR 0024); fall back to the
+                // slug only for a registry row cached before the label shipped.
+                const label = t.publicSlug || t.tenant;
+                const unreachable = !current && tenantConsoleUrl(t.tenant, label) === null;
                 return (
                   <button
                     key={t.tenant}
@@ -235,10 +239,10 @@ export function ClientSwitcher({
                     aria-current={current ? 'true' : undefined}
                     disabled={current || unreachable}
                     title={unreachable ? 'No web address yet' : undefined}
-                    onClick={() => openTenantConsole(t.tenant)}
+                    onClick={() => openTenantConsole(t.tenant, label)}
                   >
                     <span className="client-switch-name">{t.name || t.tenant}</span>
-                    <span className="client-switch-slug">{t.tenant}</span>
+                    <span className="client-switch-slug">{label}</span>
                     {current && <span className="client-switch-tag">Current</span>}
                     {unreachable && <span className="client-switch-tag">No address</span>}
                   </button>

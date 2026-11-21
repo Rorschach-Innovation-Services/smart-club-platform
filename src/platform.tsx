@@ -18,9 +18,9 @@ import { queryClient, qk } from './query';
 import * as api from './api';
 import { ApiError, EMAIL_RE } from './api';
 import { resolveCopy } from './branding';
-import { openTenantConsole, tenantConsoleUrl } from './config';
+import { hasVanityOrigin, openTenantConsole, tenantConsoleUrl } from './config';
 import { resolveVertical, VERTICALS, type ModuleKey, type Sport } from './vertical';
-import { Icon, Pill, Btn, Card, EmptyState, Modal, useToast } from './atoms';
+import { Icon, Pill, Btn, Card, EmptyState, Modal, ModalCancelBtn, useToast } from './atoms';
 import { LeagueForm } from './admin';
 import { DISTRICTS } from './data';
 import { OVERARCHING_DISTRICT } from '../packages/engine/src/leagues';
@@ -75,16 +75,18 @@ import {
 
 /* ─── Contract mirrors (keep in sync with the API) ─── */
 
-// Mirrors packages/api/src/tenant-validation.ts so the wizard rejects a bad slug
-// before the round-trip; the server remains authoritative (409/400 handled inline).
-const TENANT_SLUG_RE = /^[a-z][a-z0-9-]{1,31}$/;
+// Mirrors packages/api/src/tenant-validation.ts so the wizard (and the web-address change)
+// rejects a bad label before the round-trip; the server remains authoritative (409/400
+// handled inline). Same rule for a new slug and a public address label (ADR 0024).
+const TENANT_SLUG_RE = /^[a-z][a-z0-9-]{0,30}[a-z0-9]$/;
 const RESERVED_TENANT_SLUGS = ['www', 'api', 'platform', 'admin', '*'];
-function slugProblem(slug: string): string | null {
-  if (!TENANT_SLUG_RE.test(slug))
-    return 'slug must be 2–32 chars: a lowercase letter, then lowercase letters, digits or hyphens';
-  if (RESERVED_TENANT_SLUGS.includes(slug)) return `slug "${slug}" is reserved`;
+function labelProblem(label: string, noun: 'slug' | 'address'): string | null {
+  if (!TENANT_SLUG_RE.test(label))
+    return `${noun} must be 2–32 chars: a lowercase letter, then lowercase letters, digits or hyphens, ending in a letter or digit`;
+  if (RESERVED_TENANT_SLUGS.includes(label)) return `${noun} "${label}" is reserved`;
   return null;
 }
+const slugProblem = (slug: string) => labelProblem(slug, 'slug');
 
 // Mirrors BRANDING_UPLOAD_KINDS on POST …/logo-upload.
 const LOGO_TYPES = ['image/png', 'image/svg+xml', 'image/webp'];
@@ -417,12 +419,18 @@ export function PlatformPortal({
   signOutUser,
   hasTenantConsole,
   hostSlug,
+  hostTenantId,
 }: {
   userEmail: string;
   signOutUser: () => void;
   hasTenantConsole: boolean;
-  /** The tenant this host resolved to at boot (main.tsx TENANT_SLUG). */
+  /**
+   * The public address label this host resolved at boot (main.tsx TENANT_SLUG). Since
+   * ADR 0024 it may differ from the tenant's internal ID.
+   */
   hostSlug: string;
+  /** This host's tenant INTERNAL ID, from the GET /tenant payload; null until it loads. */
+  hostTenantId: string | null;
 }) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -437,7 +445,7 @@ export function PlatformPortal({
     enabled: hasTenantConsole,
   });
   const hostName =
-    tenantsQ.data?.find((t: TenantSummary) => t.tenant === hostSlug)?.name || hostSlug;
+    tenantsQ.data?.find((t: TenantSummary) => t.tenant === hostTenantId)?.name || hostSlug;
 
   // One help drawer for the whole operator portal, so a HelpLink in any card, modal or
   // wizard opens it in place rather than falling back to a new tab.
@@ -529,7 +537,7 @@ export function PlatformPortal({
                 <button
                   className="nav-item"
                   title={`Open the ${hostName} admin console`}
-                  onClick={() => openTenantConsole(hostSlug)}
+                  onClick={() => hostTenantId && openTenantConsole(hostTenantId, hostSlug)}
                 >
                   <span className="ni-icon">
                     <Icon.Dashboard />
@@ -632,15 +640,22 @@ function CohortStat({ n, label }: { n?: number; label: string }) {
  */
 function OpenConsoleBtn({
   slug,
+  label,
   name,
   compact = false,
 }: {
   slug: string;
+  /**
+   * The client's public address label (ADR 0024) from the platform read. undefined while
+   * that read is in flight: the button stays inert rather than guess the slug.
+   */
+  label: string | undefined;
   name: string;
   compact?: boolean;
 }) {
   // No reachable console from this host (see tenantConsoleUrl) → inert, with the reason.
-  const unreachable = tenantConsoleUrl(slug) === null;
+  const url = label ? tenantConsoleUrl(slug, label) : null;
+  const unreachable = url === null;
   return (
     <Btn
       tone="outline"
@@ -651,7 +666,7 @@ function OpenConsoleBtn({
       disabled={unreachable}
       onClick={(e) => {
         e.stopPropagation();
-        openTenantConsole(slug);
+        if (label) openTenantConsole(slug, label);
       }}
     >
       {compact ? <span className="hide-narrow">Open console</span> : 'Open console'}
@@ -713,9 +728,9 @@ function TenantListPage() {
             <thead>
               <tr>
                 <th>Client</th>
-                {/* Slug/deadline are secondary (both live on the settings page) —
+                {/* Address/deadline are secondary (both live on the settings page) —
                     drop them on narrow viewports so Overview stays on-canvas. */}
-                <th className="hide-narrow">Slug</th>
+                <th className="hide-narrow">Address</th>
                 <th className="hide-narrow">Deadline</th>
                 <th>Cohort</th>
                 <th>Admins</th>
@@ -752,7 +767,17 @@ function TenantListPage() {
                       </span>
                     </td>
                     <td className="hide-narrow">
-                      <span style={MONO}>{t.tenant}</span>
+                      {/* The public web address label (ADR 0024); the fixed internal ID
+                          shows beneath only once the two differ. */}
+                      <span style={{ ...MONO, display: 'block' }}>{t.publicSlug || t.tenant}</span>
+                      {t.publicSlug && t.publicSlug !== t.tenant && (
+                        <span
+                          style={{ ...MONO, fontSize: 11, color: 'var(--muted-2)' }}
+                          title="Internal ID — never changes"
+                        >
+                          ID {t.tenant}
+                        </span>
+                      )}
                     </td>
                     <td className="hide-narrow">
                       <span style={{ fontSize: 12.5 }}>{fmtDate(t.submissionDeadline)}</span>
@@ -775,7 +800,12 @@ function TenantListPage() {
                     </td>
                     <td style={{ textAlign: 'right', paddingRight: 18, whiteSpace: 'nowrap' }}>
                       {/* Row click opens settings; this drills into the breakdown. */}
-                      <OpenConsoleBtn slug={t.tenant} name={t.name} compact />{' '}
+                      <OpenConsoleBtn
+                        slug={t.tenant}
+                        label={t.publicSlug || t.tenant}
+                        name={t.name}
+                        compact
+                      />{' '}
                       <Btn
                         tone="outline"
                         size="sm"
@@ -800,6 +830,18 @@ function TenantListPage() {
 }
 
 /* ─── Client settings (edit page) ─── */
+
+/**
+ * The response-only address fields of a platform-tenant read (ADR 0024), to carry forward
+ * when a PUT response (which has none of them) replaces the cached row.
+ */
+function carryAddress(prev: api.PlatformTenant | undefined): Partial<api.PlatformTenant> {
+  return {
+    liveUrl: prev?.liveUrl,
+    publicSlug: prev?.publicSlug,
+    publicSlugHistory: prev?.publicSlugHistory,
+  };
+}
 
 function TenantEditPage({ toast }: { toast: Toast }) {
   const { slug = '' } = useParams();
@@ -844,11 +886,12 @@ function TenantEditPage({ toast }: { toast: Toast }) {
     // refetch quietly drops it.
     const { warnings: _warnings, ...cached } = next;
     void _warnings;
-    // The PUT response has no response-only `liveUrl` — carry the last GET's forward so
-    // the Setup card's live links don't vanish after every save.
+    // The PUT response has none of the response-only address fields (`liveUrl`,
+    // `publicSlug`, `publicSlugHistory`) — carry the last GET's forward so the Setup card's
+    // live links and the Identity card's web address don't vanish after every save.
     queryClient.setQueryData<api.PlatformTenant>(qk.platformTenant(slug), (prev) => ({
       ...cached,
-      liveUrl: prev?.liveUrl,
+      ...carryAddress(prev),
     }));
     queryClient.invalidateQueries({ queryKey: qk.platformTenants() });
     // The Overview button makes edit→overview a one-click flow; without this the
@@ -876,7 +919,11 @@ function TenantEditPage({ toast }: { toast: Toast }) {
           </p>
         </div>
         <div className="ph-actions">
-          <OpenConsoleBtn slug={slug} name={config.branding?.name ?? slug} />
+          <OpenConsoleBtn
+            slug={slug}
+            label={config.publicSlug}
+            name={config.branding?.name ?? slug}
+          />
           <Btn
             tone="outline"
             size="sm"
@@ -1210,6 +1257,10 @@ function TenantOverviewPage() {
     queryFn: () => api.platformTenantOverview(slug),
     retry: 0,
   });
+  // The overview payload has no address; the registry (shared with the Clients list) does.
+  const registryQ = useQuery({ queryKey: qk.platformTenants(), queryFn: api.platformListTenants });
+  const row = registryQ.data?.find((t: TenantSummary) => t.tenant === slug);
+  const consoleLabel = row ? row.publicSlug || row.tenant : undefined;
 
   if (q.isLoading) return <p style={{ color: 'var(--muted)', fontSize: 13 }}>Loading overview…</p>;
   if (q.isError || !q.data)
@@ -1241,7 +1292,7 @@ function TenantOverviewPage() {
           </p>
         </div>
         <div className="ph-actions">
-          <OpenConsoleBtn slug={slug} name={d.name} />
+          <OpenConsoleBtn slug={slug} label={consoleLabel} name={d.name} />
           <Btn tone="outline" size="sm" onClick={() => navigate(`/platform/tenants/${slug}`)}>
             Settings
           </Btn>
@@ -1350,10 +1401,11 @@ function IdentityCard({
   saveBranding,
   toast,
 }: {
-  config: TenantConfig;
+  config: api.PlatformTenant;
   saveBranding: BrandingSaver;
   toast: Toast;
 }) {
+  const [changingAddress, setChangingAddress] = useState(false);
   const [name, setName] = useState(config.branding?.name ?? '');
   const [title, setTitle] = useState(config.branding?.title ?? '');
   const [err, setErr] = useState('');
@@ -1392,7 +1444,10 @@ function IdentityCard({
           placeholder="e.g. Sharks Smart Club"
         />
       </Field>
-      <Field label="Slug" hint="Fixed — it keys the tenant's data and its default host label.">
+      <Field
+        label="Internal ID"
+        hint="Never changes — it keys the client's data. The web address below can change."
+      >
         <input
           className="field-input"
           value={config.tenant}
@@ -1400,11 +1455,228 @@ function IdentityCard({
           style={{ ...MONO, color: 'var(--muted)' }}
         />
       </Field>
+      <WebAddressField config={config} onChange={() => setChangingAddress(true)} />
       <Btn tone="teal" size="sm" onClick={saveIt} disabled={!dirty || busy}>
         {busy ? 'Saving…' : 'Save identity'}
       </Btn>
+      {changingAddress && config.publicSlug && (
+        <ChangeAddressDialog
+          slug={config.tenant}
+          current={config.publicSlug}
+          history={config.publicSlugHistory ?? []}
+          onClose={() => setChangingAddress(false)}
+          toast={toast}
+        />
+      )}
     </Panel>
   );
+}
+
+/**
+ * The client's public web address (ADR 0024): the label its club site lives at, which an
+ * operator can change (a rebrand) while the internal ID stays fixed. A client with its own
+ * domain has its address set in infrastructure, so it is read-only here.
+ */
+function WebAddressField({
+  config,
+  onChange,
+}: {
+  config: api.PlatformTenant;
+  onChange: () => void;
+}) {
+  const label = config.publicSlug;
+  const vanity = hasVanityOrigin(config.tenant);
+  const history = config.publicSlugHistory ?? [];
+  const shown = config.liveUrl ?? label ?? '—';
+  return (
+    <Field
+      label="Web address"
+      hint={
+        vanity
+          ? 'This client has its own domain. Its address is managed in infrastructure (infra/tenants.ts), not here.'
+          : history.length > 0
+            ? `Previous addresses (retired): ${history.join(', ')}`
+            : undefined
+      }
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <input
+          className="field-input"
+          aria-label="Current web address"
+          value={shown}
+          readOnly
+          style={{ ...MONO, flex: 1, minWidth: 0, color: 'var(--muted)' }}
+        />
+        {!vanity && (
+          <Btn tone="outline" size="sm" onClick={onChange} disabled={!label}>
+            Change
+          </Btn>
+        )}
+      </div>
+    </Field>
+  );
+}
+
+/**
+ * Change a client's web address (ADR 0024). Retiring the old address is irreversible, so the
+ * dialog states every consequence before the operator types the new address and confirms.
+ * On success: refresh the registry and this client's row, and — when this browser is on the
+ * address just retired — move to the same page on the new address with a full load, since
+ * the current host no longer resolves.
+ */
+function ChangeAddressDialog({
+  slug,
+  current,
+  history,
+  onClose,
+  toast,
+}: {
+  slug: string;
+  current: string;
+  history: string[];
+  onClose: () => void;
+  toast: Toast;
+}) {
+  const [next, setNext] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const typed = next.trim().toLowerCase();
+  const problem = typed ? labelProblem(typed, 'address') : null;
+  const same = typed === current;
+  const preview = typed && !problem && !same ? tenantConsoleUrl(slug, typed) : null;
+
+  async function confirm() {
+    setErr('');
+    if (!typed || problem || same) {
+      setErr(same ? 'That is already the current address' : (problem ?? 'Enter the new address'));
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await api.platformSetTenantAddress(slug, {
+        publicSlug: typed,
+        expectedCurrent: current,
+      });
+      queryClient.setQueryData<api.PlatformTenant>(qk.platformTenant(slug), (prev) =>
+        prev ? { ...prev, ...res } : prev,
+      );
+      queryClient.invalidateQueries({ queryKey: qk.platformTenants() });
+      queryClient.invalidateQueries({ queryKey: qk.platformTenant(slug) });
+      // This browser is on the address just retired: its host no longer resolves, so the next
+      // refetch would swap the portal for "This club isn't available". Move to the same page
+      // on the new address instead (a full load; sessions there start fresh).
+      if (api.getActiveTenant() === current) {
+        const target = samePageOnAddress(slug, res.publicSlug);
+        if (target) {
+          window.location.assign(target);
+          return;
+        }
+      }
+      toast(`Web address changed to ${res.publicSlug}`);
+      onClose();
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'stale') {
+        // Someone else changed it first: refetch so the card (and this dialog's "current")
+        // shows the address as it now stands.
+        queryClient.invalidateQueries({ queryKey: qk.platformTenant(slug) });
+        queryClient.invalidateQueries({ queryKey: qk.platformTenants() });
+      }
+      setErr(e instanceof ApiError ? e.message : 'Could not change the address — try again');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      eyebrow="Platform · Web address"
+      title={
+        <>
+          Change web <em>address</em>
+        </>
+      }
+      onClose={onClose}
+      maxWidth={560}
+      footer={
+        <>
+          <ModalCancelBtn tone="ghost">Cancel</ModalCancelBtn>
+          <Btn
+            tone="ink"
+            onClick={() => void confirm()}
+            disabled={busy || !typed || !!problem || same}
+          >
+            {busy ? 'Changing…' : 'Change address'}
+          </Btn>
+        </>
+      }
+    >
+      <p style={{ marginTop: 0, fontSize: 13 }}>
+        Current address: <span style={MONO}>{current}</span>
+      </p>
+      <p style={{ fontSize: 13, marginBottom: 6 }}>
+        <strong>Before you change it:</strong>
+      </p>
+      <ul style={{ fontSize: 13, paddingLeft: 18, margin: '0 0 12px', lineHeight: 1.5 }}>
+        <li>
+          The old address stops working immediately (allow about a minute for it to clear
+          everywhere).
+        </li>
+        <li>Everyone has to sign in again on the new address.</li>
+        <li>
+          Links already sent or shared to the old address stop working: player registration and club
+          signup links, invites and clearance notices.
+        </li>
+        <li>The old address can never be given to another client.</li>
+      </ul>
+      {history.length > 0 && (
+        <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: '0 0 12px' }}>
+          Previous addresses (already retired): <span style={MONO}>{history.join(', ')}</span>
+        </p>
+      )}
+      <Field
+        label="New address"
+        error={err || (typed && problem) || undefined}
+        hint={
+          preview
+            ? `The club site will be at ${preview}`
+            : 'Lowercase letter first; letters, digits and hyphens, ending in a letter or digit.'
+        }
+      >
+        <input
+          className="field-input"
+          style={MONO}
+          autoFocus
+          aria-label="New address"
+          placeholder={current}
+          value={next}
+          onChange={(e) => {
+            setNext(e.target.value);
+            setErr('');
+          }}
+          // Enter never commits: a mistyped label is retired for good, so the change needs
+          // the explicit button click.
+          onKeyDown={(e) => e.key === 'Enter' && e.preventDefault()}
+        />
+      </Field>
+    </Modal>
+  );
+}
+
+/**
+ * The page this browser is on, re-addressed to `publicLabel` (the console URL keeps its own
+ * ?tenant= on a bare host; the current path and other params carry over). null when the new
+ * address is not reachable from here.
+ */
+function samePageOnAddress(slug: string, publicLabel: string): string | null {
+  const base = tenantConsoleUrl(slug, publicLabel);
+  if (!base) return null;
+  const u = new URL(base);
+  u.pathname = window.location.pathname;
+  new URLSearchParams(window.location.search).forEach((v, k) => {
+    if (k !== 'tenant') u.searchParams.set(k, v);
+  });
+  u.hash = window.location.hash;
+  return u.toString();
 }
 
 function LogoCard({
@@ -3349,7 +3621,7 @@ function SetupCard({
       const next = await fn();
       queryClient.setQueryData<api.PlatformTenant>(qk.platformTenant(slug), (prev) => ({
         ...next,
-        liveUrl: prev?.liveUrl,
+        ...carryAddress(prev),
       }));
       queryClient.invalidateQueries({ queryKey: qk.platformTenants() });
       toast(msg);
@@ -3796,7 +4068,7 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
               <Field
                 label="Tenant slug"
                 error={slugErr}
-                hint="Lowercase letter first; letters, digits and hyphens. It keys the tenant's data and default host label — it cannot change later."
+                hint="Lowercase letter first; letters, digits and hyphens, ending in a letter or digit. It is the client's permanent internal ID. Its web address starts as the same label and can be changed later."
               >
                 <input
                   className="field-input"

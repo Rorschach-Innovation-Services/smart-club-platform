@@ -69,6 +69,8 @@ import {
   tenantConfigKey,
   tenantConfigGsi1,
   tenantsListGsi1pk,
+  tenantPublicAddressKey,
+  publicLabelKey,
   exportLogKey,
   playerEraseLogKey,
   officialEraseLogKey,
@@ -181,6 +183,8 @@ import type {
   SeasonRun,
   Venue,
   TenantConfig,
+  TenantPublicAddress,
+  PublicLabelRecord,
   UserProfile,
   PlayerRegistration,
   PlayerStatus,
@@ -232,6 +236,7 @@ import { teamIdsForClub } from './teams.js';
 import { isoInstant } from './medicoach-sync-contract.js';
 import { fixtureHighWater } from './fixture-identity.js';
 import { playerSyncEnabled } from './medicoach-sync/player-placement.js';
+import { clearPublicAddressCache } from './public-address.js';
 
 const TABLE = tableName();
 // DYNAMO_ENDPOINT points at a local DynamoDB (dynalite) for offline dev; any
@@ -425,20 +430,111 @@ export async function getTenantConfig(tenant: string): Promise<TenantConfig | nu
   return stripKeys<TenantConfig>(res.Item);
 }
 
-/** Create a tenant config; fails if the slug is already taken (collision guard). */
+/**
+ * Thrown by createTenantConfig when the slug can't be created. Its `name` is
+ * ConditionalCheckFailedException on purpose: POST /platform/tenants and seed-core already
+ * match that name (409 / 'exists'), so the transactional create keeps their contract. `reason`
+ * tells a duplicate CONFIG row apart from a slug that is, or was, a public address (ADR 0024).
+ */
+export class TenantSlugUnavailableError extends Error {
+  constructor(public reason: 'exists' | 'address-in-use') {
+    super(
+      reason === 'exists'
+        ? 'tenant already exists'
+        : 'slug is, or was, a public web address and cannot be reused',
+    );
+    this.name = 'ConditionalCheckFailedException';
+  }
+}
+
+/**
+ * Thrown by createTenantConfig when its transaction lost a race (cancellation code
+ * `TransactionConflict`: a concurrent create of the same slug, or an address change claiming
+ * the same label). Nothing was written; the caller may retry. Deliberately NOT named
+ * ConditionalCheckFailedException, so callers never read it as "already exists".
+ */
+export class TenantCreateConflictError extends Error {
+  constructor() {
+    super('another change to this client ID was in progress — try again');
+    this.name = 'TenantCreateConflictError';
+  }
+}
+
+/**
+ * Create a tenant config; fails if the slug is already taken (collision guard) or if a public
+ * label record exists for it (a label in use or retired, ADR 0024 — this also blocks reusing an
+ * erased renamed tenant's slug). One transaction: the CONFIG Put plus a ConditionCheck on
+ * `PUBLICADDR#<slug>`. The dynalite (offline/test) path has no TransactWriteItems → reads then a
+ * conditional Put, throwing the same TenantSlugUnavailableError shapes in the same precedence.
+ * A `TransactionConflict` cancellation (a race; checked after both conditions) throws
+ * TenantCreateConflictError.
+ */
 export async function createTenantConfig(config: TenantConfig): Promise<void> {
-  await ddb.send(
-    new PutCommand({
-      TableName: TABLE,
-      // gsi1 (the platform tenant registry) is derived HERE, at the write choke
-      // point: stripKeys removes gsi attrs on read, so a caller round-tripping a
-      // read config could never carry them back. Derived keys spread LAST so a
-      // config that smuggles pk/sk/gsi1* can never override them.
-      Item: { ...config, ...tenantConfigKey(config.tenant), ...tenantConfigGsi1(config.tenant) },
-      ConditionExpression: 'attribute_not_exists(pk)',
-    }),
-  );
+  // gsi1 (the platform tenant registry) is derived HERE, at the write choke
+  // point: stripKeys removes gsi attrs on read, so a caller round-tripping a
+  // read config could never carry them back. Derived keys spread LAST so a
+  // config that smuggles pk/sk/gsi1* can never override them.
+  const item = { ...config, ...tenantConfigKey(config.tenant), ...tenantConfigGsi1(config.tenant) };
+  if (localEndpoint) {
+    if (await getTenantConfig(config.tenant)) throw new TenantSlugUnavailableError('exists');
+    if (await getPublicLabelRecord(config.tenant))
+      throw new TenantSlugUnavailableError('address-in-use');
+    try {
+      await ddb.send(
+        new PutCommand({
+          TableName: TABLE,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(pk)',
+        }),
+      );
+    } catch (err) {
+      if (isCcf(err)) throw new TenantSlugUnavailableError('exists');
+      throw err;
+    }
+  } else {
+    try {
+      await ddb.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Put: {
+                TableName: TABLE,
+                Item: item,
+                ConditionExpression: 'attribute_not_exists(pk)',
+              },
+            },
+            {
+              ConditionCheck: {
+                TableName: TABLE,
+                Key: publicLabelKey(config.tenant),
+                ConditionExpression: 'attribute_not_exists(pk)',
+              },
+            },
+          ],
+        }),
+      );
+    } catch (err) {
+      const reasons = cancellationCodes(err);
+      if (reasons?.[0] === 'ConditionalCheckFailed') throw new TenantSlugUnavailableError('exists');
+      if (reasons?.[1] === 'ConditionalCheckFailed')
+        throw new TenantSlugUnavailableError('address-in-use');
+      if (reasons?.some((code) => code === 'TransactionConflict'))
+        throw new TenantCreateConflictError();
+      throw err;
+    }
+  }
   invalidatePlayerSyncFlag(config.tenant);
+  clearPublicAddressCache();
+}
+
+/**
+ * The per-item cancellation codes of a cancelled TransactWrite (`ConditionalCheckFailed`,
+ * `None`, …), or null when `err` is not a TransactionCanceledException.
+ */
+function cancellationCodes(err: unknown): Array<string | undefined> | null {
+  if ((err as { name?: string }).name !== 'TransactionCanceledException') return null;
+  const reasons = (err as { CancellationReasons?: Array<{ Code?: string }> }).CancellationReasons;
+  return (reasons ?? []).map((r) => r?.Code);
 }
 
 export async function putTenantConfig(config: TenantConfig): Promise<void> {
@@ -470,6 +566,219 @@ export async function listTenants(): Promise<TenantConfig[]> {
   return items
     .map((i) => stripKeys<TenantConfig>(i)!)
     .sort((a, b) => a.tenant.localeCompare(b.tenant));
+}
+
+// ── Public address (ADR 0024) ──
+//
+// The slug is the tenant's fixed internal ID; its web address uses a separate, operator-editable
+// label. Two item families, neither on CONFIG (putTenantConfig's whole-item Put would wipe it):
+// the tenant address record (TENANT#<t> / PUBLICADDR) and one label record per label ever
+// claimed or retired (PUBLICADDR#<label> / PUBLICADDR). See public-address.ts for resolution.
+
+/** The tenant's address record, or null when it is on its own slug (never renamed). */
+export async function getTenantPublicAddress(tenant: string): Promise<TenantPublicAddress | null> {
+  // Strongly consistent: a stale read right after a change would re-cache the old label for
+  // the TTL (and build links to it).
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: tenantPublicAddressKey(tenant), ConsistentRead: true }),
+  );
+  return stripKeys<TenantPublicAddress>(res.Item);
+}
+
+/** The label record for `label` (active or retired), or null if it was never claimed. */
+export async function getPublicLabelRecord(label: string): Promise<PublicLabelRecord | null> {
+  // Strongly consistent: a stale read right after a change could send a redirected operator to
+  // the unavailable screen for the new label.
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: publicLabelKey(label), ConsistentRead: true }),
+  );
+  return stripKeys<PublicLabelRecord>(res.Item);
+}
+
+export type PublicAddressConflict =
+  | 'unchanged'
+  | 'stale'
+  | 'label-active'
+  | 'label-retired'
+  | 'label-is-tenant';
+
+/** A refused address change. Handlers map `unchanged` to 400 and every other code to 409. */
+export class PublicAddressConflictError extends Error {
+  constructor(
+    public code: PublicAddressConflict,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'PublicAddressConflictError';
+  }
+}
+
+const labelTakenError = (label: string, rec: PublicLabelRecord | null) =>
+  rec?.status === 'retired'
+    ? new PublicAddressConflictError(
+        'label-retired',
+        `address "${label}" was used by another client and cannot be reissued`,
+      )
+    : new PublicAddressConflictError(
+        'label-active',
+        `address "${label}" is in use by another client`,
+      );
+
+const staleAddressError = () =>
+  new PublicAddressConflictError(
+    'stale',
+    'the address was changed by someone else — reload and try again',
+  );
+
+/** Retire `label` for `tenant`: creates the tombstone when absent; another tenant's ⇒ CCF. */
+const retireLabelUpdate = (tenant: string, label: string, at: string) => ({
+  TableName: TABLE,
+  Key: publicLabelKey(label),
+  UpdateExpression:
+    'SET #s = :retired, #ra = :at, #t = :tenant, #l = :label, #ca = if_not_exists(#ca, :at)',
+  ConditionExpression: 'attribute_not_exists(pk) OR #t = :tenant',
+  ExpressionAttributeNames: {
+    '#s': 'status',
+    '#ra': 'retiredAt',
+    '#t': 'tenant',
+    '#l': 'label',
+    '#ca': 'claimedAt',
+  },
+  ExpressionAttributeValues: {
+    ':retired': 'retired',
+    ':at': at,
+    ':tenant': tenant,
+    ':label': label,
+  },
+});
+
+/**
+ * Move `tenant`'s web address to label `next` (already validated by the caller). The old label
+ * is retired — it stops resolving and is never reissued to another tenant; the first move off
+ * the slug writes a retired record for the slug itself. One TransactWrite of up to four items,
+ * all distinct (next ≠ current is checked first, and the CONFIG check is skipped when `next` is
+ * the tenant's own slug, so no item is ever named twice):
+ *   0. claim PUBLICADDR#<next> — absent, or already this tenant's (reclaiming an own old label)
+ *   1. ConditionCheck no TENANT#<next> CONFIG row (another tenant's internal ID) — unless own slug
+ *   2. the tenant address record — still holding `expectedCurrent` (optimistic concurrency)
+ *   3. retire PUBLICADDR#<current>
+ * Cancellations map to PublicAddressConflictError (a `TransactionConflict` on any item ⇒
+ * `stale`). The dynalite (offline/test) path has no
+ * TransactWriteItems → reads, then the same writes in sequence (not atomic; offline only),
+ * throwing the same shapes.
+ */
+export async function setTenantPublicSlug(
+  tenant: string,
+  next: string,
+  expectedCurrent: string,
+): Promise<TenantPublicAddress> {
+  const existing = await getTenantPublicAddress(tenant);
+  const current = existing?.publicSlug ?? tenant;
+  if (current !== expectedCurrent) throw staleAddressError();
+  if (next === current)
+    throw new PublicAddressConflictError('unchanged', `the address is already "${next}"`);
+  const at = new Date().toISOString();
+  const record: TenantPublicAddress = {
+    publicSlug: next,
+    history: [...(existing?.history ?? []).filter((l) => l !== next && l !== current), current],
+    updatedAt: at,
+  };
+  const claim = {
+    TableName: TABLE,
+    Item: { ...publicLabelKey(next), label: next, tenant, status: 'active', claimedAt: at },
+    ConditionExpression: 'attribute_not_exists(pk) OR #t = :tenant',
+    ExpressionAttributeNames: { '#t': 'tenant' },
+    ExpressionAttributeValues: { ':tenant': tenant },
+  };
+  const notTenantId =
+    next === tenant
+      ? null
+      : {
+          TableName: TABLE,
+          Key: tenantConfigKey(next),
+          ConditionExpression: 'attribute_not_exists(pk)',
+        };
+  const address = {
+    TableName: TABLE,
+    Item: { ...tenantPublicAddressKey(tenant), ...record },
+    ...(existing
+      ? {
+          ConditionExpression: 'publicSlug = :exp',
+          ExpressionAttributeValues: { ':exp': expectedCurrent },
+        }
+      : { ConditionExpression: 'attribute_not_exists(pk)' }),
+  };
+  const retire = retireLabelUpdate(tenant, current, at);
+
+  if (localEndpoint) {
+    const held = await getPublicLabelRecord(next);
+    if (held && held.tenant !== tenant) throw labelTakenError(next, held);
+    if (notTenantId && (await getTenantConfig(next)))
+      throw new PublicAddressConflictError(
+        'label-is-tenant',
+        `address "${next}" is another client's internal ID`,
+      );
+    try {
+      await ddb.send(new PutCommand(address));
+    } catch (err) {
+      if (isCcf(err)) throw staleAddressError();
+      throw err;
+    }
+    try {
+      await ddb.send(new PutCommand(claim));
+    } catch (err) {
+      if (isCcf(err)) throw labelTakenError(next, await getPublicLabelRecord(next));
+      throw err;
+    }
+    await ddb.send(new UpdateCommand(retire));
+  } else {
+    const items = [
+      { Put: claim },
+      ...(notTenantId ? [{ ConditionCheck: notTenantId }] : []),
+      { Put: address },
+      { Update: retire },
+    ];
+    const idx = { claim: 0, tenantId: notTenantId ? 1 : -1, address: notTenantId ? 2 : 1 };
+    try {
+      await ddb.send(new TransactWriteCommand({ TransactItems: items }));
+    } catch (err) {
+      const codes = cancellationCodes(err);
+      if (codes?.[idx.claim] === 'ConditionalCheckFailed')
+        throw labelTakenError(next, await getPublicLabelRecord(next));
+      if (idx.tenantId >= 0 && codes?.[idx.tenantId] === 'ConditionalCheckFailed')
+        throw new PublicAddressConflictError(
+          'label-is-tenant',
+          `address "${next}" is another client's internal ID`,
+        );
+      if (codes?.[idx.address] === 'ConditionalCheckFailed') throw staleAddressError();
+      // Lost a race (another operator's change, or a tenant create, on an item this transaction
+      // touches): nothing was written, so it reads as a stale address — reload and retry.
+      if (codes?.some((code) => code === 'TransactionConflict')) throw staleAddressError();
+      // A failed retire means PUBLICADDR#<current> belongs to another tenant — an integrity
+      // fault, not a user conflict: surface it (500/Sentry).
+      throw err;
+    }
+  }
+  clearPublicAddressCache();
+  return record;
+}
+
+/**
+ * Erase-time half of ADR 0024: retire every label the tenant holds (current + history) — label
+ * records are tombstones and are never deleted. Idempotent (a re-run re-retires the same
+ * records), so a partial erase can be retried: eraseTenantData calls this BEFORE it deletes the
+ * address record. A label recorded as another tenant's is left alone (logged).
+ */
+async function retireTenantLabels(tenant: string, address: TenantPublicAddress): Promise<void> {
+  const at = new Date().toISOString();
+  for (const label of new Set([address.publicSlug, ...address.history])) {
+    try {
+      await ddb.send(new UpdateCommand(retireLabelUpdate(tenant, label, at)));
+    } catch (err) {
+      if (!isCcf(err)) throw err;
+      console.warn(`erase: label "${label}" belongs to another tenant; left as is`);
+    }
+  }
 }
 
 /**
@@ -9393,12 +9702,18 @@ export async function batchDelete(keys: Array<{ pk: string; sk: string }>): Prom
  */
 export async function eraseTenantData(tenant: string): Promise<number> {
   invalidatePlayerSyncFlag(tenant);
+  // Retire the tenant's public labels FIRST (ADR 0024): they stay as tombstones so the
+  // addresses are never reissued. The address record is deleted below with everything else,
+  // so a retry after a partial erase still finds it and re-retires (idempotently).
+  const address = await getTenantPublicAddress(tenant);
+  if (address) await retireTenantLabels(tenant, address);
   const config = await getTenantConfig(tenant);
   if (config?.clubSignupLink?.token) await deleteToken(config.clubSignupLink.token);
   for (const link of Object.values(config?.officialSignupLinks ?? {}))
     if (link?.token) await deleteToken(link.token);
 
   const keys: Array<{ pk: string; sk: string }> = [tenantConfigKey(tenant)];
+  if (address) keys.push(tenantPublicAddressKey(tenant));
   const objectKeys: string[] = [];
   const prefixes: string[] = [];
 
@@ -9496,6 +9811,7 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   await batchDelete(unique);
   await deleteUploadObjects(objectKeys);
   await deleteUploadPrefixes(prefixes);
+  clearPublicAddressCache();
   return unique.length;
 }
 

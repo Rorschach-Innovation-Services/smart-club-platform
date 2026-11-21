@@ -52,6 +52,7 @@ import {
   requirePlatformOperator,
   assertClubAccess,
   resolveTenant,
+  resolveLabel,
   HttpError,
   type HonoEnv,
   type RequestAuth,
@@ -341,6 +342,7 @@ import type {
   SeriesSchedule,
   Venue,
   TenantConfig,
+  TenantPublicAddress,
   PendingScheduleSync,
   TutorialVideo,
   UserProfile,
@@ -457,7 +459,14 @@ import {
   isSeasonLabelClear,
 } from './tenant-validation.js';
 import { grantTenantAdmin, addAdminMembership } from './tenant-admin.js';
-import { originAllowed, originAllowedForTenant, canonicalWebOrigin } from './origins.js';
+import {
+  originAllowed,
+  originAllowedForTenant,
+  canonicalWebOrigin,
+  hasVanityWebOrigin,
+  tenantWebOrigin,
+} from './origins.js';
+import { publicLabelFor } from './public-address.js';
 import {
   clearanceAdminLink,
   clearanceChairLink,
@@ -974,8 +983,15 @@ app.get('/local-uploads/local/*', async (c) => {
 
 /** Tenant branding by host (or ?tenant= / x-tenant in dev). No auth. */
 app.get('/tenant', async (c) => {
-  const tenant = resolveTenant(c) ?? c.req.query('tenant') ?? null;
-  if (!tenant) throw new HttpError(400, 'unknown tenant');
+  // Every presented label goes through the public-address lookup (ADR 0024): an unknown or
+  // retired label is a 404 (the SPA shows "This club isn't available"); 400 only when the
+  // request presented nothing at all.
+  let resolved = await resolveTenant(c);
+  const queryLabel = c.req.query('tenant');
+  if (!resolved && queryLabel) resolved = await resolveLabel(queryLabel.toLowerCase());
+  if (!resolved) throw new HttpError(400, 'unknown tenant');
+  if (!resolved.tenant) throw new HttpError(404, 'tenant not found');
+  const tenant = resolved.tenant;
   const config = await repo.getTenantConfig(tenant);
   if (!config) throw new HttpError(404, 'tenant not found');
   // Only branding + deadline + the catalogues are public; knownClubs gates behind
@@ -1979,7 +1995,7 @@ interface ClearanceOpenedNotifyOpts {
  * parallel creates can briefly overshoot the cap. Fine for an anti-abuse bound; not a quota.
  *
  * Each notice carries a deep link to the clearance (source/destination chair: their own club
- * portal; admins: the console) built from canonicalWebOrigin ONLY — this fires from the anonymous
+ * portal; admins: the console) built from tenantWebOrigin ONLY — this fires from the anonymous
  * register route, so a request Origin must never steer the link host (see clearance-links.ts).
  * No canonical origin (dev stages) ⇒ no link, and the notices render exactly as before.
  */
@@ -1991,7 +2007,11 @@ async function notifyClearanceOpened(
   by: string,
   opts: ClearanceOpenedNotifyOpts = {},
 ): Promise<void> {
-  const linkOrigin = canonicalWebOrigin(tenant);
+  // Best-effort like the sends: a failed label read means link-less notices, never a failure.
+  const linkOrigin = await tenantWebOrigin(tenant).catch((err: unknown) => {
+    console.error(`clearance notice: web origin lookup failed for ${tenant}`, err);
+    return null;
+  });
   let capped = false;
   if (fromClub) {
     try {
@@ -2134,7 +2154,7 @@ async function notifyClearanceAdminSummary(
     const admins = await adminEmails();
     if (admins.length === 0) return;
     // Canonical origin only — the chair bulk routes are not admin actions.
-    const adminLink = clearancesAdminListLink(canonicalWebOrigin(tenant));
+    const adminLink = clearancesAdminListLink(await tenantWebOrigin(tenant));
     await sendClearanceAdminSummaryNotice({
       to: admins,
       toClubName,
@@ -2181,17 +2201,24 @@ async function notifyClearanceAdminSummary(
  * accepted: at worst one club's chair is not messaged, and the resolution itself stands.
  *
  * Each chair's email links to the clearance in THEIR OWN club portal, built from `linkOrigin`.
- * It defaults to canonicalWebOrigin (the safe origin for any non-request caller), and only the authenticated reject/override routes pass adminClearanceLinkOrigin (which may fall
- * back to the request Origin on dev stages). No origin ⇒ no link.
+ * It defaults to tenantWebOrigin (the safe origin for any non-request caller), and only the
+ * authenticated reject/override routes pass adminClearanceLinkOrigin (which may fall back to
+ * the request Origin on dev stages). A thunk, so its lookup runs inside the best-effort try.
+ * No origin ⇒ no link.
  */
 async function notifyClearanceResolved(
   tenant: string,
   clearance: PlayerClearance,
   outcome: 'approved' | 'rejected',
   by: string,
-  linkOrigin: string | null = canonicalWebOrigin(tenant),
+  linkOrigin: () => Promise<string | null> = () => tenantWebOrigin(tenant),
 ): Promise<void> {
   try {
+    // A failed label read means link-less notices, not a skipped notice.
+    const origin = await linkOrigin().catch((err: unknown) => {
+      console.error(`clearance resolved notice: web origin lookup failed for ${tenant}`, err);
+      return null;
+    });
     const [fromClub, toClub] = await Promise.all([
       repo.getClub(tenant, clearance.fromClubId),
       repo.getClub(tenant, clearance.toClubId),
@@ -2199,7 +2226,7 @@ async function notifyClearanceResolved(
     const notifyClub = async (club: Club | null): Promise<void> => {
       if (!club) return; // directory source (or a club since deleted): nothing to notify
       const reason = outcome === 'rejected' ? clearance.rejectReason : clearance.overrideReason;
-      const portalLink = clearanceChairLink(linkOrigin, club.id, clearance.id);
+      const portalLink = clearanceChairLink(origin, club.id, clearance.id);
       const { results } = await sendClearanceResolvedNotice({
         chair: chairContactOf(club),
         fromClubName: clearance.fromClubName,
@@ -2247,16 +2274,22 @@ async function notifyClearanceResolved(
  * cycles never collide). The cap is bypassed for the same reason a resolution bypasses it — a
  * reopen is a deliberate authenticated admin action, not the anonymous abuse the cap guards.
  * Each chair's notice links to the clearance in their own club portal, built from `linkOrigin`
- * (the reopen route passes adminClearanceLinkOrigin); no origin ⇒ no link.
+ * (the reopen route passes adminClearanceLinkOrigin; a thunk, resolved inside the try); no
+ * origin ⇒ no link.
  */
 async function notifyClearanceReopened(
   tenant: string,
   tenantConfig: TenantConfig | null,
   clearance: PlayerClearance,
   by: string,
-  linkOrigin: string | null = canonicalWebOrigin(tenant),
+  linkOrigin: () => Promise<string | null> = () => tenantWebOrigin(tenant),
 ): Promise<void> {
   try {
+    // A failed label read means link-less notices, not a skipped notice.
+    const origin = await linkOrigin().catch((err: unknown) => {
+      console.error(`clearance reopened notice: web origin lookup failed for ${tenant}`, err);
+      return null;
+    });
     const channels: Channel[] = hasFeature(tenantConfig, 'whatsappInvites', true)
       ? ['email', 'whatsapp']
       : ['email'];
@@ -2266,7 +2299,7 @@ async function notifyClearanceReopened(
     ]);
     const notifyClub = async (club: Club | null, side: 'source' | 'destination'): Promise<void> => {
       if (!club) return; // directory source (or a club since deleted): nothing to notify
-      const portalLink = clearanceChairLink(linkOrigin, club.id, clearance.id);
+      const portalLink = clearanceChairLink(origin, club.id, clearance.id);
       const { results } = await sendClearanceReopenedNotice({
         side,
         chair: chairContactOf(club),
@@ -2723,8 +2756,8 @@ app.patch('/clubs/:id', async (c) => {
  * resolvable so the caller skips the auto-send (the chair can still be sent the link
  * manually from the shared modal). In local dev (STAGE 'local') a localhost base is fine.
  */
-function deliverableBaseUrl(c: Context<HonoEnv>, tenant: string): string | null {
-  const base = resolveLoginUrl(c, tenant);
+async function deliverableBaseUrl(c: Context<HonoEnv>, tenant: string): Promise<string | null> {
+  const base = await resolveLoginUrl(c, tenant);
   try {
     if (new URL(base).hostname === 'localhost' && process.env.STAGE !== 'local') return null;
   } catch {
@@ -2771,7 +2804,12 @@ async function mintAndDeliverOnboarding(
   // Only auto-send on the first completion (fresh mint) — re-confirmations skip the blast.
   if (!justMinted || !current.playerRegLink) return current;
 
-  const base = deliverableBaseUrl(c, tenant);
+  // Best-effort: the base URL now reads the tenant's public label (ADR 0024). A failed read
+  // must not fail the affiliation write (the mint already succeeded): treat it as no base URL.
+  const base = await deliverableBaseUrl(c, tenant).catch((err: unknown) => {
+    console.error('onboarding: base URL lookup failed, skipping the auto-send', err);
+    return null;
+  });
   if (!base) {
     console.warn('onboarding send skipped: no deliverable host (localhost in a deployed stage)');
     return current;
@@ -11540,6 +11578,10 @@ async function applyTenantConfigPatch(
   // `liveUrl` is response-only (GET /tenant/config derives it from the slug) — never
   // persist it, so a console echoing the row back can't write it onto the stored config.
   delete (patch as { liveUrl?: unknown }).liveUrl;
+  // Likewise the public-address fields on the operator GET (ADR 0024): the address lives in
+  // its own records and changes only via PUT /platform/tenants/:slug/address.
+  delete (patch as { publicSlug?: unknown }).publicSlug;
+  delete (patch as { publicSlugHistory?: unknown }).publicSlugHistory;
   // Same for the server-computed transfer-window status (GET /tenant, GET /tenant/config).
   delete (patch as { transferWindowStatus?: unknown }).transferWindowStatus;
   // Table/index keys are derived at the repo write choke point — strip them here
@@ -12360,6 +12402,10 @@ app.get('/platform/tenants', async (c) => {
       }),
     ),
   );
+  // Address records (ADR 0024): one GetItem per tenant, alongside the club fan-out. Unlike
+  // the counts these are NOT decorative — the console's links are built from them — so a
+  // failed read fails the listing rather than showing a retired address.
+  const addresses = await Promise.all(tenants.map((t) => repo.getTenantPublicAddress(t.tenant)));
   return c.json(
     tenants.map((t, i) => {
       const clubs = clubLists[i];
@@ -12374,6 +12420,7 @@ app.get('/platform/tenants', async (c) => {
         // Setup milestone (D6): present = operator marked setup done. Drives the
         // "In setup" / "Live" chip on the client list.
         setupCompletedAt: t.setupCompletedAt,
+        ...publicAddressView(t.tenant, addresses[i]),
         ...(clubs && {
           clubCount: clubs.length,
           teamCount: clubs.reduce((sum, cl) => sum + clubTeamCount(cl), 0),
@@ -12435,7 +12482,17 @@ app.post('/platform/tenants', async (c) => {
     await repo.createTenantConfig(config);
   } catch (err: unknown) {
     if ((err as { name?: string }).name === 'ConditionalCheckFailedException')
-      throw new HttpError(409, `tenant "${slug}" already exists`);
+      throw new HttpError(
+        409,
+        err instanceof repo.TenantSlugUnavailableError && err.reason === 'address-in-use'
+          ? `"${slug}" is, or was, a client's web address and cannot be used as a new client's ID`
+          : `tenant "${slug}" already exists`,
+      );
+    if (err instanceof repo.TenantCreateConflictError)
+      throw new HttpError(
+        409,
+        `another change to "${slug}" was in progress at the same moment — try again`,
+      );
     throw err;
   }
   // Recorded in the new client's own partition, so its history starts with its creation.
@@ -12496,17 +12553,84 @@ async function grantAdminToOperators(
 
 /**
  * GET /platform/tenants/:slug — the full config row (operator edit form), plus the
- * RESPONSE-ONLY `liveUrl`: where the client is already reachable (its vanity origin, else
- * its wildcard host; null in the dormant pre-wildcard state). Computed per read, never
- * stored — the PUT builds its patch from an explicit field whitelist that has no
- * `liveUrl`, and applyTenantConfigPatch strips it from every patch (PUT /tenant/config
- * too), so a console echoing the row back cannot persist it.
+ * RESPONSE-ONLY address fields (publicAddressView): `liveUrl` (where the client is already
+ * reachable — its vanity origin, else the wildcard host of its public label; null in the
+ * dormant pre-wildcard state), `publicSlug` and `publicSlugHistory`. Computed per read, never
+ * stored — the PUT builds its patch from an explicit field whitelist that has none of them,
+ * and applyTenantConfigPatch strips `liveUrl` from every patch (PUT /tenant/config too), so a
+ * console echoing the row back cannot persist it.
  */
 app.get('/platform/tenants/:slug', async (c) => {
   const slug = c.req.param('slug');
   const config = await repo.getTenantConfig(slug);
   if (!config) throw new HttpError(404, 'tenant not found');
-  return c.json({ ...config, liveUrl: canonicalWebOrigin(slug) });
+  return c.json({ ...config, ...publicAddressView(slug, await repo.getTenantPublicAddress(slug)) });
+});
+
+/**
+ * The operator-facing address fields (ADR 0024): the effective public label (`publicSlug`,
+ * the slug until renamed), the labels it has retired (oldest first) and the live URL built
+ * from the label. Read straight from the address record, not the resolution cache, so the
+ * portal never shows a stale address.
+ */
+function publicAddressView(
+  slug: string,
+  address: TenantPublicAddress | null,
+): { publicSlug: string; publicSlugHistory: string[]; liveUrl: string | null } {
+  const publicSlug = address?.publicSlug ?? slug;
+  return {
+    publicSlug,
+    publicSlugHistory: address?.history ?? [],
+    liveUrl: canonicalWebOrigin(slug, publicSlug),
+  };
+}
+
+/**
+ * PUT /platform/tenants/:slug/address — change a client's public web address (ADR 0024).
+ * Body `{ publicSlug, expectedCurrent }`. The slug stays the fixed internal ID; only the label
+ * its wildcard host uses moves. The old label is retired: it stops resolving at once in this
+ * container (≤60s in others) and is never reissued to another client.
+ *
+ * 400 invalid label / missing expectedCurrent / unchanged; 404 unknown tenant; 409 vanity-host
+ * tenant (its address is set in infra/tenants.ts), label in use or retired by another client,
+ * label is another client's internal ID, or a stale `expectedCurrent`.
+ */
+app.put('/platform/tenants/:slug/address', async (c) => {
+  const slug = c.req.param('slug');
+  const body = await c.req
+    .json<{ publicSlug?: unknown; expectedCurrent?: unknown }>()
+    .catch(() => ({}) as { publicSlug?: unknown; expectedCurrent?: unknown });
+  const config = await repo.getTenantConfig(slug);
+  if (!config) throw new HttpError(404, 'tenant not found');
+  if (hasVanityWebOrigin(slug))
+    throw new HttpError(
+      409,
+      'this client has its own domain — its address is set in infra/tenants.ts, not here',
+    );
+  if (typeof body.publicSlug !== 'string') throw new HttpError(400, 'publicSlug required');
+  const next = body.publicSlug.trim().toLowerCase();
+  const labelError = validateTenantSlug(next);
+  if (labelError) throw new HttpError(400, labelError.replace(/^slug\b/, 'address'));
+  if (typeof body.expectedCurrent !== 'string' || !body.expectedCurrent)
+    throw new HttpError(400, 'expectedCurrent required');
+  const expectedCurrent = body.expectedCurrent.trim().toLowerCase();
+  let address: TenantPublicAddress;
+  try {
+    address = await repo.setTenantPublicSlug(slug, next, expectedCurrent);
+  } catch (err) {
+    if (err instanceof repo.PublicAddressConflictError)
+      throw new HttpError(err.code === 'unchanged' ? 400 : 409, err.message, { code: err.code });
+    throw err;
+  }
+  // repo.setTenantPublicSlug clears this container's label cache on success.
+  auditTarget({
+    type: 'tenant',
+    id: slug,
+    label: config.branding?.name,
+    op: 'update',
+    changes: [{ field: 'publicSlug', from: expectedCurrent, to: next }],
+  });
+  return c.json(publicAddressView(slug, address));
 });
 
 /**
@@ -14633,12 +14757,12 @@ app.post('/platform/tenants/:slug/reps', async (c) => {
   if (badClub) throw new HttpError(400, `unknown club: ${badClub}`);
 
   if (body.channels !== undefined) validateChannels(body.channels);
-  const loginUrl = resolveLoginUrl(c, slug, body.link);
+  const loginUrl = await resolveLoginUrl(c, slug, body.link);
   // Only the SILENT-fallback case (no explicit link, no canonical origin yet) is
   // surfaced — an operator-supplied link is trusted as-is, and a tenant with a real
   // canonical origin never hits this branch.
   const warning =
-    !body.link && !canonicalWebOrigin(slug)
+    !body.link && !(await tenantWebOrigin(slug))
       ? 'This tenant has no canonical domain yet — the invite link uses the request origin and may need correcting.'
       : undefined;
 
@@ -15321,7 +15445,7 @@ app.post('/admin/users', async (c) => {
 
   // Validate the optional invite link up front (so a bad link fails before provisioning).
   // Falls back to the request-derived app origin when no link is supplied.
-  const loginUrl = resolveLoginUrl(c, ra.tenant, body.link);
+  const loginUrl = await resolveLoginUrl(c, ra.tenant, body.link);
   if (body.channels !== undefined) validateChannels(body.channels);
 
   // Create (or reuse, for a multi-union invite) a CONFIRMED passwordless user.
@@ -15517,7 +15641,7 @@ app.post('/admin/users/:sub/resend', async (c) => {
   const channels =
     body.channels && body.channels.length > 0 ? body.channels : (['email'] as Channel[]);
   validateChannels(channels);
-  const loginUrl = resolveLoginUrl(c, ra.tenant, body.link);
+  const loginUrl = await resolveLoginUrl(c, ra.tenant, body.link);
   const orgName = await tenantOrgName(ra.tenant);
   const { results } = await sendStaffInvite({
     email: profile.email,
@@ -15563,7 +15687,7 @@ app.patch('/admin/users/:sub/email', async (c) => {
     throw new HttpError(409, 'that email is already in use by another member');
 
   // Resolve link + org name up front so a bad link 400s before any mutation.
-  const loginUrl = resolveLoginUrl(c, ra.tenant, body.link);
+  const loginUrl = await resolveLoginUrl(c, ra.tenant, body.link);
   const orgName = await tenantOrgName(ra.tenant);
 
   // Relocate the Cognito sign-in alias (tries sub, falls back to the current email alias).
@@ -15643,8 +15767,12 @@ app.delete('/admin/club-signup-link', async (c) => {
 
 // ───────────────── Admin: official self-registration links ─────────────────
 
-function officialSignupUrl(c: Context<HonoEnv>, tenant: string, token: string): string {
-  const url = `${resolveLoginUrl(c, tenant)}/officials/register?t=${encodeURIComponent(token)}`;
+async function officialSignupUrl(
+  c: Context<HonoEnv>,
+  tenant: string,
+  token: string,
+): Promise<string> {
+  const url = `${await resolveLoginUrl(c, tenant)}/officials/register?t=${encodeURIComponent(token)}`;
   assertLiveLinkBase(url);
   return url;
 }
@@ -15663,7 +15791,7 @@ app.get('/admin/official-signup-link/:role', async (c) => {
   if (!cfg) throw new HttpError(404, 'tenant not found');
   const link = cfg.officialSignupLinks?.[role];
   const body = link
-    ? { url: officialSignupUrl(c, ra.tenant, link.token), createdAt: link.createdAt }
+    ? { url: await officialSignupUrl(c, ra.tenant, link.token), createdAt: link.createdAt }
     : { url: null };
   return c.json(body, 200, { 'Cache-Control': 'no-store' });
 });
@@ -15676,7 +15804,7 @@ app.post('/admin/official-signup-link/:role', async (c) => {
   if (!cfg) throw new HttpError(404, 'tenant not found');
   const token = randomUUID();
   const createdAt = now();
-  const url = officialSignupUrl(c, ra.tenant, token);
+  const url = await officialSignupUrl(c, ra.tenant, token);
   await repo.putOfficialSignupToken(token, ra.tenant, role, createdAt);
   const old = cfg.officialSignupLinks?.[role]?.token;
   if (old && old !== token) await repo.deleteToken(old);
@@ -15921,11 +16049,7 @@ app.post('/admin/clearances/:cid/override', async (c) => {
     auditClearance(current, resolved, 'override');
     // Best-effort: email BOTH clubs' chairmen that the union issued the transfer (never fails
     // the request). See notifyClearanceResolved re: email-only, no daily cap, destination chair.
-    await notifyClearanceResolved(
-      ra.tenant,
-      resolved,
-      'approved',
-      ra.email,
+    await notifyClearanceResolved(ra.tenant, resolved, 'approved', ra.email, () =>
       adminClearanceLinkOrigin(c, ra.tenant),
     );
     const cert = declineCertificate ? {} : await issueOnResolve(ra.tenant, resolved);
@@ -16109,11 +16233,7 @@ app.post('/admin/clearances/:cid/reject', async (c) => {
     auditClearance(current, rejected, 'reject');
     // Best-effort: email BOTH clubs' chairmen that the union declined the transfer (never fails
     // the request). The reject reason rides the email — see notifyClearanceResolved.
-    await notifyClearanceResolved(
-      ra.tenant,
-      rejected,
-      'rejected',
-      ra.email,
+    await notifyClearanceResolved(ra.tenant, rejected, 'rejected', ra.email, () =>
       adminClearanceLinkOrigin(c, ra.tenant),
     );
     return c.json(repo.publicClearance(rejected));
@@ -16161,11 +16281,7 @@ app.post('/admin/clearances/:cid/reopen', async (c) => {
     // Best-effort: tell BOTH clubs' chairmen the union reopened the clearance (never fails the
     // request). Source and destination get different copy — see notifyClearanceReopened.
     const tenantConfig = await getTenantConfigCached(c, ra.tenant).catch(() => null);
-    await notifyClearanceReopened(
-      ra.tenant,
-      tenantConfig,
-      reopened,
-      ra.email,
+    await notifyClearanceReopened(ra.tenant, tenantConfig, reopened, ra.email, () =>
       adminClearanceLinkOrigin(c, ra.tenant),
     );
     return c.json(repo.publicClearance(reopened));
@@ -16208,6 +16324,14 @@ app.post('/admin/clearances/:cid/remind', async (c) => {
   const channels: Channel[] = hasFeature(tenantConfig, 'whatsappInvites', true)
     ? ['email', 'whatsapp']
     : ['email'];
+  // Resolve the link origin BEFORE claiming the day's marker: it reads the public label (ADR
+  // 0024), and a throw after the claim would hold it with nothing sent. A failed read degrades
+  // to a link-less notice, as notifyClearanceOpened does.
+  const linkOrigin = await adminClearanceLinkOrigin(c, ra.tenant).catch((err: unknown) => {
+    console.error(`clearance remind: web origin lookup failed for ${ra.tenant}`, err);
+    return null;
+  });
+  const portalLink = clearanceChairLink(linkOrigin, fromClub.id, cid);
   const today = tenantDate();
   const key = clearanceReminderClaimKey(cid, today);
   const replay = await repo.claimInviteSend(
@@ -16218,7 +16342,6 @@ app.post('/admin/clearances/:cid/remind', async (c) => {
     'clearance-reminder',
   );
   if (replay) throw new HttpError(409, 'already reminded today');
-  const portalLink = clearanceChairLink(adminClearanceLinkOrigin(c, ra.tenant), fromClub.id, cid);
   let results: SendResult[];
   try {
     ({ results } = await sendClearanceNotice({
@@ -16257,8 +16380,8 @@ app.post('/admin/clearances/:cid/remind', async (c) => {
 const DOC_REQUEST_MAX_PLAYERS = 200;
 
 /** The base a doc-request email link uses: the tenant's canonical origin, never the request's. */
-const docRequestLinkOrigin = (tenant: string) =>
-  canonicalWebOrigin(tenant) ?? captainsReportLinkBase();
+const docRequestLinkOrigin = async (tenant: string) =>
+  (await tenantWebOrigin(tenant)) ?? captainsReportLinkBase();
 
 /**
  * Pending/completed document requests for the admin player register's "ID doc requested"
@@ -16323,7 +16446,7 @@ app.post('/admin/doc-requests', async (c) => {
   const whatsappUsable = whatsappOn && playerDocRequestTemplateReady();
   const channels: Channel[] = whatsappOn ? ['email', 'whatsapp'] : ['email'];
   const orgName = cfg ? orgCopy(cfg).name : ra.tenant;
-  const origin = docRequestLinkOrigin(ra.tenant);
+  const origin = await docRequestLinkOrigin(ra.tenant);
   const secret = captainsReportLinkSecret();
   const clubCache = new Map<string, Promise<Club | null>>();
   const clubOf = (id: string) => {
@@ -16502,6 +16625,9 @@ app.post('/admin/doc-requests/link', async (c) => {
   if (!(await repo.getClub(ra.tenant, clubId))) throw new HttpError(404, 'club not found');
   // No reachability/skip rules: minors and no-contact players are allowed — the admin is the delivery channel.
 
+  // Resolve the link origin (a public-label read, ADR 0024) before the request write, so a
+  // failed read fails the copy without leaving a fresh pending request behind.
+  const origin = await docRequestLinkOrigin(ra.tenant);
   const nowMs = Date.now();
   const existing = await repo.getDocRequest(ra.tenant, naturalKey, docKey);
   const reuse = existing && existing.status === 'pending' && existing.clubId === clubId;
@@ -16524,7 +16650,7 @@ app.post('/admin/doc-requests/link', async (c) => {
     { t: ra.tenant, q: requestId, e: Math.floor(Date.parse(linkExpiresAt) / 1000) },
     captainsReportLinkSecret(),
   );
-  const url = `${docRequestLinkOrigin(ra.tenant)}/d/${token}`;
+  const url = `${origin}/d/${token}`;
   assertLiveLinkBase(url);
   safeAudit(() =>
     auditTarget({
@@ -16669,7 +16795,15 @@ function validateChannels(channels: Channel[]): void {
  * falls back to the request Origin or a localhost dev default only in the dormant
  * pre-wildcard state for a tenant with no vanity host.
  */
-function resolveLoginUrl(c: Context<HonoEnv>, tenant: string, link?: string): string {
+async function resolveLoginUrl(
+  c: Context<HonoEnv>,
+  tenant: string,
+  link?: string,
+): Promise<string> {
+  // The tenant's CURRENT public label (ADR 0024): its retired address is neither canonical
+  // nor an allowed link host.
+  const publicLabel = await publicLabelFor(tenant);
+  const canonical = canonicalWebOrigin(tenant, publicLabel);
   if (link) {
     let url: URL;
     try {
@@ -16683,13 +16817,12 @@ function resolveLoginUrl(c: Context<HonoEnv>, tenant: string, link?: string): st
     // or wildcard) — that closes the phishing hole. A dormant tenant (no vanity, wildcard
     // off) has no origin to enforce against, so fall back to the broad app-origin check to
     // preserve today's behavior (localhost/CloudFront/enumerated).
-    const ok = canonicalWebOrigin(tenant)
-      ? originAllowedForTenant(url.origin, tenant)
+    const ok = canonical
+      ? originAllowedForTenant(url.origin, tenant, publicLabel)
       : originAllowed(url.origin);
     if (!ok) throw new HttpError(400, 'link host not allowed');
     return url.href;
   }
-  const canonical = canonicalWebOrigin(tenant);
   if (canonical) return canonical;
   const origin = c.req.header('origin') ?? '';
   if (origin && originAllowed(origin)) return origin;
@@ -16706,15 +16839,19 @@ function resolveLoginUrl(c: Context<HonoEnv>, tenant: string, link?: string): st
  * CORS check (originAllowed): a `*.cloudfront.net` clone or another tenant's host never becomes a
  * link. A tenant with no canonical origin has no origins of its own, so in practice only
  * localhost passes the fallback — a deployed dev stage (CloudFront) sends link-less notices.
- * Never use this on an anonymous path or in a cron: those take canonicalWebOrigin alone, so a
+ * Never use this on an anonymous path or in a cron: those take tenantWebOrigin alone, so a
  * caller can never steer the link host (see clearance-links.ts).
  */
-function adminClearanceLinkOrigin(c: Context<HonoEnv>, tenant: string): string | null {
-  const canonical = canonicalWebOrigin(tenant);
+async function adminClearanceLinkOrigin(
+  c: Context<HonoEnv>,
+  tenant: string,
+): Promise<string | null> {
+  const publicLabel = await publicLabelFor(tenant);
+  const canonical = canonicalWebOrigin(tenant, publicLabel);
   if (canonical) return canonical;
   const origin = c.req.header('origin') ?? '';
   if (!origin) return null;
-  if (originAllowedForTenant(origin, tenant)) return origin;
+  if (originAllowedForTenant(origin, tenant, publicLabel)) return origin;
   try {
     // Local dev (vite on localhost), which originAllowedForTenant excludes on purpose.
     return new URL(origin).hostname === 'localhost' ? origin : null;

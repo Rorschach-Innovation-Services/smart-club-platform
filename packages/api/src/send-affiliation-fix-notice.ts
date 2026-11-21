@@ -19,11 +19,21 @@
 import { pathToFileURL } from 'node:url';
 import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 import { fromSstResource } from './env.js';
+import { publicLabelFor } from './public-address.js';
+import { WILDCARD_WEB_SUFFIX } from '../../../infra/tenants.js';
 
 const DEFAULT_TO = 'lwandlebanele8@gmail.com';
 const DEFAULT_NAME = 'there';
-const DEFAULT_LINK =
-  'https://titans.club.medicoach.co.za/club/hammanskraal-cricket-club/affiliation';
+const TENANT = 'titans';
+const DEFAULT_LINK_PATH = '/club/hammanskraal-cricket-club/affiliation';
+
+/**
+ * The default link, on the tenant's CURRENT public address (ADR 0024 — the host label can
+ * differ from the slug once renamed). Reads the address record, so it runs under sst shell.
+ */
+async function defaultLink(): Promise<string> {
+  return `https://${await publicLabelFor(TENANT)}${WILDCARD_WEB_SUFFIX}${DEFAULT_LINK_PATH}`;
+}
 
 const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -34,8 +44,8 @@ interface Args {
   link: string;
 }
 
-function parseArgs(argv: string[]): Args {
-  const args: Args = { confirm: false, to: DEFAULT_TO, name: DEFAULT_NAME, link: DEFAULT_LINK };
+function parseArgs(argv: string[], defaultLinkValue: string): Args {
+  const args: Args = { confirm: false, to: DEFAULT_TO, name: DEFAULT_NAME, link: defaultLinkValue };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--confirm') args.confirm = true;
@@ -107,7 +117,9 @@ async function main(): Promise<void> {
     }
   }
 
-  const args = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  // Only look the address up when --link is not given (an explicit link needs no table).
+  const args = parseArgs(argv, argv.includes('--link') ? '' : await defaultLink());
   const fromEmail = process.env.FROM_EMAIL;
   const { subject, text, html } = noticeContent(args.name, args.link);
 

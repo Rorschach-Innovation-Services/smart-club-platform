@@ -123,10 +123,17 @@ const LOCAL_AUTH = import.meta.env.VITE_LOCAL_AUTH === '1';
 let _tenant: string | null = null;
 let _getToken: () => Promise<string | null> = async () => null;
 
-/** Set by config.js once the tenant slug is resolved. */
+/**
+ * Set by main.tsx once the host's tenant LABEL is resolved (host label, or ?tenant= on a
+ * bare host). Since ADR 0024 this is the public address label, which may differ from the
+ * tenant's internal ID: it keys the dev `x-tenant` header and the query-cache namespace.
+ * Never compare it with a membership's tenantId or a token's tenant — use the GET /tenant
+ * payload's `tenant` (useTenantId() in branding.ts).
+ */
 export function setActiveTenant(slug: string) {
   _tenant = slug;
 }
+/** The host's public address label (see setActiveTenant). */
 export function getActiveTenant(): string | null {
   return _tenant;
 }
@@ -274,6 +281,10 @@ export function normalizeZaCell(raw: unknown): string | null {
   const m = digits.match(/^(?:\+?27|0)([6-8]\d{8})$/);
   return m ? `0${m[1]}` : null;
 }
+/**
+ * The host tenant's public payload. Its `tenant` is the internal ID (ADR 0024), the single
+ * source for it in the SPA (read via useTenantId() in branding.ts, or the payload itself).
+ */
 export const getTenant = () => request<TenantConfig>('/tenant', { auth: false });
 // How-to-use-the-app tutorial videos ride the public /tenant payload (falls back to the
 // backend default set). Thin accessor for the public Tutorials page.
@@ -1858,9 +1869,33 @@ export const platformCreateTenant = (body: {
  * links). Computed per read, never stored, and absent from PUT responses; null in the
  * dormant pre-wildcard state.
  */
-export type PlatformTenant = TenantConfig & { liveUrl?: string | null };
+export type PlatformTenant = TenantConfig & { liveUrl?: string | null } & Partial<PublicAddress>;
 export const platformGetTenant = (slug: string) =>
   request<PlatformTenant>(`/platform/tenants/${encodeURIComponent(slug)}`);
+/**
+ * A client's public web address (ADR 0024), response-only on the platform reads.
+ * `publicSlug` is the effective label (the slug until changed); `publicSlugHistory` the
+ * labels it has retired, oldest first, never the current one.
+ */
+export interface PublicAddress {
+  publicSlug: string;
+  publicSlugHistory: string[];
+  liveUrl: string | null;
+}
+/**
+ * Change a client's public web address. The old label is retired at once and never
+ * reissued. Errors carry `code`: 400 `unchanged`; 409 `label-active`, `label-retired`,
+ * `label-is-tenant`, `stale` (refetch and retry); 409 with no code for a client with its
+ * own domain (set in infrastructure).
+ */
+export const platformSetTenantAddress = (
+  slug: string,
+  body: { publicSlug: string; expectedCurrent: string },
+) =>
+  request<PublicAddress>(`/platform/tenants/${encodeURIComponent(slug)}/address`, {
+    method: 'PUT',
+    body,
+  });
 // PUT merge-patches only branding / features / submissionDeadline; each key present
 // REPLACES that key wholesale (same shallow merge as PUT /tenant/config), so callers
 // must send the full branding object, not a fragment.

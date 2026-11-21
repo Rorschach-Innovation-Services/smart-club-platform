@@ -62,3 +62,17 @@ export async function startDynalite(port: number, table: string): Promise<Server
 
 export const stopDynalite = (server: Server) =>
   new Promise<void>((resolve) => server.close(() => resolve()));
+
+/**
+ * The smallest CONFIG row a tenant needs to be resolvable from a presented label (ADR 0024:
+ * `x-tenant` / Host / Origin labels resolve only to a tenant with a CONFIG row or an active
+ * label record). No leagues/districts/features, so handlers see the same legacy defaults they
+ * saw when these suites ran with no CONFIG row at all.
+ */
+export function minimalTenantConfig(tenant: string) {
+  return {
+    tenant,
+    branding: { name: tenant, title: tenant, logoUrl: '', colors: {}, copy: {} },
+    submissionDeadline: '2026-01-01',
+  } as unknown as import('../src/types.js').TenantConfig;
+}

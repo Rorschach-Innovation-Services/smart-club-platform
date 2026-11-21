@@ -11,6 +11,7 @@ import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 import type { Club, Series, TenantConfig } from '../src/types.js';
+import { minimalTenantConfig } from './dynalite-harness.js';
 
 const DDB_PORT = 4701; // next free odd port after 4699
 const TABLE = 'SmartClubSetSideEdgeTest';
@@ -175,6 +176,8 @@ before(async () => {
   );
   app = (await import('../src/index.js')).app;
   repo = await import('../src/repo.js');
+  // A presented x-tenant label resolves only to a tenant with a CONFIG row (ADR 0024).
+  for (const t of [T, SYNC]) await repo.putTenantConfig(minimalTenantConfig(t));
   for (const tenant of [T, SYNC]) {
     await repo.putClub(tenant, club('irene', 'Irene', 'Irene Oval'));
     await repo.putClub(tenant, club('pretoria', 'Pretoria', 'Pretoria Oval'));

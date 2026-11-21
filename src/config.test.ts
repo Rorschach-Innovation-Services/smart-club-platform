@@ -159,13 +159,15 @@ describe('tenantConsoleUrl / openTenantConsole', () => {
   it('uses the vanity origin for a mapped tenant', () => {
     vi.stubEnv('VITE_WILDCARD_ENABLED', '1');
     atHost('demo.club.medicoach.co.za');
-    expect(tenantConsoleUrl('dolphins')).toBe('https://dolphinspipeline.medicoach.co.za/');
+    expect(tenantConsoleUrl('dolphins', 'dolphins')).toBe(
+      'https://dolphinspipeline.medicoach.co.za/',
+    );
   });
 
   it('uses the wildcard subdomain for an unmapped tenant when the wildcard is armed', () => {
     vi.stubEnv('VITE_WILDCARD_ENABLED', '1');
     atHost('dolphinspipeline.medicoach.co.za');
-    expect(tenantConsoleUrl('titans')).toBe('https://titans.club.medicoach.co.za/');
+    expect(tenantConsoleUrl('titans', 'titans')).toBe('https://titans.club.medicoach.co.za/');
   });
 
   it('uses ?tenant= on the current origin on a bare host (wildcard not armed)', () => {
@@ -175,8 +177,12 @@ describe('tenantConsoleUrl / openTenantConsole', () => {
         origin: 'https://d111abcdef8.cloudfront.net',
       },
     });
-    expect(tenantConsoleUrl('titans')).toBe('https://d111abcdef8.cloudfront.net/?tenant=titans');
-    expect(tenantConsoleUrl('a b&c')).toBe('https://d111abcdef8.cloudfront.net/?tenant=a%20b%26c');
+    expect(tenantConsoleUrl('titans', 'titans')).toBe(
+      'https://d111abcdef8.cloudfront.net/?tenant=titans',
+    );
+    expect(tenantConsoleUrl('a b&c', 'a b&c')).toBe(
+      'https://d111abcdef8.cloudfront.net/?tenant=a%20b%26c',
+    );
   });
 
   it('returns null for an unmapped tenant on a tenant-naming host when the wildcard is off', () => {
@@ -185,15 +191,15 @@ describe('tenantConsoleUrl / openTenantConsole', () => {
       hostname: 'dolphinspipeline.medicoach.co.za',
       origin: 'https://dolphinspipeline.medicoach.co.za',
     });
-    expect(tenantConsoleUrl('titans')).toBeNull();
+    expect(tenantConsoleUrl('titans', 'titans')).toBeNull();
     atLocation({ hostname: 'lions.medicoach.co.za', origin: 'https://lions.medicoach.co.za' });
-    expect(tenantConsoleUrl('titans')).toBeNull();
+    expect(tenantConsoleUrl('titans', 'titans')).toBeNull();
     // A mapped www alias names a tenant too — not a bare host.
     atLocation({
       hostname: 'www.dolphinspipeline.medicoach.co.za',
       origin: 'https://www.dolphinspipeline.medicoach.co.za',
     });
-    expect(tenantConsoleUrl('titans')).toBeNull();
+    expect(tenantConsoleUrl('titans', 'titans')).toBeNull();
   });
 
   it('never builds a wildcard hostname from an invalid slug', () => {
@@ -202,11 +208,11 @@ describe('tenantConsoleUrl / openTenantConsole', () => {
       hostname: 'demo.club.medicoach.co.za',
       origin: 'https://demo.club.medicoach.co.za',
     });
-    expect(tenantConsoleUrl('evil.example.com/x')).toBeNull();
-    expect(tenantConsoleUrl('Titans')).toBeNull();
+    expect(tenantConsoleUrl('evil.example.com/x', 'evil.example.com/x')).toBeNull();
+    expect(tenantConsoleUrl('Titans', 'Titans')).toBeNull();
     // On a bare host the query-string path still works (encoded, never a hostname).
     atLocation({ hostname: 'localhost', origin: 'http://localhost:5173' });
-    expect(tenantConsoleUrl('evil.example.com/x')).toBe(
+    expect(tenantConsoleUrl('evil.example.com/x', 'evil.example.com/x')).toBe(
       'http://localhost:5173/?tenant=evil.example.com%2Fx',
     );
   });
@@ -221,8 +227,50 @@ describe('tenantConsoleUrl / openTenantConsole', () => {
       ],
     ]) {
       atLocation({ hostname, origin });
-      expect(tenantConsoleUrl('titans')).toBe(`${origin}/?tenant=titans`);
+      expect(tenantConsoleUrl('titans', 'titans')).toBe(`${origin}/?tenant=titans`);
     }
+  });
+
+  describe('a client whose public address differs from its internal ID (ADR 0024)', () => {
+    it('builds the wildcard host from the public label, not the slug', () => {
+      vi.stubEnv('VITE_WILDCARD_ENABLED', '1');
+      atHost('dolphinspipeline.medicoach.co.za');
+      expect(tenantConsoleUrl('westernprovincecricket', 'cobras')).toBe(
+        'https://cobras.club.medicoach.co.za/',
+      );
+    });
+
+    it('puts the public label on ?tenant= on a bare host', () => {
+      atLocation({ hostname: 'localhost', origin: 'http://localhost:3201' });
+      expect(tenantConsoleUrl('westernprovincecricket', 'cobras')).toBe(
+        'http://localhost:3201/?tenant=cobras',
+      );
+    });
+
+    it('keeps the vanity origin keyed by the slug', () => {
+      vi.stubEnv('VITE_WILDCARD_ENABLED', '1');
+      atHost('demo.club.medicoach.co.za');
+      expect(tenantConsoleUrl('dolphins', 'anything-else')).toBe(
+        'https://dolphinspipeline.medicoach.co.za/',
+      );
+      // A label that happens to equal a vanity tenant's slug does not borrow its origin.
+      expect(tenantConsoleUrl('titans', 'dolphins')).toBe('https://dolphins.club.medicoach.co.za/');
+    });
+
+    it('validates the label (not the slug) as a DNS label', () => {
+      vi.stubEnv('VITE_WILDCARD_ENABLED', '1');
+      atHost('demo.club.medicoach.co.za');
+      expect(tenantConsoleUrl('titans', 'Bad.Label')).toBeNull();
+    });
+
+    it('opens the console on the public label', () => {
+      const assign = vi.fn();
+      vi.stubGlobal('window', {
+        location: { hostname: 'localhost', origin: 'http://localhost:5173', assign },
+      });
+      openTenantConsole('westernprovincecricket', 'cobras');
+      expect(assign).toHaveBeenCalledWith('http://localhost:5173/?tenant=cobras');
+    });
   });
 
   it('does nothing when the tenant has no reachable console', () => {
@@ -234,7 +282,7 @@ describe('tenantConsoleUrl / openTenantConsole', () => {
         assign,
       },
     });
-    openTenantConsole('titans');
+    openTenantConsole('titans', 'titans');
     expect(assign).not.toHaveBeenCalled();
   });
 
@@ -243,7 +291,7 @@ describe('tenantConsoleUrl / openTenantConsole', () => {
     vi.stubGlobal('window', {
       location: { hostname: 'localhost', origin: 'http://localhost:5173', assign },
     });
-    openTenantConsole('titans');
+    openTenantConsole('titans', 'titans');
     expect(assign).toHaveBeenCalledWith('http://localhost:5173/?tenant=titans');
   });
 });

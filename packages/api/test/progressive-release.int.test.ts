@@ -11,6 +11,7 @@ import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 import type { Series, Club } from '../src/types.js';
+import { minimalTenantConfig } from './dynalite-harness.js';
 
 // Env must be set BEFORE importing repo/app — repo reads TABLE_NAME at module load.
 const DDB_PORT = 4625; // distinct from api.int (4599), release-clash-gate (4611), season-venues (4607), etc.
@@ -161,6 +162,8 @@ before(async () => {
   app = mod.app;
   buildClubSchedule = mod.buildClubSchedule;
   repo = await import('../src/repo.js');
+  // A presented x-tenant label resolves only to a tenant with a CONFIG row (ADR 0024).
+  await repo.putTenantConfig(minimalTenantConfig('dolphins'));
 });
 
 after(() => new Promise<void>((resolve) => ddbServer.close(() => resolve())));

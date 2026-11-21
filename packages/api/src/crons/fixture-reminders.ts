@@ -54,7 +54,7 @@ import {
 import { isWithheld, projectSeriesForClub } from '../series-projection.js';
 import { resolveTeam, teamIdsForClub } from '../teams.js';
 import { hasFeature } from '../features.js';
-import { canonicalWebOrigin } from '../origins.js';
+import { tenantWebOrigin } from '../origins.js';
 import { TENANT_UTC_OFFSET_MINUTES } from '../tenant-time.js';
 import type { Channel, Club, ClubCommEvent, Series, TenantConfig } from '../types.js';
 
@@ -82,7 +82,7 @@ export interface FixtureRemindersDeps {
   /** The `fixture_reminder` template's registry status (the WhatsApp runtime gate). */
   whatsappTemplateStatus: WhatsAppTemplateDefinition['status'];
   /** The tenant's portal origin for the reminder link; null when it has none. */
-  portalLinkFor: (tenant: string) => string | null;
+  portalLinkFor: (tenant: string) => string | null | Promise<string | null>;
   captureException: (err: unknown, tags: Record<string, string>) => void;
   log: (message: string, data?: Record<string, unknown>) => void;
 }
@@ -106,7 +106,7 @@ const defaultDeps = (): FixtureRemindersDeps => ({
   // Widened from the `as const` literal so the comparison below is a real runtime check.
   whatsappTemplateStatus: WHATSAPP_TEMPLATES.fixtureReminder
     .status as WhatsAppTemplateDefinition['status'],
-  portalLinkFor: canonicalWebOrigin,
+  portalLinkFor: tenantWebOrigin,
   captureException: (err, tags) => Sentry.captureException(err, { tags }),
   log: (message, data) => console.log(JSON.stringify({ msg: message, ...data })),
 });
@@ -265,7 +265,14 @@ export async function runFixtureReminders(
         .filter((s): s is Series => s !== null);
       if (projected.length === 0) continue;
       const clubsById = new Map(clubs.map((cl) => [cl.id, cl]));
-      const portalLink = deps.portalLinkFor(tenant) ?? undefined;
+      // A failed label read (ADR 0024) means link-less reminders, not a skipped tenant.
+      const portalLink =
+        (await Promise.resolve()
+          .then(() => deps.portalLinkFor(tenant))
+          .catch((err: unknown) => {
+            console.error(`fixture reminders: web origin lookup failed for ${tenant}`, err);
+            return null;
+          })) ?? undefined;
 
       for (const targetDate of targetDates) {
         const dateLabel = fixtureReminderDateLabel(targetDate);

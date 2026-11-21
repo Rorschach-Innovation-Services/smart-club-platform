@@ -128,7 +128,14 @@ import { AdminSquadRequestsView } from './AdminSquadRequests';
 import { AdminMedicoachSyncView } from './AdminMedicoachSync';
 import { erasureSummary } from './PlayerDetailModal';
 import { clearanceRemindToast } from './clearance-remind-copy';
-import { tenantQueryOptions, useFeature, useModule, useSeasonLabel, useVertical } from './branding';
+import {
+  tenantQueryOptions,
+  useFeature,
+  useModule,
+  useSeasonLabel,
+  useTenantId,
+  useVertical,
+} from './branding';
 
 /** The admin cancelled the medicoach-resync confirmation: the request is simply not sent. */
 class ResyncCancelled extends Error {
@@ -139,12 +146,16 @@ class ResyncCancelled extends Error {
 }
 
 // Resolve the tenant before any query runs so x-tenant is attached to requests.
+// ADR 0024: this is the PUBLIC ADDRESS LABEL the host presents (it keys x-tenant and the
+// query cache). The tenant's internal ID can differ; it arrives on GET /tenant
+// (`tenantConfig.tenant`, also useTenantId() in branding.ts) and is what memberships match.
 const TENANT_SLUG = resolveTenantSlug();
 setActiveTenant(TENANT_SLUG);
 // Tag every frontend event with the tenant, mirroring the API's tagging — Sentry is
 // one platform-wide project, so tenant is an event tag, not a project. Safe without a
-// DSN: sentry.ts guards init, and setTag on an uninitialised SDK is a no-op.
-Sentry.setTag('tenant', TENANT_SLUG);
+// DSN: sentry.ts guards init, and setTag on an uninitialised SDK is a no-op. The host
+// label is known now; the `tenant` tag (the internal ID) is set once GET /tenant loads.
+Sentry.setTag('tenantLabel', TENANT_SLUG);
 
 /* ─── HelpModal — support guidance + union office contacts ─── */
 function HelpModal({ onClose, support }) {
@@ -319,8 +330,10 @@ function Splash({ message, action }: { message?: ReactNode; action?: ReactNode }
 /**
  * Full-page state when the host names no tenant (GET /tenant → 404). On the shared
  * wildcard host every `<slug>.club.medicoach.co.za` resolves DNS-wise, so an unclaimed
- * or mistyped slug lands here instead of a half-broken app. Neutral-branded (no tenant
- * theme loaded) — never leaks another club's identity.
+ * or mistyped slug lands here instead of a half-broken app. So does a RETIRED address
+ * (ADR 0024: a club that changed its web address), hence the "may have moved" line — which
+ * deliberately never names or links the new address. Neutral-branded (no tenant theme
+ * loaded) — never leaks another club's identity.
  */
 function UnknownClub() {
   return (
@@ -331,6 +344,9 @@ function UnknownClub() {
             This club isn’t available
           </strong>
           Check the web address, or contact your union if you think it should be here.
+          <span style={{ display: 'block', marginTop: 8 }}>
+            The club may have moved to a new web address. Ask your club for its new address.
+          </span>
         </>
       }
     />
@@ -399,6 +415,10 @@ function AppRoutes() {
   useEffect(() => {
     if (tenantQuery.data?.branding && !onVerify) applyTheme(tenantQuery.data.branding);
   }, [tenantQuery.data, onVerify]);
+  const tenantId = tenantQuery.data?.tenant;
+  useEffect(() => {
+    if (tenantId) Sentry.setTag('tenant', tenantId);
+  }, [tenantId]);
 
   const tenantMissing = tenantQuery.error instanceof ApiError && tenantQuery.error.status === 404;
   if (tenantMissing && !onVerify) return <UnknownClub />;
@@ -472,7 +492,12 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
     setResyncAsk(null);
   }
 
-  const membership = membershipFor(memberships, TENANT_SLUG);
+  // Memberships carry the tenant's INTERNAL ID, which since ADR 0024 can differ from the
+  // host label (TENANT_SLUG), so match on the ID from the GET /tenant payload. Until that
+  // payload has loaded there is no membership decision at all: the gates below wait for it
+  // rather than bounce a renamed tenant's users to /platform or "No access".
+  const tenantId: string | null = tenantConfig?.tenant ?? null;
+  const membership = tenantId ? membershipFor(memberships, tenantId) : null;
   const role = routingRole(membership);
   const operator = isOperator(memberships);
 
@@ -483,9 +508,9 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   useEffect(() => {
     if (!membership) return;
     Sentry.setUser({ email });
-    Sentry.setTag('tenant', TENANT_SLUG);
+    if (tenantId) Sentry.setTag('tenant', tenantId);
     Sentry.setTag('role', role);
-  }, [email, role, membership]);
+  }, [email, role, membership, tenantId]);
 
   // ── Data ──
   const clubsQuery = useQuery({
@@ -550,9 +575,35 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
         signOutUser={signOutUser}
         hasTenantConsole={!!membership}
         hostSlug={TENANT_SLUG}
+        hostTenantId={tenantId}
       />
     );
   }
+
+  // Gate the tenant-scoped console on the tenant config having loaded. Two reasons:
+  // the membership decision below needs its internal ID (see `membership` above), and
+  // everything after derives from it (`allLeagues = tenantConfig?.leagues ?? []`);
+  // rendering with an undefined config silently collapses the catalogue to [], zeroing the
+  // leagues/teams breakdown (every club league key becomes an "orphan") while the rest of
+  // the page renders. This sits AFTER the operator/`/platform` branch on purpose — the
+  // tenant-independent platform portal must never be blocked by a broken/absent config.
+  // An operator whose host config fails to load goes home to the platform portal instead
+  // (they may hold no membership here at all, so a Retry splash would dead-end them).
+  if (!tenantConfig)
+    return tenantConfigError && operator ? (
+      <Navigate to="/platform" replace />
+    ) : tenantConfigError ? (
+      <Splash
+        message={`Couldn't load configuration for this ${authedTerms.union}. Refresh to retry.`}
+        action={
+          <Btn tone="ink" size="sm" onClick={onRetryTenantConfig}>
+            Retry
+          </Btn>
+        }
+      />
+    ) : (
+      <Splash message="Loading…" />
+    );
 
   if (!membership) {
     // An operator with no membership for this tenant isn't dead-ended on the
@@ -576,26 +627,6 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       </div>
     );
   }
-
-  // Gate the tenant-scoped console on the tenant config having loaded. Everything below
-  // derives from it (`allLeagues = tenantConfig?.leagues ?? []`); rendering with an
-  // undefined config silently collapses the catalogue to [], zeroing the leagues/teams
-  // breakdown (every club league key becomes an "orphan") while the rest of the page renders.
-  // This sits AFTER the operator/`/platform` branch on purpose — the tenant-independent
-  // platform portal must never be blocked by a broken/absent tenant config.
-  if (!tenantConfig)
-    return tenantConfigError ? (
-      <Splash
-        message={`Couldn't load configuration for this ${authedTerms.union}. Refresh to retry.`}
-        action={
-          <Btn tone="ink" size="sm" onClick={onRetryTenantConfig}>
-            Retry
-          </Btn>
-        }
-      />
-    ) : (
-      <Splash message="Loading…" />
-    );
 
   const clubs =
     role === 'admin' ? (clubsQuery.data ?? []) : repClubQueries.map((q) => q.data).filter(Boolean);
@@ -1331,6 +1362,8 @@ function Shell({
   const vertical = useVertical();
   const terms = vertical.terms;
   const seasonLabel = useSeasonLabel();
+  // The host tenant's internal ID (matched against registry rows by the client switcher).
+  const hostTenantId = useTenantId();
   const veteransOn = useModule('veterans');
   const cqiOn = useModule('cqi');
   const complianceOn = useModule('compliance');
@@ -3564,7 +3597,7 @@ function Shell({
                 <span className="ni-label">Operator portal</span>
               </button>
               {/* One-click hop into another client's console (full page load). */}
-              <ClientSwitcher currentSlug={TENANT_SLUG} />
+              <ClientSwitcher currentSlug={hostTenantId} />
             </>
           )}
 

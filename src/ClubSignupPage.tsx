@@ -10,14 +10,7 @@ import type { ReactNode, ChangeEventHandler } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { qk } from './query';
-import {
-  getClubSignup,
-  submitClubSignup,
-  getTenant,
-  getActiveTenant,
-  normalizeZaCell,
-  ApiError,
-} from './api';
+import { getClubSignup, submitClubSignup, getTenant, normalizeZaCell, ApiError } from './api';
 import { useAuth, membershipFor } from './auth';
 import { useSeasonLabel, useVertical } from './branding';
 
@@ -43,6 +36,8 @@ export function ClubSignupPage() {
   // Branding for the header/footer — same cached query the app shell uses.
   const tenantQuery = useQuery({ queryKey: qk.tenant(), queryFn: getTenant, retry: 0 });
   const branding = tenantQuery.data?.branding;
+  // The host's internal tenant ID (ADR 0024: the host label can differ), from the same payload.
+  const hostTenantId = tenantQuery.data?.tenant ?? null;
 
   // Signed-in visitors (e.g. a rep registering a second club) get their session
   // refreshed after submit so the new membership lands without a sign-out.
@@ -101,7 +96,7 @@ export function ClubSignupPage() {
   const retriedRefresh = useRef(false);
   useEffect(() => {
     if (state !== 'done' || !done?.clubId || retriedRefresh.current) return;
-    if (auth.status !== 'signedIn' || tenant !== getActiveTenant()) return;
+    if (auth.status !== 'signedIn' || tenant !== hostTenantId) return;
     if (signupDoneCta(membershipFor(auth.memberships, tenant), done.clubId)) return;
     // Mark "retried" only when the timer actually fires — a dep change mid-wait
     // (context identity churn) cancels and reschedules rather than losing the retry.
@@ -110,7 +105,7 @@ export function ClubSignupPage() {
       auth.refreshSession?.().catch(() => false);
     }, 1000);
     return () => clearTimeout(t);
-  }, [state, done, tenant, auth]);
+  }, [state, done, tenant, hostTenantId, auth]);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   // Sign-in is the normal OTP login at "/" — carry the typed email so it's pre-filled.
@@ -192,11 +187,12 @@ export function ClubSignupPage() {
   }
 
   if (state === 'done') {
-    // Signed-in CTAs only when this link's tenant is the host's active tenant —
+    // Signed-in CTAs only when this link's tenant is the host's active tenant (by internal
+    // ID: the host label can differ since ADR 0024) —
     // a multi-union user on the wrong host gets the plain sign-in fallback (a
     // navigate would drop them into the wrong union's shell).
     const membership =
-      auth.status === 'signedIn' && tenant && tenant === getActiveTenant()
+      auth.status === 'signedIn' && tenant && tenant === hostTenantId
         ? membershipFor(auth.memberships, tenant)
         : null;
     const cta = signupDoneCta(membership, done.clubId);

@@ -47,6 +47,10 @@ export function isBareHost(host: string): boolean {
 /**
  * Resolve the tenant slug: host map → subdomain → ?tenant= → sticky tab tenant
  * (sessionStorage, bare hosts only) → build default → 'dolphins'.
+ *
+ * ADR 0024: off a vanity host this is the PUBLIC ADDRESS LABEL the host presents, which
+ * may differ from the tenant's internal ID (that arrives as `tenant` on GET /tenant; see
+ * useTenantId in branding.ts). A vanity host maps straight to the internal ID.
  */
 export function resolveTenantSlug() {
   const host = window.location.hostname.toLowerCase();
@@ -111,6 +115,8 @@ export function redirectToCanonicalOrigin(): boolean {
   const suffix = import.meta.env.VITE_WILDCARD_WEB_SUFFIX ?? '';
   const host = window.location.hostname.toLowerCase();
   if (!suffix || !host.endsWith(suffix)) return false;
+  // Keyed by slug but looked up with the host label: they agree for every vanity tenant,
+  // because a client with its own domain can't change its label (the API answers 409).
   const canonical = WEB_ORIGIN_MAP[resolveTenantSlug()];
   if (!canonical || canonical === window.location.origin) return false;
   window.location.replace(
@@ -127,18 +133,28 @@ export function redirectToCanonicalOrigin(): boolean {
  * current origin and is then kept sticky by resolveTenantSlug(). Sessions are
  * per-origin, so in prod the operator signs in once per client origin.
  *
+ * ADR 0024: `slug` is the internal ID and `publicLabel` the client's public address label
+ * (the slug until an operator changes it). The vanity map is keyed by the slug; the
+ * wildcard host and the bare-host ?tenant= both use the label, since a retired label no
+ * longer resolves. The label is required so no caller silently builds a retired address.
+ *
  * Returns null when the tenant has no reachable console from here (not mapped, wildcard
- * not armed or slug not a valid DNS label, and this host names a tenant itself).
+ * not armed or label not a valid DNS label, and this host names a tenant itself).
  */
-export function tenantConsoleUrl(slug: string): string | null {
+export function tenantConsoleUrl(slug: string, publicLabel: string): string | null {
   if (WEB_ORIGIN_MAP[slug]) return `${WEB_ORIGIN_MAP[slug]}/`;
   const suffix = import.meta.env.VITE_WILDCARD_WEB_SUFFIX ?? '';
-  if (import.meta.env.VITE_WILDCARD_ENABLED === '1' && suffix && LABEL_RE.test(slug))
-    return `https://${slug}${suffix}/`;
+  if (import.meta.env.VITE_WILDCARD_ENABLED === '1' && suffix && LABEL_RE.test(publicLabel))
+    return `https://${publicLabel}${suffix}/`;
   // ?tenant= only picks the tenant on a bare host. On a tenant-naming host (vanity or
   // subdomain) it would just reload THIS tenant, so the target has no reachable address.
   if (!isBareHost(window.location.hostname)) return null;
-  return `${window.location.origin}/?tenant=${encodeURIComponent(slug)}`;
+  return `${window.location.origin}/?tenant=${encodeURIComponent(publicLabel)}`;
+}
+
+/** True when the client has its own domain (a vanity origin), whose address is set in infra. */
+export function hasVanityOrigin(slug: string): boolean {
+  return !!WEB_ORIGIN_MAP[slug];
 }
 
 /** A safe single DNS label — mirrors LABEL_RE in packages/api/src/origins.ts. */
@@ -148,8 +164,8 @@ const LABEL_RE = /^[a-z0-9-]+$/;
  * Open a tenant's admin console. Always a full page load: TENANT_SLUG is resolved once
  * at module load (main.tsx), so an in-app navigate would keep the old tenant.
  */
-export function openTenantConsole(slug: string) {
-  const url = tenantConsoleUrl(slug);
+export function openTenantConsole(slug: string, publicLabel: string) {
+  const url = tenantConsoleUrl(slug, publicLabel);
   if (url) window.location.assign(url);
 }
 

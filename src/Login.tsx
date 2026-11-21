@@ -15,7 +15,7 @@ export function Login({ tenantConfig }) {
   const branding = tenantConfig?.branding;
   // Local dev: no Cognito — a "sign in as" form sets the identity directly.
   return IS_LOCAL_AUTH ? (
-    <DevLogin auth={auth} branding={branding} />
+    <DevLogin auth={auth} branding={branding} tenantId={tenantConfig?.tenant} />
   ) : (
     <OtpLogin auth={auth} branding={branding} />
   );
@@ -231,8 +231,11 @@ function OtpLogin({ auth, branding }) {
 }
 
 /* ─── Local dev "sign in as" (no Cognito) ─── */
-function DevLogin({ auth, branding }) {
-  const tenant = getActiveTenant() || 'dolphins';
+function DevLogin({ auth, branding, tenantId }) {
+  // The memberships minted here must carry the tenant's INTERNAL ID (ADR 0024): the host
+  // label can differ, and a label-keyed membership would 403 on a renamed tenant. The ID
+  // comes from the GET /tenant payload, so sign-in waits for it.
+  const tenant: string | null = tenantId ?? null;
   const [role, setRole] = useState('admin');
   const [clubIds, setClubIds] = useState('ukzn');
   const navigate = useNavigate();
@@ -251,12 +254,15 @@ function DevLogin({ auth, branding }) {
         email: 'operator@platform.local',
         memberships: [
           { tenantId: '*', role: 'operator', clubIds: [] },
-          { tenantId: tenant, role: 'admin', clubIds: [] },
+          // Only when the host's tenant payload has loaded: an operator needs no tenant.
+          ...(tenant ? [{ tenantId: tenant, role: 'admin', clubIds: [] }] : []),
         ],
       });
       navigate('/platform', { replace: true });
       return;
     }
+    // Admin and rep memberships are tenant-scoped: wait for the internal ID.
+    if (!tenant) return;
     const ids = clubIds
       .split(',')
       .map((s) => s.trim())
@@ -271,7 +277,7 @@ function DevLogin({ auth, branding }) {
   return (
     <div className="ps-screen">
       <div className="ps-intro">
-        <div className="ps-eyebrow">Local dev · {tenant}</div>
+        <div className="ps-eyebrow">Local dev · {tenant ?? getActiveTenant()}</div>
         <h1 className="ps-title">{branding?.copy?.welcome ?? 'Sign in (dev)'}</h1>
         <p className="ps-desc">
           Offline mode — no Cognito. Pick a role to sign in as; this sets a dev identity the local
@@ -315,7 +321,12 @@ function DevLogin({ auth, branding }) {
               />
             </label>
           )}
-          <button className="btn btn-ink" type="submit" style={{ width: '100%', marginTop: 14 }}>
+          <button
+            className="btn btn-ink"
+            type="submit"
+            disabled={!tenant && role !== 'operator'}
+            style={{ width: '100%', marginTop: 14 }}
+          >
             Enter as {role}
           </button>
         </form>

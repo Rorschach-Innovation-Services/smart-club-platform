@@ -47,6 +47,27 @@ export const tenantConfigGsi1 = (slug: string) => ({
 export const tenantsListGsi1pk = () => 'PLATFORM#TENANTS';
 
 /**
+ * A tenant's public-address record (ADR 0024): `{ publicSlug, history, updatedAt }`, the label
+ * its web address uses. Deliberately NOT a field on CONFIG — putTenantConfig is a whole-item
+ * Put used read-spread-write everywhere, so a stale save would wipe it and revive a retired
+ * address. Absent = the tenant is on its own slug.
+ */
+export const tenantPublicAddressKey = (tenant: string) => ({
+  pk: tenantPrefix(tenant),
+  sk: 'PUBLICADDR',
+});
+
+/**
+ * One record per public label ever claimed or retired: `{ tenant, status, claimedAt,
+ * retiredAt? }`. Its own partition, so label → tenant is a single GetItem. Retired records
+ * are permanent tombstones (never deleted, never reissued to another tenant).
+ */
+export const publicLabelKey = (label: string) => ({
+  pk: `PUBLICADDR#${label}`,
+  sk: 'PUBLICADDR',
+});
+
+/**
  * Player-register export audit item. Co-located with the tenant CONFIG row
  * (pk `TENANT#<t>`, distinct EXPORT# sk) so it is tenant-isolated and queryable by
  * `begins_with(sk,'EXPORT#')` without a gsi1 entry. It carries no player PII (just

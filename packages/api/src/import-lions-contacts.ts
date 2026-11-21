@@ -58,7 +58,7 @@ import {
   type ParsedAffiliation,
 } from './lions-affiliation-parse.js';
 import { CLUB_MAP } from './lions-import-map.js';
-import { canonicalWebOrigin } from './origins.js';
+import { tenantWebOrigin } from './origins.js';
 // The tenant-neutral, already-tested pieces of the Titans contacts CLI. Importing that module
 // never loads notify/email.ts or notify/whatsapp.ts (its own load-order test guards this), so
 // bootstrapNotifyEnvFromSst still runs before either sender freezes its dry-run flag.
@@ -717,8 +717,9 @@ function runParseOnly(parsed: ParsedAffiliation, args: Args): void {
     parsed,
     liveClubs: CLUB_MAP.map((c) => ({ id: c.id, name: c.name })),
     userByEmail: new Map(),
-    // The real origin is resolved under sst shell; a placeholder keeps parse-only AWS-free.
-    origin: canonicalWebOrigin(TENANT) ?? '(resolved under sst shell)',
+    // The real origin (vanity, else the tenant's PUBLIC label — ADR 0024) needs the table, so
+    // it is resolved under sst shell; a placeholder keeps parse-only AWS-free.
+    origin: '(resolved under sst shell)',
     channels: ['email', 'whatsapp'],
     dataOnly: false,
     skipClubs: args.skipClubs,
@@ -767,7 +768,7 @@ async function gatherInputs(
     parsed,
     liveClubs: clubs.map((c) => ({ id: c.id, name: c.name, exco: c.exco })),
     userByEmail,
-    origin: canonicalWebOrigin(TENANT),
+    origin: await tenantWebOrigin(TENANT),
     channels: args.channels,
     dataOnly: args.dataOnly,
     skipClubs: args.skipClubs,

@@ -33,7 +33,7 @@
  * template's {{5}} is the link — see sendClearanceWhatsApp. Admins get email only.
  *
  * Links: each chair reminder links to the clearance in the source club's portal, and each digest
- * line to the clearance in the admin console, built from canonicalWebOrigin ONLY (`portalLinkFor`)
+ * line to the clearance in the admin console, built from tenantWebOrigin ONLY (`portalLinkFor`)
  * — a cron has no request, and must never reflect one. No canonical origin ⇒ no links.
  *
  * Failures are isolated per tenant and per clearance (captured to Sentry, counted, the run moves
@@ -67,7 +67,7 @@ import {
   lastClearanceReminderAt,
 } from '../clearance-reminder.js';
 import { hasFeature, hasModule } from '../features.js';
-import { canonicalWebOrigin } from '../origins.js';
+import { tenantWebOrigin } from '../origins.js';
 import { clearanceAdminLink, clearanceChairLink } from '../clearance-links.js';
 import { orgCopy } from '../branding.js';
 import { tenantDate } from '../tenant-time.js';
@@ -102,8 +102,8 @@ export interface ClearanceRemindersDeps {
   sendDigest: typeof sendClearanceReminderDigest;
   /** The `club_clearance_pending_v2` template's registry status (the WhatsApp runtime gate). */
   whatsappTemplateStatus: WhatsAppTemplateDefinition['status'];
-  /** The tenant's web origin for the clearance links (canonicalWebOrigin); null ⇒ no links. */
-  portalLinkFor: (tenant: string) => string | null;
+  /** The tenant's web origin for the clearance links (tenantWebOrigin); null ⇒ no links. */
+  portalLinkFor: (tenant: string) => string | null | Promise<string | null>;
   captureException: (err: unknown, tags: Record<string, string>) => void;
   log: (message: string, data?: Record<string, unknown>) => void;
 }
@@ -135,7 +135,7 @@ const defaultDeps = (): ClearanceRemindersDeps => ({
   // Widened from the `as const` literal so the comparison below is a real runtime check.
   whatsappTemplateStatus: WHATSAPP_TEMPLATES.clearancePendingV2
     .status as WhatsAppTemplateDefinition['status'],
-  portalLinkFor: canonicalWebOrigin,
+  portalLinkFor: tenantWebOrigin,
   captureException: (err, tags) => Sentry.captureException(err, { tags }),
   log: (message, data) => console.log(JSON.stringify({ msg: message, ...data })),
 });
@@ -222,7 +222,13 @@ export async function runClearanceReminders(
       );
       if (pending.length === 0) continue;
       const channels = reminderChannels(cfg, deps.whatsappTemplateStatus);
-      const origin = deps.portalLinkFor(tenant);
+      // A failed label read (ADR 0024) means link-less reminders, not a skipped tenant.
+      const origin = await Promise.resolve()
+        .then(() => deps.portalLinkFor(tenant))
+        .catch((err: unknown) => {
+          console.error(`clearance reminders: web origin lookup failed for ${tenant}`, err);
+          return null;
+        });
       // While the tenant's windows are closed no chair can complete a transfer (ADR 0017,
       // revised), so chair reminders are suppressed — checked before any marker is claimed.
       // The admin digest (chairless / no-contact lines) still goes out so the office keeps sight.

@@ -375,6 +375,11 @@ export const AUDIT_ROUTES: Record<string, AuditRouteSpec> = {
     entity: { type: 'tenant-config', param: 'slug' },
     ...platform,
   },
+  'PUT /platform/tenants/:slug/address': {
+    action: 'tenant.address.update',
+    entity: { type: 'tenant', param: 'slug' },
+    ...platform,
+  },
   'POST /platform/tenants/:slug/medicoach/reconcile': {
     action: 'medicoach.reconcile',
     bulk: true,

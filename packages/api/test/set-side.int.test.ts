@@ -10,6 +10,7 @@ import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 import type { Club, Series } from '../src/types.js';
+import { minimalTenantConfig } from './dynalite-harness.js';
 
 const DDB_PORT = 4699; // next free odd port after 4697
 const TABLE = 'SmartClubSetSideTest';
@@ -155,6 +156,8 @@ before(async () => {
   );
   app = (await import('../src/index.js')).app;
   repo = await import('../src/repo.js');
+  // A presented x-tenant label resolves only to a tenant with a CONFIG row (ADR 0024).
+  await repo.putTenantConfig(minimalTenantConfig(T));
   await repo.putClub(T, club('irene', 'Irene', 'Irene Oval'));
   await repo.putClub(T, club('pretoria', 'Pretoria', 'Pretoria Oval'));
   // Outside every KO series: the "Community Cup winner". Two sides in the T20 cup.

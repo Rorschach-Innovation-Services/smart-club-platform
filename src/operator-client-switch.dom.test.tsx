@@ -32,8 +32,9 @@ vi.mock('./config', async () => {
 
 const actualConfig = await vi.importActual<typeof import('./config')>('./config');
 
-const tenant = (slug: string, name: string): TenantSummary => ({
+const tenant = (slug: string, name: string, publicSlug = slug): TenantSummary => ({
   tenant: slug,
+  publicSlug,
   name,
   title: '',
   logoUrl: '',
@@ -67,6 +68,7 @@ const renderPortal = (path = '/platform', hasTenantConsole = true) =>
           signOutUser={vi.fn()}
           hasTenantConsole={hasTenantConsole}
           hostSlug="dolphins"
+          hostTenantId="dolphins"
         />
       </MemoryRouter>
     </QueryClientProvider>,
@@ -80,7 +82,7 @@ describe('Clients table — Open console', () => {
     const row = (await screen.findByText('Titans Cricket')).closest('tr') as HTMLElement;
     await user.click(within(row).getByRole('button', { name: /open console/i }));
 
-    expect(config.openTenantConsole).toHaveBeenCalledWith('titans');
+    expect(config.openTenantConsole).toHaveBeenCalledWith('titans', 'titans');
     // The row's own click (→ settings) must not fire.
     expect(screen.getByRole('heading', { name: /client unions/i })).toBeInTheDocument();
   });
@@ -114,7 +116,7 @@ describe('Portal sidebar — back to this host’s console', () => {
     renderPortal();
     const link = await screen.findByRole('button', { name: 'Dolphins Pipeline console' });
     await user.click(link);
-    expect(config.openTenantConsole).toHaveBeenCalledWith('dolphins');
+    expect(config.openTenantConsole).toHaveBeenCalledWith('dolphins', 'dolphins');
   });
 
   it('is hidden when the operator has no console on this host', async () => {
@@ -153,7 +155,7 @@ describe('Admin shell — ClientSwitcher', () => {
     expect(config.openTenantConsole).not.toHaveBeenCalled();
 
     await user.click(items[2]);
-    expect(config.openTenantConsole).toHaveBeenCalledWith('titans');
+    expect(config.openTenantConsole).toHaveBeenCalledWith('titans', 'titans');
   });
 
   it('closes on Escape', async () => {
@@ -207,7 +209,7 @@ describe('Admin shell — ClientSwitcher', () => {
     expect(items[2]).toHaveFocus();
 
     await user.keyboard('{Enter}');
-    expect(config.openTenantConsole).toHaveBeenCalledWith('titans');
+    expect(config.openTenantConsole).toHaveBeenCalledWith('titans', 'titans');
   });
 
   it('ArrowDown on the trigger opens the menu on the first enabled item', async () => {
@@ -264,5 +266,48 @@ describe('Admin shell — ClientSwitcher', () => {
     expect(titans).toHaveTextContent('No address');
     await user.click(titans);
     expect(config.openTenantConsole).not.toHaveBeenCalled();
+  });
+});
+
+describe('a client whose web address differs from its internal ID (ADR 0024)', () => {
+  const RENAMED = [
+    tenant('westernprovincecricket', 'Cobras', 'cobras'),
+    tenant('dolphins', 'Dolphins Pipeline'),
+  ];
+
+  it('shows the address in the Clients table with the internal ID beneath', async () => {
+    vi.mocked(api.platformListTenants).mockResolvedValue(RENAMED);
+    renderPortal();
+    const row = (await screen.findByText('Cobras')).closest('tr') as HTMLElement;
+    expect(within(row).getByText('cobras')).toBeInTheDocument();
+    expect(within(row).getByText('ID westernprovincecricket')).toBeInTheDocument();
+    // An un-renamed client shows no ID line.
+    const dolphins = screen.getByText('Dolphins Pipeline').closest('tr') as HTMLElement;
+    expect(within(dolphins).queryByText(/^ID /)).not.toBeInTheDocument();
+  });
+
+  it('opens the console on the public address', async () => {
+    vi.mocked(api.platformListTenants).mockResolvedValue(RENAMED);
+    const user = userEvent.setup();
+    renderPortal();
+    const row = (await screen.findByText('Cobras')).closest('tr') as HTMLElement;
+    await user.click(within(row).getByRole('button', { name: /open console/i }));
+    expect(config.openTenantConsole).toHaveBeenCalledWith('westernprovincecricket', 'cobras');
+  });
+
+  it('the switcher marks the current client by internal ID and opens others on their address', async () => {
+    vi.mocked(api.platformListTenants).mockResolvedValue(RENAMED);
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ClientSwitcher currentSlug="dolphins" />
+      </QueryClientProvider>,
+    );
+    await user.click(screen.getByRole('button', { name: 'Switch client' }));
+    const menu = await screen.findByRole('menu', { name: 'Switch client' });
+    const cobras = await within(menu).findByRole('menuitem', { name: /Cobras/ });
+    expect(cobras).toHaveTextContent('cobras');
+    await user.click(cobras);
+    expect(config.openTenantConsole).toHaveBeenCalledWith('westernprovincecricket', 'cobras');
   });
 });
