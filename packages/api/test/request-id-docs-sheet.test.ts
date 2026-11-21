@@ -229,7 +229,13 @@ const vanity = [
 
 test('resolveLinkOrigin: prod vanity tenant resolves to its https origin', () => {
   assert.equal(
-    resolveLinkOrigin({ stage: 'prod', tenant: 'dolphins', vanity, wildcardEnabled: true }),
+    resolveLinkOrigin({
+      stage: 'prod',
+      tenant: 'dolphins',
+      publicLabel: 'dolphins',
+      vanity,
+      wildcardEnabled: true,
+    }),
     'https://dolphins.example.org',
   );
 });
@@ -239,6 +245,7 @@ test('resolveLinkOrigin: prod unknown tenant falls to the wildcard when armed', 
     resolveLinkOrigin({
       stage: 'prod',
       tenant: 'titans',
+      publicLabel: 'titans',
       vanity,
       wildcardEnabled: true,
       wildcardSuffix: '.club.example.org',
@@ -246,22 +253,59 @@ test('resolveLinkOrigin: prod unknown tenant falls to the wildcard when armed', 
     'https://titans.club.example.org',
   );
   assert.throws(
-    () => resolveLinkOrigin({ stage: 'prod', tenant: 'titans', vanity, wildcardEnabled: false }),
+    () =>
+      resolveLinkOrigin({
+        stage: 'prod',
+        tenant: 'titans',
+        publicLabel: 'titans',
+        vanity,
+        wildcardEnabled: false,
+      }),
     /--link-origin/,
+  );
+});
+
+test('resolveLinkOrigin: a renamed wildcard tenant links to its public label, not its slug', () => {
+  assert.equal(
+    resolveLinkOrigin({
+      stage: 'prod',
+      tenant: 'westernprovincecricket',
+      publicLabel: 'cobras',
+      vanity,
+      wildcardEnabled: true,
+      wildcardSuffix: '.club.example.org',
+    }),
+    'https://cobras.club.example.org',
+  );
+  // A vanity entry (keyed by slug) still wins over the label.
+  assert.equal(
+    resolveLinkOrigin({
+      stage: 'prod',
+      tenant: 'dolphins',
+      publicLabel: 'elsewhere',
+      vanity,
+      wildcardEnabled: true,
+    }),
+    'https://dolphins.example.org',
   );
 });
 
 test('resolveLinkOrigin: non-prod / unknown stage needs --link-origin', () => {
   assert.throws(
-    () => resolveLinkOrigin({ stage: 'dev', tenant: 'dolphins', vanity }),
+    () => resolveLinkOrigin({ stage: 'dev', tenant: 'dolphins', publicLabel: 'dolphins', vanity }),
     /--link-origin/,
   );
   assert.throws(
-    () => resolveLinkOrigin({ stage: null, tenant: 'dolphins', vanity }),
+    () => resolveLinkOrigin({ stage: null, tenant: 'dolphins', publicLabel: 'dolphins', vanity }),
     /--link-origin/,
   );
   assert.equal(
-    resolveLinkOrigin({ stage: 'dev', tenant: 'dolphins', linkOrigin: 'https://dev.example.org/' }),
+    resolveLinkOrigin({
+      stage: 'dev',
+      tenant: 'dolphins',
+      publicLabel: 'dolphins',
+      linkOrigin: 'https://dev.example.org/',
+    }),
     'https://dev.example.org',
   );
 });

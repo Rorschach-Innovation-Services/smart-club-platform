@@ -596,6 +596,14 @@ export interface TenantSummary {
   features: Record<string, boolean>;
   /** Present ⇒ operator marked setup done; absent ⇒ still in setup. Drives the list chip. */
   setupCompletedAt?: string;
+  /**
+   * The client's public web address label (ADR 0024): equals `tenant` until an operator
+   * changes it. Console links are built from it, never from `tenant`.
+   */
+  publicSlug: string;
+  /** Labels this client has retired, oldest first (never the current one). */
+  publicSlugHistory?: string[];
+  liveUrl?: string | null;
   /** Fleet rollup counts. Optional: react-query rows cached before the rollup shipped lack them. */
   clubCount?: number;
   teamCount?: number;

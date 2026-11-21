@@ -226,6 +226,26 @@ export interface RequiredDoc {
   role?: 'memberDatabase' | 'committee';
 }
 
+/**
+ * A tenant's public web-address label (ADR 0024), stored apart from CONFIG. `publicSlug` is
+ * the label its wildcard host uses; `history` lists the labels it has retired (oldest first,
+ * never the current one). Absent record = the tenant is on its own slug with no history.
+ */
+export interface TenantPublicAddress {
+  publicSlug: string;
+  history: string[];
+  updatedAt: string;
+}
+
+/** One claimed or retired public label (ADR 0024). Retired records are permanent tombstones. */
+export interface PublicLabelRecord {
+  label: string;
+  tenant: string;
+  status: 'active' | 'retired';
+  claimedAt: string;
+  retiredAt?: string;
+}
+
 /** An entry in the operator-managed club directory (TenantConfig.knownClubs). */
 export interface DirectoryClub {
   /** Stable slug (clubIdFromName) — doubles as a clearance source partition. */

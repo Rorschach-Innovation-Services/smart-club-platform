@@ -15,6 +15,7 @@ import type { Context, MiddlewareHandler } from 'hono';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import { Sentry } from './instrument.js';
 import { PLATFORM_TENANT } from './types.js';
+import { resolvePublicLabel } from './public-address.js';
 import type { Membership, Role, TenantConfig } from './types.js';
 
 export interface AuthContext {
@@ -91,17 +92,35 @@ const WILDCARD_ENABLED = process.env.WILDCARD_ENABLED === '1';
 const LABEL_RE = /^[a-z0-9-]+$/;
 
 /**
+ * The outcome of resolving a request's tenant (ADR 0024):
+ *   - `{ tenant }`        a known tenant (its internal slug)
+ *   - `{ unknownLabel }`  a label WAS presented but names no tenant (never claimed, or retired)
+ *   - `null`              nothing usable was presented
+ * Callers tell "unknown club" (404) apart from "no tenant on this request" (400).
+ */
+export type TenantResolution =
+  | { tenant: string; unknownLabel?: undefined }
+  | { tenant?: undefined; unknownLabel: string }
+  | null;
+
+/** Resolve one presented public label through the label rule (public-address.ts). */
+export async function resolveLabel(label: string): Promise<TenantResolution> {
+  const tenant = await resolvePublicLabel(label);
+  return tenant ? { tenant } : { unknownLabel: label };
+}
+
+/**
  * Derive the tenant from a browser Origin when the request hits the SHARED_API_HOST
  * (where the Host is `api.club.…` for everyone, so it can't identify the tenant). A
- * vanity web origin sharing the shared API resolves via the host map; a wildcard web
- * origin resolves to its single leftmost label. Anything else (missing/foreign Origin,
- * a multi-label `a.b.club.…`) returns null — the shared host NEVER falls through to
- * leftmost-label (that would yield the reserved slug 'api'). Origin is spoofable by
- * non-browser clients, but that only lets a caller SELECT a tenant they already hold a
- * membership in (the JWT `memberships` claim is the isolation boundary) — see auth
- * docs / docs/architecture/0007.
+ * vanity web origin sharing the shared API resolves via the host map (static, no lookup);
+ * a wildcard web origin's single leftmost label goes through the label lookup. Anything
+ * else (missing/foreign Origin, a multi-label `a.b.club.…`) returns null — the shared host
+ * NEVER falls through to leftmost-label (that would yield the reserved slug 'api'). Origin
+ * is spoofable by non-browser clients, but that only lets a caller SELECT a tenant they
+ * already hold a membership in (the JWT `memberships` claim is the isolation boundary) —
+ * see auth docs / docs/architecture/0007.
  */
-function tenantFromOrigin(origin: string | undefined): string | null {
+async function tenantFromOrigin(origin: string | undefined): Promise<TenantResolution> {
   if (!origin) return null;
   let host: string;
   try {
@@ -109,32 +128,33 @@ function tenantFromOrigin(origin: string | undefined): string | null {
   } catch {
     return null;
   }
-  if (HOST_TENANT_MAP[host]) return HOST_TENANT_MAP[host];
+  if (HOST_TENANT_MAP[host]) return { tenant: HOST_TENANT_MAP[host] };
   if (WILDCARD_WEB_SUFFIX && host.endsWith(WILDCARD_WEB_SUFFIX)) {
     const label = host.slice(0, -WILDCARD_WEB_SUFFIX.length);
-    if (LABEL_RE.test(label)) return label;
+    if (LABEL_RE.test(label)) return resolveLabel(label);
   }
   return null;
 }
 
 /**
- * Resolve the tenant slug for a request. Prod order: an explicit host→tenant map entry
- * (vanity web + api hosts) → the shared API host's Origin-derived tenant → the leftmost
- * label of the Host (e.g. `dolphins.example.com` → `dolphins`). Dev: an explicit
- * `x-tenant` header. Returns null if it can't be determined (callers decide whether
- * that's fatal).
+ * Resolve the tenant for a request. Prod order: an explicit host→tenant map entry
+ * (vanity web + api hosts; static, no lookup) → the shared API host's Origin-derived label →
+ * the leftmost label of the Host (e.g. `dolphins.example.com` → `dolphins`). Dev: an
+ * explicit `x-tenant` header. Every presented LABEL (not a host-map hit) goes through the
+ * public-address lookup, so a renamed tenant answers on its new label only and a retired
+ * label is unknown. Throws (500) when the lookup's DynamoDB read fails — never guesses.
  */
-export function resolveTenant(c: Context): string | null {
+export async function resolveTenant(c: Context): Promise<TenantResolution> {
   // The x-tenant header is a DEV convenience only (no custom domains locally).
   // In prod the host is the authorization boundary, so the header is ignored —
   // otherwise any caller could target any tenant they hold a membership in.
   if (process.env.STAGE !== 'prod') {
     const explicit = c.req.header('x-tenant');
-    if (explicit) return explicit.toLowerCase();
+    if (explicit) return resolveLabel(explicit.toLowerCase());
   }
   const host = (c.req.header('host') ?? '').split(':')[0].toLowerCase();
   // Explicit custom-domain mapping wins (covers per-tenant API hosts + vanity web hosts).
-  if (HOST_TENANT_MAP[host]) return HOST_TENANT_MAP[host];
+  if (HOST_TENANT_MAP[host]) return { tenant: HOST_TENANT_MAP[host] };
   // Shared API host: resolve from Origin, and never fall through to leftmost-label.
   if (WILDCARD_ENABLED && SHARED_API_HOST && host === SHARED_API_HOST) {
     return tenantFromOrigin(c.req.header('origin'));
@@ -143,7 +163,7 @@ export function resolveTenant(c: Context): string | null {
   // Ignore non-tenant hosts (raw execute-api/localhost) so the API-Gateway
   // default domain can't be used to bypass host-based tenant inference.
   if (!label || label === 'localhost' || host.includes('execute-api')) return null;
-  return label;
+  return resolveLabel(label);
 }
 
 /** Parse + verify the bearer token and attach the decoded auth context. */
@@ -199,8 +219,11 @@ export const authenticate: MiddlewareHandler<HonoEnv> = async (c, next) => {
 export const requireTenantMembership: MiddlewareHandler<HonoEnv> = async (c, next) => {
   const auth = c.get('auth');
   if (!auth) throw new HttpError(401, 'unauthenticated');
-  const tenant = resolveTenant(c);
-  if (!tenant) throw new HttpError(400, 'tenant could not be resolved');
+  const resolved = await resolveTenant(c);
+  if (!resolved) throw new HttpError(400, 'tenant could not be resolved');
+  // A presented label that names no tenant (never claimed, or a retired address).
+  if (!resolved.tenant) throw new HttpError(404, 'tenant not found');
+  const tenant = resolved.tenant;
   const membership = auth.memberships.find((m) => m.tenantId === tenant);
   if (!membership) throw new HttpError(403, 'no membership for this tenant');
   c.set('requestAuth', {

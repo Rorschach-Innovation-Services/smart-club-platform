@@ -224,6 +224,7 @@ export const AUDIT_ACTION_SENTENCES: Readonly<Record<string, string>> = {
   'tenant.update': 'Changed client settings',
   'tenant.setup-complete': 'Marked setup complete',
   'tenant.setup-reopen': 'Reopened setup',
+  'tenant.address.update': 'Changed web address',
   'tutorial.upload': 'Uploaded a tutorial video',
   'doc-intake.commit': 'Imported club documents',
   'roster-intake.commit': 'Imported rosters',
@@ -462,6 +463,8 @@ export const AUDIT_FIELD_LABELS: Readonly<Record<string, string>> = {
   team: 'Team',
   notes: 'Notes',
   submissionDeadline: 'Submission deadline',
+  // The client's public web address label (ADR 0024).
+  publicSlug: 'Web address',
   support: 'Support contact',
   branding: 'Branding',
   features: 'Features',

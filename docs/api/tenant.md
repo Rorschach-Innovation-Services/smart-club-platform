@@ -13,9 +13,20 @@ explicit `[]` (freshly created client) comes through empty.
 ```
 200 → { tenant, branding, submissionDeadline, leagues, districts, requiredDocs,
         tutorials, features, calendars, transferWindows, transferWindowStatus? }
-400 → unknown tenant
-404 → tenant not found
+400 → unknown tenant          (nothing presented: no usable host, Origin, x-tenant or ?tenant=)
+404 → tenant not found        (a label was presented but names no client, or is retired)
 ```
+
+**Public address ([ADR 0024](../architecture/0024-public-address-separate-from-slug.md)).**
+The host label (or `x-tenant` / `?tenant=` value) is a **public address label**, not
+necessarily the tenant's internal ID. Every presented label goes through one lookup: an
+active `PUBLICADDR#<label>` record → its tenant; a retired one → 404; no record → the tenant
+whose slug equals the label, if its CONFIG row exists, else 404. A vanity host in
+`TENANT_HOST_MAP` skips the lookup. `tenant` in the payload is always the **internal ID** —
+the SPA must use it, not the host label, wherever it compares with membership tenant IDs.
+Authenticated routes resolve the same way: an unknown or retired label is
+`404 tenant not found`, nothing presented is `400 tenant could not be resolved`. Other
+warm API containers may honour a just-retired label for up to 60 seconds.
 
 `requiredDocs` rides the public payload ([ADR 0009](../architecture/0009-per-tenant-required-docs.md)):
 doc names and behaviour flags are as public as league and district names, and the rep
@@ -208,12 +219,51 @@ operator's `PUT /platform/tenants/:slug`
 
 ## `GET` / `PUT /platform/tenants/:slug` — the operator's view of one tenant
 
-`GET` returns the full config row plus a **response-only** `liveUrl`: where the client is
-already reachable (its vanity origin, else its wildcard host; `null` in the dormant
-pre-wildcard state), computed per read by `canonicalWebOrigin`. It replaces the deleted
-`GET /platform/tenants/:slug/dns` sheet. It is never stored: the `PUT` builds its patch from
-an explicit field whitelist that has no `liveUrl`, so a console echoing the row back cannot
-persist it.
+`GET` returns the full config row plus **response-only** address fields
+([ADR 0024](../architecture/0024-public-address-separate-from-slug.md)):
+
+- `liveUrl`: where the client is already reachable (its vanity origin, else the wildcard host
+  of its public label; `null` in the dormant pre-wildcard state), computed per read by
+  `canonicalWebOrigin`. It replaces the deleted `GET /platform/tenants/:slug/dns` sheet.
+- `publicSlug`: the effective public address label (the slug until the address is changed).
+- `publicSlugHistory`: labels the client has retired, oldest first (`[]` if never changed).
+
+None is stored: the `PUT` builds its patch from an explicit field whitelist that has none of
+them (and the shared patch core strips them), so a console echoing the row back cannot persist
+them. `GET /platform/tenants` carries the same three fields on every row.
+
+## `PUT /platform/tenants/:slug/address` — change a client's web address (operator only)
+
+Body `{ publicSlug, expectedCurrent }`. `publicSlug` is the new label (trimmed, lowercased,
+validated like a new slug: 2–32 chars, DNS-label shape, not reserved). `expectedCurrent` is the
+label the operator saw (the `publicSlug` from the GET) — optimistic concurrency. The slug stays
+the internal ID. The old label is **retired**: it stops resolving at once (≤60 s on other
+containers) and is never reissued to another client. A client may reclaim one of its own
+retired labels, including its own slug. Audited as `tenant.address.update`
+(`publicSlug: old → new`).
+
+```
+200 → { publicSlug, publicSlugHistory, liveUrl }
+400 → publicSlug required
+      expectedCurrent required
+      address must be 2–32 chars: … (the validateTenantSlug reason, "slug" → "address")
+      address "<x>" is reserved
+      the address is already "<x>"                                   code: unchanged
+404 → tenant not found
+409 → this client has its own domain — its address is set in infra/tenants.ts, not here
+      address "<x>" is in use by another client                      code: label-active
+      address "<x>" was used by another client and cannot be reissued code: label-retired
+      address "<x>" is another client's internal ID                  code: label-is-tenant
+      the address was changed by someone else — reload and try again code: stale
+```
+
+`stale` also covers a lost race: a concurrent change touching the same items
+(`TransactionConflict`) writes nothing and answers the same 409.
+
+`POST /platform/tenants` also answers 409 when the requested slug is, or was, any client's
+public address: `"<slug>" is, or was, a client's web address and cannot be used as a new
+client's ID`; and, when the create raced another write on the same slug or label, a
+retryable 409 `another change to "<slug>" was in progress at the same moment — try again`.
 
 `PUT` may write `League.setup` (the tenant-admin `PUT /tenant/config` cannot). The deprecated
 `League.competitions` is inert during the dual window and handled per incoming league:

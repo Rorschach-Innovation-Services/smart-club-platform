@@ -38,8 +38,8 @@ const SYNC_OFF_COPY =
  * The client's own Medicoach sync page (`/admin/medicoach_sync`) on that client's console
  * origin. null when this host has no reachable address for the client (see tenantConsoleUrl).
  */
-export function adminSyncUrl(slug: string): string | null {
-  const base = tenantConsoleUrl(slug);
+export function adminSyncUrl(slug: string, publicLabel: string): string | null {
+  const base = tenantConsoleUrl(slug, publicLabel);
   if (!base) return null;
   const u = new URL(base);
   u.pathname = '/admin/medicoach_sync';
@@ -121,7 +121,9 @@ export function MedicoachConsolePage({ toast }: { toast: Toast }) {
   }
 
   const name = configQ.data?.branding?.name ?? slug;
-  const syncUrl = adminSyncUrl(slug);
+  // The console origin is built from the client's public address label (ADR 0024), which
+  // only the platform-tenant read carries: no link until it has loaded.
+  const syncUrl = configQ.data ? adminSyncUrl(slug, configQ.data.publicSlug || slug) : null;
   const conn = connQ.data;
 
   return (

@@ -55,7 +55,7 @@ import {
 } from './titans-contacts-parse.js';
 import { isLegacyXlsBuffer } from './committee-parse.js';
 import { CLUB_MAP } from './titans-import-map.js';
-import { canonicalWebOrigin } from './origins.js';
+import { tenantWebOrigin } from './origins.js';
 // NOT './notify/whatsapp.js': loading that module freezes WHATSAPP_DRY_RUN from process.env,
 // which must only happen AFTER bootstrapNotifyEnvFromSst() (see main()).
 import { toE164 } from './notify/e164.js';
@@ -682,7 +682,7 @@ async function gatherInputs(
     clubExco,
     clubCoaches,
     userByEmail,
-    origin: canonicalWebOrigin(TENANT),
+    origin: await tenantWebOrigin(TENANT),
     channels: args.channels,
     dataOnly: args.dataOnly,
     skipSections: args.skipClubs,

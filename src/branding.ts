@@ -114,6 +114,16 @@ export function useTenantSettled(): boolean {
   return q.isSuccess || q.isError;
 }
 
+/**
+ * The host tenant's INTERNAL ID (ADR 0024) from the GET /tenant payload's `tenant`; null until
+ * it loads (or when the host label names no tenant). The host label (api.getActiveTenant) may
+ * differ: use this wherever the SPA compares with, or sends, a real tenant ID — memberships,
+ * link tokens, audit keys, the client switcher.
+ */
+export function useTenantId(): string | null {
+  return useTenantPayload()?.tenant ?? null;
+}
+
 /** Resolved org copy for the active tenant (neutral defaults until branding loads). */
 export function useCopy(): ResolvedCopy {
   const tenant = useTenantPayload();

@@ -53,6 +53,7 @@ import {
   type WhatsAppTemplateDefinition,
 } from './notify/whatsapp-templates.js';
 import { hasFeature } from './features.js';
+import { publicLabelFor } from './public-address.js';
 import { orgCopy } from './branding.js';
 import {
   DOC_REQUEST_DOCS,
@@ -431,12 +432,15 @@ function parseArgs(argv: string[]): Args {
  * SST_RESOURCE_*), so canonicalWebOrigin() would return null and the link base would fall
  * back to localhost. Instead this mirrors how sst.config.ts bakes them, from infra/tenants.ts
  * (prod-only: `isProd`, `wildcardEnabled = isProd && SHARED_API_CERT_ARN !== ''`).
+ * The wildcard host uses the tenant's PUBLIC label (`publicLabel`, ADR 0024 — required so a
+ * renamed tenant never gets its retired address); a vanity entry is keyed by slug.
  * An explicit --link-origin always wins; any other stage, or an unresolvable prod tenant,
  * requires it. Throws with a clear message otherwise. Pure.
  */
 export function resolveLinkOrigin(opts: {
   stage: string | null;
   tenant: string;
+  publicLabel: string;
   linkOrigin?: string;
   vanity?: VanityDomain[];
   wildcardEnabled?: boolean;
@@ -448,7 +452,7 @@ export function resolveLinkOrigin(opts: {
     const suffix = opts.wildcardSuffix ?? WILDCARD_WEB_SUFFIX;
     const origin =
       webOriginMap(opts.vanity ?? VANITY)[opts.tenant] ??
-      (wildcardEnabled ? `https://${opts.tenant}${suffix}` : null);
+      (wildcardEnabled ? `https://${opts.publicLabel}${suffix}` : null);
     if (origin) return origin;
     throw new Error(
       `no link origin for tenant "${opts.tenant}" on prod (no vanity entry, wildcard not armed) ` +
@@ -633,6 +637,7 @@ async function main(): Promise<void> {
     origin = resolveLinkOrigin({
       stage: sstStage(),
       tenant,
+      publicLabel: await publicLabelFor(tenant),
       linkOrigin: args.linkOrigin,
     });
     console.log(`\n· link origin: ${origin}`);

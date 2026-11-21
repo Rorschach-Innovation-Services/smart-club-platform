@@ -241,9 +241,12 @@ describe('tenant create → list → get → patch', () => {
       'adminCount',
       'clubCount',
       'features',
+      'liveUrl',
       'logoUrl',
       'name',
       'playerCount',
+      'publicSlug',
+      'publicSlugHistory',
       'submissionDeadline',
       'teamCount',
       'tenant',
@@ -2398,7 +2401,7 @@ describe('GET /platform/tenants/:slug liveUrl (the DNS sheet is gone)', () => {
     const body = (await res.json()) as Record<string, unknown>;
     assert.ok('liveUrl' in body, 'liveUrl is on the response');
     const { canonicalWebOrigin } = await import('../src/origins.js');
-    assert.equal(body.liveUrl, canonicalWebOrigin('sharks'));
+    assert.equal(body.liveUrl, canonicalWebOrigin('sharks', 'sharks'));
     assert.equal(
       ((await repo.getTenantConfig('sharks')) as Record<string, unknown> | null)?.liveUrl,
       undefined,

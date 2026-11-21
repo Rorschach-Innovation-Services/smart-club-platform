@@ -13,7 +13,7 @@ import { createPortal } from 'react-dom';
 import { useQueries, useQuery } from '@tanstack/react-query';
 import * as api from './api';
 import { qk, queryClient } from './query';
-import { useCopy, useModule, useSeasonLabel, useVertical } from './branding';
+import { useCopy, useModule, useSeasonLabel, useTenantId, useVertical } from './branding';
 import { pitchCountLabel, roleLabel } from './vertical';
 import {
   PlayerFilterBar,
@@ -3516,6 +3516,8 @@ export function AdminSettingsView({
   toast,
 }) {
   const vt = useVertical().terms;
+  // Audit entries are keyed by the tenant's internal ID (from GET /tenant), not the host label.
+  const tenantId = useTenantId();
   const [name, setName] = useStateA(orgName || '');
   const [savingOrg, setSavingOrg] = useStateA(false);
   const [showEditDeadline, setShowEditDeadline] = useStateA(false);
@@ -3606,11 +3608,12 @@ export function AdminSettingsView({
             and how clubs and players are notified.
           </p>
         </div>
-        {api.getActiveTenant() && (
+        {/* Audit entries are keyed by the tenant's internal ID, not the host label. */}
+        {tenantId && (
           <div className="ph-actions">
             <HistoryButton
               type="tenant-config"
-              id={api.getActiveTenant()!}
+              id={tenantId}
               title={`${orgName} settings`}
               tone="outline"
             />

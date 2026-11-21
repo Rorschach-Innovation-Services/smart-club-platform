@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import type { AuditEntry } from '../src/types.js';
+import { minimalTenantConfig } from './dynalite-harness.js';
 
 const DDB_PORT = 4851; // unique
 const TABLE = 'SmartClubAuditMiddlewareTest';
@@ -89,6 +90,8 @@ before(async () => {
   );
   app = (await import('../src/index.js')).app;
   repo = await import('../src/repo.js');
+  // A presented x-tenant label resolves only to a tenant with a CONFIG row (ADR 0024).
+  await repo.putTenantConfig(minimalTenantConfig(TENANT));
   mw = await import('../src/audit-middleware.js');
   keys = await import('../src/keys.js');
   await repo.putClub(TENANT, { id: 'home-club', name: 'Home Club' } as never);

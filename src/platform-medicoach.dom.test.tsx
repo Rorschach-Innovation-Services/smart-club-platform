@@ -307,6 +307,7 @@ describe('MedicoachConsolePage', () => {
 describe('Client list Match Centre flags', () => {
   const summary = (tenant: string, name: string): TenantSummary => ({
     tenant,
+    publicSlug: tenant,
     name,
     title: '',
     logoUrl: '',
@@ -324,6 +325,7 @@ describe('Client list Match Centre flags', () => {
             signOutUser={vi.fn()}
             hasTenantConsole={false}
             hostSlug="acme"
+            hostTenantId="acme"
           />
         </MemoryRouter>
       </QueryClientProvider>,

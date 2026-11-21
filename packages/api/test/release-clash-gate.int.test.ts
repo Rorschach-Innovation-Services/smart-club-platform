@@ -12,6 +12,7 @@ import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 import type { Series, Venue, Club } from '../src/types.js';
+import { minimalTenantConfig } from './dynalite-harness.js';
 
 // Env must be set BEFORE importing repo/app — repo reads TABLE_NAME at module load.
 const DDB_PORT = 4611; // distinct from api.int (4599), platform.int (4601), logo-offline (4603), tutorial-offline (4604), backfill-team (4605), season-venues (4607), migrate-block-index (4609)
@@ -123,6 +124,8 @@ before(async () => {
 
   app = (await import('../src/index.js')).app;
   repo = await import('../src/repo.js');
+  // A presented x-tenant label resolves only to a tenant with a CONFIG row (ADR 0024).
+  await repo.putTenantConfig(minimalTenantConfig('dolphins'));
 });
 
 after(() => new Promise<void>((resolve) => ddbServer.close(() => resolve())));
